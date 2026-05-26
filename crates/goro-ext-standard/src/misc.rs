@@ -5245,6 +5245,10 @@ fn htmlspecialchars_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     Ok(Value::String(PhpString::from_string(result)))
 }
 
+// Note: the active str_word_count implementation is `str_word_count_fn` in
+// strings.rs (it overrides this one at registration time, since both register
+// under the same PHP function name). This stub is unused but kept to avoid
+// disturbing the registration order. See strings.rs for the real impl.
 fn str_word_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     Ok(Value::Long(

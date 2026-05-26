@@ -5786,57 +5786,81 @@ pub(crate) fn parse_csv_fields_ex(bytes: &[u8], delimiter: u8, enclosure: u8, es
 }
 
 fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Mirrors PHP's str_word_count. A "word" character is any ASCII letter,
+    // an apostrophe (`'`), a hyphen (`-`), or any byte listed in $characters.
+    // PHP's range syntax `a..z` in $characters expands to a..b..c..z. The
+    // leading `'`/`-` is dropped (unless $characters explicitly contains it),
+    // and a trailing `-` is dropped (again unless allowed by $characters).
+    // Trailing `'` is kept. Format must be 0/1/2 — anything else is a
+    // ValueError.
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let extra_chars = args.get(2).filter(|v| !matches!(v, Value::Null)).map(|v| v.to_php_string());
 
-    // Validate format - PHP throws ValueError for invalid formats
-    if format < 0 || format > 2 {
+    if format != 0 && format != 1 && format != 2 {
         let msg = "str_word_count(): Argument #2 ($format) must be a valid format value".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     }
 
-    // Build extra char set (byte-level)
-    let mut extra_set = [false; 256];
-    if let Some(ec) = &extra_chars {
-        for &b in ec.as_bytes() {
-            extra_set[b as usize] = true;
+    // Build the 256-byte char mask from optional $characters (with `..` ranges).
+    let mut mask = [false; 256];
+    let mut has_char_list = false;
+    if let Some(cl) = args.get(2) {
+        if !matches!(cl.deref(), Value::Null) {
+            has_char_list = true;
+            let cl_str = cl.to_php_string();
+            let cb = cl_str.as_bytes();
+            let mut i = 0;
+            while i < cb.len() {
+                if i + 3 < cb.len() && cb[i + 1] == b'.' && cb[i + 2] == b'.' && cb[i + 3] >= cb[i] {
+                    for c in cb[i]..=cb[i + 3] { mask[c as usize] = true; }
+                    i += 4;
+                } else {
+                    mask[cb[i] as usize] = true;
+                    i += 1;
+                }
+            }
         }
     }
 
-    // Char classifier matching PHP behavior (byte-level):
-    // A char is a word char if it's a letter (ASCII or extended bytes 0x80-0xFF), or in extra_set.
-    // Additionally, '-' and '\'' are word chars but ONLY if not at start of word (they "attach" to existing word).
     let bytes = s.as_bytes();
-    let is_alpha = |b: u8| (b.is_ascii_alphabetic()) || b >= 0x80 || extra_set[b as usize];
+    if bytes.is_empty() {
+        return Ok(match format {
+            0 => Value::Long(0),
+            _ => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+        });
+    }
+
+    let is_word_char = |c: u8| -> bool {
+        c.is_ascii_alphabetic() || c == b'\'' || c == b'-' || (has_char_list && mask[c as usize])
+    };
+
+    // PHP: skip leading `'` or `-` unless allowed; skip trailing `-` only.
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    let first = bytes[0];
+    if (first == b'\'' && !(has_char_list && mask[b'\'' as usize]))
+        || (first == b'-' && !(has_char_list && mask[b'-' as usize]))
+    {
+        start = 1;
+    }
+    let last = bytes[end - 1];
+    if last == b'-' && !(has_char_list && mask[b'-' as usize]) {
+        end -= 1;
+    }
 
     let mut words: Vec<(usize, Vec<u8>)> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if is_alpha(bytes[i]) {
-            let start = i;
-            let mut word = Vec::new();
-            word.push(bytes[i]);
-            i += 1;
-            while i < bytes.len() {
-                let b = bytes[i];
-                if is_alpha(b) {
-                    word.push(b);
-                    i += 1;
-                } else if (b == b'-' || b == b'\'') && i + 1 < bytes.len() && is_alpha(bytes[i + 1]) {
-                    // word continuation through '-' or '''
-                    word.push(b);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            words.push((start, word));
-        } else {
-            i += 1;
+    let mut p = start;
+    while p < end {
+        let s_pos = p;
+        while p < end && is_word_char(bytes[p]) {
+            p += 1;
         }
+        if p > s_pos {
+            words.push((s_pos, bytes[s_pos..p].to_vec()));
+        }
+        p += 1;
     }
 
     match format {
