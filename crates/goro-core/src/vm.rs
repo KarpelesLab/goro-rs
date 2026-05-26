@@ -1510,7 +1510,7 @@ impl Vm {
     /// Find the root declaring class for a method (the highest ancestor that declares it).
     /// This is needed for protected access checks: if a method is declared protected in class A,
     /// and overridden in B extends A, then any class that extends A can still access B::method().
-    fn find_root_declaring_class_for_method(&self, class_name_lower: &[u8], method_name_lower: &[u8]) -> Vec<u8> {
+    pub fn find_root_declaring_class_for_method(&self, class_name_lower: &[u8], method_name_lower: &[u8]) -> Vec<u8> {
         let mut root = class_name_lower.to_vec();
         let mut current = class_name_lower.to_vec();
         for _ in 0..50 {

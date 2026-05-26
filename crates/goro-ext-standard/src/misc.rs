@@ -1231,7 +1231,8 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             let caller_scope = vm.current_class_scope();
                             let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
                             let decl_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            match method.visibility {
+                            let vis = method.visibility;
+                            match vis {
                                 Visibility::Private => {
                                     if let Some(ref scope) = caller_lower {
                                         if *scope == decl_lower { Value::True } else { Value::False }
@@ -1240,10 +1241,20 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     }
                                 }
                                 Visibility::Protected => {
+                                    // For protected methods, the visibility
+                                    // check walks the override chain to the
+                                    // root declaring class (the highest
+                                    // non-private ancestor that declares this
+                                    // method), so callers in any class
+                                    // related to that root can see it.
+                                    let root = vm.find_root_declaring_class_for_method(
+                                        &decl_lower,
+                                        method_name,
+                                    );
                                     if let Some(ref scope) = caller_lower {
-                                        if *scope == decl_lower
-                                            || vm.class_extends(scope, &decl_lower)
-                                            || vm.class_extends(&decl_lower, scope)
+                                        if *scope == root
+                                            || vm.class_extends(scope, &root)
+                                            || vm.class_extends(&root, scope)
                                         {
                                             Value::True
                                         } else {
