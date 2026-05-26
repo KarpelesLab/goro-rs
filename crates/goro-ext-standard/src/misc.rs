@@ -5592,6 +5592,13 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(len as i64))
 }
 
+fn sscanf_put(results: &mut Vec<Value>, slot: usize, v: Value) {
+    while results.len() <= slot {
+        results.push(Value::Null);
+    }
+    results[slot] = v;
+}
+
 fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
     let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
@@ -5604,6 +5611,12 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut fmt_pos = 0usize;
     let mut nconversions: usize = 0;
     let mut underflow = false;
+    // Next default output slot (0-based). %N$X overrides this to N-1.
+    let mut next_slot: usize = 0;
+    // Slot to use for the *current* conversion (set per conversion).
+    let mut cur_slot: usize = 0;
+    // Helper: write into the slot, growing results with Nulls as needed.
+    // Captured by closure later; for now we inline via a macro-like fn.
 
     while fmt_pos < format_bytes.len() {
         if format_bytes[fmt_pos] == b'%' {
@@ -5619,13 +5632,33 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 continue;
             }
 
-            // Handle argument swapping like %2$s
-            let _swap_arg = if format_bytes[fmt_pos].is_ascii_digit() && fmt_pos + 1 < format_bytes.len() && format_bytes[fmt_pos + 1] == b'$' {
-                let _n = (format_bytes[fmt_pos] - b'0') as usize;
-                fmt_pos += 2;
-                Some(_n)
-            } else {
-                None
+            // Handle argument swapping like %2$s — positional placement.
+            // PHP accepts multi-digit positions; we parse the full digit run
+            // followed by '$' as the position.
+            let swap_arg: Option<usize> = {
+                let start = fmt_pos;
+                while fmt_pos < format_bytes.len() && format_bytes[fmt_pos].is_ascii_digit() {
+                    fmt_pos += 1;
+                }
+                if fmt_pos > start && fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'$' {
+                    let n: usize = std::str::from_utf8(&format_bytes[start..fmt_pos])
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    fmt_pos += 1; // skip '$'
+                    if n > 0 { Some(n) } else { None }
+                } else {
+                    // Not a positional spec — rewind so width parsing sees the digits.
+                    fmt_pos = start;
+                    None
+                }
+            };
+            // Determine the slot for this conversion. With %N$X use N-1;
+            // otherwise use the next sequential slot. After this conversion,
+            // next_slot becomes cur_slot + 1.
+            cur_slot = match swap_arg {
+                Some(n) => n - 1,
+                None => next_slot,
             };
 
             // Handle width
@@ -5695,13 +5728,13 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         if !suppress {
                             let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                             let val = s.parse::<i64>().unwrap_or(0);
-                            results.push(Value::Long(val));
+                            sscanf_put(&mut results, cur_slot, Value::Long(val));
                         }
                     } else {
                         // Roll back if we consumed just a sign.
                         input_pos = start;
                         if !suppress {
-                            results.push(Value::Null);
+                            sscanf_put(&mut results, cur_slot, Value::Null);
                         }
                     }
                 }
@@ -5721,7 +5754,7 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = i64::from_str_radix(s, 16).unwrap_or(0);
-                        results.push(Value::Long(val));
+                        sscanf_put(&mut results, cur_slot, Value::Long(val));
                     }
                 }
                 b'o' => {
@@ -5735,7 +5768,7 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = i64::from_str_radix(s, 8).unwrap_or(0);
-                        results.push(Value::Long(val));
+                        sscanf_put(&mut results, cur_slot, Value::Long(val));
                     }
                 }
                 b'f' | b'e' | b'g' | b'E' | b'G' => {
@@ -5777,12 +5810,12 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         input_pos = start;
                         let _ = int_start;
                         if !suppress {
-                            results.push(Value::Null);
+                            sscanf_put(&mut results, cur_slot, Value::Null);
                         }
                     } else if !suppress {
                         let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
                         let val = s.parse::<f64>().unwrap_or(0.0);
-                        results.push(Value::Double(val));
+                        sscanf_put(&mut results, cur_slot, Value::Double(val));
                     }
                 }
                 b's' => {
@@ -5797,9 +5830,9 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     if !suppress {
                         if input_pos > start {
-                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                         } else {
-                            results.push(Value::Null);
+                            sscanf_put(&mut results, cur_slot, Value::Null);
                         }
                     }
                 }
@@ -5816,16 +5849,16 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     if !suppress {
                         if input_pos > start {
-                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                         } else {
-                            results.push(Value::Null);
+                            sscanf_put(&mut results, cur_slot, Value::Null);
                         }
                     }
                 }
                 b'n' => {
                     // Number of characters consumed so far
                     if !suppress {
-                        results.push(Value::Long(input_pos as i64));
+                        sscanf_put(&mut results, cur_slot, Value::Long(input_pos as i64));
                     }
                 }
                 b'[' => {
@@ -5878,9 +5911,9 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     if !suppress {
                         if input_pos > start {
-                            results.push(Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
+                            sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
                         } else {
-                            results.push(Value::Null);
+                            sscanf_put(&mut results, cur_slot, Value::Null);
                         }
                     }
                 }
@@ -5896,6 +5929,13 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     vm.current_exception = Some(exc);
                     return Err(VmError { message: msg, line: vm.current_line });
                 }
+            }
+            // Advance the default output slot for the next conversion.
+            // Suppressed conversions (`%*`) still don't consume a slot, but
+            // since we never wrote, the slot is naturally available; sticking
+            // to "next conversion after a non-suppressed write" matches PHP.
+            if !suppress {
+                next_slot = cur_slot + 1;
             }
             nconversions += 1;
         } else if matches!(format_bytes[fmt_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
