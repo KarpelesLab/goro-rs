@@ -1362,6 +1362,71 @@ impl Vm {
         })
     }
 
+    /// Classify a string as a PHP numeric integer string for string offset
+    /// purposes (mirrors zend_check_string_offset, which only accepts the
+    /// IS_LONG return value from is_numeric_string_ex). Returns
+    /// `(integer_like, trailing_data)`:
+    /// - `integer_like` is true if the string parses as an integer with
+    ///   `is_numeric_string_ex` (IS_LONG result), i.e. starts with an
+    ///   integer literal and is not "really" a float (no fractional or
+    ///   exponent that would change the value).
+    /// - `trailing_data` is true if non-whitespace characters follow the
+    ///   integer (PHP warns "Illegal string offset" in this case).
+    ///
+    /// "1.0E+121" is a float-typed numeric string (IS_DOUBLE) - not
+    /// integer_like. "15abc" is integer_like with trailing data.
+    pub fn is_numeric_string_with_trailing(bytes: &[u8]) -> (bool, bool) {
+        // Skip leading whitespace.
+        let mut i = 0usize;
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            i += 1;
+        }
+        if i == bytes.len() {
+            return (false, false);
+        }
+        if matches!(bytes[i], b'+' | b'-') {
+            i += 1;
+        }
+        let int_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == int_start {
+            return (false, false);
+        }
+        // Now look at what follows the integer body. If the next character
+        // would form a valid float (`.` followed by digits, or `e`/`E`
+        // followed by an optional sign and digits), the string parses as a
+        // double — not integer_like, so the caller throws TypeError.
+        // Otherwise the string parses as IS_LONG with optional trailing
+        // garbage (which is only flagged if it isn't whitespace).
+        let body_end = i;
+        if body_end < bytes.len() {
+            if bytes[body_end] == b'.' {
+                // `.` followed by at least one digit -> IS_DOUBLE.
+                let after = body_end + 1;
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return (false, false);
+                }
+            } else if matches!(bytes[body_end], b'e' | b'E') {
+                // Exponent: optional sign + at least one digit -> IS_DOUBLE.
+                let mut k = body_end + 1;
+                if k < bytes.len() && matches!(bytes[k], b'+' | b'-') {
+                    k += 1;
+                }
+                if k < bytes.len() && bytes[k].is_ascii_digit() {
+                    return (false, false);
+                }
+            }
+        }
+        // IS_LONG: trailing whitespace is fine, anything else is trailing data.
+        let mut j = body_end;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            j += 1;
+        }
+        (true, j < bytes.len())
+    }
+
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
@@ -22596,7 +22661,63 @@ impl Vm {
                             return Err(VmError { message: msg, line: op.line });
                         }
                     } else if matches!(arr_val, Value::String(_)) {
-                        // String offset write: $str[n] = 'x'
+                        // String offset write: $str[n] = 'x'.
+                        // Validate the offset type the same way zend_check_string_offset
+                        // does: arrays/objects/non-integer strings throw TypeError;
+                        // double/bool/null get a "String offset cast occurred" warning.
+                        let key_inner = match &key_val {
+                            Value::Reference(r) => r.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        match &key_inner {
+                            Value::Double(_) | Value::True | Value::False | Value::Null => {
+                                self.emit_warning_at("String offset cast occurred", op.line);
+                            }
+                            _ => {}
+                        }
+                        let illegal_offset: Option<String> = match &key_inner {
+                            Value::String(key_str) => {
+                                let (numeric, trailing) =
+                                    Vm::is_numeric_string_with_trailing(key_str.as_bytes());
+                                if !numeric {
+                                    Some("string".to_string())
+                                } else {
+                                    if trailing {
+                                        self.emit_warning_at(
+                                            &format!(
+                                                "Illegal string offset \"{}\"",
+                                                key_str.to_string_lossy()
+                                            ),
+                                            op.line,
+                                        );
+                                    }
+                                    None
+                                }
+                            }
+                            Value::Array(_) => Some("array".to_string()),
+                            Value::Object(o) => Some(
+                                crate::value::display_class_name(&o.borrow().class_name)
+                            ),
+                            Value::Resource(_) => Some("resource".to_string()),
+                            _ => None,
+                        };
+                        if let Some(t) = illegal_offset {
+                            let msg = format!("Cannot access offset of type {} on string", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let ct = *catch_target;
+                                ip = ct as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", msg),
+                                line: op.line,
+                            });
+                        }
                         let idx = key_val.to_long();
                         let replacement = val.to_php_string();
                         let replace_byte = replacement.as_bytes().first().copied().unwrap_or(b'\0');
@@ -22725,10 +22846,12 @@ impl Vm {
                             }
                         }
                     } else if let Value::String(s) = &arr_val {
-                        // String offset access (supports negative indices)
-                        // PHP emits "String offset cast occurred" when the offset is not
-                        // a "naturally integer-typed" key. Resolve through one layer of
-                        // reference for the type check.
+                        // String offset access (supports negative indices).
+                        // Mirrors zend_check_string_offset: numeric keys (and
+                        // long/double/bool/null after a cast warning) cast to
+                        // an integer offset; non-numeric strings, arrays, and
+                        // objects throw TypeError.
+                        // Resolve one layer of reference for the type check.
                         let key_inner = match &key_val {
                             Value::Reference(r) => r.borrow().clone(),
                             other => other.clone(),
@@ -22739,30 +22862,49 @@ impl Vm {
                             }
                             _ => {}
                         }
-                        // Check for illegal string offset: non-numeric string keys
-                        if let Value::String(key_str) = &key_val {
-                            let key_bytes = key_str.as_bytes();
-                            let trimmed = key_str.to_string_lossy();
-                            let trimmed = trimmed.trim();
-                            // Check if the string is a valid numeric value
-                            let is_numeric = if trimmed.is_empty() {
-                                false
-                            } else {
-                                let start = if trimmed.starts_with('-') || trimmed.starts_with('+') { 1 } else { 0 };
-                                let rest = &trimmed[start..];
-                                if rest.is_empty() {
-                                    false
+                        // Non-numeric string / array / object key -> TypeError.
+                        let illegal_offset: Option<String> = match &key_inner {
+                            Value::String(key_str) => {
+                                let (numeric, trailing) =
+                                    Vm::is_numeric_string_with_trailing(key_str.as_bytes());
+                                if !numeric {
+                                    Some("string".to_string())
                                 } else {
-                                    rest.chars().all(|c| c.is_ascii_digit())
-                                        || rest.parse::<f64>().is_ok()
+                                    if trailing {
+                                        self.emit_warning_at(
+                                            &format!(
+                                                "Illegal string offset \"{}\"",
+                                                key_str.to_string_lossy()
+                                            ),
+                                            op.line,
+                                        );
+                                    }
+                                    None
                                 }
-                            };
-                            if !is_numeric && !key_bytes.is_empty() {
-                                self.emit_warning_at(
-                                    &format!("Illegal string offset \"{}\"", key_str.to_string_lossy()),
-                                    op.line,
-                                );
                             }
+                            Value::Array(_) => Some("array".to_string()),
+                            Value::Object(o) => Some(
+                                crate::value::display_class_name(&o.borrow().class_name)
+                            ),
+                            Value::Resource(_) => Some("resource".to_string()),
+                            _ => None,
+                        };
+                        if let Some(t) = illegal_offset {
+                            let msg = format!("Cannot access offset of type {} on string", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let ct = *catch_target;
+                                ip = ct as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", msg),
+                                line: op.line,
+                            });
                         }
                         let idx = key_val.to_long();
                         let bytes = s.as_bytes();
