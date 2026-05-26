@@ -4195,6 +4195,46 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     arg_idx += 1;
                 }
             }
+            b'l' => {
+                // signed long (32-bit, native byte order — LE on x86)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as i32;
+                    result.extend_from_slice(&v.to_ne_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'i' => {
+                // signed int (machine-dependent size and byte order — 4 bytes on x86_64)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as std::ffi::c_int;
+                    result.extend_from_slice(&v.to_ne_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'I' => {
+                // unsigned int (machine-dependent — 4 bytes on x86_64)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as std::ffi::c_uint;
+                    result.extend_from_slice(&v.to_ne_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b's' => {
+                // signed short (16-bit, native byte order)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as i16;
+                    result.extend_from_slice(&v.to_ne_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'q' => {
+                // signed long long (64-bit, native byte order)
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0);
+                    result.extend_from_slice(&v.to_ne_bytes());
+                    arg_idx += 1;
+                }
+            }
             b'N' => {
                 // unsigned long (32-bit BE)
                 for _ in 0..repeat {
@@ -4220,18 +4260,34 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             b'f' | b'g' => {
-                // float (LE)
+                // float - f is native, g is forced little-endian (x86 native is LE).
                 for _ in 0..repeat {
                     let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0) as f32;
                     result.extend_from_slice(&v.to_le_bytes());
                     arg_idx += 1;
                 }
             }
+            b'G' => {
+                // float - forced big-endian
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0) as f32;
+                    result.extend_from_slice(&v.to_be_bytes());
+                    arg_idx += 1;
+                }
+            }
             b'd' | b'e' => {
-                // double (LE)
+                // double - d is native, e is forced little-endian (x86 native is LE).
                 for _ in 0..repeat {
                     let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0);
                     result.extend_from_slice(&v.to_le_bytes());
+                    arg_idx += 1;
+                }
+            }
+            b'E' => {
+                // double - forced big-endian
+                for _ in 0..repeat {
+                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0);
+                    result.extend_from_slice(&v.to_be_bytes());
                     arg_idx += 1;
                 }
             }
@@ -4338,8 +4394,17 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let bytes = &data.as_bytes()[offset.min(data.len())..];
+    let raw_offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    // PHP: offset must be in [0, strlen($data)]; out-of-range raises
+    // ValueError "Argument #3 ($offset) must be contained in argument #2 ($data)".
+    if raw_offset < 0 || raw_offset as usize > data.len() {
+        let msg = "unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)";
+        let exc = _vm.create_exception(b"ValueError", msg, 0);
+        _vm.current_exception = Some(exc);
+        return Err(VmError { message: msg.into(), line: _vm.current_line });
+    }
+    let offset = raw_offset as usize;
+    let bytes = &data.as_bytes()[offset..];
     let fmt = format.as_bytes();
     let mut result = PhpArray::new();
     let mut pos = 0;
@@ -4470,11 +4535,29 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     count as usize
                 };
+                // PHP: explicit length larger than available -> warning + false.
+                if count != u32::MAX && len > bytes.len() - pos {
+                    _vm.emit_warning_at(
+                        &format!(
+                            "unpack(): Type {}: not enough input values, need {} values but only {} was provided",
+                            code as char, len, bytes.len() - pos
+                        ),
+                        _vm.current_line,
+                    );
+                    return Ok(Value::False);
+                }
                 let end = (pos + len).min(bytes.len());
                 let mut s = bytes[pos..end].to_vec();
                 if code == b'A' {
-                    while s.last() == Some(&b' ') || s.last() == Some(&0) {
+                    // PHP strips trailing NUL, space, tab, CR, newline.
+                    while matches!(s.last(), Some(&b' ' | &0 | &b'\t' | &b'\r' | &b'\n')) {
                         s.pop();
+                    }
+                } else if code == b'Z' {
+                    // Z (in unpack) is identical to a NUL-terminated read: strip
+                    // everything from the first NUL onward.
+                    if let Some(p) = s.iter().position(|&b| b == 0) {
+                        s.truncate(p);
                     }
                 }
                 let k = name
@@ -4657,8 +4740,8 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
             }
-            b'f' | b'g' => {
-                // f = float machine byte order, g = float little-endian
+            b'f' | b'g' | b'G' => {
+                // f = float machine byte order, g = float little-endian, G = float big-endian
                 let repeat = if count == u32::MAX {
                     (bytes.len() - pos) / 4
                 } else {
@@ -4666,10 +4749,10 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 4 <= bytes.len() {
-                        let v = if code == b'g' {
-                            f32::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64
-                        } else {
-                            f32::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64
+                        let v = match code {
+                            b'g' => f32::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
+                            b'G' => f32::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
+                            _ => f32::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
                         };
                         let k = if let Some(ref n) = name {
                             if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
@@ -4681,8 +4764,8 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
             }
-            b'd' | b'e' | b'E' | b'G' => {
-                // d = double machine, e = double little-endian, E = double big-endian, G = double big-endian
+            b'd' | b'e' | b'E' => {
+                // d = double machine, e = double little-endian, E = double big-endian
                 let repeat = if count == u32::MAX {
                     (bytes.len() - pos) / 8
                 } else {
@@ -4693,8 +4776,8 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let v = match code {
                             b'e' => f64::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
                                                        bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
-                            b'E' | b'G' => f64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                              bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
+                            b'E' => f64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+                                                       bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
                             _ => f64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
                                                    bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
                         };
@@ -4754,6 +4837,16 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     count as usize
                 };
+                if count != u32::MAX && len > bytes.len() - pos {
+                    _vm.emit_warning_at(
+                        &format!(
+                            "unpack(): Type Z: not enough input values, need {} values but only {} was provided",
+                            len, bytes.len() - pos
+                        ),
+                        _vm.current_line,
+                    );
+                    return Ok(Value::False);
+                }
                 let end = (pos + len).min(bytes.len());
                 let mut s = bytes[pos..end].to_vec();
                 // Truncate at first NUL
@@ -4795,8 +4888,11 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             _ => {
-                // Truly unknown format code - skip
-                pos += 1;
+                // Unknown format code: PHP throws ValueError "Invalid format type X".
+                let msg = format!("Invalid format type {}", code as char);
+                let exc = _vm.create_exception(b"ValueError", &msg, 0);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: _vm.current_line });
             }
         }
     }
