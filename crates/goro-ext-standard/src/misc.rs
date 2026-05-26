@@ -5503,9 +5503,99 @@ fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Use the sprintf implementation from strings module
     let formatted = crate::strings::do_sprintf(args);
     let len = formatted.len();
-    vm.write_output(formatted.as_bytes());
+    vm.write_output(&formatted);
     Ok(Value::Long(len as i64))
 }
+/// Validate that the format argument is a string (for fprintf/vfprintf where
+/// `$stream` is arg #1 and `$format` is arg #2).
+fn validate_fmt_arg2(vm: &mut Vm, func_name: &str, format_arg: &Value) -> Result<(), VmError> {
+    let derefed = format_arg.deref();
+    let type_str = match &derefed {
+        Value::Array(_) => Some("array"),
+        Value::Resource(_) => Some("resource"),
+        Value::Object(obj) => {
+            // Object with __toString is OK.
+            let class_name = obj.borrow().class_name.clone();
+            let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let has_tostring = vm.classes.get(&class_lower)
+                .map(|c| c.get_method(b"__tostring").is_some())
+                .unwrap_or(false);
+            if has_tostring {
+                None
+            } else {
+                let class_display = String::from_utf8_lossy(&class_name).to_string();
+                let msg = format!("{}(): Argument #2 ($format) must be of type string, {} given", func_name, class_display);
+                let exc = vm.create_exception(b"TypeError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
+            }
+        }
+        _ => None,
+    };
+    if let Some(t) = type_str {
+        let msg = format!("{}(): Argument #2 ($format) must be of type string, {} given", func_name, t);
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(())
+}
+
+/// Validate that the values argument is an array (for vfprintf where `$values`
+/// is arg #3).
+fn validate_values_arg3(vm: &mut Vm, func_name: &str, values_arg: &Value) -> Result<(), VmError> {
+    let derefed = values_arg.deref();
+    let type_name = match &derefed {
+        Value::Array(_) => return Ok(()),
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::Null | Value::Undef => "null",
+        Value::True => "true",
+        Value::False => "false",
+        Value::String(_) => "string",
+        Value::Resource(_) => "resource",
+        Value::Object(obj) => {
+            let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            let msg = format!("{}(): Argument #3 ($values) must be of type array, {} given", func_name, name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        _ => "unknown",
+    };
+    let msg = format!("{}(): Argument #3 ($values) must be of type array, {} given", func_name, type_name);
+    let exc = vm.create_exception(b"TypeError", &msg, 0);
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
+}
+
+/// Validate that arg #1 is a resource (or an int treated as one). Returns the
+/// type name PHP would print on mismatch.
+fn validate_stream_arg1(vm: &mut Vm, func_name: &str, stream_arg: &Value) -> Result<(), VmError> {
+    let derefed = stream_arg.deref();
+    let type_name = match &derefed {
+        Value::Resource(_) | Value::Long(_) => return Ok(()),
+        Value::Double(_) => "float",
+        Value::Null | Value::Undef => "null",
+        Value::True => "true",
+        Value::False => "false",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(obj) => {
+            let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            let msg = format!("{}(): Argument #1 ($stream) must be of type resource, {} given", func_name, name);
+            let exc = vm.create_exception(b"TypeError", &msg, 0);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        _ => "unknown",
+    };
+    let msg = format!("{}(): Argument #1 ($stream) must be of type resource, {} given", func_name, type_name);
+    let exc = vm.create_exception(b"TypeError", &msg, 0);
+    vm.current_exception = Some(exc);
+    Err(VmError { message: msg, line: vm.current_line })
+}
+
 fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
     if args.len() < 2 {
@@ -5514,16 +5604,18 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     }
+    validate_stream_arg1(vm, "fprintf", &args[0])?;
+    validate_fmt_arg2(vm, "fprintf", &args[1])?;
     let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
-    let formatted = crate::strings::do_sprintf(format_args);
+    let formatted = crate::strings::do_sprintf_vm(vm, format_args)?;
     let len = formatted.len();
 
     // Check if it's a real file handle
     let written = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            fh.file.write_all(formatted.as_bytes()).ok();
+            fh.file.write_all(&formatted).ok();
             true
         } else {
             false
@@ -5532,7 +5624,7 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     if !written {
         // Fallback to stdout for STDOUT handle or unknown handles
-        vm.write_output(formatted.as_bytes());
+        vm.write_output(&formatted);
     }
     Ok(Value::Long(len as i64))
 }
@@ -5545,30 +5637,31 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     }
+    validate_stream_arg1(vm, "vfprintf", &args[0])?;
+    validate_fmt_arg2(vm, "vfprintf", &args[1])?;
+    validate_values_arg3(vm, "vfprintf", &args[2])?;
     let fid = args[0].to_long();
-    let format = args[1].to_php_string();
+    let format = vm.value_to_string(&args[1]);
     let mut format_args = vec![Value::String(format)];
-    if args.len() > 2 {
-        if let Value::Array(arr) = &args[2] {
-            for (_, v) in arr.borrow().iter() {
-                format_args.push(v.clone());
-            }
+    if let Value::Array(arr) = &args[2] {
+        for (_, v) in arr.borrow().iter() {
+            format_args.push(v.clone());
         }
     }
-    let formatted = crate::strings::do_sprintf(&format_args);
+    let formatted = crate::strings::do_sprintf_vm(vm, &format_args)?;
     let len = formatted.len();
 
     let written = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            fh.file.write_all(formatted.as_bytes()).ok();
+            fh.file.write_all(&formatted).ok();
             true
         } else {
             false
         }
     });
     if !written {
-        vm.write_output(formatted.as_bytes());
+        vm.write_output(&formatted);
     }
     Ok(Value::Long(len as i64))
 }
@@ -5661,6 +5754,8 @@ fn count_sscanf_total_slots(format: &[u8]) -> usize {
 /// specifiers in `format`. Used by sscanf_fn to detect var/specifier mismatch
 /// before performing the scan, mirroring PHP's ValidateFormat phase.
 fn validate_sscanf_format(format: &[u8], num_vars: usize) -> Result<(), String> {
+    // PHP caps positional index at SCAN_MAX_ARGS (255) when no ref vars are given.
+    const SCAN_MAX_ARGS: usize = 255;
     let mut nassign: Vec<usize> = vec![0; num_vars];
     let mut next_slot: usize = 0;
     let mut got_xpg = false;
@@ -5685,15 +5780,24 @@ fn validate_sscanf_format(format: &[u8], num_vars: usize) -> Result<(), String> 
         }
         let mut cur_slot: Option<usize> = None;
         if i > start && i < format.len() && format[i] == b'$' {
-            let n: usize = std::str::from_utf8(&format[start..i])
+            // Parse as u64 so we can detect overflow before clamping into usize.
+            let raw: u64 = std::str::from_utf8(&format[start..i])
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             i += 1;
-            if n > 0 {
-                cur_slot = Some(n - 1);
-                got_xpg = true;
+            if raw == 0 {
+                return Err("\"%n$\" argument index out of range".to_string());
             }
+            // numVars == 0 (no ref args) caps at SCAN_MAX_ARGS.
+            // numVars > 0 caps at numVars.
+            let cap = if num_vars == 0 { SCAN_MAX_ARGS as u64 } else { num_vars as u64 };
+            if raw > cap {
+                return Err("\"%n$\" argument index out of range".to_string());
+            }
+            let n = raw as usize;
+            cur_slot = Some(n - 1);
+            got_xpg = true;
         } else {
             i = start;
         }
@@ -5761,12 +5865,12 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP validates that every supplied ref var is assigned by some specifier
     // and that no slot is assigned twice. This runs before any scanning so the
     // ValueError fires even when the input would have produced fewer results.
-    if has_refs {
-        if let Err(msg) = validate_sscanf_format(format_bytes, args.len() - 2) {
-            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
-        }
+    // Even without ref args, validate to catch out-of-range positional indices
+    // (e.g. "%2147483648$s") which would otherwise blow up allocation.
+    if let Err(msg) = validate_sscanf_format(format_bytes, if has_refs { args.len() - 2 } else { 0 }) {
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
     let mut results: Vec<Value> = Vec::new();
     let mut input_pos = 0usize;

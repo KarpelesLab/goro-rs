@@ -1090,7 +1090,16 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
             // Skip flags, width, precision, length modifiers, and type
             while i < format_bytes.len() && matches!(format_bytes[i], b'-' | b'+' | b' ' | b'0' | b'\'') {
                 if format_bytes[i] == b'\'' {
+                    i += 1; // consume apostrophe
+                    if i >= format_bytes.len() {
+                        // %'  with no padding char -> ValueError "Missing padding character"
+                        let msg = "Missing padding character";
+                        let exc = vm.create_exception(b"ValueError", msg, 0);
+                        vm.current_exception = Some(exc);
+                        return Err(VmError { message: msg.into(), line: vm.current_line });
+                    }
                     i += 1; // skip pad char
+                    continue;
                 }
                 i += 1;
             }
@@ -1143,23 +1152,25 @@ fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     validate_sprintf_format_arg(vm, "sprintf", args.first())?;
     // Check argument count
     validate_sprintf_arg_count(vm, "sprintf", args)?;
-    let result = do_sprintf_vm(vm, args);
-    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
+    let result = do_sprintf_vm(vm, args)?;
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
-/// Shared sprintf implementation used by both sprintf() and printf()
-pub fn do_sprintf(args: &[Value]) -> String {
-    do_sprintf_inner(None, args)
+/// Shared sprintf implementation used by both sprintf() and printf().
+/// No-VM variant: error paths return the empty string.
+pub fn do_sprintf(args: &[Value]) -> Vec<u8> {
+    do_sprintf_inner(None, args).unwrap_or_default()
 }
 
-/// Sprintf implementation with optional VM reference for __toString invocation.
-pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> String {
+/// Sprintf implementation with VM reference (for __toString invocation and
+/// for raising errors). Errors set the VM's current_exception.
+pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, VmError> {
     do_sprintf_inner(Some(vm), args)
 }
 
-fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
+fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, VmError> {
     if args.is_empty() {
-        return String::new();
+        return Ok(Vec::new());
     }
     let format = if let Some(vm_ref) = vm.as_deref_mut() {
         vm_ref.value_to_string(&args[0])
@@ -1168,8 +1179,52 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
     };
     let format_bytes = format.as_bytes();
 
-    let mut result = String::new();
-    let mut arg_idx = 1;
+    // Helper: raise a ValueError (or no-op if no VM).
+    fn raise(vm: &mut Option<&mut Vm>, msg: String) -> VmError {
+        if let Some(vm_ref) = vm.as_deref_mut() {
+            let exc = vm_ref.create_exception(b"ValueError", &msg, 0);
+            vm_ref.current_exception = Some(exc);
+            return VmError { message: msg, line: vm_ref.current_line };
+        }
+        VmError { message: msg, line: 0 }
+    }
+
+    // Parse an optional argument-position specifier (digits followed by '$').
+    // Returns Some(1-based position) on match. On no match, leaves i unchanged.
+    // Matches PHP: scan past any digits first; only if `$` follows do we treat
+    // this as an argpos spec (and then parse the number, which may be 0/missing
+    // which triggers a ValueError).
+    fn parse_argpos(fmt: &[u8], i: &mut usize, vm: &mut Option<&mut Vm>) -> Result<Option<usize>, VmError> {
+        let save_i = *i;
+        let mut lookahead = *i;
+        while lookahead < fmt.len() && fmt[lookahead].is_ascii_digit() {
+            lookahead += 1;
+        }
+        if lookahead >= fmt.len() || fmt[lookahead] != b'$' {
+            // Not an argpos; leave parser position untouched.
+            *i = save_i;
+            return Ok(None);
+        }
+        // Argpos spec confirmed. Parse digits (may be empty → 0 → invalid).
+        let mut num: u64 = 0;
+        let mut overflow = false;
+        while *i < fmt.len() && fmt[*i].is_ascii_digit() {
+            num = num.saturating_mul(10).saturating_add((fmt[*i] - b'0') as u64);
+            if num > i32::MAX as u64 { overflow = true; }
+            *i += 1;
+        }
+        *i += 1; // skip $
+        if num == 0 || overflow {
+            return Err(raise(vm, format!(
+                "Argument number specifier must be greater than zero and less than {}",
+                i32::MAX
+            )));
+        }
+        Ok(Some(num as usize))
+    }
+
+    let mut result: Vec<u8> = Vec::new();
+    let mut arg_idx: usize = 1; // 1-based sequential cursor (args[0] is format)
     let mut i = 0;
 
     while i < format_bytes.len() {
@@ -1179,30 +1234,14 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
                 break;
             }
             if format_bytes[i] == b'%' {
-                result.push('%');
+                result.push(b'%');
                 i += 1;
                 continue;
             }
 
             // Parse format specifier: %[argnum$][flags][width][.precision]type
-            // Check for argument position: %N$ (e.g., %1$s, %2$d)
-            let mut use_arg_idx = arg_idx;
-            {
-                let save_i = i;
-                let mut num = 0usize;
-                let mut has_num = false;
-                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    num = num * 10 + (format_bytes[i] - b'0') as usize;
-                    has_num = true;
-                    i += 1;
-                }
-                if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
-                    use_arg_idx = num; // 1-based maps directly to args[] since args[0] is format string
-                    i += 1; // skip $
-                } else {
-                    i = save_i; // not a position specifier, backtrack
-                }
-            }
+            // Value-arg position. None means "use sequential" (set later if no spec).
+            let arg_pos = parse_argpos(format_bytes, &mut i, &mut vm)?;
 
             // Flags: -, +, space, 0, '
             let mut pad_char = b' ';
@@ -1234,45 +1273,98 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
                     } // space flag
                     b'\'' => {
                         i += 1;
-                        if i < format_bytes.len() {
-                            pad_char = format_bytes[i];
-                            i += 1;
+                        if i >= format_bytes.len() {
+                            return Err(raise(&mut vm, "Missing padding character".to_string()));
                         }
+                        pad_char = format_bytes[i];
+                        i += 1;
                     }
                     _ => break,
                 }
             }
 
-            // Width (cap at 1MB to prevent OOM)
+            // Width: literal digits, or '*' (next arg / positional arg)
             let mut width: usize = 0;
-            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                width = width.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
+            if i < format_bytes.len() && format_bytes[i] == b'*' {
                 i += 1;
-            }
-            if width > 1_000_000 {
-                width = 1_000_000;
-            }
-
-            // Precision (cap at 1MB to prevent OOM)
-            let mut precision: Option<usize> = None;
-            if i < format_bytes.len() && format_bytes[i] == b'.' {
-                i += 1;
-                let mut prec: usize = 0;
+                let w_argpos = parse_argpos(format_bytes, &mut i, &mut vm)?;
+                let w_idx = match w_argpos {
+                    Some(n) => n,
+                    None => {
+                        let n = arg_idx; arg_idx += 1; n
+                    }
+                };
+                let w_arg = args.get(w_idx).unwrap_or(&Value::Null);
+                if !matches!(w_arg, Value::Long(_)) {
+                    return Err(raise(&mut vm, "Width must be an integer".to_string()));
+                }
+                let w_val = w_arg.to_long();
+                if w_val < 0 || w_val > i32::MAX as i64 {
+                    return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
+                }
+                width = w_val as usize;
+            } else {
+                let mut w: u64 = 0;
+                let mut overflow = false;
                 while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    prec = prec.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
+                    w = w.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as u64);
+                    if w > i32::MAX as u64 { overflow = true; }
                     i += 1;
                 }
-                if prec > 4096 {
-                    prec = 4096;
+                if overflow {
+                    return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
                 }
-                precision = Some(prec);
+                width = w as usize;
+            }
+
+            // Precision: '.' then either '*' or digits. Sentinel: -1 means
+            // "auto/shortest" (only valid for g/G/h/H). Negative literal not
+            // expressible via the digit path; only %.* with -1 is.
+            let mut precision: Option<i64> = None;
+            if i < format_bytes.len() && format_bytes[i] == b'.' {
+                i += 1;
+                if i < format_bytes.len() && format_bytes[i] == b'*' {
+                    i += 1;
+                    let p_argpos = parse_argpos(format_bytes, &mut i, &mut vm)?;
+                    let p_idx = match p_argpos {
+                        Some(n) => n,
+                        None => {
+                            let n = arg_idx; arg_idx += 1; n
+                        }
+                    };
+                    let p_arg = args.get(p_idx).unwrap_or(&Value::Null);
+                    if !matches!(p_arg, Value::Long(_)) {
+                        return Err(raise(&mut vm, "Precision must be an integer".to_string()));
+                    }
+                    let p_val = p_arg.to_long();
+                    if p_val < -1 || p_val > i32::MAX as i64 {
+                        return Err(raise(&mut vm, format!("Precision must be between -1 and {}", i32::MAX)));
+                    }
+                    precision = Some(p_val);
+                } else {
+                    let mut p: u64 = 0;
+                    let mut overflow = false;
+                    let mut has_digits = false;
+                    while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
+                        p = p.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as u64);
+                        if p > i32::MAX as u64 { overflow = true; }
+                        has_digits = true;
+                        i += 1;
+                    }
+                    if overflow {
+                        return Err(raise(&mut vm, format!("Precision must be between 0 and {}", i32::MAX)));
+                    }
+                    precision = Some(if has_digits { p as i64 } else { 0 });
+                }
             }
 
             if i >= format_bytes.len() {
                 break;
             }
-            // Skip length modifiers (l, ll, h, etc.) - PHP ignores them
-            while i < format_bytes.len() && matches!(format_bytes[i], b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't') {
+            // Skip length modifiers (l, ll, etc.). PHP only skips 'l' but the
+            // others are harmless to skip too. Notably exclude 'h' and 'H'
+            // because those ARE valid type specifiers (shortest g/G).
+            while i < format_bytes.len() && format_bytes[i] == b'l' {
                 i += 1;
             }
             if i >= format_bytes.len() {
@@ -1281,68 +1373,152 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
             let spec = format_bytes[i];
             i += 1;
 
-            let arg = args.get(use_arg_idx).unwrap_or(&Value::Null);
-            if use_arg_idx == arg_idx {
-                arg_idx += 1;
+            // PHP: precision = -1 only allowed for g/G/h/H.
+            if precision == Some(-1) && !matches!(spec, b'g' | b'G' | b'h' | b'H') {
+                return Err(raise(&mut vm, "Precision -1 is only supported for %g, %G, %h and %H".to_string()));
             }
 
-            let formatted = match spec {
+            // Determine value arg index now (after parsing all width/precision).
+            let use_arg_idx = match arg_pos {
+                Some(n) => n,
+                None => {
+                    let n = arg_idx; arg_idx += 1; n
+                }
+            };
+            let arg = args.get(use_arg_idx).unwrap_or(&Value::Null);
+
+            // Precision usage: precision is Option<i64>, where Some(-1) means
+            // "auto/shortest" (g/G/h/H only). For floating-point specifiers
+            // PHP caps precision at MAX_FLOAT_PRECISION (53) and emits a Notice.
+            const PHP_MAX_FLOAT_PRECISION: i64 = 53;
+            let is_float_spec = matches!(spec, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'h' | b'H');
+            let precision_usize: Option<usize> = match precision {
+                Some(-1) => None, // sentinel handled per-type below
+                Some(p) if p >= 0 => {
+                    if is_float_spec && p > PHP_MAX_FLOAT_PRECISION {
+                        if let Some(vm_ref) = vm.as_deref_mut() {
+                            let line = vm_ref.current_line;
+                            vm_ref.emit_notice_at(
+                                &format!(
+                                    "sprintf(): Requested precision of {} digits was truncated to PHP maximum of {} digits",
+                                    p, PHP_MAX_FLOAT_PRECISION
+                                ),
+                                line,
+                            );
+                        }
+                        Some(PHP_MAX_FLOAT_PRECISION as usize)
+                    } else {
+                        Some((p as usize).min(4096))
+                    }
+                }
+                _ => None,
+            };
+            let auto_precision = precision == Some(-1);
+
+            // Helper: when the arg is an object without __toString-like
+            // support, PHP either throws (for %s) or emits a Warning
+            // ("could not be converted to int|float") for the numeric specs.
+            fn object_warn_int(vm: &mut Option<&mut Vm>, arg: &Value) {
+                if let Value::Object(obj) = arg.deref() {
+                    if let Some(vm_ref) = vm.as_deref_mut() {
+                        let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                        vm_ref.emit_warning(&format!(
+                            "Object of class {} could not be converted to int", class_name
+                        ));
+                    }
+                }
+            }
+            fn object_warn_float(vm: &mut Option<&mut Vm>, arg: &Value) {
+                if let Value::Object(obj) = arg.deref() {
+                    if let Some(vm_ref) = vm.as_deref_mut() {
+                        let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                        vm_ref.emit_warning(&format!(
+                            "Object of class {} could not be converted to float", class_name
+                        ));
+                    }
+                }
+            }
+
+            let formatted: Vec<u8> = match spec {
                 b's' => {
-                    let s = if let Some(vm_ref) = vm.as_deref_mut() {
-                        vm_ref.value_to_string(arg).to_string_lossy()
+                    // PHP emits "Array to string conversion" warning when an
+                    // array is fed to %s.
+                    if matches!(arg.deref(), Value::Array(_)) {
+                        if let Some(vm_ref) = vm.as_deref_mut() {
+                            vm_ref.emit_warning("Array to string conversion");
+                        }
+                    }
+                    // For objects lacking __toString-equivalent support, PHP
+                    // throws Error rather than producing output.
+                    let s_bytes: Vec<u8> = if let Some(vm_ref) = vm.as_deref_mut() {
+                        let php_s = vm_ref.value_to_string_checked(arg)?;
+                        php_s.as_bytes().to_vec()
                     } else {
-                        arg.to_php_string().to_string_lossy()
+                        arg.to_php_string().as_bytes().to_vec()
                     };
-                    if let Some(prec) = precision {
-                        s.chars().take(prec).collect::<String>()
+                    if let Some(prec) = precision_usize {
+                        s_bytes.into_iter().take(prec).collect()
                     } else {
-                        s
+                        s_bytes
                     }
                 }
                 b'd' => {
+                    object_warn_int(&mut vm, arg);
                     let n = arg.to_long();
                     if show_sign && n >= 0 {
-                        format!("+{}", n)
+                        format!("+{}", n).into_bytes()
                     } else {
-                        n.to_string()
+                        n.to_string().into_bytes()
                     }
                 }
                 b'f' | b'F' => {
+                    object_warn_float(&mut vm, arg);
                     let f = arg.to_double();
-                    let prec = precision.unwrap_or(6);
+                    let prec = precision_usize.unwrap_or(6);
                     let s = format!("{:.prec$}", f);
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s)
+                        format!("+{}", s).into_bytes()
                     } else {
-                        s
+                        s.into_bytes()
                     }
                 }
                 b'e' => {
+                    object_warn_float(&mut vm, arg);
                     let f = arg.to_double();
-                    let prec = precision.unwrap_or(6);
+                    let prec = precision_usize.unwrap_or(6);
                     let s = format!("{:.prec$e}", f);
                     // PHP always shows +/- in exponent, Rust doesn't show +
                     let s = php_fix_exponent(&s);
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s)
+                        format!("+{}", s).into_bytes()
                     } else {
-                        s
+                        s.into_bytes()
                     }
                 }
                 b'E' => {
+                    object_warn_float(&mut vm, arg);
                     let f = arg.to_double();
-                    let prec = precision.unwrap_or(6);
+                    let prec = precision_usize.unwrap_or(6);
                     let s = format!("{:.prec$E}", f);
                     let s = php_fix_exponent(&s);
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s)
+                        format!("+{}", s).into_bytes()
                     } else {
-                        s
+                        s.into_bytes()
                     }
                 }
-                b'g' | b'G' => {
+                b'g' | b'G' | b'h' | b'H' => {
+                    object_warn_float(&mut vm, arg);
                     let f = arg.to_double();
-                    let prec = if precision == Some(0) { 1 } else { precision.unwrap_or(6) };
+                    // precision -1 ('auto') uses shortest round-trip via Rust's
+                    // default float formatting; otherwise use significant digits.
+                    let prec = if auto_precision {
+                        usize::MAX // sentinel: use shortest
+                    } else if precision_usize == Some(0) {
+                        1
+                    } else {
+                        precision_usize.unwrap_or(6)
+                    };
                     // PHP %g: use shorter of %e and %f, with significant digits
                     // The precision specifies number of significant digits
                     let s = if f == 0.0 {
@@ -1355,6 +1531,18 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
                         "NAN".to_string()
                     } else if f.is_infinite() {
                         if f > 0.0 { "INF".to_string() } else { "-INF".to_string() }
+                    } else if prec == usize::MAX {
+                        // Shortest round-trip via Rust default Display.
+                        let abs = f.abs();
+                        let exp = abs.log10().floor() as i32;
+                        // Use scientific when exponent is outside [-4, 16].
+                        if (-4..=16).contains(&exp) {
+                            // Try fixed display
+                            format!("{}", f)
+                        } else {
+                            let s = format!("{:e}", f);
+                            php_fix_exponent(&s)
+                        }
                     } else {
                         // Use Rust's formatting with significant digits
                         let abs = f.abs();
@@ -1391,62 +1579,84 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> String {
                             }
                         }
                     };
-                    let s = if spec == b'G' { s.to_uppercase() } else { s };
+                    let upper = matches!(spec, b'G' | b'H');
+                    let s = if upper { s.to_uppercase() } else { s };
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s)
+                        format!("+{}", s).into_bytes()
                     } else {
-                        s
+                        s.into_bytes()
                     }
                 }
-                b'x' => format!("{:x}", arg.to_long()),
-                b'X' => format!("{:X}", arg.to_long()),
-                b'o' => format!("{:o}", arg.to_long()),
-                b'b' => format!("{:b}", arg.to_long()),
-                b'c' => String::from(arg.to_long() as u8 as char),
-                b'u' => format!("{}", arg.to_long() as u64),
+                b'x' => {
+                    object_warn_int(&mut vm, arg);
+                    format!("{:x}", arg.to_long()).into_bytes()
+                }
+                b'X' => {
+                    object_warn_int(&mut vm, arg);
+                    format!("{:X}", arg.to_long()).into_bytes()
+                }
+                b'o' => {
+                    object_warn_int(&mut vm, arg);
+                    format!("{:o}", arg.to_long()).into_bytes()
+                }
+                b'b' => {
+                    object_warn_int(&mut vm, arg);
+                    format!("{:b}", arg.to_long()).into_bytes()
+                }
+                b'c' => {
+                    object_warn_int(&mut vm, arg);
+                    vec![arg.to_long() as u8]
+                }
+                b'u' => {
+                    object_warn_int(&mut vm, arg);
+                    format!("{}", arg.to_long() as u64).into_bytes()
+                }
                 b'%' => {
                     // `%` as type specifier (after flags/width): output literal `%` and consume arg
-                    "%".to_string()
+                    vec![b'%']
                 }
                 _ => {
-                    arg_idx -= 1;
-                    format!("%{}", spec as char)
+                    // PHP throws ValueError for any unrecognized type specifier.
+                    return Err(raise(
+                        &mut vm,
+                        format!("Unknown format specifier \"{}\"", spec as char),
+                    ));
                 }
             };
 
-            // Apply width and padding
+            // Apply width and padding (byte-level).
             if width > 0 && formatted.len() < width {
                 let padding = width - formatted.len();
                 if left_align {
-                    result.push_str(&formatted);
+                    result.extend_from_slice(&formatted);
                     for _ in 0..padding {
-                        result.push(pad_char as char);
+                        result.push(pad_char);
                     }
                 } else {
                     // For zero-padding with sign, put sign before zeros
-                    if pad_zero && (formatted.starts_with('-') || formatted.starts_with('+')) {
-                        result.push(formatted.chars().next().unwrap());
+                    if pad_zero && !formatted.is_empty() && (formatted[0] == b'-' || formatted[0] == b'+') {
+                        result.push(formatted[0]);
                         for _ in 0..padding {
-                            result.push('0');
+                            result.push(b'0');
                         }
-                        result.push_str(&formatted[1..]);
+                        result.extend_from_slice(&formatted[1..]);
                     } else {
                         for _ in 0..padding {
-                            result.push(pad_char as char);
+                            result.push(pad_char);
                         }
-                        result.push_str(&formatted);
+                        result.extend_from_slice(&formatted);
                     }
                 }
             } else {
-                result.push_str(&formatted);
+                result.extend_from_slice(&formatted);
             }
         } else {
-            result.push(format_bytes[i] as char);
+            result.push(format_bytes[i]);
             i += 1;
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Fix scientific notation exponent to always show sign (e.g., e2 -> e+2)
@@ -2453,31 +2663,22 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // Resolve negative offset
-    let start = if offset < 0 {
-        let resolved = main_len + offset;
-        if resolved < 0 {
-            let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            if let Value::Object(obj) = &exc {
-                obj.borrow_mut().class_name = b"ValueError".to_vec();
-            }
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
-        }
-        resolved as usize
+    // Resolve negative offset (PHP clamps to 0 if it would go before start).
+    let resolved_offset = if offset < 0 {
+        (main_len + offset).max(0)
     } else {
-        if offset > main_len {
-            let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
-            let exc = vm.throw_type_error(msg.clone());
-            if let Value::Object(obj) = &exc {
-                obj.borrow_mut().class_name = b"ValueError".to_vec();
-            }
-            vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
-        }
-        offset as usize
+        offset
     };
+    if resolved_offset > main_len {
+        let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
+        let exc = vm.throw_type_error(msg.clone());
+        if let Value::Object(obj) = &exc {
+            obj.borrow_mut().class_name = b"ValueError".to_vec();
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let start = resolved_offset as usize;
 
     // If length is explicitly 0, result is always 0
     if let Some(0) = length {
@@ -3249,10 +3450,10 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
     validate_sprintf_arg_count(vm, "vprintf", &all_args)?;
-    let result = do_sprintf_vm(vm, &all_args);
-    let s_bytes = result.as_bytes();
-    vm.write_output(s_bytes);
-    Ok(Value::Long(s_bytes.len() as i64))
+    let result = do_sprintf_vm(vm, &all_args)?;
+    let len = result.len();
+    vm.write_output(&result);
+    Ok(Value::Long(len as i64))
 }
 
 fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3264,10 +3465,10 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
     validate_sprintf_arg_count(vm, "printf", args)?;
-    let result = do_sprintf_vm(vm, args);
-    let s_bytes = result.as_bytes();
-    vm.write_output(s_bytes);
-    Ok(Value::Long(s_bytes.len() as i64))
+    let result = do_sprintf_vm(vm, args)?;
+    let len = result.len();
+    vm.write_output(&result);
+    Ok(Value::Long(len as i64))
 }
 
 fn strrchr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3498,8 +3699,8 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
     validate_sprintf_arg_count(vm, "vsprintf", &all_args)?;
-    let result = do_sprintf_vm(vm, &all_args);
-    Ok(Value::String(PhpString::from_vec(result.into_bytes())))
+    let result = do_sprintf_vm(vm, &all_args)?;
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4265,6 +4466,23 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             count as usize
         };
 
+        // For numeric types (one arg per repeat), reject upfront if too few args
+        // to avoid huge allocations before the check (see bug78833).
+        let is_numeric_type = matches!(
+            code,
+            b'C' | b'c'
+                | b'S' | b'v' | b'n' | b's'
+                | b'L' | b'V' | b'l' | b'i' | b'I' | b'N'
+                | b'q' | b'Q' | b'P' | b'J'
+                | b'f' | b'g' | b'G' | b'd' | b'e' | b'E'
+        );
+        if is_numeric_type && arg_idx + repeat > args.len() {
+            let msg = format!("Type {}: too few arguments", code as char);
+            let exc = _vm.create_exception(b"ValueError", &msg, 0);
+            _vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: _vm.current_line });
+        }
+
         match code {
             b'C' | b'c' => {
                 for _ in 0..repeat {
@@ -4424,7 +4642,14 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .unwrap_or_else(PhpString::empty);
                 arg_idx += 1;
                 let hex = s.as_bytes();
-                let nibbles = (count as usize).min(hex.len());
+                let want_nibbles = if count == u32::MAX { hex.len() } else { count as usize };
+                if want_nibbles > hex.len() {
+                    _vm.emit_warning_at(
+                        &format!("pack(): Type {}: not enough characters in string", code as char),
+                        _vm.current_line,
+                    );
+                }
+                let nibbles = want_nibbles.min(hex.len());
                 if code == b'H' {
                     // High nibble first
                     for j in (0..nibbles).step_by(2) {
@@ -4639,10 +4864,12 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 // PHP: explicit length larger than available -> warning + false.
                 if count != u32::MAX && len > bytes.len() - pos {
+                    let avail = bytes.len() - pos;
                     _vm.emit_warning_at(
                         &format!(
-                            "unpack(): Type {}: not enough input values, need {} values but only {} was provided",
-                            code as char, len, bytes.len() - pos
+                            "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
+                            code as char, len, avail,
+                            if avail == 1 { "was" } else { "were" }
                         ),
                         _vm.current_line,
                     );
@@ -4895,6 +5122,16 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'H' | b'h' => {
                 // H = hex string, high nibble first; h = hex string, low nibble first
+                // PHP: count must not exceed INT_MAX / 2
+                if count != u32::MAX && count > (i32::MAX as u32) / 2 {
+                    let msg = format!(
+                        "unpack(): Argument #1 ($format) repeater must be less than or equal to {}",
+                        i32::MAX / 2
+                    );
+                    let exc = _vm.create_exception(b"ValueError", &msg, 0);
+                    _vm.current_exception = Some(exc);
+                    return Err(VmError { message: msg, line: _vm.current_line });
+                }
                 let len = if count == u32::MAX {
                     (bytes.len() - pos) * 2
                 } else {
@@ -4940,10 +5177,12 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     count as usize
                 };
                 if count != u32::MAX && len > bytes.len() - pos {
+                    let avail = bytes.len() - pos;
                     _vm.emit_warning_at(
                         &format!(
-                            "unpack(): Type Z: not enough input values, need {} values but only {} was provided",
-                            len, bytes.len() - pos
+                            "unpack(): Type Z: not enough input values, need {} values but only {} {} provided",
+                            len, avail,
+                            if avail == 1 { "was" } else { "were" }
                         ),
                         _vm.current_line,
                     );
