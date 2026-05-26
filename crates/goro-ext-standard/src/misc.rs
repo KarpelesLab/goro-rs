@@ -628,7 +628,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ignore_user_abort", ignore_user_abort_fn);
     vm.register_function(b"connection_aborted", connection_aborted_fn);
     vm.register_function(b"connection_status", connection_status_fn);
-    vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
+    // get_html_translation_table is registered by strings::register with proper flag handling
     vm.register_function(b"nl_langinfo", nl_langinfo_fn);
     vm.register_function(b"localeconv", localeconv_fn);
     vm.register_function(b"time_nanosleep", time_nanosleep_fn);
