@@ -1896,22 +1896,40 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
                     && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
                 if is_xml_pi {
-                    // XML PI - skip until first >
+                    // <?xml is treated as XML PI: after the `<?xml` prefix,
+                    // PHP switches to HTML-tag state with is_xml flag and ends
+                    // at first '>' NOT preceded by '-' (so '->' inside content
+                    // doesn't end the tag, but '?>' does).
                     i += 2;
+                    let mut prev: u8 = 0;
                     while i < bytes.len() {
-                        if bytes[i] == b'>' {
+                        if bytes[i] == b'>' && prev != b'-' {
                             i += 1;
                             break;
                         }
+                        prev = bytes[i];
                         i += 1;
                     }
                 } else {
-                    // PHP/ASP tag - skip until ?> or %> respectively
+                    // PHP/ASP tag - skip until ?> or %> respectively, tracking
+                    // single/double quotes so nested `<?` inside a quoted string
+                    // doesn't end the outer tag early (bug78346).
                     let close_char = bytes[i + 1]; // ? or %
                     i += 2;
+                    let mut in_q: u8 = 0;
                     while i < bytes.len() {
-                        if bytes[i] == close_char && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                            i += 2;
+                        let c = bytes[i];
+                        if c == b'\'' || c == b'"' {
+                            let prev_is_bs = i > 0 && bytes[i - 1] == b'\\';
+                            if !prev_is_bs {
+                                if in_q == 0 {
+                                    in_q = c;
+                                } else if in_q == c {
+                                    in_q = 0;
+                                }
+                            }
+                        } else if c == b'>' && in_q == 0 && i > 0 && bytes[i - 1] == close_char {
+                            i += 1;
                             break;
                         }
                         i += 1;
@@ -5096,22 +5114,40 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
                     && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
                 if is_xml_pi {
-                    // XML PI - skip until first >
+                    // <?xml is treated as XML PI: after the `<?xml` prefix,
+                    // PHP switches to HTML-tag state with is_xml flag and ends
+                    // at first '>' NOT preceded by '-' (so '->' inside content
+                    // doesn't end the tag, but '?>' does).
                     i += 2;
+                    let mut prev: u8 = 0;
                     while i < bytes.len() {
-                        if bytes[i] == b'>' {
+                        if bytes[i] == b'>' && prev != b'-' {
                             i += 1;
                             break;
                         }
+                        prev = bytes[i];
                         i += 1;
                     }
                 } else {
-                    // PHP/ASP tag - skip until ?> or %> respectively
+                    // PHP/ASP tag - skip until ?> or %> respectively, tracking
+                    // single/double quotes so nested `<?` inside a quoted string
+                    // doesn't end the outer tag early (bug78346).
                     let close_char = bytes[i + 1]; // ? or %
                     i += 2;
+                    let mut in_q: u8 = 0;
                     while i < bytes.len() {
-                        if bytes[i] == close_char && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                            i += 2;
+                        let c = bytes[i];
+                        if c == b'\'' || c == b'"' {
+                            let prev_is_bs = i > 0 && bytes[i - 1] == b'\\';
+                            if !prev_is_bs {
+                                if in_q == 0 {
+                                    in_q = c;
+                                } else if in_q == c {
+                                    in_q = 0;
+                                }
+                            }
+                        } else if c == b'>' && in_q == 0 && i > 0 && bytes[i - 1] == close_char {
+                            i += 1;
                             break;
                         }
                         i += 1;
