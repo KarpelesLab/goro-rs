@@ -2281,10 +2281,17 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     // tests' connect.inc picks them up. If startup fails (no binary, init
     // error, port in use), we silently fall back to the existing skip
     // behavior — no regression.
-    let has_mysqli_tests = files.iter().any(|p| {
-        let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        abs.to_string_lossy().contains("/ext/mysqli/tests/")
-    });
+    // They run from their absolute path: their includes (connect.inc) and
+    // helper processes resolve relative to the script.
+    let mut has_mysqli_tests = false;
+    for p in files.iter_mut() {
+        if let Ok(abs) = std::fs::canonicalize(&*p) {
+            if abs.to_string_lossy().contains("/ext/mysqli/tests/") {
+                has_mysqli_tests = true;
+                *p = abs;
+            }
+        }
+    }
     if has_mysqli_tests {
         let start = std::time::Instant::now();
         let up = mysqli_test::ensure_started();
