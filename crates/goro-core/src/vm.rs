@@ -30183,6 +30183,19 @@ impl Vm {
                     }
                 }
 
+                OpCode::StaticVarInitOrJmp => {
+                    // Already initialized: skip the initializer; the
+                    // StaticVarInit at the target binds the CV.
+                    let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    if self
+                        .static_vars
+                        .contains_key(key_val.to_php_string().as_bytes())
+                    {
+                        if let OperandType::JmpTarget(target) = op.op2 {
+                            ip = target as usize;
+                        }
+                    }
+                }
                 OpCode::StaticVarInit => {
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     let key = key_val.to_php_string().as_bytes().to_vec();

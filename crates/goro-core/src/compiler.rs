@@ -3489,12 +3489,6 @@ impl Compiler {
                         });
                     }
                     let cv = self.op_array.get_or_create_cv(name);
-                    let default_val = if let Some(expr) = default {
-                        self.compile_expr(expr)?
-                    } else {
-                        let idx = self.op_array.add_literal(Value::Null);
-                        OperandType::Const(idx)
-                    };
                     // Create a key for the static variable: "funcname::varname"
                     // ("class::method::varname" for methods: each declaring
                     // class has its own statics).
@@ -3511,6 +3505,30 @@ impl Compiler {
                     let key_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(key)));
+                    // A non-constant initializer runs only on first execution
+                    // (PHP 8.3+): guard it like ZEND_BIND_INIT_STATIC_OR_JMP.
+                    let guard = match default {
+                        Some(e) if Self::eval_const_expr(e).is_none() => {
+                            Some(self.op_array.emit(Op {
+                                opcode: OpCode::StaticVarInitOrJmp,
+                                op1: OperandType::Cv(cv),
+                                op2: OperandType::JmpTarget(0),
+                                result: OperandType::Const(key_idx),
+                                line: stmt.span.line,
+                            }))
+                        }
+                        _ => None,
+                    };
+                    let default_val = if let Some(expr) = default {
+                        self.compile_expr(expr)?
+                    } else {
+                        let idx = self.op_array.add_literal(Value::Null);
+                        OperandType::Const(idx)
+                    };
+                    if let Some(g) = guard {
+                        let target = self.op_array.current_offset();
+                        self.op_array.ops[g as usize].op2 = OperandType::JmpTarget(target);
+                    }
                     self.op_array.emit(Op {
                         opcode: OpCode::StaticVarInit,
                         op1: OperandType::Cv(cv),

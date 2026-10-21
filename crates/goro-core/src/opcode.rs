@@ -170,6 +170,11 @@ pub enum OpCode {
     IncludeFile,
     /// Initialize a static variable: op1 = CV, op2 = default value (const), result = static key name (const)
     StaticVarInit,
+    /// `static $x = <non-constant expr>;` guard (ZEND_BIND_INIT_STATIC_OR_JMP):
+    /// jump to op2 (the matching StaticVarInit, which binds) when the static
+    /// named by result (const key) is already initialized, skipping the
+    /// initializer. op1 = CV.
+    StaticVarInitOrJmp,
     /// Bind a global variable: op1 = CV, op2 = variable name (const)
     BindGlobal,
 
