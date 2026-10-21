@@ -33830,6 +33830,47 @@ impl Vm {
         }
     }
 
+    /// Call the `kind` ("get"/"set") hook of `$obj->pn` as reflection does
+    /// (no visibility check). Returns None if there is no such hook or we are
+    /// already inside one of that property's hooks.
+    pub fn call_property_hook_unchecked(&mut self, obj: &Rc<RefCell<PhpObject>>, pn: &[u8], kind: &str, value: Option<Value>) -> Option<Result<Value, VmError>> {
+        let (class_lower, class_name_orig) = {
+            let ob = obj.borrow();
+            (ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), ob.class_name.clone())
+        };
+        let prefix: &[u8] = if kind == "set" { b"__property_set_" } else { b"__property_get_" };
+        if !self.has_unguarded_hook(&class_lower, pn, prefix) {
+            return None;
+        }
+        let mut m = prefix.to_vec();
+        m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
+        let (method, decl) = {
+            let md = self.classes.get(&class_lower)?.get_method(&m)?;
+            (md.op_array.clone(), md.declaring_class.clone())
+        };
+        let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+        if !fn_cvs.is_empty() {
+            fn_cvs[0] = Value::Object(obj.clone());
+        }
+        if let Some(v) = value {
+            if fn_cvs.len() > 1 {
+                fn_cvs[1] = v;
+            }
+        }
+        let mut hook_key = class_lower.clone();
+        hook_key.extend_from_slice(b"::");
+        hook_key.extend_from_slice(pn);
+        hook_key.extend_from_slice(if kind == "set" { b"::set" } else { b"::get" });
+        self.property_hook_stack.push(hook_key);
+        self.class_scope_stack.push(decl);
+        self.called_class_stack.push(class_name_orig);
+        let r = self.execute_op_array(&method, fn_cvs);
+        self.called_class_stack.pop();
+        self.class_scope_stack.pop();
+        self.property_hook_stack.pop();
+        Some(r)
+    }
+
     /// Declared non-static properties of a class in declaration order
     /// (ancestors first; a redeclaration keeps the inherited position).
     pub fn ordered_instance_prop_defs(&self, class_lower: &[u8]) -> Vec<crate::object::PropertyDef> {

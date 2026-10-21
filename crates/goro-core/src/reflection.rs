@@ -4652,6 +4652,12 @@ pub fn reflection_property_docall(
                     Some(val)
                 } else if let Some(target) = args.get(1) {
                     if let Value::Object(target_obj) = target {
+                        // getValue() reads through the get hook, if any.
+                        match vm.call_property_hook_unchecked(target_obj, prop_name.as_bytes(), "get", None) {
+                            Some(Ok(v)) => return Some(v),
+                            Some(Err(_)) => return Some(Value::Null),
+                            None => {}
+                        }
                         let target_ob = target_obj.borrow();
                         Some(target_ob.get_property(prop_name.as_bytes()))
                     } else {
@@ -4687,6 +4693,13 @@ pub fn reflection_property_docall(
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
                     let value = args[2].clone();
+                    // setValue() writes through the set hook, if any.
+                    if let Value::Object(target_obj) = &target {
+                        if let Some(r) = vm.call_property_hook_unchecked(target_obj, prop_name.as_bytes(), "set", Some(value.clone())) {
+                            let _ = r;
+                            return Some(Value::Null);
+                        }
+                    }
                     if let Value::Object(target_obj) = &target {
                         // For typed properties, coerce the incoming value to
                         // satisfy the declared type when possible. In particular
@@ -4730,6 +4743,14 @@ pub fn reflection_property_docall(
             b"getrawvalue" => {
                 // getRawValue($obj): read the property without triggering lazy init.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Some(d) = find_prop_decl(vm, &class_lower, prop_name.as_bytes()) {
+                    if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
+                        let msg = format!("Must not read from virtual property {}::${}", class_display(vm, &d.declaring_class), prop_name);
+                        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 if let Value::Object(target_obj) = &target {
                     let ob = target_obj.borrow();
                     Some(ob.get_property(prop_name.as_bytes()))
@@ -4818,6 +4839,14 @@ pub fn reflection_property_docall(
                 // hooks and type checks (best-effort in our VM).
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
+                if let Some(d) = find_prop_decl(vm, &class_lower, prop_name.as_bytes()) {
+                    if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
+                        let msg = format!("Must not write to virtual property {}::${}", class_display(vm, &d.declaring_class), prop_name);
+                        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                }
                 if is_static {
                     if let Some(ce) = vm.classes.get_mut(&class_lower) {
                         ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
