@@ -1696,14 +1696,22 @@ fn execute_php_inner_impl(
             }
         }
         if let Some(stdin) = &req.stdin {
-            if let Ok(mut f) = tempfile::tempfile() {
-                use std::io::{Seek, SeekFrom, Write};
-                let _ = f.write_all(stdin);
-                let _ = f.seek(SeekFrom::Start(0));
-                use std::os::unix::io::AsRawFd;
+            // run-tests.php feeds the section through a pipe: php://stdin
+            // (a dup of descriptor 0) shares its read position with STDIN.
+            let mut p = [0i32; 2];
+            if unsafe { libc::pipe(p.as_mut_ptr()) } == 0 {
                 unsafe {
-                    libc::dup2(f.as_raw_fd(), 0);
+                    libc::dup2(p[0], 0);
+                    libc::close(p[0]);
                 }
+                let data = stdin.clone();
+                let wfd = p[1];
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    use std::os::unix::io::FromRawFd;
+                    let mut w = unsafe { std::fs::File::from_raw_fd(wfd) };
+                    let _ = w.write_all(&data);
+                });
             }
         } else {
             // run-tests.php gives the test an (empty) stdin pipe.
@@ -2421,8 +2429,21 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
 
     for path in &files {
         if let Ok(content) = std::fs::read(path) {
-            if let Some(test) = PhptTest::parse_bytes(&content) {
+            if let Some(mut test) = PhptTest::parse_bytes(&content) {
                 let test_dir = path.parent();
+                // --EXPECT_EXTERNAL-- & co. name a file (next to the test)
+                // holding that section.
+                for key in ["EXPECT", "EXPECTF", "EXPECTREGEX"] {
+                    let ext = format!("{}_EXTERNAL", key);
+                    if test.sections.contains_key(key) {
+                        continue;
+                    }
+                    if let (Some(rel), Some(dir)) = (test.sections.get(&ext), test_dir) {
+                        if let Ok(body) = std::fs::read_to_string(dir.join(rel.trim())) {
+                            test.sections.insert(key.to_string(), body);
+                        }
+                    }
+                }
                 // Wrap in catch_unwind to prevent stack overflows from killing the runner
                 let test_name = test.name.clone();
                 // Use full path for filename, converting .phpt to .php
@@ -2731,7 +2752,12 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         full.push((k.clone().into_bytes(), v.clone().into_bytes()));
     }
     info.env = full;
-    let stdin = test.sections.get("STDIN").map(|s| test.bytes(s));
+    // The section is passed byte-exact, trailing newline included.
+    let stdin = test
+        .raw_sections
+        .get("STDIN")
+        .or_else(|| test.sections.get("STDIN"))
+        .map(|s| test.bytes(s));
     PhptRequest { info, env, stdin }
 }
 
