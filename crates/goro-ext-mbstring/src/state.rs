@@ -607,6 +607,8 @@ pub fn sync(vm: &mut Vm) {
                 }
             }
         }
+        // MINIT then runs mbstring_internal_encoding_changed_hook()
+        let _ = apply_ini(vm, &mut st, "internal_encoding", None, false);
         // RINIT
         st.current_internal_encoding = st.internal_encoding;
         st.current_http_output_encoding = st.http_output_encoding;
