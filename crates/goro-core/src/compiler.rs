@@ -260,6 +260,11 @@ impl Compiler {
                     (b"stream_socket_recvfrom", 3) => true,
                     // stream_select(&$read, &$write, &$except, ...)
                     (b"stream_select", 0..=2) => true,
+                    // dns_get_mx($hostname, &$hosts, &$weights)
+                    (b"dns_get_mx", 1) | (b"dns_get_mx", 2) => true,
+                    (b"getmxrr", 1) | (b"getmxrr", 2) => true,
+                    // dns_get_record($hostname, $type, &$authoritative_name_servers, &$additional_records, $raw)
+                    (b"dns_get_record", 2) | (b"dns_get_record", 3) => true,
                     // mb_ereg($pattern, $string, &$regs)
                     (b"mb_ereg", 2) => true,
                     (b"mb_eregi", 2) => true,

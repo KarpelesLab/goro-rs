@@ -13,6 +13,7 @@ pub mod ini_parser;
 pub mod locale;
 pub mod math;
 pub mod misc;
+pub mod netdb;
 pub mod ob;
 pub mod output;
 pub mod regex;
@@ -52,6 +53,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     url_scanner::register(vm);
     locale::register(vm);
     misc::userstream::register(vm);
+    netdb::register(vm);
     register_builtin_param_names(vm);
 }
 

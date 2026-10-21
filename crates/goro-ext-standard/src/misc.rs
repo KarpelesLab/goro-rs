@@ -570,21 +570,14 @@ final class StreamBucket {
     vm.register_function(b"property_exists", property_exists_fn);
     vm.register_function(b"get_mangled_object_vars", get_mangled_object_vars_fn);
     vm.register_function(b"get_resource_id", get_resource_id_fn);
-    vm.register_function(b"ip2long", ip2long_fn);
-    vm.register_function(b"long2ip", long2ip_fn);
     vm.register_function(b"hrtime", hrtime_fn);
     vm.register_function(b"gethostname", gethostname_fn);
     vm.register_function(b"umask", umask_fn);
     vm.register_function(b"getopt", getopt_fn);
-    vm.register_function(b"gethostbyname", gethostbyname_fn);
-    vm.register_function(b"gethostbynamel", gethostbynamel_fn);
-    vm.register_function(b"gethostbyaddr", gethostbyaddr_fn);
     vm.register_function(b"proc_open", proc_open::proc_open);
     vm.register_function(b"proc_close", proc_open::proc_close);
     vm.register_function(b"proc_get_status", proc_open::proc_get_status);
     vm.register_function(b"proc_terminate", proc_open::proc_terminate);
-    vm.register_function(b"inet_pton", inet_pton_fn);
-    vm.register_function(b"inet_ntop", inet_ntop_fn);
     vm.register_function(b"stream_set_blocking", xp_socket::stream_set_blocking);
     vm.register_function(b"socket_set_blocking", xp_socket::stream_set_blocking);
     vm.register_function(b"stream_set_timeout", xp_socket::stream_set_timeout);
@@ -696,14 +689,6 @@ final class StreamBucket {
     vm.register_function(b"unregister_tick_function", unregister_tick_function_fn);
     vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
     vm.register_function(b"output_reset_rewrite_vars", output_reset_rewrite_vars_fn);
-    vm.register_function(b"dns_check_record", dns_check_record_fn);
-    vm.register_function(b"checkdnsrr", dns_check_record_fn);
-    vm.register_function(b"dns_get_record", dns_get_record_fn);
-    vm.register_function(b"getmxrr", getmxrr_fn);
-    vm.register_function(b"getservbyname", getservbyname_fn);
-    vm.register_function(b"getservbyport", getservbyport_fn);
-    vm.register_function(b"getprotobyname", getprotobyname_fn);
-    vm.register_function(b"getprotobynumber", getprotobynumber_fn);
     vm.register_function(b"get_browser", get_browser_fn);
     vm.register_function(b"stream_socket_accept", xp_socket::stream_socket_accept);
     vm.register_function(b"stream_isatty", stream_isatty_fn);
@@ -17638,41 +17623,6 @@ fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn ip2long_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ip = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 {
-        return Ok(Value::False);
-    }
-    let mut result: u32 = 0;
-    for (i, part) in parts.iter().enumerate() {
-        match part.parse::<u32>() {
-            Ok(n) if n <= 255 => {
-                result |= n << (8 * (3 - i));
-            }
-            _ => return Ok(Value::False),
-        }
-    }
-    // PHP returns signed long
-    Ok(Value::Long(result as i64))
-}
-
-fn long2ip_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ip = args.first().unwrap_or(&Value::Null).to_long() as u32;
-    let s = format!(
-        "{}.{}.{}.{}",
-        (ip >> 24) & 0xFF,
-        (ip >> 16) & 0xFF,
-        (ip >> 8) & 0xFF,
-        ip & 0xFF,
-    );
-    Ok(Value::String(PhpString::from_string(s)))
-}
-
 fn hrtime_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let as_number = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let now = std::time::SystemTime::now()
@@ -18118,165 +18068,6 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         *r.borrow_mut() = Value::Long(optind as i64);
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn host_arg(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Vec<u8>, VmError> {
-    let h = vm
-        .value_to_string(args.first().unwrap_or(&Value::Null))
-        .as_bytes()
-        .to_vec();
-    if h.contains(&0) {
-        let msg = format!(
-            "{}(): Argument #1 ($hostname) must not contain any null bytes",
-            fname
-        );
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    Ok(h)
-}
-
-fn resolve_ipv4(host: &[u8]) -> Vec<String> {
-    use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:0", String::from_utf8_lossy(host));
-    match addr_str.to_socket_addrs() {
-        Ok(addrs) => addrs
-            .filter(|a| a.is_ipv4())
-            .map(|a| a.ip().to_string())
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn gethostbyname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let host = host_arg(vm, args, "gethostbyname")?;
-    if host.len() > 255 {
-        vm.emit_warning("gethostbyname(): Host name cannot be longer than 255 characters");
-        return Ok(Value::String(PhpString::from_vec(host)));
-    }
-    match resolve_ipv4(&host).into_iter().next() {
-        Some(ip) => Ok(Value::String(PhpString::from_string(ip))),
-        None => Ok(Value::String(PhpString::from_vec(host))),
-    }
-}
-
-fn gethostbynamel_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let host = host_arg(vm, args, "gethostbynamel")?;
-    if host.len() > 255 {
-        vm.emit_warning("gethostbynamel(): Host name cannot be longer than 255 characters");
-        return Ok(Value::False);
-    }
-    let ips = resolve_ipv4(&host);
-    if ips.is_empty() {
-        // gethostbyname() failure
-        use std::net::ToSocketAddrs;
-        if format!("{}:0", String::from_utf8_lossy(&host))
-            .to_socket_addrs()
-            .is_err()
-        {
-            return Ok(Value::False);
-        }
-    }
-    let mut result = PhpArray::new();
-    for ip in ips {
-        result.push(Value::String(PhpString::from_string(ip)));
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn gethostbyaddr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let addr = vm
-        .value_to_string(args.first().unwrap_or(&Value::Null))
-        .as_bytes()
-        .to_vec();
-    let s = String::from_utf8_lossy(&addr).to_string();
-    let ip: std::net::IpAddr = match s.parse() {
-        Ok(ip) if !addr.contains(&0) => ip,
-        _ => {
-            vm.emit_warning("gethostbyaddr(): Address is not a valid IPv4 or IPv6 address");
-            return Ok(Value::False);
-        }
-    };
-    // getnameinfo(NI_NAMEREQD); on failure PHP returns the address itself.
-    let name = unsafe {
-        let mut host = [0 as libc::c_char; 1025];
-        let rc = match ip {
-            std::net::IpAddr::V4(v4) => {
-                let mut sa: libc::sockaddr_in = std::mem::zeroed();
-                sa.sin_family = libc::AF_INET as libc::sa_family_t;
-                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
-                libc::getnameinfo(
-                    &sa as *const _ as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                    host.as_mut_ptr(),
-                    host.len() as libc::socklen_t,
-                    std::ptr::null_mut(),
-                    0,
-                    libc::NI_NAMEREQD,
-                )
-            }
-            std::net::IpAddr::V6(v6) => {
-                let mut sa: libc::sockaddr_in6 = std::mem::zeroed();
-                sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                sa.sin6_addr.s6_addr = v6.octets();
-                libc::getnameinfo(
-                    &sa as *const _ as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-                    host.as_mut_ptr(),
-                    host.len() as libc::socklen_t,
-                    std::ptr::null_mut(),
-                    0,
-                    libc::NI_NAMEREQD,
-                )
-            }
-        };
-        if rc == 0 {
-            Some(std::ffi::CStr::from_ptr(host.as_ptr()).to_bytes().to_vec())
-        } else {
-            None
-        }
-    };
-    Ok(Value::String(PhpString::from_vec(name.unwrap_or(addr))))
-}
-
-fn inet_pton_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let addr_str = args.first().unwrap_or(&Value::Null).to_php_string();
-    let addr_s = addr_str.to_string_lossy();
-    // Try parsing as IPv4
-    if let Ok(ipv4) = addr_s.parse::<std::net::Ipv4Addr>() {
-        return Ok(Value::String(PhpString::from_vec(ipv4.octets().to_vec())));
-    }
-    // Try parsing as IPv6
-    if let Ok(ipv6) = addr_s.parse::<std::net::Ipv6Addr>() {
-        return Ok(Value::String(PhpString::from_vec(ipv6.octets().to_vec())));
-    }
-    // PHP 8.1+: no warning, just return false
-    Ok(Value::False)
-}
-
-fn inet_ntop_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let packed = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = packed.as_bytes();
-    match bytes.len() {
-        4 => {
-            let addr = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-            Ok(Value::String(PhpString::from_string(addr.to_string())))
-        }
-        16 => {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(bytes);
-            let addr = std::net::Ipv6Addr::from(octets);
-            Ok(Value::String(PhpString::from_string(addr.to_string())))
-        }
-        _ => {
-            // PHP 8.1+: no warning for invalid length
-            Ok(Value::False)
-        }
-    }
 }
 
 /// Mangle a PHP object property name according to visibility.
@@ -19987,27 +19778,6 @@ fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 }
 fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
-}
-fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn dns_get_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn getmxrr_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn getservbyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn getservbyport_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(-1))
-}
-fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
 }
 fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
