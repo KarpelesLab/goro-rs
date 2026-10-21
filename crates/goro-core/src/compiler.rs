@@ -3359,7 +3359,7 @@ impl Compiler {
                             }
                             if lower == b"static" {
                                 return Err(CompileError {
-                                    message: "Cannot use \"static\" as a parameter type"
+                                    message: "Cannot use the static modifier on a parameter"
                                         .to_string(),
                                     line: stmt.span.line,
                                 });
@@ -3418,6 +3418,19 @@ impl Compiler {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
                         func_compiler.op_array.variadic_param = Some(cv);
+                    }
+                    if let Some(hint) = &param.type_hint {
+                        let pt = type_hint_to_param_type_with_ns(
+                            hint,
+                            &self.current_namespace,
+                            &self.use_map,
+                        );
+                        if let Some(message) = reserved_type_name_error(&pt) {
+                            return Err(CompileError {
+                                message,
+                                line: stmt.span.line,
+                            });
+                        }
                     }
 
                     // Store parameter type info
@@ -6900,7 +6913,7 @@ impl Compiler {
                                         if check_static_param_type(hint) {
                                             return Err(CompileError {
                                                 message:
-                                                    "Cannot use \"static\" as a parameter type"
+                                                    "Cannot use the static modifier on a parameter"
                                                         .to_string(),
                                                 line: *method_line,
                                             });
@@ -7065,7 +7078,7 @@ impl Compiler {
                                         if check_static_param_type(hint) {
                                             return Err(CompileError {
                                                 message:
-                                                    "Cannot use \"static\" as a parameter type"
+                                                    "Cannot use the static modifier on a parameter"
                                                         .to_string(),
                                                 line: *method_line,
                                             });
@@ -13328,7 +13341,7 @@ impl Compiler {
                     if let Some(hint) = &param.type_hint {
                         if check_static_param_type(hint) {
                             return Err(CompileError {
-                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                message: "Cannot use the static modifier on a parameter".to_string(),
                                 line: expr.span.line,
                             });
                         }
@@ -13637,7 +13650,7 @@ impl Compiler {
                     if let Some(hint) = &param.type_hint {
                         if check_static_param_type(hint) {
                             return Err(CompileError {
-                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                message: "Cannot use the static modifier on a parameter".to_string(),
                                 line: expr.span.line,
                             });
                         }
@@ -17049,6 +17062,47 @@ fn compound_binary_opcode(op: &BinaryOp) -> OpCode {
 }
 
 /// Convert an AST TypeHint into a runtime ParamType with namespace resolution.
+/// zend_assert_valid_class_name(.., "a type name"): a qualified class name
+/// whose last segment is a reserved type name (e.g. `bar\int`).
+fn reserved_type_name_error(pt: &ParamType) -> Option<String> {
+    match pt {
+        ParamType::Simple(name) => {
+            let pos = name.iter().rposition(|&b| b == b'\\')?;
+            let uq = name[pos + 1..].to_ascii_lowercase();
+            matches!(
+                uq.as_slice(),
+                b"bool"
+                    | b"false"
+                    | b"float"
+                    | b"int"
+                    | b"null"
+                    | b"parent"
+                    | b"self"
+                    | b"static"
+                    | b"string"
+                    | b"true"
+                    | b"void"
+                    | b"never"
+                    | b"iterable"
+                    | b"object"
+                    | b"mixed"
+                    | b"array"
+                    | b"callable"
+            )
+            .then(|| {
+                format!(
+                    "Cannot use \"{}\" as a type name as it is reserved",
+                    String::from_utf8_lossy(name)
+                )
+            })
+        }
+        ParamType::Nullable(inner) => reserved_type_name_error(inner),
+        ParamType::Union(ts) | ParamType::Intersection(ts) => {
+            ts.iter().find_map(reserved_type_name_error)
+        }
+    }
+}
+
 fn type_hint_to_param_type_with_ns(
     hint: &TypeHint,
     namespace: &[u8],
