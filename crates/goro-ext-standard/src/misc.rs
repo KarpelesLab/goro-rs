@@ -5085,74 +5085,33 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::False)
 }
-fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// class_exists_impl(): look the name up in the class table (autoloading
+/// unless disabled) and check its kind.
+fn class_exists_impl(
+    vm: &mut Vm,
+    args: &[Value],
+    accept: fn(goro_core::class_table::ClassKind) -> bool,
+) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    // Strip leading backslash for fully qualified names
     let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") {
-        &raw_bytes[1..]
-    } else {
-        raw_bytes
-    };
-    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    // Check built-in classes
-    let is_builtin = matches!(
-        name_lower.as_slice(),
-        b"stdclass"
-            | b"exception"
-            | b"error"
-            | b"typeerror"
-            | b"valueerror"
-            | b"runtimeexception"
-            | b"logicexception"
-            | b"invalidargumentexception"
-            | b"badmethodcallexception"
-            | b"closure"
-            | b"generator"
-            | b"reflectionclass"
-            | b"reflectionobject"
-            | b"reflectionmethod"
-            | b"reflectionfunction"
-            | b"reflectionproperty"
-            | b"reflectionparameter"
-            | b"reflectionextension"
-            | b"reflectionexception"
-            | b"reflectionfunctionabstract"
-            | b"reflectionnamedtype"
-            | b"reflectionuniontype"
-            | b"reflectionintersectiontype"
-            | b"reflectionenum"
-            | b"reflectionenumunitcase"
-            | b"reflectionenumbackedcase"
-            | b"reflectionclassconstant"
-            | b"reflectiongenerator"
-            | b"reflectionattribute"
-            | b"weakreference"
-            | b"weakmap"
-            | b"fiber"
-    );
-    if is_builtin {
-        return Ok(Value::True);
-    }
-    // class_exists() returns false for interfaces and traits (but true for enums)
-    if let Some(class) = vm.classes.get(&name_lower) {
-        if class.is_interface || class.is_trait {
-            return Ok(Value::False);
-        }
-        return Ok(Value::True);
-    }
-    // Try autoload if second arg is true (default)
-    let autoload = args.get(1).is_none_or(|v| v.to_bool());
-    if autoload {
+    let name_bytes = raw_bytes.strip_prefix(b"\\").unwrap_or(raw_bytes);
+    let name_lower = name_bytes.to_ascii_lowercase();
+    let mut kind = vm.class_kind(&name_lower);
+    if kind.is_none() && args.get(1).is_none_or(|v| v.to_bool()) {
         vm.try_autoload_class(name_bytes);
-        if let Some(class) = vm.classes.get(&name_lower) {
-            if class.is_interface || class.is_trait {
-                return Ok(Value::False);
-            }
-            return Ok(Value::True);
-        }
+        kind = vm.class_kind(&name_lower);
     }
-    Ok(Value::False)
+    Ok(if kind.is_some_and(accept) {
+        Value::True
+    } else {
+        Value::False
+    })
+}
+fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::class_table::ClassKind;
+    class_exists_impl(vm, args, |k| {
+        matches!(k, ClassKind::Class | ClassKind::Enum)
+    })
 }
 fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
@@ -5200,31 +5159,28 @@ fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for (_, class) in &vm.classes {
-        if !class.is_interface && !class.is_trait {
-            result.push(Value::String(PhpString::from_vec(class.name.clone())));
-        }
+    for name in vm.declared_class_names(&[ClassKind::Class, ClassKind::Enum]) {
+        result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn get_declared_traits_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for (_, class) in &vm.classes {
-        if class.is_trait {
-            result.push(Value::String(PhpString::from_vec(class.name.clone())));
-        }
+    for name in vm.declared_class_names(&[ClassKind::Trait]) {
+        result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
-    for (_, class) in &vm.classes {
-        if class.is_interface {
-            result.push(Value::String(PhpString::from_vec(class.name.clone())));
-        }
+    for name in vm.declared_class_names(&[ClassKind::Interface]) {
+        result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
@@ -8244,114 +8200,15 @@ fn register_shutdown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    // Strip leading backslash for fully qualified names
-    let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") {
-        &raw_bytes[1..]
-    } else {
-        raw_bytes
-    };
-    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    // Check both user-defined and built-in interfaces
-    let is_builtin = matches!(
-        name_lower.as_slice(),
-        b"iterator"
-            | b"iteratoraggregate"
-            | b"throwable"
-            | b"arrayaccess"
-            | b"serializable"
-            | b"countable"
-            | b"stringable"
-            | b"traversable"
-    );
-    if is_builtin
-        || vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_interface)
-            .unwrap_or(false)
-    {
-        return Ok(Value::True);
-    }
-    // Try autoload if second arg is true (default)
-    let autoload = args.get(1).is_none_or(|v| v.to_bool());
-    if autoload {
-        vm.try_autoload_class(name_bytes);
-        if vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_interface)
-            .unwrap_or(false)
-        {
-            return Ok(Value::True);
-        }
-    }
-    Ok(Value::False)
+    class_exists_impl(vm, args, |k| {
+        k == goro_core::class_table::ClassKind::Interface
+    })
 }
 fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") {
-        &raw_bytes[1..]
-    } else {
-        raw_bytes
-    };
-    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    if vm
-        .classes
-        .get(&name_lower)
-        .map(|c| c.is_trait)
-        .unwrap_or(false)
-    {
-        return Ok(Value::True);
-    }
-    // Try autoload if second arg is true (default)
-    let autoload = args.get(1).is_none_or(|v| v.to_bool());
-    if autoload {
-        vm.try_autoload_class(name_bytes);
-        if vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_trait)
-            .unwrap_or(false)
-        {
-            return Ok(Value::True);
-        }
-    }
-    Ok(Value::False)
+    class_exists_impl(vm, args, |k| k == goro_core::class_table::ClassKind::Trait)
 }
 fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") {
-        &raw_bytes[1..]
-    } else {
-        raw_bytes
-    };
-    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    if vm
-        .classes
-        .get(&name_lower)
-        .map(|c| c.is_enum)
-        .unwrap_or(false)
-    {
-        return Ok(Value::True);
-    }
-    // Try autoload if second arg is true (default)
-    let autoload = args.get(1).is_none_or(|v| v.to_bool());
-    if autoload {
-        vm.try_autoload_class(name_bytes);
-        if vm
-            .classes
-            .get(&name_lower)
-            .map(|c| c.is_enum)
-            .unwrap_or(false)
-        {
-            return Ok(Value::True);
-        }
-    }
-    Ok(Value::False)
+    class_exists_impl(vm, args, |k| k == goro_core::class_table::ClassKind::Enum)
 }
 fn gc_collect_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(vm.gc_collect_cycles()))
@@ -8840,7 +8697,11 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
 
     // Walk the parent chain
     let mut current = class_lower;
-    while let Some(class_entry) = vm.classes.get(&current).cloned() {
+    loop {
+        let Some(class_entry) = vm.classes.get(&current) else {
+            // An internal ancestor: its hierarchy comes from the stubs.
+            return goro_core::vm::is_builtin_subclass(&current, &check_lower);
+        };
         // Check interfaces
         for iface in &class_entry.interfaces {
             let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -8870,6 +8731,9 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
 }
 
 fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
+    if !vm.classes.contains_key(iface_name) {
+        return goro_core::vm::is_builtin_subclass(iface_name, check_name);
+    }
     if let Some(ce) = vm.classes.get(iface_name) {
         for parent_iface in &ce.interfaces {
             let pi_lower: Vec<u8> = parent_iface

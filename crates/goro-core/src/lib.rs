@@ -2,6 +2,7 @@ pub mod arginfo;
 pub mod array;
 pub mod basedir;
 pub mod callable;
+pub mod class_table;
 pub mod closure;
 pub mod compiler;
 pub mod crypto;

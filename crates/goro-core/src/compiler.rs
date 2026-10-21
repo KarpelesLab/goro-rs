@@ -2125,12 +2125,16 @@ impl Compiler {
                 } if !name.starts_with(b"__anonymous_class_") => {
                     // Only early-bind (hoist) declarations PHP would early-bind. Others are
                     // left for the second pass to emit at their source position.
-                    if self.class_is_early_bindable(modifiers, extends, implements, body) {
-                        let qn_lower: Vec<u8> = self
-                            .prefix_with_namespace(name)
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
+                    let qn_lower: Vec<u8> = self
+                        .prefix_with_namespace(name)
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    // A name taken by an internal class can't be bound at
+                    // compile time: the declaration fails at runtime instead.
+                    if self.class_is_early_bindable(modifiers, extends, implements, body)
+                        && !crate::vm::is_known_builtin_class_name(&qn_lower)
+                    {
                         self.in_hoisting_pass = true;
                         let r = self.compile_stmt(stmt);
                         self.in_hoisting_pass = false;

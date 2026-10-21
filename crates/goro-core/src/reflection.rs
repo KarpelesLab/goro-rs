@@ -156,9 +156,7 @@ pub(crate) fn require_string_arg(
 
 /// Whether `lower` names an internal class/interface the VM implements.
 pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
-    vm.is_known_builtin_class(lower)
-        || vm.builtin_is_interface(lower)
-        || vm.native_class_handlers.contains_key(lower)
+    vm.is_known_builtin_class(lower) || vm.native_class_handlers.contains_key(lower)
 }
 
 /// Reflection's view of a class: the user class, or for an internal class a

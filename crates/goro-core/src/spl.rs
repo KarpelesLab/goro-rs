@@ -983,47 +983,6 @@ pub(crate) const SPL_CLASSES: &[&[u8]] = &[
     b"recursiveregexiterator",
 ];
 
-/// ce->interfaces of an interface/class known from the SPL stubs (or a core
-/// iterator interface), in php-src's order. None for unknown classes.
-pub fn spl_class_interfaces(class_lower: &[u8]) -> Option<Vec<&'static str>> {
-    match class_lower {
-        b"iterator" | b"iteratoraggregate" => return Some(vec!["Traversable"]),
-        b"traversable" | b"arrayaccess" | b"countable" | b"serializable" | b"stringable"
-        | b"jsonserializable" => return Some(vec![]),
-        b"internaliterator" => return Some(vec!["Iterator", "Traversable"]),
-        _ => {}
-    }
-    if class_lower.ends_with(b"exception") {
-        return None;
-    }
-    let (_, parent, ifaces, _, _) = crate::spl_stubs::spl_stub_class(class_lower)?;
-    let mut out: Vec<&'static str> = match parent {
-        Some(p) => spl_class_interfaces(p.to_ascii_lowercase().as_bytes()).unwrap_or_default(),
-        None => Vec::new(),
-    };
-    for i in ifaces.iter() {
-        if out.iter().any(|x| x.eq_ignore_ascii_case(i)) {
-            continue;
-        }
-        out.push(i);
-        for sub in spl_class_interfaces(i.to_ascii_lowercase().as_bytes()).unwrap_or_default() {
-            if !out.iter().any(|x| x.eq_ignore_ascii_case(sub)) {
-                out.push(sub);
-            }
-        }
-    }
-    Some(out)
-}
-
-/// Whether an SPL class implements `iface_lower` (None: not an SPL class).
-pub fn spl_class_implements(class_lower: &[u8], iface_lower: &[u8]) -> Option<bool> {
-    let list = spl_class_interfaces(class_lower)?;
-    Some(
-        list.iter()
-            .any(|i| i.as_bytes().eq_ignore_ascii_case(iface_lower)),
-    )
-}
-
 std::thread_local! {
     static AUTOLOADING: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }

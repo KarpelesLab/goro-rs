@@ -8330,226 +8330,17 @@ impl Vm {
         false
     }
 
-    /// Check if a built-in class name is an interface
+    /// Whether an internal class (lowercased name) is an interface.
     pub fn builtin_is_interface(&self, class_lower: &[u8]) -> bool {
-        matches!(
-            class_lower,
-            b"iterator"
-                | b"iteratoraggregate"
-                | b"traversable"
-                | b"countable"
-                | b"arrayaccess"
-                | b"serializable"
-                | b"stringable"
-                | b"jsonserializable"
-                | b"outeriterator"
-                | b"recursiveiterator"
-                | b"seekableiterator"
-                | b"throwable"
-                | b"backedenum"
-                | b"unitenum"
-                | b"reflector"
-                | b"random\\engine"
-                | b"random\\cryptosafeengine"
-                | b"sessionhandlerinterface"
-                | b"sessionidinterface"
-                | b"sessionupdatetimestamphandlerinterface"
-        )
+        crate::stubs::find_class_lower(class_lower)
+            .is_some_and(|c| c.kind == crate::stubs::K_INTERFACE)
     }
 
-    /// Check if a built-in class implements a given interface
+    /// Whether an internal class (lowercased name) implements an interface
+    /// (lowercased), per the stubs.
     pub fn builtin_implements_interface(&self, class_lower: &[u8], iface_name: &[u8]) -> bool {
-        // SPL classes and the core iterator interfaces (Iterator and
-        // IteratorAggregate extend Traversable) per the stubs.
-        if let Some(r) = crate::spl::spl_class_implements(class_lower, iface_name) {
-            return r;
-        }
-        match iface_name {
-            b"iterator" => matches!(
-                class_lower,
-                b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"spldoublylinkedlist"
-                    | b"splstack"
-                    | b"splqueue"
-                    | b"splpriorityqueue"
-                    | b"splheap"
-                    | b"splminheap"
-                    | b"splmaxheap"
-                    | b"emptyiterator"
-                    | b"iteratoriterator"
-                    | b"recursiveiteratoriterator"
-                    | b"norewinditerator"
-                    | b"infiniteiterator"
-                    | b"limititerator"
-                    | b"cachingiterator"
-                    | b"recursivecachingiterator"
-                    | b"appenditerator"
-                    | b"filteriterator"
-                    | b"callbackfilteriterator"
-                    | b"recursivefilteriterator"
-                    | b"recursivecallbackfilteriterator"
-                    | b"regexiterator"
-                    | b"recursiveregexiterator"
-                    | b"multipleiterator"
-                    | b"parentiterator"
-                    | b"splobjectstorage"
-                    | b"directoryiterator"
-                    | b"filesystemiterator"
-                    | b"recursivedirectoryiterator"
-                    | b"globiterator"
-                    | b"splfileobject"
-                    | b"spltempfileobject"
-                    | b"simplexmlelement"
-                    | b"internaliterator"
-            ),
-            b"iteratoraggregate" => {
-                matches!(
-                    class_lower,
-                    b"arrayobject" | b"weakmap" | b"dateperiod" | b"mysqli_result"
-                )
-            }
-            b"traversable" => matches!(
-                class_lower,
-                b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"spldoublylinkedlist"
-                    | b"splstack"
-                    | b"splqueue"
-                    | b"splpriorityqueue"
-                    | b"splheap"
-                    | b"splminheap"
-                    | b"splmaxheap"
-                    | b"emptyiterator"
-                    | b"iteratoriterator"
-                    | b"recursiveiteratoriterator"
-                    | b"norewinditerator"
-                    | b"infiniteiterator"
-                    | b"limititerator"
-                    | b"cachingiterator"
-                    | b"recursivecachingiterator"
-                    | b"appenditerator"
-                    | b"filteriterator"
-                    | b"callbackfilteriterator"
-                    | b"recursivefilteriterator"
-                    | b"recursivecallbackfilteriterator"
-                    | b"regexiterator"
-                    | b"recursiveregexiterator"
-                    | b"multipleiterator"
-                    | b"parentiterator"
-                    | b"splobjectstorage"
-                    | b"arrayobject"
-                    | b"directoryiterator"
-                    | b"filesystemiterator"
-                    | b"recursivedirectoryiterator"
-                    | b"globiterator"
-                    | b"splfileobject"
-                    | b"spltempfileobject"
-                    | b"simplexmlelement"
-                    | b"weakmap"
-                    | b"dateperiod"
-                    | b"mysqli_result"
-                    | b"internaliterator"
-            ),
-            b"countable" => matches!(
-                class_lower,
-                b"arrayobject"
-                    | b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"spldoublylinkedlist"
-                    | b"splstack"
-                    | b"splqueue"
-                    | b"splpriorityqueue"
-                    | b"splobjectstorage"
-                    | b"splheap"
-                    | b"splminheap"
-                    | b"splmaxheap"
-                    | b"cachingiterator"
-                    | b"recursivecachingiterator"
-                    | b"simplexmlelement"
-                    | b"weakmap"
-            ),
-            b"arrayaccess" => matches!(
-                class_lower,
-                b"arrayobject"
-                    | b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"spldoublylinkedlist"
-                    | b"splstack"
-                    | b"splqueue"
-                    | b"splobjectstorage"
-                    | b"weakmap"
-            ),
-            b"outeriterator" => matches!(
-                class_lower,
-                b"iteratoriterator"
-                    | b"recursiveiteratoriterator"
-                    | b"norewinditerator"
-                    | b"infiniteiterator"
-                    | b"limititerator"
-                    | b"cachingiterator"
-                    | b"recursivecachingiterator"
-                    | b"appenditerator"
-                    | b"filteriterator"
-                    | b"callbackfilteriterator"
-                    | b"recursivefilteriterator"
-                    | b"recursivecallbackfilteriterator"
-                    | b"regexiterator"
-                    | b"recursiveregexiterator"
-                    | b"parentiterator"
-            ),
-            b"recursiveiterator" => matches!(
-                class_lower,
-                b"recursivearrayiterator" | b"recursivedirectoryiterator"
-            ),
-            b"seekableiterator" => matches!(
-                class_lower,
-                b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"directoryiterator"
-                    | b"filesystemiterator"
-                    | b"recursivedirectoryiterator"
-                    | b"globiterator"
-                    | b"splfileobject"
-                    | b"spltempfileobject"
-            ),
-            b"serializable" => matches!(
-                class_lower,
-                b"arrayobject"
-                    | b"arrayiterator"
-                    | b"recursivearrayiterator"
-                    | b"splfixedarray"
-                    | b"spldoublylinkedlist"
-                    | b"splstack"
-                    | b"splqueue"
-                    | b"splobjectstorage"
-            ),
-            b"stringable" => matches!(
-                class_lower,
-                b"splfileinfo"
-                    | b"splfileobject"
-                    | b"spltempfileobject"
-                    | b"directoryiterator"
-                    | b"filesystemiterator"
-                    | b"recursivedirectoryiterator"
-                    | b"globiterator"
-                    | b"phptoken"
-            ),
-            b"random\\engine" => matches!(
-                class_lower,
-                b"random\\engine\\mt19937"
-                    | b"random\\engine\\xoshiro256starstar"
-                    | b"random\\engine\\pcgoneseq128xslrr64"
-                    | b"random\\engine\\secure"
-            ),
-            b"random\\cryptosafeengine" => matches!(class_lower, b"random\\engine\\secure"),
-            _ => false,
-        }
+        crate::stubs::class_hierarchy(class_lower)
+            .is_some_and(|(_, h)| h.interfaces_lower.iter().any(|i| i == iface_name))
     }
 
     /// Dispatch method calls for SPL built-in classes
@@ -12670,9 +12461,10 @@ impl Vm {
         }
     }
 
-    /// Check if a class name is a known built-in class
+    /// Whether a class name (lowercased) is an internal class the VM
+    /// implements natively (see `class_table`).
     pub fn is_known_builtin_class(&self, class_lower: &[u8]) -> bool {
-        is_known_builtin_class_name(class_lower)
+        self.internal_class(class_lower).is_some()
     }
 }
 
@@ -12704,291 +12496,23 @@ pub(crate) fn is_auto_global_name(name: &[u8]) -> bool {
     )
 }
 
-/// Standalone, `self`-free predicate for "is this a built-in/internal class name?".
-/// Mirrors `Vm::is_known_builtin_class` so the compiler (which has no Vm) can use it
-/// for early-binding decisions. Keep the two lists in sync.
+/// Standalone, `self`-free predicate for "is this a built-in/internal class name?"
+/// (any class described by the stubs, whether or not its extension is
+/// enabled), for the compiler's early-binding decisions.
 pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
-    matches!(
-        class_lower,
-        b"stdclass"
-            | b"exception"
-            | b"error"
-            | b"typeerror"
-            | b"valueerror"
-            | b"runtimeexception"
-            | b"logicexception"
-            | b"invalidargumentexception"
-            | b"badmethodcallexception"
-            | b"closure"
-            | b"generator"
-            | b"reflectionclass"
-            | b"reflectionobject"
-            | b"reflectionmethod"
-            | b"reflectionfunction"
-            | b"reflectionproperty"
-            | b"reflectionparameter"
-            | b"reflectionextension"
-            | b"reflectionexception"
-            | b"reflectionfunctionabstract"
-            | b"reflectionnamedtype"
-            | b"reflectionuniontype"
-            | b"reflectionintersectiontype"
-            | b"reflectionenum"
-            | b"reflectionenumunitcase"
-            | b"reflectionenumbackedcase"
-            | b"reflectionclassconstant"
-            | b"reflectiongenerator"
-            | b"reflectionattribute"
-            | b"reflectionconstant"
-            | b"reflectionfiber"
-            | b"reflectiontype"
-            | b"reflectionreference"
-            | b"arithmeticerror"
-            | b"divisionbyzeroerror"
-            | b"argumentcounterror"
-            | b"rangeerror"
-            | b"unhandledmatcherror"
-            | b"assertionerror"
-            | b"closedgeneratorexception"
-            | b"badfunctioncallexception"
-            | b"overflowexception"
-            | b"underflowexception"
-            | b"outofboundsexception"
-            | b"domainexception"
-            | b"unexpectedvalueexception"
-            | b"lengthexception"
-            | b"outofrangeexception"
-            | b"errorexception"
-            | b"arrayobject"
-            | b"arrayiterator"
-            | b"recursivearrayiterator"
-            | b"splfixedarray"
-            | b"spldoublylinkedlist"
-            | b"splstack"
-            | b"splqueue"
-            | b"splpriorityqueue"
-            | b"splobjectstorage"
-            | b"splheap"
-            | b"splminheap"
-            | b"splmaxheap"
-            | b"emptyiterator"
-            | b"iteratoriterator"
-            | b"recursiveiteratoriterator"
-            | b"norewinditerator"
-            | b"infiniteiterator"
-            | b"limititerator"
-            | b"cachingiterator"
-            | b"recursivecachingiterator"
-            | b"appenditerator"
-            | b"filteriterator"
-            | b"callbackfilteriterator"
-            | b"recursivefilteriterator"
-            | b"recursivecallbackfilteriterator"
-            | b"regexiterator"
-            | b"recursiveregexiterator"
-            | b"multipleiterator"
-            | b"parentiterator"
-            | b"recursivetreeiterator"
-            | b"spltempfileobject"
-            | b"splfileinfo"
-            | b"splfileobject"
-            | b"directoryiterator"
-            | b"filesystemiterator"
-            | b"recursivedirectoryiterator"
-            | b"globiterator"
-            | b"directory"
-            | b"datetime"
-            | b"datetimeimmutable"
-            | b"datetimezone"
-            | b"dateinterval"
-            | b"dateperiod"
-            | b"internaliterator"
-            | b"dateexception"
-            | b"dateinvalidtimezoneexception"
-            | b"datemalformedintervalstringexception"
-            | b"datemalformedstringexception"
-            | b"datemalformedperiodstringexception"
-            | b"dateinvalidoperationexception"
-            | b"dateerror"
-            | b"dateobjecterror"
-            | b"daterangeerror"
-            | b"throwable"
-            | b"stringable"
-            | b"traversable"
-            | b"iterator"
-            | b"iteratoraggregate"
-            | b"arrayaccess"
-            | b"countable"
-            | b"serializable"
-            | b"seekableiterator"
-            | b"outeriterator"
-            | b"recursiveiterator"
-            | b"splobserver"
-            | b"splsubject"
-            | b"fiber"
-            | b"fibererror"
-            | b"attribute"
-            | b"deprecated"
-            | b"nodiscard"
-            | b"override"
-            | b"mysqli"
-            | b"mysqli_driver"
-            | b"mysqli_result"
-            | b"mysqli_stmt"
-            | b"mysqli_warning"
-            | b"mysqli_sql_exception"
-            | b"curlhandle"
-            | b"curlmultihandle"
-            | b"curlsharehandle"
-            | b"socket"
-            | b"xmlparser"
-            | b"streambucket"
-            | b"weakmap"
-            | b"__php_incomplete_class"
-            | b"weakreference"
-            | b"sensitiveparametervalue"
-            | b"roundingmode"
-            | b"reflection"
-            | b"reflector"
-            | b"reflectionzendextension"
-            | b"propertyhooktype"
-            | b"random\\engine"
-            | b"random\\cryptosafeengine"
-            | b"random\\randomizer"
-            | b"random\\engine\\mt19937"
-            | b"random\\engine\\pcgoneseq128xslrr64"
-            | b"random\\engine\\xoshiro256starstar"
-            | b"random\\engine\\secure"
-            | b"random\\randomexception"
-            | b"random\\randomerror"
-            | b"random\\brokenrandomengineerror"
-            | b"random\\intervalerror"
-            | b"sessionhandlerinterface"
-            | b"sessionidinterface"
-            | b"sessionupdatetimestamphandlerinterface"
-            | b"phptoken"
-            | b"uri\\whatwg\\url"
-            | b"uri\\rfc3986\\uri"
-            | b"uri\\whatwg\\invalidurlexception"
-            | b"uri\\invaliduriexception"
-            | b"uri\\uricomparisonmode"
-    )
+    crate::stubs::find_class_lower(class_lower).is_some()
 }
 
 impl Vm {
     /// Get canonical (properly cased) name for built-in class
     pub fn builtin_canonical_name(&self, class_lower: &[u8]) -> String {
-        let canonical = match class_lower {
-            b"stdclass" => "stdClass",
-            b"exception" => "Exception",
-            b"error" => "Error",
-            b"typeerror" => "TypeError",
-            b"valueerror" => "ValueError",
-            b"runtimeexception" => "RuntimeException",
-            b"logicexception" => "LogicException",
-            b"invalidargumentexception" => "InvalidArgumentException",
-            b"badmethodcallexception" => "BadMethodCallException",
-            b"badfunctioncallexception" => "BadFunctionCallException",
-            b"overflowexception" => "OverflowException",
-            b"underflowexception" => "UnderflowException",
-            b"outofboundsexception" => "OutOfBoundsException",
-            b"lengthexception" => "LengthException",
-            b"outofrangeexception" => "OutOfRangeException",
-            b"domainexception" => "DomainException",
-            b"unexpectedvalueexception" => "UnexpectedValueException",
-            b"closedgeneratorexception" => "ClosedGeneratorException",
-            b"errorexception" => "ErrorException",
-            b"arithmeticerror" => "ArithmeticError",
-            b"divisionbyzeroerror" => "DivisionByZeroError",
-            b"argumentcounterror" => "ArgumentCountError",
-            b"rangeerror" => "RangeError",
-            b"unhandledmatcherror" => "UnhandledMatchError",
-            b"assertionerror" => "AssertionError",
-            b"closure" => "Closure",
-            b"generator" => "Generator",
-            b"reflectionclass" => "ReflectionClass",
-            b"reflectionobject" => "ReflectionObject",
-            b"reflectionmethod" => "ReflectionMethod",
-            b"reflectionfunction" => "ReflectionFunction",
-            b"reflectionproperty" => "ReflectionProperty",
-            b"reflectionparameter" => "ReflectionParameter",
-            b"reflectionextension" => "ReflectionExtension",
-            b"reflectionexception" => "ReflectionException",
-            b"reflectionfunctionabstract" => "ReflectionFunctionAbstract",
-            b"reflectionnamedtype" => "ReflectionNamedType",
-            b"reflectionuniontype" => "ReflectionUnionType",
-            b"reflectionintersectiontype" => "ReflectionIntersectionType",
-            b"reflectionenum" => "ReflectionEnum",
-            b"reflectionenumunitcase" => "ReflectionEnumUnitCase",
-            b"reflectionenumbackedcase" => "ReflectionEnumBackedCase",
-            b"reflectionclassconstant" => "ReflectionClassConstant",
-            b"reflectiongenerator" => "ReflectionGenerator",
-            b"reflectionattribute" => "ReflectionAttribute",
-            b"attribute" => "Attribute",
-            b"deprecated" => "Deprecated",
-            b"nodiscard" => "NoDiscard",
-            b"override" => "Override",
-            b"fiber" => "Fiber",
-            b"fibererror" => "FiberError",
-            b"arrayobject" => "ArrayObject",
-            b"arrayiterator" => "ArrayIterator",
-            b"recursivearrayiterator" => "RecursiveArrayIterator",
-            b"splfixedarray" => "SplFixedArray",
-            b"spldoublylinkedlist" => "SplDoublyLinkedList",
-            b"splstack" => "SplStack",
-            b"splqueue" => "SplQueue",
-            b"splpriorityqueue" => "SplPriorityQueue",
-            b"splobjectstorage" => "SplObjectStorage",
-            b"splheap" => "SplHeap",
-            b"splminheap" => "SplMinHeap",
-            b"splmaxheap" => "SplMaxHeap",
-            b"emptyiterator" => "EmptyIterator",
-            b"iteratoriterator" => "IteratorIterator",
-            b"recursiveiteratoriterator" => "RecursiveIteratorIterator",
-            b"norewinditerator" => "NoRewindIterator",
-            b"infiniteiterator" => "InfiniteIterator",
-            b"limititerator" => "LimitIterator",
-            b"cachingiterator" => "CachingIterator",
-            b"recursivecachingiterator" => "RecursiveCachingIterator",
-            b"appenditerator" => "AppendIterator",
-            b"filteriterator" => "FilterIterator",
-            b"callbackfilteriterator" => "CallbackFilterIterator",
-            b"recursivefilteriterator" => "RecursiveFilterIterator",
-            b"recursivecallbackfilteriterator" => "RecursiveCallbackFilterIterator",
-            b"regexiterator" => "RegexIterator",
-            b"recursiveregexiterator" => "RecursiveRegexIterator",
-            b"multipleiterator" => "MultipleIterator",
-            b"parentiterator" => "ParentIterator",
-            b"recursivetreeiterator" => "RecursiveTreeIterator",
-            b"splfileinfo" => "SplFileInfo",
-            b"splfileobject" => "SplFileObject",
-            b"spltempfileobject" => "SplTempFileObject",
-            b"directoryiterator" => "DirectoryIterator",
-            b"filesystemiterator" => "FilesystemIterator",
-            b"recursivedirectoryiterator" => "RecursiveDirectoryIterator",
-            b"globiterator" => "GlobIterator",
-            b"directory" => "Directory",
-            b"datetime" => "DateTime",
-            b"datetimeimmutable" => "DateTimeImmutable",
-            b"dateinterval" => "DateInterval",
-            b"datetimezone" => "DateTimeZone",
-            b"dateperiod" => "DatePeriod",
-            b"internaliterator" => "InternalIterator",
-            b"phptoken" => "PhpToken",
-            b"uri\\whatwg\\url" => "Uri\\WhatWg\\Url",
-            b"uri\\rfc3986\\uri" => "Uri\\Rfc3986\\Uri",
-            b"uri\\whatwg\\invalidurlexception" => "Uri\\WhatWg\\InvalidUrlException",
-            b"uri\\invaliduriexception" => "Uri\\InvalidUriException",
-            b"uri\\uricomparisonmode" => "Uri\\UriComparisonMode",
-            _ => {
-                return self
-                    .classes
-                    .get(class_lower)
-                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                    .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string());
-            }
-        };
-        canonical.to_string()
+        if let Some(c) = crate::stubs::find_class_lower(class_lower) {
+            return c.name.to_string();
+        }
+        self.classes
+            .get(class_lower)
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string())
     }
 
     /// Get built-in class constant values
@@ -39541,6 +39065,51 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            // A natively implemented internal parent: the same
+                            // checks as for user parents, from its stub flags.
+                            if !self.classes.contains_key(&parent_lower) {
+                                if let Some(pc) = self.internal_class(&parent_lower) {
+                                    let child = crate::value::display_class_name(&class.name);
+                                    let msg = if class.is_interface {
+                                        (pc.kind != crate::stubs::K_INTERFACE).then(|| {
+                                            format!(
+                                                "{} cannot implement {} - it is not an interface",
+                                                child, pc.name
+                                            )
+                                        })
+                                    } else if class.is_trait {
+                                        None
+                                    } else {
+                                        match pc.kind {
+                                            crate::stubs::K_INTERFACE => Some(format!(
+                                                "Class {} cannot extend interface {}",
+                                                child, pc.name
+                                            )),
+                                            crate::stubs::K_TRAIT => Some(format!(
+                                                "Class {} cannot extend trait {}",
+                                                child, pc.name
+                                            )),
+                                            crate::stubs::K_ENUM => Some(format!(
+                                                "Class {} cannot extend enum {}",
+                                                child, pc.name
+                                            )),
+                                            _ if pc.flags & crate::stubs::F_FINAL != 0 => {
+                                                Some(format!(
+                                                    "Class {} cannot extend final class {}",
+                                                    child, pc.name
+                                                ))
+                                            }
+                                            _ => None,
+                                        }
+                                    };
+                                    if let Some(message) = msg {
+                                        return Err(VmError {
+                                            message,
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                            }
                             // If the parent class isn't loaded yet, give a registered
                             // autoloader the chance to define it (PHP triggers autoload
                             // when resolving a parent during class declaration).
@@ -43431,32 +43000,7 @@ impl Vm {
                         }
 
                         // Check for duplicate class declaration
-                        let is_builtin_class = matches!(
-                            name_lower.as_slice(),
-                            b"stdclass"
-                                | b"exception"
-                                | b"error"
-                                | b"typeerror"
-                                | b"valueerror"
-                                | b"runtimeexception"
-                                | b"logicexception"
-                                | b"invalidargumentexception"
-                                | b"badmethodcallexception"
-                                | b"badfunctioncallexception"
-                                | b"overflowexception"
-                                | b"underflowexception"
-                                | b"rangeerror"
-                                | b"arithmeticerror"
-                                | b"divisionbyzeroerror"
-                                | b"argumentcounterror"
-                                | b"errorexception"
-                                | b"closedgeneratorexception"
-                                | b"generator"
-                                | b"closure"
-                                | b"arrayobject"
-                                | b"arrayiterator"
-                                | b"__php_incomplete_class"
-                        );
+                        let is_builtin_class = self.internal_class(&name_lower).is_some();
                         // Anonymous class names contain a NUL byte separator (\0)
                         let is_anonymous_class = class.name.contains(&b'\x00');
                         if (self.classes.contains_key(&name_lower) || is_builtin_class)
@@ -43486,12 +43030,14 @@ impl Vm {
                                     };
                                     (name, prev, kind)
                                 } else {
-                                    // Builtin class - use proper casing
-                                    let name = match name_lower.as_slice() {
-                                        b"stdclass" => "stdClass".to_string(),
-                                        _ => String::from_utf8_lossy(&class.name).to_string(),
-                                    };
-                                    (name, String::new(), "class")
+                                    // Natively implemented internal class.
+                                    let found = self.lookup_class(&name_lower);
+                                    let name = found
+                                        .as_ref()
+                                        .map(|c| String::from_utf8_lossy(c.name).to_string())
+                                        .unwrap_or_default();
+                                    let kind = found.map_or("class", |c| c.kind.keyword());
+                                    (name, String::new(), kind)
                                 };
                             let msg =
                                 format!("Cannot redeclare {} {}{}", kind, canonical, prev_info);
@@ -44097,49 +43643,57 @@ impl Vm {
                         });
                     }
                     // Check for abstract class, interface, or enum
-                    if let Some(class) = self.classes.get(&name_lower) {
-                        if class.is_abstract
-                            || class.is_interface
-                            || class.is_enum
-                            || class.is_trait
-                        {
-                            // Create an Error object and throw it
-                            let err_msg = if class.is_trait {
-                                format!(
-                                    "Cannot instantiate trait {}",
-                                    crate::value::display_class_name(&class.name)
-                                )
-                            } else if class.is_interface {
-                                format!(
-                                    "Cannot instantiate interface {}",
-                                    crate::value::display_class_name(&class.name)
-                                )
-                            } else if class.is_enum {
-                                format!(
-                                    "Cannot instantiate enum {}",
-                                    crate::value::display_class_name(&class.name)
-                                )
-                            } else {
-                                format!(
-                                    "Cannot instantiate abstract class {}",
-                                    crate::value::display_class_name(&class.name)
-                                )
+                    let inst_err = if let Some(class) = self.classes.get(&name_lower) {
+                        (class.is_abstract || class.is_interface || class.is_enum || class.is_trait)
+                            .then(|| {
+                                if class.is_trait {
+                                    format!(
+                                        "Cannot instantiate trait {}",
+                                        crate::value::display_class_name(&class.name)
+                                    )
+                                } else if class.is_interface {
+                                    format!(
+                                        "Cannot instantiate interface {}",
+                                        crate::value::display_class_name(&class.name)
+                                    )
+                                } else if class.is_enum {
+                                    format!(
+                                        "Cannot instantiate enum {}",
+                                        crate::value::display_class_name(&class.name)
+                                    )
+                                } else {
+                                    format!(
+                                        "Cannot instantiate abstract class {}",
+                                        crate::value::display_class_name(&class.name)
+                                    )
+                                }
+                            })
+                    } else {
+                        // Natively implemented internal classes (zend_class_entry flags).
+                        self.internal_class(&name_lower).and_then(|c| {
+                            let kind = match c.kind {
+                                crate::stubs::K_INTERFACE => "interface",
+                                crate::stubs::K_TRAIT => "trait",
+                                crate::stubs::K_ENUM => "enum",
+                                _ if c.flags & crate::stubs::F_ABSTRACT != 0 => "abstract class",
+                                _ => return None,
                             };
-                            let exc = self.create_exception(b"Error", &err_msg, op.line);
-                            self.current_exception = Some(exc);
+                            Some(format!("Cannot instantiate {} {}", kind, c.name))
+                        })
+                    };
+                    if let Some(err_msg) = inst_err {
+                        let exc = self.create_exception(b"Error", &err_msg, op.line);
+                        self.current_exception = Some(exc);
 
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                continue;
-                            } else {
-                                return Err(VmError {
-                                    message: err_msg,
-                                    line: op.line,
-                                });
-                            }
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        } else {
+                            return Err(VmError {
+                                message: err_msg,
+                                line: op.line,
+                            });
                         }
                     }
 
@@ -44158,129 +43712,10 @@ impl Vm {
                     let canonical_name = if let Some(class) = self.classes.get(&name_lower) {
                         class.name.clone()
                     } else {
-                        // Normalize well-known class names
-                        match name_lower.as_slice() {
-                            b"stdclass" => b"stdClass".to_vec(),
-                            b"exception" => b"Exception".to_vec(),
-                            b"error" => b"Error".to_vec(),
-                            b"typeerror" => b"TypeError".to_vec(),
-                            b"valueerror" => b"ValueError".to_vec(),
-                            b"runtimeexception" => b"RuntimeException".to_vec(),
-                            b"logicexception" => b"LogicException".to_vec(),
-                            b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
-                            b"badmethodcallexception" => b"BadMethodCallException".to_vec(),
-                            b"badfunctioncallexception" => b"BadFunctionCallException".to_vec(),
-                            b"overflowexception" => b"OverflowException".to_vec(),
-                            b"underflowexception" => b"UnderflowException".to_vec(),
-                            b"rangeerror" => b"RangeError".to_vec(),
-                            b"arithmeticerror" => b"ArithmeticError".to_vec(),
-                            b"divisionbyzeroerror" => b"DivisionByZeroError".to_vec(),
-                            b"argumentcounterror" => b"ArgumentCountError".to_vec(),
-                            b"errorexception" => b"ErrorException".to_vec(),
-                            b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
-                            b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
-                            b"domainexception" => b"DomainException".to_vec(),
-                            b"assertionerror" => b"AssertionError".to_vec(),
-                            b"unhandledmatcherror" => b"UnhandledMatchError".to_vec(),
-                            // SPL classes
-                            b"arrayobject" => b"ArrayObject".to_vec(),
-                            b"arrayiterator" => b"ArrayIterator".to_vec(),
-                            b"splfixedarray" => b"SplFixedArray".to_vec(),
-                            b"spldoublylinkedlist" => b"SplDoublyLinkedList".to_vec(),
-                            b"splstack" => b"SplStack".to_vec(),
-                            b"splqueue" => b"SplQueue".to_vec(),
-                            b"splpriorityqueue" => b"SplPriorityQueue".to_vec(),
-                            b"splmaxheap" => b"SplMaxHeap".to_vec(),
-                            b"splminheap" => b"SplMinHeap".to_vec(),
-                            b"splobjectstorage" => b"SplObjectStorage".to_vec(),
-                            b"recursivearrayiterator" => b"RecursiveArrayIterator".to_vec(),
-                            b"splfileinfo" => b"SplFileInfo".to_vec(),
-                            b"splfileobject" => b"SplFileObject".to_vec(),
-                            b"spltempfileobject" => b"SplTempFileObject".to_vec(),
-                            b"directoryiterator" => b"DirectoryIterator".to_vec(),
-                            b"filesystemiterator" => b"FilesystemIterator".to_vec(),
-                            b"recursivedirectoryiterator" => b"RecursiveDirectoryIterator".to_vec(),
-                            b"globiterator" => b"GlobIterator".to_vec(),
-                            b"emptyiterator" => b"EmptyIterator".to_vec(),
-                            b"iteratoriterator" => b"IteratorIterator".to_vec(),
-                            b"recursiveiteratoriterator" => b"RecursiveIteratorIterator".to_vec(),
-                            b"norewinditerator" => b"NoRewindIterator".to_vec(),
-                            b"infiniteiterator" => b"InfiniteIterator".to_vec(),
-                            b"limititerator" => b"LimitIterator".to_vec(),
-                            b"cachingiterator" => b"CachingIterator".to_vec(),
-                            b"recursivecachingiterator" => b"RecursiveCachingIterator".to_vec(),
-                            b"appenditerator" => b"AppendIterator".to_vec(),
-                            b"filteriterator" => b"FilterIterator".to_vec(),
-                            b"callbackfilteriterator" => b"CallbackFilterIterator".to_vec(),
-                            b"recursivefilteriterator" => b"RecursiveFilterIterator".to_vec(),
-                            b"recursivecallbackfilteriterator" => {
-                                b"RecursiveCallbackFilterIterator".to_vec()
-                            }
-                            b"regexiterator" => b"RegexIterator".to_vec(),
-                            b"recursiveregexiterator" => b"RecursiveRegexIterator".to_vec(),
-                            b"multipleiterator" => b"MultipleIterator".to_vec(),
-                            b"parentiterator" => b"ParentIterator".to_vec(),
-                            b"recursivetreeiterator" => b"RecursiveTreeIterator".to_vec(),
-                            b"splheap" => b"SplHeap".to_vec(),
-                            // DateTime classes
-                            b"datetime" => b"DateTime".to_vec(),
-                            b"datetimeimmutable" => b"DateTimeImmutable".to_vec(),
-                            b"dateinterval" => b"DateInterval".to_vec(),
-                            b"datetimezone" => b"DateTimeZone".to_vec(),
-                            b"dateperiod" => b"DatePeriod".to_vec(),
-                            b"internaliterator" => b"InternalIterator".to_vec(),
-                            b"lengthexception" => b"LengthException".to_vec(),
-                            b"outofrangeexception" => b"OutOfRangeException".to_vec(),
-                            b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
-                            // Reflection classes
-                            b"reflectionclass" => b"ReflectionClass".to_vec(),
-                            b"reflectionobject" => b"ReflectionObject".to_vec(),
-                            b"reflectionmethod" => b"ReflectionMethod".to_vec(),
-                            b"reflectionfunction" => b"ReflectionFunction".to_vec(),
-                            b"reflectionproperty" => b"ReflectionProperty".to_vec(),
-                            b"reflectionparameter" => b"ReflectionParameter".to_vec(),
-                            b"reflectionextension" => b"ReflectionExtension".to_vec(),
-                            b"reflectionexception" => b"ReflectionException".to_vec(),
-                            b"reflectionnamedtype" => b"ReflectionNamedType".to_vec(),
-                            b"reflectionuniontype" => b"ReflectionUnionType".to_vec(),
-                            b"reflectionintersectiontype" => b"ReflectionIntersectionType".to_vec(),
-                            b"reflectionenum" => b"ReflectionEnum".to_vec(),
-                            b"reflectionenumunitcase" => b"ReflectionEnumUnitCase".to_vec(),
-                            b"reflectionenumbackedcase" => b"ReflectionEnumBackedCase".to_vec(),
-                            b"reflectionclassconstant" => b"ReflectionClassConstant".to_vec(),
-                            b"reflectiongenerator" => b"ReflectionGenerator".to_vec(),
-                            b"reflectionfiber" => b"ReflectionFiber".to_vec(),
-                            b"sensitiveparametervalue" => b"SensitiveParameterValue".to_vec(),
-                            b"reflectionattribute" => b"ReflectionAttribute".to_vec(),
-                            b"fiber" => b"Fiber".to_vec(),
-                            b"fibererror" => b"FiberError".to_vec(),
-                            b"reflectionfunctionabstract" => b"ReflectionFunctionAbstract".to_vec(),
-                            b"weakreference" => b"WeakReference".to_vec(),
-                            b"weakmap" => b"WeakMap".to_vec(),
-                            b"phptoken" => b"PhpToken".to_vec(),
-                            b"uri\\whatwg\\url" => b"Uri\\WhatWg\\Url".to_vec(),
-                            b"uri\\rfc3986\\uri" => b"Uri\\Rfc3986\\Uri".to_vec(),
-                            b"uri\\whatwg\\invalidurlexception" => {
-                                b"Uri\\WhatWg\\InvalidUrlException".to_vec()
-                            }
-                            b"uri\\invaliduriexception" => b"Uri\\InvalidUriException".to_vec(),
-                            // Random classes
-                            b"random\\randomizer" => b"Random\\Randomizer".to_vec(),
-                            b"random\\engine\\mt19937" => b"Random\\Engine\\Mt19937".to_vec(),
-                            b"random\\engine\\xoshiro256starstar" => {
-                                b"Random\\Engine\\Xoshiro256StarStar".to_vec()
-                            }
-                            b"random\\engine\\pcgoneseq128xslrr64" => {
-                                b"Random\\Engine\\PcgOneseq128XslRr64".to_vec()
-                            }
-                            b"random\\engine\\secure" => b"Random\\Engine\\Secure".to_vec(),
-                            b"random\\randomexception" => b"Random\\RandomException".to_vec(),
-                            b"random\\randomerror" => b"Random\\RandomError".to_vec(),
-                            b"random\\brokenrandomengineerror" => {
-                                b"Random\\BrokenRandomEngineError".to_vec()
-                            }
-                            b"random\\intervalboundary" => b"Random\\IntervalBoundary".to_vec(),
-                            _ => class_name.as_bytes().to_vec(),
+                        // Internal classes: their declared name.
+                        match crate::stubs::find_class_lower(&name_lower) {
+                            Some(c) => c.name.as_bytes().to_vec(),
+                            None => class_name.as_bytes().to_vec(),
                         }
                     };
                     let mut obj = PhpObject::new(canonical_name, obj_id);
@@ -48057,7 +47492,7 @@ impl Vm {
                             if spl_result.is_none() {
                                 let mut check_class = class_name_lower.clone();
                                 for _ in 0..10 {
-                                    if let Some(parent) = get_builtin_parent(&check_class) {
+                                    if let Some(parent) = builtin_dispatch_parent(&check_class) {
                                         let parent_lower: Vec<u8> =
                                             parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         spl_result = self.dispatch_spl_method(
@@ -48112,7 +47547,7 @@ impl Vm {
                             if !is_spl {
                                 let mut check_class = class_name_lower.clone();
                                 for _ in 0..10 {
-                                    if let Some(parent) = get_builtin_parent(&check_class) {
+                                    if let Some(parent) = builtin_dispatch_parent(&check_class) {
                                         let parent_lower: Vec<u8> =
                                             parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if self
@@ -48149,7 +47584,7 @@ impl Vm {
                             if !self.is_spl_args_method(&spl_class, &method_name_lower) {
                                 let mut check = spl_class.clone();
                                 for _ in 0..10 {
-                                    if let Some(parent) = get_builtin_parent(&check) {
+                                    if let Some(parent) = builtin_dispatch_parent(&check) {
                                         let parent_lower: Vec<u8> =
                                             parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if self
@@ -51768,443 +51203,54 @@ impl Default for Vm {
     }
 }
 
-/// Check if a built-in class is a subclass of another built-in class
-/// PHP exception hierarchy:
-///   Throwable
-///   ├─ Error
-///   │  ├─ TypeError
-///   │  ├─ ValueError
-///   │  ├─ ArithmeticError
-///   │  │  └─ DivisionByZeroError
-///   │  ├─ ArgumentCountError
-///   │  ├─ RangeError
-///   │  └─ UnhandledMatchError
-///   └─ Exception
-///      ├─ RuntimeException
-///      │  ├─ OverflowException
-///      │  └─ UnderflowException
-///      ├─ LogicException
-///      │  ├─ InvalidArgumentException
-///      │  ├─ BadMethodCallException
-///      │  │  └─ BadFunctionCallException
-///      │  ├─ DomainException
-///      │  └─ UnexpectedValueException
-///      └─ ClosedGeneratorException
+/// Whether internal class `child` extends or implements `parent` (both
+/// lowercased; a class is not its own subclass).
 pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
-    // Check SPL interface implementation
-    if is_builtin_implements(child, parent) {
-        return true;
-    }
-    // Get the parent chain for the child class
-    let parents = builtin_parent_chain(child);
-    if parents.iter().any(|p| p == parent) {
-        return true;
-    }
-    // Also check if any parent class implements the interface
-    for p in &parents {
-        if is_builtin_implements(p, parent) {
-            return true;
-        }
-    }
-    false
+    child != parent && crate::stubs::stub_instanceof(child, parent).unwrap_or(false)
 }
 
-/// Get all interfaces that a built-in class implements
+/// The interfaces of an internal class (lowercased name), in `ce->interfaces`
+/// order.
 pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
-    if let Some(list) = crate::spl::spl_class_interfaces(class) {
-        return list.iter().map(|i| i.as_bytes().to_vec()).collect();
+    match crate::stubs::class_hierarchy(class) {
+        Some((_, h)) => h.interfaces.iter().map(|i| i.as_bytes().to_vec()).collect(),
+        None => Vec::new(),
     }
-    let interfaces: &[&[u8]] = match class {
-        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => &[
-            b"IteratorAggregate",
-            b"Traversable",
-            b"ArrayAccess",
-            b"Serializable",
-            b"Countable",
-        ],
-        b"splfixedarray" => &[b"Iterator", b"Traversable", b"ArrayAccess", b"Countable"],
-        b"spldoublylinkedlist" => &[
-            b"Iterator",
-            b"Traversable",
-            b"Countable",
-            b"Serializable",
-            b"ArrayAccess",
-        ],
-        b"splstack" | b"splqueue" => &[
-            b"Iterator",
-            b"Traversable",
-            b"Countable",
-            b"Serializable",
-            b"ArrayAccess",
-        ],
-        b"splobjectstorage" => &[
-            b"Countable",
-            b"Iterator",
-            b"Traversable",
-            b"Serializable",
-            b"ArrayAccess",
-        ],
-        b"splpriorityqueue" => &[b"Iterator", b"Traversable", b"Countable"],
-        b"splheap" | b"splminheap" | b"splmaxheap" => &[b"Iterator", b"Traversable", b"Countable"],
-        b"weakmap" => &[
-            b"ArrayAccess",
-            b"Countable",
-            b"IteratorAggregate",
-            b"Traversable",
-        ],
-        b"datetime" => &[b"DateTimeInterface"],
-        b"datetimeimmutable" => &[b"DateTimeInterface"],
-        b"exception"
-        | b"error"
-        | b"typeerror"
-        | b"valueerror"
-        | b"argumentcounterror"
-        | b"rangeerror"
-        | b"arithmeticerror"
-        | b"divisionbyzeroerror"
-        | b"assertionerror"
-        | b"unhandledmatcherror"
-        | b"runtimeexception"
-        | b"logicexception"
-        | b"invalidargumentexception"
-        | b"badmethodcallexception"
-        | b"badfunctioncallexception"
-        | b"overflowexception"
-        | b"underflowexception"
-        | b"outofboundsexception"
-        | b"domainexception"
-        | b"unexpectedvalueexception"
-        | b"lengthexception"
-        | b"outofrangeexception"
-        | b"closedgeneratorexception"
-        | b"errorexception"
-        | b"jsonexception"
-        | b"fibererror"
-        | b"dateexception"
-        | b"dateinvalidtimezoneexception"
-        | b"datemalformedintervalstringexception"
-        | b"datemalformedstringexception"
-        | b"datemalformedperiodstringexception"
-        | b"dateinvalidoperationexception"
-        | b"dateerror"
-        | b"dateobjecterror"
-        | b"daterangeerror"
-        | b"parseerror"
-        | b"compileerror"
-        | b"random\\randomexception"
-        | b"random\\randomerror"
-        | b"random\\brokenrandomengineerror"
-        | b"random\\intervalerror"
-        | b"uri\\whatwg\\invalidurlexception"
-        | b"uri\\invaliduriexception" => &[b"Throwable"],
-        _ => &[],
-    };
-    interfaces.iter().map(|i| i.to_vec()).collect()
 }
 
-/// Get the built-in parent class name for a class (lowercase)
-pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
-    match class {
-        b"typeerror"
-        | b"valueerror"
-        | b"rangeerror"
-        | b"unhandledmatcherror"
-        | b"assertionerror"
-        | b"fibererror"
-        | b"compileerror" => Some(b"Error"),
-        b"parseerror" => Some(b"CompileError"),
-        b"argumentcounterror" => Some(b"TypeError"),
-        b"arithmeticerror" => Some(b"Error"),
-        b"divisionbyzeroerror" => Some(b"ArithmeticError"),
-        b"runtimeexception"
-        | b"logicexception"
-        | b"closedgeneratorexception"
-        | b"errorexception"
-        | b"jsonexception"
-        | b"uri\\whatwg\\invalidurlexception"
-        | b"uri\\invaliduriexception"
-        | b"random\\randomexception" => Some(b"Exception"),
-        b"random\\randomerror" => Some(b"Error"),
-        b"random\\brokenrandomengineerror" => Some(b"Random\\RandomError"),
-        b"random\\intervalerror" => Some(b"ValueError"),
-        b"overflowexception" | b"underflowexception" | b"outofboundsexception" => {
-            Some(b"RuntimeException")
-        }
-        b"invalidargumentexception"
-        | b"badmethodcallexception"
-        | b"domainexception"
-        | b"unexpectedvalueexception"
-        | b"lengthexception"
-        | b"outofrangeexception" => Some(b"LogicException"),
-        b"badfunctioncallexception" => Some(b"BadMethodCallException"),
-        b"splstack" | b"splqueue" => Some(b"SplDoublyLinkedList"),
-        b"splminheap" | b"splmaxheap" => Some(b"SplHeap"),
-        b"recursivearrayiterator" => Some(b"ArrayIterator"),
-        b"recursiveiteratoriterator" => Some(b"IteratorIterator"),
-        b"recursivecachingiterator" => Some(b"CachingIterator"),
-        b"recursivefilteriterator" => Some(b"FilterIterator"),
-        b"recursivecallbackfilteriterator" => Some(b"CallbackFilterIterator"),
-        b"recursiveregexiterator" => Some(b"RegexIterator"),
-        b"callbackfilteriterator" => Some(b"FilterIterator"),
-        b"regexiterator" => Some(b"FilterIterator"),
-        b"parentiterator" => Some(b"RecursiveFilterIterator"),
-        b"recursivetreeiterator" => Some(b"RecursiveIteratorIterator"),
-        b"norewinditerator" | b"infiniteiterator" | b"limititerator" | b"cachingiterator"
-        | b"appenditerator" | b"filteriterator" => Some(b"IteratorIterator"),
-        b"filesystemiterator" => Some(b"DirectoryIterator"),
-        b"directoryiterator" => Some(b"SplFileInfo"),
-        b"recursivedirectoryiterator" => Some(b"FilesystemIterator"),
-        b"globiterator" => Some(b"FilesystemIterator"),
-        b"spltempfileobject" => Some(b"SplFileObject"),
-        b"splfileobject" => Some(b"SplFileInfo"),
-        b"dateinvalidtimezoneexception"
-        | b"datemalformedintervalstringexception"
-        | b"datemalformedstringexception"
-        | b"datemalformedperiodstringexception"
-        | b"dateinvalidoperationexception" => Some(b"DateException"),
-        b"dateexception" => Some(b"Exception"),
-        b"dateobjecterror" | b"daterangeerror" => Some(b"DateError"),
-        b"dateerror" => Some(b"Error"),
-        _ => None,
+/// The parent whose native method dispatcher an internal class falls back
+/// to. The Reflection classes' dispatchers handle their inherited methods
+/// themselves (and leave methods taking arguments to the call), so they
+/// never fall back.
+fn builtin_dispatch_parent(class: &[u8]) -> Option<&'static [u8]> {
+    if class.starts_with(b"reflection") {
+        return None;
     }
+    get_builtin_parent(class)
+}
+
+/// The parent of an internal class (lowercased name), by its declared name.
+pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
+    crate::stubs::class_hierarchy(class)?
+        .1
+        .parent
+        .map(|p| p.as_bytes())
 }
 
 /// Canonicalize a class name from lowercase to proper case
 pub fn canonicalize_class_name(name_lower: &[u8]) -> Vec<u8> {
-    match name_lower {
-        b"stdclass" => b"stdClass".to_vec(),
-        b"exception" => b"Exception".to_vec(),
-        b"error" => b"Error".to_vec(),
-        b"typeerror" => b"TypeError".to_vec(),
-        b"valueerror" => b"ValueError".to_vec(),
-        b"runtimeexception" => b"RuntimeException".to_vec(),
-        b"logicexception" => b"LogicException".to_vec(),
-        b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
-        b"badmethodcallexception" => b"BadMethodCallException".to_vec(),
-        b"badfunctioncallexception" => b"BadFunctionCallException".to_vec(),
-        b"overflowexception" => b"OverflowException".to_vec(),
-        b"underflowexception" => b"UnderflowException".to_vec(),
-        b"rangeerror" => b"RangeError".to_vec(),
-        b"arithmeticerror" => b"ArithmeticError".to_vec(),
-        b"divisionbyzeroerror" => b"DivisionByZeroError".to_vec(),
-        b"argumentcounterror" => b"ArgumentCountError".to_vec(),
-        b"errorexception" => b"ErrorException".to_vec(),
-        b"closedgeneratorexception" => b"ClosedGeneratorException".to_vec(),
-        b"unexpectedvalueexception" => b"UnexpectedValueException".to_vec(),
-        b"domainexception" => b"DomainException".to_vec(),
-        b"assertionerror" => b"AssertionError".to_vec(),
-        b"unhandledmatcherror" => b"UnhandledMatchError".to_vec(),
-        b"lengthexception" => b"LengthException".to_vec(),
-        b"outofrangeexception" => b"OutOfRangeException".to_vec(),
-        b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
-        b"arrayobject" => b"ArrayObject".to_vec(),
-        b"arrayiterator" => b"ArrayIterator".to_vec(),
-        b"splfixedarray" => b"SplFixedArray".to_vec(),
-        b"spldoublylinkedlist" => b"SplDoublyLinkedList".to_vec(),
-        b"splstack" => b"SplStack".to_vec(),
-        b"splqueue" => b"SplQueue".to_vec(),
-        b"splpriorityqueue" => b"SplPriorityQueue".to_vec(),
-        b"splmaxheap" => b"SplMaxHeap".to_vec(),
-        b"splminheap" => b"SplMinHeap".to_vec(),
-        b"splheap" => b"SplHeap".to_vec(),
-        b"splobjectstorage" => b"SplObjectStorage".to_vec(),
-        b"recursivearrayiterator" => b"RecursiveArrayIterator".to_vec(),
-        b"emptyiterator" => b"EmptyIterator".to_vec(),
-        b"iteratoriterator" => b"IteratorIterator".to_vec(),
-        b"recursiveiteratoriterator" => b"RecursiveIteratorIterator".to_vec(),
-        b"norewinditerator" => b"NoRewindIterator".to_vec(),
-        b"infiniteiterator" => b"InfiniteIterator".to_vec(),
-        b"limititerator" => b"LimitIterator".to_vec(),
-        b"cachingiterator" => b"CachingIterator".to_vec(),
-        b"recursivecachingiterator" => b"RecursiveCachingIterator".to_vec(),
-        b"appenditerator" => b"AppendIterator".to_vec(),
-        b"filteriterator" => b"FilterIterator".to_vec(),
-        b"callbackfilteriterator" => b"CallbackFilterIterator".to_vec(),
-        b"recursivefilteriterator" => b"RecursiveFilterIterator".to_vec(),
-        b"recursivecallbackfilteriterator" => b"RecursiveCallbackFilterIterator".to_vec(),
-        b"regexiterator" => b"RegexIterator".to_vec(),
-        b"recursiveregexiterator" => b"RecursiveRegexIterator".to_vec(),
-        b"multipleiterator" => b"MultipleIterator".to_vec(),
-        b"parentiterator" => b"ParentIterator".to_vec(),
-        b"recursivetreeiterator" => b"RecursiveTreeIterator".to_vec(),
-        b"splfileinfo" => b"SplFileInfo".to_vec(),
-        b"splfileobject" => b"SplFileObject".to_vec(),
-        b"spltempfileobject" => b"SplTempFileObject".to_vec(),
-        b"directoryiterator" => b"DirectoryIterator".to_vec(),
-        b"filesystemiterator" => b"FilesystemIterator".to_vec(),
-        b"recursivedirectoryiterator" => b"RecursiveDirectoryIterator".to_vec(),
-        b"globiterator" => b"GlobIterator".to_vec(),
-        b"datetime" => b"DateTime".to_vec(),
-        b"datetimeimmutable" => b"DateTimeImmutable".to_vec(),
-        b"dateinterval" => b"DateInterval".to_vec(),
-        b"datetimezone" => b"DateTimeZone".to_vec(),
-        b"dateperiod" => b"DatePeriod".to_vec(),
-        b"dateexception" => b"DateException".to_vec(),
-        b"dateinvalidtimezoneexception" => b"DateInvalidTimeZoneException".to_vec(),
-        b"datemalformedintervalstringexception" => b"DateMalformedIntervalStringException".to_vec(),
-        b"datemalformedstringexception" => b"DateMalformedStringException".to_vec(),
-        b"datemalformedperiodstringexception" => b"DateMalformedPeriodStringException".to_vec(),
-        b"dateinvalidoperationexception" => b"DateInvalidOperationException".to_vec(),
-        b"dateerror" => b"DateError".to_vec(),
-        b"dateobjecterror" => b"DateObjectError".to_vec(),
-        b"daterangeerror" => b"DateRangeError".to_vec(),
-        b"datetimeinterface" => b"DateTimeInterface".to_vec(),
-        _ => name_lower.to_vec(),
+    match crate::stubs::find_class_lower(name_lower) {
+        Some(c) => c.name.as_bytes().to_vec(),
+        None => name_lower.to_vec(),
     }
 }
 
-fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {
-    if let Some(r) = crate::spl::spl_class_implements(class, interface) {
-        return r;
-    }
-    match class {
-        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
-            interface,
-            b"iteratoraggregate" | b"traversable" | b"arrayaccess" | b"serializable" | b"countable"
-        ),
-        b"splfixedarray" => matches!(
-            interface,
-            b"iterator" | b"traversable" | b"arrayaccess" | b"countable"
-        ),
-        b"spldoublylinkedlist" => matches!(
-            interface,
-            b"iterator" | b"traversable" | b"countable" | b"serializable" | b"arrayaccess"
-        ),
-        b"splstack" | b"splqueue" => matches!(
-            interface,
-            b"iterator" | b"traversable" | b"countable" | b"serializable" | b"arrayaccess"
-        ),
-        b"splobjectstorage" => matches!(
-            interface,
-            b"countable" | b"iterator" | b"traversable" | b"serializable" | b"arrayaccess"
-        ),
-        b"splpriorityqueue" => matches!(interface, b"iterator" | b"traversable" | b"countable"),
-        b"splheap" | b"splminheap" | b"splmaxheap" => {
-            matches!(interface, b"iterator" | b"traversable" | b"countable")
-        }
-        b"emptyiterator" | b"internaliterator" => matches!(interface, b"iterator" | b"traversable"),
-        b"dateperiod" => matches!(interface, b"iteratoraggregate" | b"traversable"),
-        b"iteratoriterator" | b"recursiveiteratoriterator" => {
-            matches!(interface, b"iterator" | b"traversable" | b"outeriterator")
-        }
-        b"norewinditerator" | b"infiniteiterator" | b"limititerator" => {
-            matches!(interface, b"iterator" | b"traversable" | b"outeriterator")
-        }
-        b"cachingiterator" | b"recursivecachingiterator" => matches!(
-            interface,
-            b"iterator" | b"traversable" | b"outeriterator" | b"countable" | b"arrayaccess"
-        ),
-        b"appenditerator" => matches!(interface, b"iterator" | b"traversable" | b"outeriterator"),
-        b"filteriterator"
-        | b"callbackfilteriterator"
-        | b"recursivefilteriterator"
-        | b"recursivecallbackfilteriterator"
-        | b"regexiterator"
-        | b"recursiveregexiterator"
-        | b"parentiterator" => matches!(interface, b"iterator" | b"traversable" | b"outeriterator"),
-        b"multipleiterator" => matches!(interface, b"iterator" | b"traversable"),
-        b"datetime" | b"datetimeimmutable" => matches!(interface, b"datetimeinterface"),
-        _ => false,
-    }
-}
-
+/// The ancestors of an internal class (lowercased), nearest first.
 pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
-    let mut chain = Vec::new();
-    let mut current = class.to_vec();
-    loop {
-        let parent = match current.as_slice() {
-            // Error hierarchy
-            b"typeerror"
-            | b"valueerror"
-            | b"rangeerror"
-            | b"unhandledmatcherror"
-            | b"assertionerror"
-            | b"fibererror"
-            | b"compileerror" => Some(b"error".to_vec()),
-            b"parseerror" => Some(b"compileerror".to_vec()),
-            b"argumentcounterror" => Some(b"typeerror".to_vec()),
-            b"arithmeticerror" => Some(b"error".to_vec()),
-            b"divisionbyzeroerror" => Some(b"arithmeticerror".to_vec()),
-            b"error" => Some(b"throwable".to_vec()),
-            // Exception hierarchy
-            b"runtimeexception"
-            | b"logicexception"
-            | b"closedgeneratorexception"
-            | b"jsonexception"
-            | b"uri\\whatwg\\invalidurlexception"
-            | b"uri\\invaliduriexception" => Some(b"exception".to_vec()),
-            b"overflowexception" | b"underflowexception" | b"outofboundsexception" => {
-                Some(b"runtimeexception".to_vec())
-            }
-            b"invalidargumentexception"
-            | b"badmethodcallexception"
-            | b"domainexception"
-            | b"unexpectedvalueexception"
-            | b"lengthexception"
-            | b"outofrangeexception" => Some(b"logicexception".to_vec()),
-            b"badfunctioncallexception" => Some(b"badmethodcallexception".to_vec()),
-            b"errorexception" => Some(b"exception".to_vec()),
-            b"exception" => Some(b"throwable".to_vec()),
-            // Date exception hierarchy
-            b"dateexception" => Some(b"exception".to_vec()),
-            b"dateinvalidtimezoneexception"
-            | b"datemalformedintervalstringexception"
-            | b"datemalformedstringexception"
-            | b"datemalformedperiodstringexception"
-            | b"dateinvalidoperationexception" => Some(b"dateexception".to_vec()),
-            b"dateerror" => Some(b"error".to_vec()),
-            b"dateobjecterror" | b"daterangeerror" => Some(b"dateerror".to_vec()),
-            // Random exception hierarchy
-            b"random\\randomexception" => Some(b"exception".to_vec()),
-            b"random\\randomerror" => Some(b"error".to_vec()),
-            b"random\\brokenrandomengineerror" => Some(b"random\\randomerror".to_vec()),
-            b"random\\intervalerror" => Some(b"valueerror".to_vec()),
-            // SPL class hierarchy
-            b"splstack" | b"splqueue" => Some(b"spldoublylinkedlist".to_vec()),
-            b"splminheap" | b"splmaxheap" => Some(b"splheap".to_vec()),
-            // SPL iterator hierarchy
-            b"recursivearrayiterator" => Some(b"arrayiterator".to_vec()),
-            b"recursiveiteratoriterator" => Some(b"iteratoriterator".to_vec()),
-            b"recursivecachingiterator" => Some(b"cachingiterator".to_vec()),
-            b"recursivefilteriterator" => Some(b"filteriterator".to_vec()),
-            b"recursivecallbackfilteriterator" => Some(b"callbackfilteriterator".to_vec()),
-            b"recursiveregexiterator" => Some(b"regexiterator".to_vec()),
-            b"callbackfilteriterator"
-            | b"regexiterator"
-            | b"filteriterator"
-            | b"cachingiterator"
-            | b"appenditerator"
-            | b"norewinditerator"
-            | b"infiniteiterator"
-            | b"limititerator" => Some(b"iteratoriterator".to_vec()),
-            b"parentiterator" => Some(b"recursivefilteriterator".to_vec()),
-            b"recursivetreeiterator" => Some(b"recursiveiteratoriterator".to_vec()),
-            b"filesystemiterator" => Some(b"directoryiterator".to_vec()),
-            b"directoryiterator" => Some(b"splfileinfo".to_vec()),
-            b"recursivedirectoryiterator" => Some(b"filesystemiterator".to_vec()),
-            b"globiterator" => Some(b"filesystemiterator".to_vec()),
-            b"splfileobject" | b"spltempfileobject" => Some(b"splfileinfo".to_vec()),
-            // Reflection class hierarchy
-            b"reflectionexception" => Some(b"exception".to_vec()),
-            b"reflectionmethod" => Some(b"reflectionfunctionabstract".to_vec()),
-            b"reflectionfunction" => Some(b"reflectionfunctionabstract".to_vec()),
-            b"reflectionobject" => Some(b"reflectionclass".to_vec()),
-            b"reflectionenum" => Some(b"reflectionclass".to_vec()),
-            b"reflectionenumbackedcase" => Some(b"reflectionenumunitcase".to_vec()),
-            b"reflectionenumunitcase" => Some(b"reflectionclassconstant".to_vec()),
-            b"reflectionnamedtype" => Some(b"reflectiontype".to_vec()),
-            b"reflectionuniontype" => Some(b"reflectiontype".to_vec()),
-            b"reflectionintersectiontype" => Some(b"reflectiontype".to_vec()),
-            _ => None,
-        };
-        if let Some(p) = parent {
-            chain.push(p.clone());
-            current = p;
-        } else {
-            break;
-        }
+    match crate::stubs::class_hierarchy(class) {
+        Some((_, h)) => h.parents_lower.clone(),
+        None => Vec::new(),
     }
-    chain
 }
 
 /// Shift a CV operand index by +1 (used when inserting $this as CV[0] in bound closures)

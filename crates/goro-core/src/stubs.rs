@@ -164,6 +164,134 @@ pub fn find_class(name: &[u8]) -> Option<&'static StubClass> {
         .map(|&i| &crate::stub_sigs::CLASSES[i])
 }
 
+/// Hierarchy of an internal class, precomputed from the stubs.
+pub struct StubHierarchy {
+    /// Declared name of the parent class.
+    pub parent: Option<&'static str>,
+    /// `ce->interfaces` (declared names) in php-src's order.
+    pub interfaces: Vec<&'static str>,
+    /// Lowercased ancestor classes, nearest first.
+    pub parents_lower: Vec<Vec<u8>>,
+    /// Lowercased `interfaces`.
+    pub interfaces_lower: Vec<Vec<u8>>,
+}
+
+struct StubTable {
+    by_lower: crate::fxhash::FxHashMap<Vec<u8>, usize>,
+    hierarchy: Vec<StubHierarchy>,
+}
+
+/// `ce->interfaces` of an internal class as php-src builds it at
+/// registration: the implicit Stringable of a class declaring `__toString()`
+/// (zend_register_functions), then the parent's interfaces in reverse
+/// (zend_do_inherit_interfaces), then each implemented interface followed by
+/// its own interfaces in reverse (zend_do_implement_interface).
+fn ce_interfaces(c: &'static StubClass, depth: usize) -> Vec<&'static str> {
+    fn push(out: &mut Vec<&'static str>, n: &'static str) {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(n)) {
+            out.push(n);
+        }
+    }
+    let mut out = Vec::new();
+    if depth > 32 {
+        return out;
+    }
+    if c.kind != K_TRAIT
+        && !c.name.eq_ignore_ascii_case("Stringable")
+        && c.methods
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case("__toString"))
+    {
+        push(&mut out, "Stringable");
+    }
+    if let Some(pc) = c.parent.and_then(|p| find_class(p.as_bytes())) {
+        for i in ce_interfaces(pc, depth + 1).into_iter().rev() {
+            push(&mut out, i);
+        }
+    }
+    for i in c.interfaces {
+        let ic = find_class(i.as_bytes());
+        push(&mut out, ic.map(|ic| ic.name).unwrap_or(i));
+        if let Some(ic) = ic {
+            for sub in ce_interfaces(ic, depth + 1).into_iter().rev() {
+                push(&mut out, sub);
+            }
+        }
+    }
+    out
+}
+
+fn stub_table() -> &'static StubTable {
+    static T: OnceLock<StubTable> = OnceLock::new();
+    T.get_or_init(|| {
+        let classes = crate::stub_sigs::CLASSES;
+        let by_lower: crate::fxhash::FxHashMap<Vec<u8>, usize> = classes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.to_ascii_lowercase().into_bytes(), i))
+            .collect();
+        let hierarchy = classes
+            .iter()
+            .map(|c| {
+                let mut parents_lower = Vec::new();
+                let mut cur = c;
+                while let Some(p) = cur.parent.and_then(|p| find_class(p.as_bytes())) {
+                    if parents_lower.len() > 32 {
+                        break;
+                    }
+                    parents_lower.push(p.name.to_ascii_lowercase().into_bytes());
+                    cur = p;
+                }
+                let interfaces = ce_interfaces(c, 0);
+                let interfaces_lower = interfaces
+                    .iter()
+                    .map(|i| i.to_ascii_lowercase().into_bytes())
+                    .collect();
+                StubHierarchy {
+                    parent: c
+                        .parent
+                        .map(|p| find_class(p.as_bytes()).map(|pc| pc.name).unwrap_or(p)),
+                    interfaces,
+                    parents_lower,
+                    interfaces_lower,
+                }
+            })
+            .collect();
+        StubTable {
+            by_lower,
+            hierarchy,
+        }
+    })
+}
+
+/// Allocation-free stub lookup by an already lowercased name (no leading
+/// backslash).
+pub fn find_class_lower(lower: &[u8]) -> Option<&'static StubClass> {
+    stub_table()
+        .by_lower
+        .get(lower)
+        .map(|&i| &crate::stub_sigs::CLASSES[i])
+}
+
+/// The stub and precomputed hierarchy of an internal class (lowercased name).
+pub fn class_hierarchy(lower: &[u8]) -> Option<(&'static StubClass, &'static StubHierarchy)> {
+    let t = stub_table();
+    t.by_lower
+        .get(lower)
+        .map(|&i| (&crate::stub_sigs::CLASSES[i], &t.hierarchy[i]))
+}
+
+/// instanceof between internal classes (both lowercased): Some(result) when
+/// `child` is a stub class, None otherwise.
+pub fn stub_instanceof(child: &[u8], ancestor: &[u8]) -> Option<bool> {
+    let (_, h) = class_hierarchy(child)?;
+    Some(
+        child == ancestor
+            || h.parents_lower.iter().any(|p| p == ancestor)
+            || h.interfaces_lower.iter().any(|i| i == ancestor),
+    )
+}
+
 /// Look up the stub of an internal function.
 pub fn find_function(name: &[u8]) -> Option<&'static StubFunc> {
     function_index()
