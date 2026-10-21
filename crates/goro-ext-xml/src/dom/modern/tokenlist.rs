@@ -168,19 +168,29 @@ fn length(o: &Obj) -> i64 {
 // ---------------------------------------------------------------------------
 // Handlers
 
-fn offset_to_long(v: &Value) -> Option<i64> {
+fn offset_to_long(vm: &mut Vm, v: &Value) -> Option<i64> {
     match v {
+        Value::Resource(id) => {
+            vm.emit_warning(&format!(
+                "Resource ID#{} used as offset, casting to integer ({})",
+                id, id
+            ));
+            Some(*id)
+        }
         Value::String(s_) => {
             let b = s_.as_bytes();
             let st = std::str::from_utf8(b).ok()?;
             let canonical = st.parse::<i64>().ok().filter(|n| n.to_string() == st)?;
             Some(canonical)
         }
-        Value::Double(d) => Some(if d.is_finite() { *d as i64 } else { 0 }),
+        Value::Double(d) => Some(super::collections::dval_to_lval_safe(vm, *d)),
         Value::Long(n) => Some(*n),
         Value::False => Some(0),
         Value::True => Some(1),
-        Value::Reference(r) => offset_to_long(&r.borrow()),
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            offset_to_long(vm, &inner)
+        }
         _ => None,
     }
 }
@@ -201,12 +211,12 @@ fn read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8) -> Op
             return Some(Value::Null);
         }
     };
-    match offset_to_long(&off) {
+    match offset_to_long(vm, &off) {
         Some(i) => Some(item(o, i)),
         None => {
             throw_error(
                 vm,
-                b"Error",
+                b"TypeError",
                 &format!(
                     "Cannot access offset of type {} on Dom\\TokenList",
                     offset_type(&off)
@@ -219,7 +229,7 @@ fn read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8) -> Op
 
 fn has_dimension(vm: &mut Vm, o: &Obj, offset: &Value, check_empty: u8) -> Option<bool> {
     let off = offset.deref();
-    match offset_to_long(&off) {
+    match offset_to_long(vm, &off) {
         Some(i) => {
             if check_empty == 1 {
                 Some(item(o, i).is_truthy())
@@ -230,7 +240,7 @@ fn has_dimension(vm: &mut Vm, o: &Obj, offset: &Value, check_empty: u8) -> Optio
         None => {
             throw_error(
                 vm,
-                b"Error",
+                b"TypeError",
                 &format!(
                     "Cannot access offset of type {} in isset or empty",
                     offset_type(&off)

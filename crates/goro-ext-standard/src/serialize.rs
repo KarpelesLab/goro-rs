@@ -99,6 +99,10 @@ fn not_serializable_builtin(cl: &[u8]) -> bool {
             | b"opensslcertificatesigningrequest"
             | b"opensslasymmetrickey"
             | b"domxpath"
+            | b"dom\\xpath"
+            | b"dom\\implementation"
+            | b"dom\\tokenlist"
+            | b"dom\\namespaceinfo"
             | b"hashcontext_never"
     ) || (cl.starts_with(b"reflection") && cl != b"reflectionexception")
 }

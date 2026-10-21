@@ -1363,6 +1363,15 @@ impl Tree {
                 }));
                 if extended == 1 {
                     for c in self.children_of(id) {
+                        if matches!(self.nodes[c].t, NType::ElementDecl | NType::AttributeDecl) {
+                            // xmlCopyDtd copies element and attribute declarations too
+                            let src = self.nodes[c].clone();
+                            let d = self.new_node(doc, src.t, &src.name);
+                            self.nodes[d].extra = src.extra.clone();
+                            self.nodes[d].ns = src.ns;
+                            self.link_child_raw(n, d);
+                            continue;
+                        }
                         if let Extra::Entity(info) = self.nodes[c].extra.clone() {
                             let nm = self.nodes[c].name.clone();
                             let e = self.add_entity(

@@ -785,6 +785,21 @@ pub fn dom_import_simplexml(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> 
         );
         return Ok(Value::Null);
     }
+    // lock the document's class type (no DOMNode and Dom\Node for the same nodes)
+    if let Some(d) = tree::with(|t| t.nodes[n.unwrap()].doc) {
+        if doc_props(Some(d)).class_type == 2 {
+            throw_error(
+                vm,
+                b"TypeError",
+                &format!(
+                    "{}(): Argument #1 ($node) must not be already imported as a Dom\\Node",
+                    f
+                ),
+            );
+            return Ok(Value::Null);
+        }
+        with_doc_props(d, |p| p.class_type = 1);
+    }
     Ok(node_obj(vm, n.unwrap()))
 }
 

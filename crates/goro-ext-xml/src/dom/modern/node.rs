@@ -5,6 +5,7 @@ use super::*;
 use crate::dom::node::{
     children_valid, get_content_value, hierarchy_ok, remove_all_children, str_of,
 };
+use crate::tree::NsId;
 
 // ---------------------------------------------------------------------------
 // Properties
@@ -115,6 +116,10 @@ fn w_node_value(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
 }
 
 fn skip_text_content(t: &Tree, n: NodeId) -> bool {
+    // document-less nodes keep the legacy behaviour (php_dom_follow_spec_intern)
+    if t.nodes[n].doc.is_none() && !t.is_doc(n) {
+        return false;
+    }
     !matches!(
         t.nodes[n].t,
         NType::DocumentFrag
@@ -1393,12 +1398,122 @@ fn m_compare_document_position(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(Value::Long(r))
 }
 
+fn c14n_attached(vm: &mut Vm, o: &Obj) -> R<()> {
+    let n = need_node(vm, o)?;
+    let attached = tree::with(|t| {
+        let mut x = n;
+        while let Some(p) = t.nodes[x].parent {
+            x = p;
+        }
+        t.is_doc(x)
+    });
+    if !attached {
+        dom_err_msg(
+            vm,
+            HIERARCHY_REQUEST_ERR,
+            "Canonicalization can only happen on nodes attached to a document.",
+        );
+        return Err(());
+    }
+    Ok(())
+}
+
+/// What dom_relink_ns_decls changed on one element.
+struct Relinked {
+    elem: NodeId,
+    attrs: Vec<NodeId>,
+    ns: Option<NsId>,
+}
+
+/// dom_relink_ns_decls: make the xmlns attributes of a modern document
+/// visible as namespace declarations for the canonicalizer.
+fn relink_ns_decls(t: &mut Tree, root: NodeId) -> Vec<Relinked> {
+    let mut out = Vec::new();
+    let mut cur = Some(root);
+    while let Some(x) = cur {
+        if t.nodes[x].t == NType::Element {
+            let attrs = t.attrs_of(x);
+            let mut keep = Vec::new();
+            for &at in &attrs {
+                let is_xmlns = t.nodes[at]
+                    .ns
+                    .map(|n| t.nss[n].href == XMLNS_NS)
+                    .unwrap_or(false);
+                if is_xmlns {
+                    let href = t.node_get_content(at);
+                    let prefix = if t.nodes[at]
+                        .ns
+                        .and_then(|n| t.nss[n].prefix.clone())
+                        .is_some()
+                    {
+                        Some(t.nodes[at].name.clone())
+                    } else {
+                        None
+                    };
+                    let ns = t.new_ns_raw(&href, prefix.as_deref(), Some(x));
+                    t.nodes[x].ns_def.insert(0, ns);
+                } else {
+                    keep.push(at);
+                }
+            }
+            if keep.len() != attrs.len() {
+                for &at in &attrs {
+                    t.unlink(at);
+                }
+                t.nodes[x].properties = None;
+                for &at in &keep {
+                    t.link_child_raw(x, at);
+                }
+            }
+            let old_ns = t.nodes[x].ns;
+            if old_ns.map(|n| t.nss[n].prefix.is_none()).unwrap_or(false) {
+                t.nodes[x].ns = t.search_ns(x, None);
+            }
+            out.push(Relinked {
+                elem: x,
+                attrs,
+                ns: old_ns,
+            });
+        }
+        cur = next_in_tree_order(t, x, Some(root));
+    }
+    out
+}
+
+/// dom_unlink_ns_decls
+fn unlink_ns_decls(t: &mut Tree, saved: Vec<Relinked>) {
+    for r in saved {
+        t.nodes[r.elem].ns_def.clear();
+        t.nodes[r.elem].ns = r.ns;
+        for at in t.attrs_of(r.elem) {
+            t.unlink(at);
+        }
+        t.nodes[r.elem].properties = None;
+        for at in r.attrs {
+            t.link_child_raw(r.elem, at);
+        }
+    }
+}
+
+fn c14n_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
+    c14n_attached(vm, o)?;
+    let n = need_node(vm, o)?;
+    let root = tree::with(|t| doc_from_node(t, n).and_then(|d| t.root_element(d)));
+    let saved = match root {
+        Some(r) => tree::with(|t| relink_ns_decls(t, r)),
+        None => Vec::new(),
+    };
+    let r = crate::dom::document::c14n(vm, o, a, file);
+    tree::with(|t| unlink_ns_decls(t, saved));
+    r
+}
+
 fn m_c14n(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
-    crate::dom::document::c14n(vm, o, a, false)
+    c14n_common(vm, o, a, false)
 }
 
 fn m_c14n_file(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
-    crate::dom::document::c14n(vm, o, a, true)
+    c14n_common(vm, o, a, true)
 }
 
 pub fn node_methods() -> Vec<(&'static str, MethodFn)> {

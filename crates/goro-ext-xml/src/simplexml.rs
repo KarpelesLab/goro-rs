@@ -2637,6 +2637,7 @@ fn call_method(
                 Some(x) => x,
                 None => return Value::False,
             };
+            let modern = crate::dom::modern::is_modern_doc(s.doc.get());
             let bytes = tree::with(|t| {
                 let doc = s.doc.get();
                 let enc = doc.and_then(|d| t.doc_info(d).and_then(|i| i.encoding.clone()));
@@ -2644,7 +2645,14 @@ fn call_method(
                     .parent
                     .map(|p| t.nodes[p].t == NType::Document)
                     .unwrap_or(false);
-                if let (true, Some(d)) = (is_root, doc) {
+                if modern {
+                    // the document handlers of Dom\XMLDocument: the spec serializer
+                    let target = match (is_root, doc) {
+                        (true, Some(d)) => d,
+                        _ => node,
+                    };
+                    crate::dom::modern::serializer::dump_for_handlers(t, target, enc.as_deref())
+                } else if let (true, Some(d)) = (is_root, doc) {
                     serialize::doc_to_bytes(t, d, enc.as_deref(), false, false, false)
                 } else {
                     serialize::node_to_bytes(

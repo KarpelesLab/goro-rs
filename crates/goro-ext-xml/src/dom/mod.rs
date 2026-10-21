@@ -232,8 +232,9 @@ fn free_detached_one(t: &mut Tree, n: NodeId) {
     while let Some(x) = stack.pop() {
         if alive(t, x) {
             t.unlink(x);
-            if t.nodes[x].t == NType::Element {
-                // keep the namespaces it uses declared within the survivor
+            // keep the namespaces it uses declared within the survivor
+            // (modern documents keep their namespaces in the mapper)
+            if t.nodes[x].t == NType::Element && !modern::is_modern_doc(t.nodes[x].doc) {
                 node::reconciliate_ns(t, x);
             }
             continue;

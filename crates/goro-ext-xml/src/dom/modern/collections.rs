@@ -88,17 +88,25 @@ enum Index {
     Illegal,
 }
 
+/// zend_dval_to_lval_safe
+pub fn dval_to_lval_safe(vm: &mut Vm, d: f64) -> i64 {
+    if !d.is_finite() || d < i64::MIN as f64 || d >= i64::MAX as f64 {
+        return 0;
+    }
+    if d.fract() != 0.0 {
+        vm.emit_deprecated(&format!(
+            "Implicit conversion from float {} to int loses precision",
+            goro_core::value::format_php_float(d)
+        ));
+    }
+    d as i64
+}
+
 /// dom_modern_nodelist_get_index
-fn get_index(v: &Value) -> Index {
+fn get_index(vm: &mut Vm, v: &Value) -> Index {
     match v {
         Value::Long(n) => Index::Long(*n),
-        Value::Double(d) => Index::Long(
-            if d.is_finite() && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 {
-                *d as i64
-            } else {
-                0
-            },
-        ),
+        Value::Double(d) => Index::Long(dval_to_lval_safe(vm, *d)),
         Value::String(s_) => {
             let b = s_.as_bytes();
             if let Some(n) = handle_numeric(b) {
@@ -107,7 +115,10 @@ fn get_index(v: &Value) -> Index {
                 Index::Str(s_.to_string_lossy())
             }
         }
-        Value::Reference(r) => get_index(&r.borrow()),
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            get_index(vm, &inner)
+        }
         _ => Index::Illegal,
     }
 }
@@ -158,7 +169,7 @@ fn illegal_offset(vm: &mut Vm, o: &Obj, v: &Value, isset: bool) {
             cn
         )
     };
-    throw_error(vm, b"Error", &msg);
+    throw_error(vm, b"TypeError", &msg);
 }
 
 fn cannot_append(vm: &mut Vm, o: &Obj) {
@@ -208,7 +219,7 @@ fn list_read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8) 
         }
     };
     let collection = is_collection(vm, o);
-    match get_index(&off) {
+    match get_index(vm, &off) {
         Index::Long(i) => Some(lists::get_item(vm, o, i)),
         Index::Str(s_) if collection => {
             let n = named_item(o, &s_);
@@ -224,7 +235,7 @@ fn list_read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8) 
 fn list_has_dimension(vm: &mut Vm, o: &Obj, offset: &Value, _check_empty: u8) -> Option<bool> {
     let off = offset.deref();
     let collection = is_collection(vm, o);
-    match get_index(&off) {
+    match get_index(vm, &off) {
         Index::Long(i) => Some(i >= 0 && i < lists::list_length(o)),
         Index::Str(s_) if collection => Some(named_item(o, &s_).is_some()),
         _ => {
@@ -255,7 +266,7 @@ fn map_read_dimension(vm: &mut Vm, o: &Obj, offset: Option<&Value>, _mode: u8) -
             }
         },
         Value::Long(i) => Some(lists::get_item(vm, o, *i)),
-        Value::Double(_) => match get_index(&off) {
+        Value::Double(_) => match get_index(vm, &off) {
             Index::Long(i) => Some(lists::get_item(vm, o, i)),
             _ => Some(Value::Null),
         },
@@ -274,7 +285,7 @@ fn map_has_dimension(vm: &mut Vm, o: &Obj, offset: &Value, _check_empty: u8) -> 
             None => Some(map_named_item(o, &s_.to_string_lossy(), None).is_some()),
         },
         Value::Long(i) => Some(*i >= 0 && *i < lists::list_length(o)),
-        Value::Double(_) => match get_index(&off) {
+        Value::Double(_) => match get_index(vm, &off) {
             Index::Long(i) => Some(i >= 0 && i < lists::list_length(o)),
             _ => Some(false),
         },

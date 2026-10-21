@@ -427,9 +427,8 @@ fn w_node_value(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
     tree::with(|t| match t.nodes[n].t {
         NType::Attribute | NType::Element => {
             t.remove_id_for_attr_if_attr(n);
-            remove_all_children(t, n);
-            t.node_set_content(n, &st);
-            let _ = 0;
+            // xmlNodeSetContentLen: entity references are parsed
+            super::element::set_content_legacy(t, n, &st);
         }
         NType::Text | NType::Comment | NType::CData | NType::Pi => t.node_set_content(n, &st),
         _ => {}

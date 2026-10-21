@@ -266,6 +266,11 @@ pub fn entity_props(t: &HashMap<Base, Rc<Vec<Prop>>>) -> Vec<Prop> {
     vec![l("publicId"), l("systemId"), l("notationName")]
 }
 
+fn r_eref_text_content(vm: &mut Vm, o: &Obj, n: NodeId) -> R<Value> {
+    crate::dom::chardata::sync_entity_ref(n);
+    (node::text_content_rw("").read)(vm, o, n)
+}
+
 fn r_eref_child_nodes(vm: &mut Vm, o: &Obj, n: NodeId) -> R<Value> {
     crate::dom::chardata::sync_entity_ref(n);
     Ok(mlist_obj(
@@ -281,10 +286,13 @@ pub fn entity_ref_overrides(t: &HashMap<Base, Rc<Vec<Prop>>>) -> Vec<Prop> {
         p.owner = "";
         p
     };
+    let mut tc = node::text_content_rw("");
+    tc.read = r_eref_text_content;
+    tc.write = None;
     vec![
         l("firstChild"),
         l("lastChild"),
-        l("textContent"),
+        tc,
         p("childNodes", r_eref_child_nodes, None, "mixed"),
     ]
 }

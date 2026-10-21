@@ -135,7 +135,7 @@ fn w_substituted(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
     let st = str_of(v);
     tree::with(|t| {
         remove_all_children(t, n);
-        t.node_set_content(n, &st);
+        crate::dom::element::set_content_legacy(t, n, &st);
     });
     Ok(())
 }

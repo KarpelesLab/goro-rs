@@ -665,3 +665,12 @@ pub fn serialize_children(t: &Tree, node: NodeId, require_well_formed: bool) -> 
     }
     Ok(s.out)
 }
+
+/// php_new_dom_dump_node_to_str / php_new_dom_dump_doc_to_str: what other
+/// extensions (SimpleXML) get when serializing nodes of a modern document.
+pub fn dump_for_handlers(t: &Tree, node: NodeId, encoding: Option<&str>) -> Vec<u8> {
+    match serialize(t, node, false, false, false, false, encoding) {
+        Ok(out) => crate::serialize::encode_output(&out, encoding),
+        Err(()) => Vec::new(),
+    }
+}

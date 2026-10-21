@@ -39,7 +39,12 @@ fn invalid_ctx(vm: &mut Vm) -> R<Value> {
 pub fn construct(vm: &mut Vm, this: &Obj, a: &[Value]) -> R<()> {
     let a = args(a);
     a.count(vm, 1, 2)?;
-    let dobj = a.obj_of(vm, 0, "document", "DOMDocument", false)?.unwrap();
+    let dclass = if base_of(vm, this) == Some(Base::MXPath) {
+        "Dom\\Document"
+    } else {
+        "DOMDocument"
+    };
+    let dobj = a.obj_of(vm, 0, "document", dclass, false)?.unwrap();
     let reg = a.bool(vm, 1, "registerNodeNS", true)?;
     let d = need_node(vm, &dobj)?;
     attach(
@@ -172,7 +177,7 @@ fn dispatch(
     }
     match rv.deref() {
         Value::Object(o) => {
-            if obj_is(vm, &o, "DOMNode") {
+            if obj_is(vm, &o, "DOMNode") || obj_is(vm, &o, "Dom\\Node") {
                 match node_of(&o) {
                     Some(n) => Ok(XValue::NodeSet(vec![n])),
                     None => Ok(XValue::NodeSet(Vec::new())),
@@ -203,7 +208,14 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 3)?;
     let expr = a.str(vm, 0, "expression")?;
-    let ctxo = a.obj_of(vm, 1, "contextNode", "DOMNode", true)?;
+    let modern = base_of(vm, o) == Some(Base::MXPath);
+    let ctxo = a.obj_of(
+        vm,
+        1,
+        "contextNode",
+        if modern { "Dom\\Node" } else { "DOMNode" },
+        true,
+    )?;
     let st = with_state(o, |s| {
         (
             s.doc,
@@ -234,7 +246,11 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
     let mut nslist: Vec<(String, String)> = Vec::new();
     if reg {
         if let Some(n) = nodep {
-            nslist = tree::with(|t| xpath::ns_list(t, n));
+            nslist = if modern {
+                super::modern::xpath_ns_list(doc, n)
+            } else {
+                tree::with(|t| xpath::ns_list(t, n))
+            };
         }
     }
     for (p_, u) in &regns {
@@ -296,6 +312,12 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
                 return Err(());
             }
             xpath::report_error(vm, &fname, &e, &expr);
+            if modern {
+                if vm.current_exception.is_none() {
+                    throw_error(vm, b"Error", "Could not evaluate XPath expression");
+                }
+                return Err(());
+            }
             return Ok(Value::False);
         }
     };
@@ -306,10 +328,31 @@ fn eval(vm: &mut Vm, o: &Obj, a: &[Value], query: bool) -> R<Value> {
         XValue::NodeSet(nodes) => {
             let mut items = Vec::new();
             for n in nodes {
+                if modern && tree::with(|t| t.nodes[n].t == NType::NamespaceDecl) {
+                    throw_dom_msg(
+                        vm,
+                        NOT_SUPPORTED_ERR,
+                        "The namespace axis is not well-defined in the living DOM specification. Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
+                        true,
+                    );
+                    return Err(());
+                }
                 items.push(node_obj(vm, n));
+            }
+            if modern {
+                return Ok(super::modern::mlist_obj(
+                    vm,
+                    b"Dom\\NodeList",
+                    ListKind::Static(items),
+                ));
             }
             Ok(list_obj(vm, ListKind::Static(items)))
         }
+        _ if query && modern => Ok(super::modern::mlist_obj(
+            vm,
+            b"Dom\\NodeList",
+            ListKind::Static(Vec::new()),
+        )),
         _ if query => Ok(list_obj(vm, ListKind::Static(Vec::new()))),
         XValue::Bool(x) => Ok(b(x)),
         XValue::Num(n) => Ok(Value::Double(n)),

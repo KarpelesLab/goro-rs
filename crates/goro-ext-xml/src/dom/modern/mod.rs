@@ -201,7 +201,11 @@ fn compat_attribute(t: &mut Tree, doc: NodeId, node: NodeId, ns: NsId) -> NodeId
         ),
     };
     let d = t.nodes[node].doc;
-    t.new_attr_node(d, xmlns_ns, &name, Some(&href))
+    // xmlSetNsProp always creates a text child, even for an empty value
+    let a = t.new_attr_node(d, xmlns_ns, &name, None);
+    let tx = t.new_text(d, &href);
+    t.link_child_raw(a, tx);
+    a
 }
 
 /// php_dom_ns_compat_mark_attribute_list: turn the namespace declarations
@@ -841,6 +845,14 @@ fn class_entry(name: &str, parent: Option<&str>, interfaces: &[&str]) -> ClassEn
 }
 
 pub fn register_classes(vm: &mut Vm) {
+    // Dom\DOMException is an alias of DOMException
+    if let Some(exc) = vm.classes.get(&b"domexception".to_vec()).cloned() {
+        vm.classes.insert(b"dom\\domexception".to_vec(), exc);
+        vm.class_aliases
+            .insert(b"dom\\domexception".to_vec(), b"domexception".to_vec());
+        vm.class_aliases
+            .insert(b"domexception".to_vec(), b"dom\\domexception".to_vec());
+    }
     let mut pn = class_entry("Dom\\ParentNode", None, &[]);
     pn.is_interface = true;
     vm.classes.insert(b"dom\\parentnode".to_vec(), pn);
@@ -973,4 +985,20 @@ pub fn register_rest(vm: &mut Vm) {
 
 pub fn xml_ns() -> &'static str {
     XML_XML_NAMESPACE
+}
+
+/// In-scope namespaces of `n` as (prefix, uri) pairs for XPath evaluation
+/// (php_dom_get_in_scope_ns with the modern mapper).
+pub fn xpath_ns_list(doc: NodeId, n: NodeId) -> Vec<(String, String)> {
+    tree::with(|t| {
+        in_scope_ns(t, doc, n, false)
+            .into_iter()
+            .filter_map(|ns| {
+                t.nss[ns]
+                    .prefix
+                    .clone()
+                    .map(|p| (p, t.nss[ns].href.clone()))
+            })
+            .collect()
+    })
 }
