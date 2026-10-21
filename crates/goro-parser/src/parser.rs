@@ -808,7 +808,13 @@ impl Parser {
                 }
                 r
             }
-            TokenKind::Function => {
+            // `function (...) {...};` / `function &(...)` at statement start
+            // is a closure expression statement, not a declaration.
+            TokenKind::Function
+                if !matches!(self.peek_at(1), TokenKind::OpenParen)
+                    && !(matches!(self.peek_at(1), TokenKind::Ampersand)
+                        && matches!(self.peek_at(2), TokenKind::OpenParen)) =>
+            {
                 let doc = self.take_doc_comment();
                 let r = self.parse_function_decl_with_attrs(Vec::new());
                 if let Some(d) = doc {
@@ -3923,278 +3929,141 @@ impl Parser {
     fn parse_assignment_inner(&mut self) -> ParseResult<Expr> {
         let left = self.parse_null_coalesce()?;
 
-        match self.peek().clone() {
+        let compound_op = match self.peek() {
+            TokenKind::Assign => None,
+            TokenKind::PlusAssign => Some(BinaryOp::Add),
+            TokenKind::MinusAssign => Some(BinaryOp::Sub),
+            TokenKind::StarAssign => Some(BinaryOp::Mul),
+            TokenKind::SlashAssign => Some(BinaryOp::Div),
+            TokenKind::PercentAssign => Some(BinaryOp::Mod),
+            TokenKind::PowAssign => Some(BinaryOp::Pow),
+            TokenKind::DotAssign => Some(BinaryOp::Concat),
+            TokenKind::AmpersandAssign => Some(BinaryOp::BitwiseAnd),
+            TokenKind::PipeAssign => Some(BinaryOp::BitwiseOr),
+            TokenKind::CaretAssign => Some(BinaryOp::BitwiseXor),
+            TokenKind::ShiftLeftAssign => Some(BinaryOp::ShiftLeft),
+            TokenKind::ShiftRightAssign => Some(BinaryOp::ShiftRight),
+            // The target is evaluated once (zend_compile_assign_coalesce).
+            TokenKind::NullCoalesceAssign => Some(BinaryOp::Coalesce),
+            _ => return Ok(left),
+        };
+        let assign_span = self.span();
+        self.advance();
+        let by_ref = compound_op.is_none() && self.eat(&TokenKind::Ampersand);
+        let right = self.parse_assignment()?;
+        let after_span = self.span();
+        // In PHP's grammar an assignment is `variable '=' expr`: the operator
+        // always binds to the variable right before it, however tightly the
+        // operators to its left bind. `$a + !$b = $c` is `$a + !($b = $c)`,
+        // `$s ?? $s = ''` is `$s ?? ($s = '')`.
+        Self::graft_assignment(left, move |target| {
             // A class constant is not writable: `C::X = v` is a syntax error.
-            TokenKind::Assign if matches!(left.kind, ExprKind::ClassConstAccess { .. }) => {
-                Err(ParseError {
+            if compound_op.is_none()
+                && !by_ref
+                && matches!(target.kind, ExprKind::ClassConstAccess { .. })
+            {
+                return Err(ParseError {
                     message: "syntax error, unexpected token \"=\"".into(),
-                    span: self.span(),
-                })
+                    span: assign_span,
+                });
             }
-            TokenKind::Assign => {
-                self.advance();
-                if self.eat(&TokenKind::Ampersand) {
-                    let right = self.parse_assignment()?;
-                    // Nor can a reference to one be taken (`$a = &C::X`).
-                    if matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
-                        return Err(ParseError {
-                            message: "syntax error, unexpected token \";\", expecting \"->\" or \"?->\" or \"{\" or \"[\"".into(),
-                            span: self.span(),
-                        });
-                    }
-                    Ok(Expr {
-                        span: left.span.merge(right.span),
-                        kind: ExprKind::AssignRef {
-                            target: Box::new(left),
-                            value: Box::new(right),
-                        },
-                    })
-                } else {
-                    let right = self.parse_assignment()?;
-                    // If left side is not a valid l-value, try to restructure the AST
-                    // to allow assignment to inner l-values. This handles PHP patterns like:
-                    //   null !== $key = expr  →  null !== ($key = expr)
-                    //   !$stmt = expr          →  !($stmt = expr)
-                    //   @$x = expr             →  @($x = expr)
-                    if !Self::is_lvalue(&left) {
-                        // Binary op: (expr OP $var) = val → expr OP ($var = val)
-                        if matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r))
-                        {
-                            if let ExprKind::BinaryOp {
-                                op,
-                                left: bin_left,
-                                right: bin_right,
-                            } = left.kind
-                            {
-                                let assign = Expr {
-                                    span: bin_right.span.merge(right.span),
-                                    kind: ExprKind::Assign {
-                                        target: bin_right,
-                                        value: Box::new(right),
-                                    },
-                                };
-                                return Ok(Expr {
-                                    span: bin_left.span.merge(assign.span),
-                                    kind: ExprKind::BinaryOp {
-                                        op,
-                                        left: bin_left,
-                                        right: Box::new(assign),
-                                    },
-                                });
-                            }
-                        }
-                        // Unary prefix: (!$var) = val → !($var = val)
-                        if matches!(&left.kind, ExprKind::UnaryOp { operand: o, prefix: true, .. } if Self::is_lvalue(o))
-                        {
-                            if let ExprKind::UnaryOp {
-                                op,
-                                operand,
-                                prefix,
-                            } = left.kind
-                            {
-                                let assign = Expr {
-                                    span: operand.span.merge(right.span),
-                                    kind: ExprKind::Assign {
-                                        target: operand,
-                                        value: Box::new(right),
-                                    },
-                                };
-                                return Ok(Expr {
-                                    span: left.span.merge(assign.span),
-                                    kind: ExprKind::UnaryOp {
-                                        op,
-                                        operand: Box::new(assign),
-                                        prefix,
-                                    },
-                                });
-                            }
-                        }
-                        // Suppress: (@$var) = val → @($var = val)
-                        if matches!(&left.kind, ExprKind::Suppress(o) if Self::is_lvalue(o)) {
-                            if let ExprKind::Suppress(operand) = left.kind {
-                                let assign = Expr {
-                                    span: operand.span.merge(right.span),
-                                    kind: ExprKind::Assign {
-                                        target: operand,
-                                        value: Box::new(right),
-                                    },
-                                };
-                                return Ok(Expr {
-                                    span: left.span.merge(assign.span),
-                                    kind: ExprKind::Suppress(Box::new(assign)),
-                                });
-                            }
-                        }
-                    }
-                    Ok(Expr {
-                        span: left.span.merge(right.span),
-                        kind: ExprKind::Assign {
-                            target: Box::new(left),
-                            value: Box::new(right),
-                        },
-                    })
+            // Nor can a reference to one be taken (`$a = &C::X`).
+            if by_ref && matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
+                return Err(ParseError {
+                    message: "syntax error, unexpected token \";\", expecting \"->\" or \"?->\" or \"{\" or \"[\"".into(),
+                    span: after_span,
+                });
+            }
+            let span = target.span.merge(right.span);
+            let target = Box::new(target);
+            let value = Box::new(right);
+            let kind = match compound_op {
+                None if by_ref => ExprKind::AssignRef { target, value },
+                None => ExprKind::Assign { target, value },
+                Some(op) => ExprKind::CompoundAssign { op, target, value },
+            };
+            Ok(Expr { span, kind })
+        })
+    }
+
+    /// Attach an assignment to the rightmost operand of `left` that the
+    /// assignment operator directly follows (see parse_assignment_inner).
+    fn graft_assignment<F>(left: Expr, build: F) -> ParseResult<Expr>
+    where
+        F: FnOnce(Expr) -> ParseResult<Expr>,
+    {
+        if Self::is_lvalue(&left) {
+            return build(left);
+        }
+        let span = left.span;
+        Ok(match left.kind {
+            ExprKind::BinaryOp { op, left: l, right } => {
+                let right = Self::graft_assignment(*right, build)?;
+                Expr {
+                    span: span.merge(right.span),
+                    kind: ExprKind::BinaryOp {
+                        op,
+                        left: l,
+                        right: Box::new(right),
+                    },
                 }
             }
-            TokenKind::PlusAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Add,
-                        target: Box::new(left),
-                        value: Box::new(right),
+            ExprKind::UnaryOp {
+                op,
+                operand,
+                prefix: true,
+            } if !matches!(op, UnaryOp::PreIncrement | UnaryOp::PreDecrement) => {
+                let operand = Self::graft_assignment(*operand, build)?;
+                Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::UnaryOp {
+                        op,
+                        operand: Box::new(operand),
+                        prefix: true,
                     },
-                })
+                }
             }
-            TokenKind::MinusAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Sub,
-                        target: Box::new(left),
-                        value: Box::new(right),
+            ExprKind::Cast(ty, operand) => {
+                let operand = Self::graft_assignment(*operand, build)?;
+                Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(ty, Box::new(operand)),
+                }
+            }
+            ExprKind::Suppress(operand) => {
+                let operand = Self::graft_assignment(*operand, build)?;
+                Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Suppress(Box::new(operand)),
+                }
+            }
+            ExprKind::NullCoalesce { left: l, right } => {
+                let right = Self::graft_assignment(*right, build)?;
+                Expr {
+                    span: span.merge(right.span),
+                    kind: ExprKind::NullCoalesce {
+                        left: l,
+                        right: Box::new(right),
                     },
-                })
+                }
             }
-            TokenKind::StarAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Mul,
-                        target: Box::new(left),
-                        value: Box::new(right),
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                let if_false = Self::graft_assignment(*if_false, build)?;
+                Expr {
+                    span: span.merge(if_false.span),
+                    kind: ExprKind::Ternary {
+                        condition,
+                        if_true,
+                        if_false: Box::new(if_false),
                     },
-                })
+                }
             }
-            TokenKind::SlashAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Div,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::PercentAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Mod,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::PowAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Pow,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::DotAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Concat,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::AmpersandAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::BitwiseAnd,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::PipeAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::BitwiseOr,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::CaretAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::BitwiseXor,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::ShiftLeftAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::ShiftLeft,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::ShiftRightAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                Ok(Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::ShiftRight,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            TokenKind::NullCoalesceAssign => {
-                self.advance();
-                let right = self.parse_assignment()?;
-                let span = left.span.merge(right.span);
-                // The target is evaluated once (zend_compile_assign_coalesce).
-                Ok(Expr {
-                    span,
-                    kind: ExprKind::CompoundAssign {
-                        op: BinaryOp::Coalesce,
-                        target: Box::new(left),
-                        value: Box::new(right),
-                    },
-                })
-            }
-            _ => Ok(left),
-        }
+            kind => build(Expr { span, kind })?,
+        })
     }
 
     fn parse_null_coalesce(&mut self) -> ParseResult<Expr> {
