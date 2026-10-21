@@ -99,8 +99,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"convert_uudecode", convert_uudecode_fn);
     vm.register_function(b"quoted_printable_encode", quoted_printable_encode_fn);
     vm.register_function(b"quoted_printable_decode", quoted_printable_decode_fn);
-    vm.register_function(b"strcoll", strcoll_fn);
-    vm.register_function(b"money_format", money_format_fn);
     vm.register_function(b"settype", settype_fn);
 
     // Register parameter types for strict_types enforcement on builtins
@@ -1412,6 +1410,19 @@ pub fn do_sprintf(args: &[Value]) -> Vec<u8> {
 
 /// Sprintf implementation with VM reference (for __toString invocation and
 /// for raising errors). Errors set the VM's current_exception.
+/// Replace the '.' of a formatted number by the LC_NUMERIC decimal point.
+fn localize_decimal_point(s: &mut String) {
+    let dp = crate::locale::decimal_point();
+    if dp != b'.' {
+        if let Some(p) = s.find('.') {
+            let mut b = std::mem::take(s).into_bytes();
+            b[p] = dp;
+            *s = String::from_utf8(b)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        }
+    }
+}
+
 pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, VmError> {
     do_sprintf_inner(Some(vm), args)
 }
@@ -1846,7 +1857,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     object_warn_float(&mut vm, arg);
                     let f = arg.to_double();
                     let prec = precision_usize.unwrap_or(6);
-                    let s = format!("{:.prec$}", f);
+                    let mut s = format!("{:.prec$}", f);
+                    // %f uses the locale's decimal point, %F does not.
+                    if spec == b'f' {
+                        localize_decimal_point(&mut s);
+                    }
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
                         format!("+{}", s).into_bytes()
                     } else {
@@ -1960,7 +1975,10 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                         }
                     };
                     let upper = matches!(spec, b'G' | b'H');
-                    let s = if upper { s.to_uppercase() } else { s };
+                    let mut s = if upper { s.to_uppercase() } else { s };
+                    if matches!(spec, b'g' | b'G') {
+                        localize_decimal_point(&mut s);
+                    }
                     if show_sign && !s.starts_with('-') && !f.is_nan() {
                         format!("+{}", s).into_bytes()
                     } else {
@@ -6978,22 +6996,6 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
     }
-}
-
-fn strcoll_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let cmp = s1.as_bytes().cmp(s2.as_bytes());
-    Ok(Value::Long(match cmp {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
-}
-
-fn money_format_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // money_format() is removed in PHP 8
-    Ok(Value::False)
 }
 
 fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

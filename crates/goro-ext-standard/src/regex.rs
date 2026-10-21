@@ -439,13 +439,18 @@ impl<'a> RegexParser<'a> {
                     negated: false,
                 }
             } else {
+                let mut ranges = vec![
+                    CharRange::Range(b'a' as u32, b'z' as u32),
+                    CharRange::Range(b'A' as u32, b'Z' as u32),
+                    CharRange::Range(b'0' as u32, b'9' as u32),
+                    CharRange::Single(b'_' as u32),
+                ];
+                // Locale character tables (setlocale(LC_CTYPE, ...)).
+                for b in crate::locale::locale_word_bytes() {
+                    ranges.push(CharRange::Single(b as u32));
+                }
                 RegexNode::CharClass {
-                    ranges: vec![
-                        CharRange::Range(b'a' as u32, b'z' as u32),
-                        CharRange::Range(b'A' as u32, b'Z' as u32),
-                        CharRange::Range(b'0' as u32, b'9' as u32),
-                        CharRange::Single(b'_' as u32),
-                    ],
+                    ranges,
                     classes: vec![],
                     anti_classes: vec![],
                     negated: false,
@@ -459,13 +464,17 @@ impl<'a> RegexParser<'a> {
                     negated: true,
                 }
             } else {
+                let mut ranges = vec![
+                    CharRange::Range(b'a' as u32, b'z' as u32),
+                    CharRange::Range(b'A' as u32, b'Z' as u32),
+                    CharRange::Range(b'0' as u32, b'9' as u32),
+                    CharRange::Single(b'_' as u32),
+                ];
+                for b in crate::locale::locale_word_bytes() {
+                    ranges.push(CharRange::Single(b as u32));
+                }
                 RegexNode::CharClass {
-                    ranges: vec![
-                        CharRange::Range(b'a' as u32, b'z' as u32),
-                        CharRange::Range(b'A' as u32, b'Z' as u32),
-                        CharRange::Range(b'0' as u32, b'9' as u32),
-                        CharRange::Single(b'_' as u32),
-                    ],
+                    ranges,
                     classes: vec![],
                     anti_classes: vec![],
                     negated: true,

@@ -314,7 +314,6 @@ final class StreamBucket {
     vm.register_function(b"property_exists", property_exists);
     vm.register_function(b"method_exists", method_exists);
     vm.register_function(b"is_object", is_object);
-    vm.register_function(b"setlocale", setlocale);
     vm.register_function(b"debug_zval_refcount", debug_zval_refcount);
     vm.register_function(b"compact", compact);
     vm.register_function(b"extract", extract_fn);
@@ -711,8 +710,6 @@ final class StreamBucket {
     vm.register_function(b"connection_aborted", connection_aborted_fn);
     vm.register_function(b"connection_status", connection_status_fn);
     // get_html_translation_table is registered by strings::register with proper flag handling
-    vm.register_function(b"nl_langinfo", nl_langinfo_fn);
-    vm.register_function(b"localeconv", localeconv_fn);
     vm.register_function(b"time_nanosleep", time_nanosleep_fn);
     vm.register_function(b"time_sleep_until", time_sleep_until_fn);
     vm.register_function(b"socket_get_status", stream_get_meta_data_fn); // alias
@@ -5940,20 +5937,6 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         _ => Value::False,
     })
-}
-fn setlocale(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Return the locale string (simplified - just return what was requested)
-    if args.len() >= 2 {
-        let locale = args.get(1).unwrap_or(&Value::Null).to_php_string();
-        if locale.is_empty() || locale.as_bytes() == b"0" {
-            // Query current locale
-            Ok(Value::String(PhpString::from_bytes(b"C")))
-        } else {
-            Ok(Value::String(locale))
-        }
-    } else {
-        Ok(Value::String(PhpString::from_bytes(b"C")))
-    }
 }
 fn debug_zval_refcount(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
@@ -20014,65 +19997,6 @@ fn connection_aborted_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
 
 fn connection_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
-}
-
-fn nl_langinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"")))
-}
-
-fn localeconv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut result = PhpArray::new();
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"decimal_point")),
-        Value::String(PhpString::from_bytes(b".")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"thousands_sep")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"int_curr_symbol")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"currency_symbol")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"mon_decimal_point")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"mon_thousands_sep")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"positive_sign")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"negative_sign")),
-        Value::String(PhpString::from_bytes(b"")),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"int_frac_digits")),
-        Value::Long(127),
-    );
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"frac_digits")),
-        Value::Long(127),
-    );
-    let grouping = PhpArray::new();
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"grouping")),
-        Value::Array(Rc::new(RefCell::new(grouping))),
-    );
-    let mon_grouping = PhpArray::new();
-    result.set(
-        ArrayKey::String(PhpString::from_bytes(b"mon_grouping")),
-        Value::Array(Rc::new(RefCell::new(mon_grouping))),
-    );
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn time_nanosleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -118,7 +118,7 @@ fn ctype_alpha(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_alpha",
-        |b| b.is_ascii_alphabetic(),
+        |b| unsafe { libc::isalpha(b as i32) != 0 },
         false,
         false,
     ))
@@ -128,7 +128,7 @@ fn ctype_digit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_digit",
-        |b| b.is_ascii_digit(),
+        |b| unsafe { libc::isdigit(b as i32) != 0 },
         true,
         false,
     ))
@@ -138,7 +138,7 @@ fn ctype_alnum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_alnum",
-        |b| b.is_ascii_alphanumeric(),
+        |b| unsafe { libc::isalnum(b as i32) != 0 },
         true,
         false,
     ))
@@ -148,7 +148,7 @@ fn ctype_upper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_upper",
-        |b| b.is_ascii_uppercase(),
+        |b| unsafe { libc::isupper(b as i32) != 0 },
         false,
         false,
     ))
@@ -158,7 +158,7 @@ fn ctype_lower(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_lower",
-        |b| b.is_ascii_lowercase(),
+        |b| unsafe { libc::islower(b as i32) != 0 },
         false,
         false,
     ))
@@ -168,7 +168,7 @@ fn ctype_space(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_space",
-        |b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C),
+        |b| unsafe { libc::isspace(b as i32) != 0 },
         false,
         false,
     ))
@@ -178,7 +178,7 @@ fn ctype_cntrl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_cntrl",
-        |b| b.is_ascii_control(),
+        |b| unsafe { libc::iscntrl(b as i32) != 0 },
         false,
         false,
     ))
@@ -188,7 +188,7 @@ fn ctype_graph(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_graph",
-        |b| b.is_ascii_graphic(),
+        |b| unsafe { libc::isgraph(b as i32) != 0 },
         true,
         true,
     ))
@@ -198,7 +198,7 @@ fn ctype_print(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_print",
-        |b| (0x20..=0x7e).contains(&b),
+        |b| unsafe { libc::isprint(b as i32) != 0 },
         true,
         true,
     ))
@@ -208,7 +208,7 @@ fn ctype_punct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_punct",
-        |b| b.is_ascii_punctuation(),
+        |b| unsafe { libc::ispunct(b as i32) != 0 },
         false,
         false,
     ))
@@ -218,7 +218,7 @@ fn ctype_xdigit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm,
         args,
         "ctype_xdigit",
-        |b| b.is_ascii_hexdigit(),
+        |b| unsafe { libc::isxdigit(b as i32) != 0 },
         true,
         false,
     ))

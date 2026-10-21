@@ -10,6 +10,7 @@ pub mod html;
 pub(crate) mod html_tables;
 pub mod image;
 pub mod ini_parser;
+pub mod locale;
 pub mod math;
 pub mod misc;
 pub mod ob;
@@ -49,6 +50,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     request::register(vm);
     basedir_guard::register(vm);
     url_scanner::register(vm);
+    locale::register(vm);
     misc::userstream::register(vm);
     register_builtin_param_names(vm);
 }
