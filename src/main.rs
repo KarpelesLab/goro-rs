@@ -288,6 +288,9 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
             let mut handle = stdout.lock();
             handle.write_all(&output).ok();
             handle.flush().ok();
+            if vm.exit_requested && vm.exit_code != 0 {
+                process::exit(vm.exit_code as i32);
+            }
         }
         Err(e) => {
             // The VM displays uncaught exceptions / fatal errors itself

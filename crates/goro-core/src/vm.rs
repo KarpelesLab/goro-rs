@@ -434,6 +434,8 @@ pub struct Vm {
     fiber_stack: Vec<Option<Value>>,
     /// Whether exit() or die() has been called (signals script termination)
     pub exit_requested: bool,
+    /// Status passed to exit() (process exit code for the CLI).
+    pub exit_code: i64,
     /// Set to true when emit_fatal_at has already written the "Fatal error: ..."
     /// line to vm.output, so the top-level error handler does not re-emit it.
     pub fatal_emitted: bool,
@@ -579,6 +581,7 @@ impl Vm {
             current_fiber: None,
             fiber_stack: Vec::new(),
             exit_requested: false,
+            exit_code: 0,
             fatal_emitted: false,
             property_hook_stack: Vec::new(),
             include_return_cvs: None,
@@ -23881,17 +23884,59 @@ impl Vm {
                 OpCode::ExitOp => {
                     // exit/die: if the value is an integer, it's the exit code (don't print)
                     // if it's a string or other type, echo it
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    match &val {
-                        Value::Long(_) => {
-                            // Integer exit code - don't echo
+                    // exit(string|int $status = 0): ints set the exit status,
+                    // strings are printed; other types follow arg coercion rules.
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let mut type_err: Option<String> = None;
+                    let code: i64 = match &val {
+                        Value::Long(n) => *n,
+                        Value::True => 1,
+                        Value::False => 0,
+                        Value::Null | Value::Undef => {
+                            self.emit_deprecated_at("exit(): Passing null to parameter #1 ($status) of type string|int is deprecated", op.line);
+                            0
                         }
-                        _ => {
-                            // String or other value - echo it
-                            let s = val.to_php_string();
+                        Value::Double(f) => {
+                            if f.is_finite() && f.fract() != 0.0 {
+                                self.emit_deprecated_at(&format!("Implicit conversion from float {} to int loses precision",
+                                    crate::value::Value::Double(*f).to_php_string().to_string_lossy()), op.line);
+                            }
+                            *f as i64
+                        }
+                        Value::String(s) => {
+                            let s = s.clone();
                             self.write_output(s.as_bytes());
+                            0
                         }
+                        Value::Object(o) => {
+                            let cl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let has_to_string = self.classes.get(&cl).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+                            if has_to_string {
+                                let s = val.to_php_string();
+                                self.write_output(s.as_bytes());
+                            } else {
+                                type_err = Some(format!("exit(): Argument #1 ($status) must be of type string|int, {} given",
+                                    crate::value::display_class_name(&o.borrow().class_name)));
+                            }
+                            0
+                        }
+                        other => {
+                            type_err = Some(format!("exit(): Argument #1 ($status) must be of type string|int, {} given",
+                                Vm::value_type_name(other)));
+                            0
+                        }
+                    };
+                    if let Some(msg) = type_err {
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
                     }
+                    self.exit_code = code;
                     self.exit_requested = true;
                     return Ok(Value::Null);
                 }
