@@ -2071,6 +2071,19 @@ impl Compiler {
         }
     }
 
+    /// FreeTmps over a range of temporaries, if it is not empty
+    fn emit_free_tmps(&mut self, (start, end): (u32, u32), line: u32) {
+        if end > start {
+            self.op_array.emit(Op {
+                opcode: OpCode::FreeTmps,
+                op1: OperandType::Tmp(start),
+                op2: OperandType::Tmp(end),
+                result: OperandType::Unused,
+                line,
+            });
+        }
+    }
+
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
         match &stmt.kind {
             StmtKind::Nop => Ok(()),
@@ -2288,7 +2301,9 @@ impl Compiler {
                 elseif_clauses,
                 else_body,
             } => {
+                let cond_tmps = self.op_array.temp_count;
                 let cond = self.compile_expr(condition)?;
+                let cond_tmps = (cond_tmps, self.op_array.temp_count);
 
                 // Jump past body if condition is false
                 let jmp_false = self.op_array.emit(Op {
@@ -2298,6 +2313,9 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+                // The condition's temporaries die once it is tested (e.g. the
+                // object of `if (!$x = f())`), on both paths.
+                self.emit_free_tmps(cond_tmps, stmt.span.line);
 
                 // Compile body
                 for s in body {
@@ -2320,10 +2338,13 @@ impl Compiler {
                 // Patch false jump to here
                 let after_body = self.op_array.current_offset();
                 self.op_array.patch_jump(jmp_false, after_body);
+                self.emit_free_tmps(cond_tmps, stmt.span.line);
 
                 // Elseif clauses
                 for (elseif_cond, elseif_body) in elseif_clauses {
+                    let tmps_start = self.op_array.temp_count;
                     let cond = self.compile_expr(elseif_cond)?;
+                    let cond_tmps = (tmps_start, self.op_array.temp_count);
                     let jmp_false = self.op_array.emit(Op {
                         opcode: OpCode::JmpZ,
                         op1: cond,
@@ -2331,6 +2352,7 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
+                    self.emit_free_tmps(cond_tmps, stmt.span.line);
                     for s in elseif_body {
                         self.compile_stmt(s)?;
                     }
@@ -2344,6 +2366,7 @@ impl Compiler {
                     end_jumps.push(jmp_end);
                     let after_elseif = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp_false, after_elseif);
+                    self.emit_free_tmps(cond_tmps, stmt.span.line);
                 }
 
                 // Else body
