@@ -1330,6 +1330,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let callback = &args[0];
+    if let Value::String(s) = callback {
+        if let Some(msg) = Vm::forbidden_dynamic_call(s.as_bytes()) {
+            let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: vm.current_line });
+        }
+    }
     let call_args: Vec<Value> = args[1..].to_vec();
     // Take any forwarded named args from the VM
     let named_args: Vec<(Vec<u8>, Value)> = std::mem::take(&mut vm.pending_named_args);

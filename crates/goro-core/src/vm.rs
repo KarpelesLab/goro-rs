@@ -1956,9 +1956,25 @@ impl Vm {
     }
 
     /// Call a user callback (string function name, array [class/obj, method], or closure object).
+    /// Scope-introspection functions may not be called dynamically
+    /// ("Cannot call extract() dynamically"); returns the error message.
+    pub fn forbidden_dynamic_call(name: &[u8]) -> Option<String> {
+        let l: Vec<u8> = name.strip_prefix(b"\\").unwrap_or(name).iter().map(|b| b.to_ascii_lowercase()).collect();
+        if matches!(l.as_slice(), b"extract" | b"compact" | b"get_defined_vars" | b"func_get_args" | b"func_get_arg" | b"func_num_args") {
+            Some(format!("Cannot call {}() dynamically", String::from_utf8_lossy(&l)))
+        } else {
+            None
+        }
+    }
+
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
         match callback {
             Value::String(s) => {
+                if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
+                    let exc = self.create_exception(b"Error", &msg, self.current_line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: self.current_line });
+                }
                 let func_name = s.as_bytes().to_vec();
                 let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
@@ -17672,6 +17688,114 @@ impl Vm {
                 // Function calls
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // `$callable()` where $callable is an [obj|class, method] array
+                    // (closures are also arrays here: [closure_name, captures...]).
+                    let is_closure_array = matches!(&name_val, Value::Array(arr)
+                        if matches!(arr.borrow().get_int(0), Some(Value::String(s))
+                            if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_")
+                                // bound-method closures: ["Class::method", $this]
+                                || b.windows(2).any(|w| w == b"::") }));
+                    // 'Class::method' strings are static calls: same checks as ['Class', 'method'].
+                    let static_str_callable: Option<Value> = match &name_val {
+                        // Only for dynamic calls: static `A::m()` syntax also arrives
+                        // here as a constant "A::m" name.
+                        Value::String(s) if !Self::is_closure_value(&name_val) && !matches!(op.op1, OperandType::Const(_)) => {
+                            let b = s.as_bytes();
+                            b.windows(2).position(|w| w == b"::").map(|p| {
+                                let mut a = PhpArray::new();
+                                a.push(Value::String(PhpString::from_vec(b[..p].to_vec())));
+                                a.push(Value::String(PhpString::from_vec(b[p + 2..].to_vec())));
+                                Value::Array(Rc::new(RefCell::new(a)))
+                            })
+                        }
+                        _ => None,
+                    };
+                    let dyn_check_val = static_str_callable.as_ref().unwrap_or(&name_val);
+                    let dyn_err: Option<(&'static [u8], String)> = match dyn_check_val {
+                        Value::String(s) if !matches!(op.op1, OperandType::Const(_)) && {
+                            let l: Vec<u8> = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes()).iter().map(|b| b.to_ascii_lowercase()).collect();
+                            matches!(l.as_slice(), b"extract" | b"compact" | b"get_defined_vars" | b"func_get_args" | b"func_get_arg" | b"func_num_args")
+                        } => {
+                            let l: Vec<u8> = s.as_bytes().strip_prefix(b"\\").unwrap_or(s.as_bytes()).iter().map(|b| b.to_ascii_lowercase()).collect();
+                            Some((b"Error", format!("Cannot call {}() dynamically", String::from_utf8_lossy(&l))))
+                        }
+                        Value::Array(arr) if !is_closure_array => {
+                            let a = arr.borrow();
+                            if a.len() != 2 {
+                                Some((b"Error", "Array callback must have exactly two elements".to_string()))
+                            } else if a.get_int(0).is_none() || a.get_int(1).is_none() {
+                                Some((b"Error", "Array callback has to contain indices 0 and 1".to_string()))
+                            } else {
+                                let target = a.get_int(0).cloned().unwrap_or(Value::Null).deref();
+                                let method = a.get_int(1).cloned().unwrap_or(Value::Null).deref();
+                                drop(a);
+                                match (&target, &method) {
+                                    (_, m) if !matches!(m, Value::String(_)) => Some((b"Error", "Method name must be a string".to_string())),
+                                    (Value::Object(_), _) => None,
+                                    (Value::String(cn), Value::String(m)) => {
+                                        let cl: Vec<u8> = cn.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if !self.classes.contains_key(&cl) && !matches!(cl.as_slice(), b"self" | b"parent" | b"static") {
+                                            self.try_autoload_class(cn.as_bytes());
+                                        }
+                                        if !self.classes.contains_key(&cl) && !matches!(cl.as_slice(), b"self" | b"parent" | b"static") && !self.is_known_builtin_class(&cl) {
+                                            Some((b"Error", format!("Class \"{}\" not found", String::from_utf8_lossy(cn.as_bytes()))))
+                                        } else if let Some(c) = self.classes.get(&cl) {
+                                            let ml: Vec<u8> = m.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            // zend_init_dynamic_call_array: a class-string callable
+                                            // is always a static call (no $this binding).
+                                            let this_in_scope = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                                                && matches!(cvs.first(), Some(Value::Object(o))
+                                                    if { let ocl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect(); ocl == cl || self.class_extends(&ocl, &cl) });
+                                            match c.get_method(&ml) {
+                                                Some(meth) if !meth.is_static => Some((b"Error", format!("Non-static method {}::{}() cannot be called statically",
+                                                    String::from_utf8_lossy(&c.name), String::from_utf8_lossy(&meth.name)))),
+                                                Some(_) => None,
+                                                None if c.get_method(b"__callstatic").is_some() => None,
+                                                None if c.get_method(b"__call").is_some() && this_in_scope => Some((b"Error", format!("Non-static method {}::{}() cannot be called statically",
+                                                    String::from_utf8_lossy(&c.name), String::from_utf8_lossy(m.as_bytes())))),
+                                                None => Some((b"Error", format!("Call to undefined method {}::{}()",
+                                                    String::from_utf8_lossy(&c.name), String::from_utf8_lossy(m.as_bytes())))),
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => Some((b"Error", "First array member is not a valid class name or object".to_string())),
+                                }
+                            }
+                        }
+                        Value::Object(o) => {
+                            let cl: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let invokable = self.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false)
+                                || cl == b"closure";
+                            if invokable { None } else {
+                                Some((b"Error", format!("Object of type {} is not callable", crate::value::display_class_name(&o.borrow().class_name))))
+                            }
+                        }
+                        Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null | Value::Undef | Value::Resource(_) => {
+                            Some((b"Error", format!("Value of type {} is not callable", Vm::value_type_name(&name_val))))
+                        }
+                        _ => None,
+                    };
+                    if let Some((cls, msg)) = dyn_err {
+                        let exc = self.create_exception(cls, &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                    }
+                    if matches!(&name_val, Value::Array(_)) && !is_closure_array {
+                        // Dispatch through call_user_func (handles every array-callable form).
+                        self.pending_calls.push(PendingCall {
+                            name: PhpString::from_bytes(b"call_user_func"),
+                            args: vec![name_val.clone()],
+                            named_args: Vec::new(),
+                        });
+                        continue;
+                    }
                     // Check if this is a closure array [name, use_val_1, use_val_2, ...]
                     if let Value::Array(arr) = &name_val {
                         let arr = arr.borrow();
@@ -17745,7 +17869,7 @@ impl Vm {
                 }
                 OpCode::InitDynamicStaticCall => {
                     // Dynamic static call: $obj::method() or $class::method()
-                    let class_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let class_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let method_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let method_name = method_val.to_php_string();
 
@@ -17759,19 +17883,29 @@ impl Vm {
                         | Value::Long(_) | Value::Double(_) | Value::Array(_) => {
                             // Invalid type for class name
                             let err_msg = "Class name must be a valid object or a string";
-                            let exc = self.create_exception(b"TypeError", err_msg, op.line);
+                            let exc = self.create_exception(b"Error", err_msg, op.line);
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
                                 continue;
                             }
                             return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", err_msg),
+                                message: format!("Uncaught Error: {}", err_msg),
                                 line: op.line,
                             });
                         }
                         _ => class_val.to_php_string().as_bytes().to_vec(),
                     };
+                    if !matches!(method_val, Value::String(_)) {
+                        let err_msg = "Method name must be a string";
+                        let exc = self.create_exception(b"Error", err_msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                    }
 
                     let mut func_name = class_name;
                     func_name.extend_from_slice(b"::");
