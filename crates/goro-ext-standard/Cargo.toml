@@ -11,6 +11,7 @@ workspace = true
 goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }
 goro-vfs = { path = "../goro-vfs" }
+goro-pcre = { path = "../goro-pcre" }
 libc = "0.2"
 md-5 = "0.10"
 sha2 = "0.10"

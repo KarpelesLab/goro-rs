@@ -1540,6 +1540,11 @@ fn execute_php_inner_impl(
             }
             continue;
         }
+        // Directives of extension features goro does not build (PCRE JIT):
+        // PHP ignores unknown directives, so ini_get() keeps returning false.
+        if key == "pcre.jit" {
+            continue;
+        }
         let val = if let Ok(n) = value.parse::<i64>() {
             Value::Long(n)
         } else if let Some(resolved) = parse_error_reporting_expr(value) {

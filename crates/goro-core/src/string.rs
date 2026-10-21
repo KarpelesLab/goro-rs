@@ -16,6 +16,8 @@ pub struct PhpString {
 struct PhpStringInner {
     data: Vec<u8>,
     hash: std::cell::Cell<Option<u64>>,
+    /// IS_STR_VALID_UTF8: set once the string is known to be valid UTF-8.
+    valid_utf8: std::cell::Cell<bool>,
     tracked_bytes: usize,
 }
 
@@ -33,6 +35,7 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data: Vec::new(),
                 hash: std::cell::Cell::new(None),
+                valid_utf8: std::cell::Cell::new(false),
                 tracked_bytes: 0, // empty strings don't track
             }),
         }
@@ -47,6 +50,7 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
+                valid_utf8: std::cell::Cell::new(false),
                 tracked_bytes: bytes,
             }),
         }
@@ -59,6 +63,7 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
+                valid_utf8: std::cell::Cell::new(false),
                 tracked_bytes: 0,
             }),
         }
@@ -73,6 +78,7 @@ impl PhpString {
             inner: Rc::new(PhpStringInner {
                 data,
                 hash: std::cell::Cell::new(None),
+                valid_utf8: std::cell::Cell::new(false),
                 tracked_bytes: bytes,
             }),
         }
@@ -92,6 +98,16 @@ impl PhpString {
 
     pub fn is_empty(&self) -> bool {
         self.inner.data.is_empty()
+    }
+
+    /// ZSTR_IS_VALID_UTF8(): the string was already validated as UTF-8.
+    pub fn is_known_valid_utf8(&self) -> bool {
+        self.inner.valid_utf8.get()
+    }
+
+    /// GC_ADD_FLAGS(str, IS_STR_VALID_UTF8)
+    pub fn mark_valid_utf8(&self) {
+        self.inner.valid_utf8.set(true);
     }
 
     /// Get the hash, computing and caching it on first access
