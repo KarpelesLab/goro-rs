@@ -1147,6 +1147,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             // Some parser errors should be "Fatal error" rather than "Parse error"
             let err_msg = &e.message;
             let is_fatal = err_msg.contains("Match expressions")
+                || err_msg.starts_with("Unparenthesized `")
                 || err_msg.contains("Cannot use")
                 || err_msg.starts_with("Cannot create Closure")
                 || err_msg.contains("cannot declare")
@@ -1215,6 +1216,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 || err_msg.starts_with("Invalid numeric literal")
                 || err_msg.starts_with("Invalid body indentation level")
                 || err_msg.starts_with("Invalid indentation - tabs and spaces")
+                || err_msg.starts_with("Unterminated comment")
             {
                 format!(
                     "\nParse error: {} in {} on line {}\n",

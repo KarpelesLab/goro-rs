@@ -205,6 +205,31 @@ impl Parser {
         &self.current().kind
     }
 
+    /// True if tokens[start..end] is a single `( ... )` group (the opening
+    /// paren at `start` is matched by the closing paren at `end - 1`).
+    fn tokens_parenthesized(&self, start: usize, end: usize) -> bool {
+        if end <= start + 1 || end > self.tokens.len() {
+            return false;
+        }
+        if !matches!(self.tokens[start].kind, TokenKind::OpenParen) {
+            return false;
+        }
+        let mut depth = 0i32;
+        for i in start..end {
+            match self.tokens[i].kind {
+                TokenKind::OpenParen => depth += 1,
+                TokenKind::CloseParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i == end - 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn peek_at(&self, offset: usize) -> &TokenKind {
         let idx = (self.pos + offset).min(self.tokens.len() - 1);
         &self.tokens[idx].kind
@@ -3460,7 +3485,27 @@ impl Parser {
                 Some(Box::new(self.parse_expression()?))
             };
             self.expect(&TokenKind::Colon)?;
+            let false_start = self.pos;
             let if_false = self.parse_ternary()?;
+            // PHP's grammar is left-associative and rejects unparenthesized
+            // nesting (except `a ?: b ?: c`). We parse right-associatively,
+            // so check whether the false branch is a bare nested ternary.
+            if let ExprKind::Ternary { if_true: inner_true, .. } = &if_false.kind {
+                let parenthesized = self.tokens_parenthesized(false_start, self.pos);
+                if !parenthesized {
+                    let outer_short = if_true.is_none();
+                    let inner_short = inner_true.is_none();
+                    let msg = match (outer_short, inner_short) {
+                        (false, false) => Some("Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`"),
+                        (true, false) => Some("Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`"),
+                        (false, true) => Some("Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`"),
+                        (true, true) => None,
+                    };
+                    if let Some(m) = msg {
+                        return Err(ParseError { message: m.to_string(), span: cond.span });
+                    }
+                }
+            }
             Ok(Expr {
                 span: cond.span.merge(if_false.span),
                 kind: ExprKind::Ternary {
@@ -4754,10 +4799,13 @@ impl Parser {
                 while !matches!(self.peek(), TokenKind::CloseBracket | TokenKind::Eof) {
                     // Handle empty elements (for list destructuring like [$a, , $c])
                     if matches!(self.peek(), TokenKind::Comma) {
+                        // Zero-width span marks an empty placeholder element
+                        // (distinguishable from a literal `null`).
+                        let prev = self.tokens[self.pos.saturating_sub(1)].span;
                         elements.push(ArrayElement {
                             key: None,
                             value: Expr {
-                                span,
+                                span: Span::new(prev.end, prev.end, prev.line),
                                 kind: ExprKind::Null,
                             },
                             unpack: false,

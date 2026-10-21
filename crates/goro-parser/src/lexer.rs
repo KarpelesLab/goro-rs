@@ -181,7 +181,13 @@ impl<'a> Lexer<'a> {
                                 self.advance();
                                 break;
                             }
-                            None => break,
+                            None => {
+                                crate::push_lexer_error(
+                                    format!("Unterminated comment starting line {}", c_line),
+                                    self.line,
+                                );
+                                break;
+                            }
                             _ => {}
                         }
                     }

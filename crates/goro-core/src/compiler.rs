@@ -118,6 +118,18 @@ pub struct Compiler {
     /// the hoisting pass can decide whether a `extends Parent` class can itself be
     /// hoisted (its parent must already be hoisted or be an internal class).
     hoisted_class_names: std::collections::HashSet<Vec<u8>>,
+    /// Top-level functions declared in this compilation unit: lowercased
+    /// qualified name -> (display name, declaration line).
+    hoisted_function_names: HashMap<Vec<u8>, (Vec<u8>, u32)>,
+    /// Classes declared so far (source order) in the main compile pass,
+    /// lowercased qualified names. Used for `use` name conflict checks.
+    seen_class_symbols: std::collections::HashSet<Vec<u8>>,
+    /// True while running the main (second) top-level compile pass.
+    in_main_pass: bool,
+    /// True when compiling the body of a free (non-closure, non-method)
+    /// function: the class scope is known to be empty, so self/parent/static
+    /// references are compile-time errors.
+    in_free_function: bool,
     /// Whether we're compiling inside a trait (for self:: tracking)
     is_in_trait: bool,
     /// Compile-time warnings (message, line)
@@ -275,6 +287,10 @@ impl Compiler {
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
             hoisted_class_names: std::collections::HashSet::new(),
+            hoisted_function_names: HashMap::new(),
+            seen_class_symbols: std::collections::HashSet::new(),
+            in_main_pass: false,
+            in_free_function: false,
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
@@ -999,6 +1015,7 @@ impl Compiler {
         self.use_function_map = HashMap::new();
         self.use_const_map = HashMap::new();
         // Second pass: compile everything else
+        self.in_main_pass = true;
         for stmt in &program.statements {
             match &stmt.kind {
                 StmtKind::FunctionDecl { .. } => {
@@ -1012,6 +1029,7 @@ impl Compiler {
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
+                    self.seen_class_symbols.insert(qn_lower.clone());
                     if !self.hoisted_class_names.contains(&qn_lower) {
                         self.compile_stmt(stmt)?;
                     }
@@ -1047,6 +1065,7 @@ impl Compiler {
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
+                                    self.seen_class_symbols.insert(qn_lower.clone());
                                     if !self.hoisted_class_names.contains(&qn_lower) {
                                         self.compile_stmt(s)?;
                                     }
@@ -1068,6 +1087,7 @@ impl Compiler {
                 }
             }
         }
+        self.in_main_pass = false;
         // Reject any unresolved gotos at top level (PHP: "'goto' to undefined label").
         // Without this, the placeholder Jmp jumps to ip=0 and causes an infinite loop.
         self.check_pending_gotos()?;
@@ -1122,7 +1142,21 @@ impl Compiler {
                 StmtKind::UseDecl(_) => {
                     self.compile_stmt(stmt)?;
                 }
-                StmtKind::FunctionDecl { .. } => {
+                StmtKind::FunctionDecl { name, .. } => {
+                    let qn = self.prefix_with_namespace(name);
+                    let qn_lower: Vec<u8> = qn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if let Some((prev_name, prev_line)) = self.hoisted_function_names.get(&qn_lower) {
+                        return Err(CompileError {
+                            message: format!(
+                                "Cannot redeclare function {}() (previously declared in {}:{})",
+                                String::from_utf8_lossy(prev_name),
+                                String::from_utf8_lossy(&self.source_file),
+                                prev_line
+                            ),
+                            line: stmt.span.line,
+                        });
+                    }
+                    self.hoisted_function_names.insert(qn_lower, (qn, stmt.span.line));
                     self.compile_stmt(stmt)?;
                 }
                 StmtKind::ClassDecl { name, modifiers, extends, implements, body, .. }
@@ -2046,6 +2080,12 @@ impl Compiler {
             StmtKind::FunctionDecl {
                 name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, returns_by_ref: func_returns_by_ref, ..
             } => {
+                if name.eq_ignore_ascii_case(b"assert") {
+                    return Err(CompileError {
+                        message: "Defining a custom assert() function is not allowed, as the function has special semantics".to_string(),
+                        line: stmt.span.line,
+                    });
+                }
                 // Check for promoted properties in free functions
                 for param in params {
                     if param.visibility.is_some() || param.readonly || param.is_final {
@@ -2095,6 +2135,7 @@ impl Compiler {
                 func_compiler.use_function_map = self.use_function_map.clone();
                 func_compiler.use_const_map = self.use_const_map.clone();
                 func_compiler.op_array.name = qualified_name.clone();
+                func_compiler.in_free_function = self.current_class.is_none();
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.returns_by_ref = *func_returns_by_ref;
                 func_compiler.op_array.decl_line = stmt.span.line;
@@ -2743,6 +2784,18 @@ impl Compiler {
                 }
 
                 for catch in catches.iter() {
+                    for type_parts in &catch.types {
+                        if type_parts.len() == 1
+                            && (type_parts[0].eq_ignore_ascii_case(b"self")
+                                || type_parts[0].eq_ignore_ascii_case(b"parent")
+                                || type_parts[0].eq_ignore_ascii_case(b"static"))
+                        {
+                            return Err(CompileError {
+                                message: "Bad class name in the catch statement".into(),
+                                line: stmt.span.line,
+                            });
+                        }
+                    }
                     // Type check: skip this catch if exception doesn't match
                     let mut next_catch_jumps = Vec::new();
 
@@ -5582,6 +5635,53 @@ impl Compiler {
                             line: stmt.span.line,
                         });
                     }
+                    if self.in_main_pass {
+                        if item.alias.is_none() && item.name.len() == 1 && self.current_namespace.is_empty() {
+                            self.warnings.push((
+                                format!(
+                                    "The use statement with non-compound name '{}' has no effect",
+                                    String::from_utf8_lossy(&alias)
+                                ),
+                                stmt.span.line,
+                            ));
+                        }
+                        let type_str = match item.kind {
+                            UseKind::Normal => "",
+                            UseKind::Function => " function",
+                            UseKind::Constant => " const",
+                        };
+                        let fqn_lower: Vec<u8> = fqn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let already_imported = match item.kind {
+                            UseKind::Normal => self.use_map.contains_key(&alias_lower),
+                            UseKind::Function => self.use_function_map.contains_key(&alias_lower),
+                            UseKind::Constant => self.use_const_map.contains_key(&alias),
+                        };
+                        let mut conflict = already_imported;
+                        if !conflict && matches!(item.kind, UseKind::Normal) {
+                            let check: Vec<u8> = if self.current_namespace.is_empty() {
+                                alias_lower.clone()
+                            } else {
+                                let mut c: Vec<u8> = self.current_namespace.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                c.push(b'\\');
+                                c.extend_from_slice(&alias_lower);
+                                c
+                            };
+                            if self.seen_class_symbols.contains(&check) && check != fqn_lower {
+                                conflict = true;
+                            }
+                        }
+                        if conflict {
+                            return Err(CompileError {
+                                message: format!(
+                                    "Cannot use{} {} as {} because the name is already in use",
+                                    type_str,
+                                    String::from_utf8_lossy(&fqn),
+                                    String::from_utf8_lossy(&alias)
+                                ),
+                                line: stmt.span.line,
+                            });
+                        }
+                    }
                     match item.kind {
                         UseKind::Normal => {
                             self.use_map.insert(alias_lower, fqn);
@@ -5982,9 +6082,27 @@ impl Compiler {
     /// `Const` literal for a named class (with self/parent resolved and `static`
     /// left for late static binding), or a compiled operand for a dynamic class
     /// expression. Mirrors the resolution used by StaticPropGet/StaticPropSet.
+    /// PHP's zend_ensure_valid_class_fetch_type: inside a free function the
+    /// (empty) class scope is known at compile time, so self/parent/static
+    /// are rejected.
+    fn check_class_ref_scope(&self, name: &[u8], line: u32) -> CompileResult<()> {
+        if self.in_free_function && self.current_class.is_none() {
+            for kw in ["self", "parent", "static"] {
+                if name.eq_ignore_ascii_case(kw.as_bytes()) {
+                    return Err(CompileError {
+                        message: format!("Cannot use \"{}\" when no class scope is active", kw),
+                        line,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
         match &class.kind {
             ExprKind::Identifier(name) => {
+                self.check_class_ref_scope(name, class.span.line)?;
                 let resolved = self.resolve_class_name(name);
                 let is_self = resolved.eq_ignore_ascii_case(b"self");
                 let class_name = if is_self {
@@ -7474,6 +7592,15 @@ impl Compiler {
                 });
 
                 for elem in elements {
+                    if elem.key.is_none()
+                        && matches!(elem.value.kind, ExprKind::Null)
+                        && elem.value.span.start == elem.value.span.end
+                    {
+                        return Err(CompileError {
+                            message: "Cannot use empty array elements in arrays".into(),
+                            line: elem.value.span.line,
+                        });
+                    }
                     if elem.unpack {
                         let val = self.compile_expr(&elem.value)?;
                         // Check for compile-time detectable non-array/non-traversable types
@@ -9334,7 +9461,10 @@ impl Compiler {
             ExprKind::ClassConstAccess { class, constant } => {
                 // Handle ClassName::class, ClassName::CONST, self::CONST
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => self.resolve_class_name(name),
+                    ExprKind::Identifier(name) => {
+                        self.check_class_ref_scope(name, class.span.line)?;
+                        self.resolve_class_name(name)
+                    }
                     _ => {
                         // $expr::class - emit GetClassName opcode
                         if constant == b"class" {
@@ -9491,7 +9621,10 @@ impl Compiler {
 
                 // Handle ClassName::method() and parent::method()
                 let class_name = match &class.kind {
-                    ExprKind::Identifier(name) => Some(self.resolve_class_name(name)),
+                    ExprKind::Identifier(name) => {
+                        self.check_class_ref_scope(name, class.span.line)?;
+                        Some(self.resolve_class_name(name))
+                    }
                     _ => None, // Dynamic class expression - resolve at runtime
                 };
 

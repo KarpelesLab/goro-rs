@@ -29315,6 +29315,17 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            if class.is_interface
+                                && !self.classes.contains_key(&parent_lower)
+                                && (parent_lower.ends_with(b"exception") || parent_lower.ends_with(b"error")
+                                    || parent_lower == b"stdclass")
+                            {
+                                return Err(VmError {
+                                    message: format!("{} cannot implement {} - it is not an interface",
+                                        String::from_utf8_lossy(&class.name), String::from_utf8_lossy(parent_name)),
+                                    line: op.line,
+                                });
+                            }
                             if let Some(parent) = self.classes.get(&parent_lower).cloned() {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
@@ -29970,7 +29981,7 @@ impl Vm {
                             }
                             if let Some(iface) = self.classes.get(&iface_lower).cloned() {
                                 // Check that we're implementing an interface, not a class
-                                if !iface.is_interface && !class.is_interface {
+                                if !iface.is_interface {
                                     let iface_display = String::from_utf8_lossy(iface_name).to_string();
                                     let class_display = String::from_utf8_lossy(&class.name).to_string();
                                     return Err(VmError {
