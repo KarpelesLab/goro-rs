@@ -108,6 +108,7 @@ pub const XML_WAR_NS_URI_RELATIVE: i32 = 100;
 pub const XML_WAR_SPACE_VALUE: i32 = 102;
 pub const XML_WAR_ENTITY_REDEFINED: i32 = 107;
 pub const XML_ERR_UNKNOWN_VERSION: i32 = 108;
+pub const XML_ERR_NAME_TOO_LONG: i32 = 110;
 pub const XML_ERR_RESOURCE_LIMIT: i32 = 114;
 pub const XML_ERR_REDECL_PREDEF_ENTITY: i32 = 117;
 pub const XML_ERR_INT_SUBSET_NOT_FINISHED: i32 = 118;
@@ -178,7 +179,7 @@ pub fn err_string(code: i32) -> &'static str {
         XML_ERR_NOT_WELL_BALANCED => "chunk is not well balanced",
         XML_ERR_EXTRA_CONTENT => "extra content at the end of well balanced chunk",
         XML_ERR_VERSION_MISSING => "Malformed declaration expecting version",
-        110 => "Name too long",
+        XML_ERR_NAME_TOO_LONG => "Name too long",
         XML_ERR_INVALID_ENCODING => "Invalid bytes in character encoding",
         XML_ERR_RESOURCE_LIMIT => "Resource limit exceeded",
         XML_ERR_REDECL_PREDEF_ENTITY => "Invalid redeclaration of predefined entity",
@@ -647,6 +648,18 @@ pub trait Sink {
     fn current_element(&self) -> Option<(String, Option<String>)> {
         None
     }
+    /// SAX getEntity, called (only with `ParserState::sax_get_entity`) for
+    /// each general entity reference outside the DTD, with the entity the
+    /// parser knows (predefined or declared) and whether the reference is in
+    /// content rather than in an attribute value.
+    fn get_entity(
+        &mut self,
+        _p: &mut ParserState,
+        _name: &str,
+        _ent: Option<&PEntity>,
+        _in_content: bool,
+    ) {
+    }
     /// Error notification (the sink may collect or format it).
     fn error(&mut self, _err: &XmlError) {}
     /// Called when an ID attribute is found that is already defined
@@ -668,6 +681,10 @@ pub struct Input {
     lc_line: u32,
     lc_col: u32,
     pub base_line: u32,
+    /// Column at `data[0]` (non-1 after the push parser shrank the buffer).
+    pub base_col: u32,
+    /// Bytes dropped from the front of `data` (xmlParserInput.consumed).
+    pub consumed: u64,
 }
 
 impl Input {
@@ -681,13 +698,32 @@ impl Input {
             lc_line: 1,
             lc_col: 1,
             base_line: 1,
+            base_col: 1,
+            consumed: 0,
         }
+    }
+    /// Drop consumed bytes before `pos - keep` (xmlParserShrink).
+    fn shrink(&mut self, keep: usize) {
+        if self.pos <= keep {
+            return;
+        }
+        let cut = self.pos - keep;
+        let (l, c) = self.line_col(cut);
+        let d = Rc::make_mut(&mut self.data);
+        d.drain(..cut);
+        self.pos -= cut;
+        self.consumed += cut as u64;
+        self.base_line = l;
+        self.base_col = c;
+        self.lc_pos = 0;
+        self.lc_line = l;
+        self.lc_col = c;
     }
     fn line_col(&mut self, pos: usize) -> (u32, u32) {
         if pos < self.lc_pos {
             self.lc_pos = 0;
             self.lc_line = self.base_line;
-            self.lc_col = 1;
+            self.lc_col = self.base_col;
         }
         let d = &self.data;
         let mut i = self.lc_pos;
@@ -756,9 +792,32 @@ pub struct ParserState {
     pub quiet: bool,
     /// When set, ID duplicates are checked by the sink.
     pub ids: HashMap<String, ()>,
+    /// Code of the last error (ctxt->errNo); warnings don't set it.
+    pub err_no: i32,
+    /// Level of the last reported diagnostic (ctxt->lastError.level).
+    pub last_err_level: i32,
+    /// SAX1 mode (ctxt->sax2 == 0): no namespace processing, element and
+    /// attribute names are reported as written. Push parser only.
+    pub sax1: bool,
+    /// Call `Sink::get_entity` on general entity references (a SAX
+    /// getEntity callback with XML_PARSE_OLDSAX, as ext/xml installs).
+    pub sax_get_entity: bool,
 }
 
 impl ParserState {
+    /// (line, column, byte index) of the current input position, as
+    /// xmlParserInput line/col and consumed + (cur - base).
+    pub fn position(&mut self) -> (u32, u32, u64) {
+        let n = self.inputs.len();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+        let inp = &mut self.inputs[n - 1];
+        let pos = inp.pos;
+        let (l, c) = inp.line_col(pos);
+        (l, c, inp.consumed + pos as u64)
+    }
+
     pub fn cur_line(&mut self) -> u32 {
         // line of the "real" input (entity inputs without filename use parent)
         let n = self.inputs.len();
@@ -796,8 +855,10 @@ impl ParserState {
             if level == ERR_FATAL {
                 self.well_formed = false;
             }
+            self.err_no = code;
             self.nb_errors += 1;
         }
+        self.last_err_level = level;
         let silent = self.quiet
             || (self.options & XML_PARSE_NOERROR != 0)
             || (level == ERR_WARNING && self.options & XML_PARSE_NOWARNING != 0);
@@ -1000,6 +1061,32 @@ pub struct Parser<'a, S: Sink> {
     ext_sub_uri: Option<String>,
     ext_sub_system: Option<String>,
     depth_limit: usize,
+    // Push parser (xmlParseChunk) state
+    push_state: PushState,
+    check_index: usize,
+    end_check_state: u8,
+    /// Encoding the raw input is converted from, for appended chunks.
+    conv_enc: Option<String>,
+    /// Raw bytes of an incomplete UTF-16 unit at the end of a chunk.
+    conv_pending: Vec<u8>,
+    /// Character data may continue in a later chunk (an incomplete UTF-8
+    /// sequence at the end of the buffer is not an error yet).
+    partial: bool,
+}
+
+/// xmlParserInputState for the push parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushState {
+    Start,
+    XmlDecl,
+    Misc,
+    Prolog,
+    Epilog,
+    StartTag,
+    Content,
+    EndTag,
+    Dtd,
+    Eof,
 }
 
 const NS_XML: &str = "http://www.w3.org/XML/1998/namespace";
@@ -1030,6 +1117,10 @@ impl<'a, S: Sink> Parser<'a, S> {
             stop: false,
             quiet: false,
             ids: HashMap::new(),
+            err_no: 0,
+            last_err_level: 0,
+            sax1: false,
+            sax_get_entity: false,
         };
         Parser {
             st,
@@ -1052,6 +1143,12 @@ impl<'a, S: Sink> Parser<'a, S> {
             } else {
                 256
             },
+            push_state: PushState::Start,
+            check_index: 0,
+            end_check_state: 0,
+            conv_enc: None,
+            conv_pending: Vec::new(),
+            partial: false,
         }
     }
 
@@ -1118,6 +1215,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         let pos = self.pos();
         match utf8_char(&self.inp().data, pos) {
             Some(v) => v,
+            None if self.partial && incomplete_utf8_at_end(&self.inp().data, pos) => (0, 0),
             None => {
                 self.encoding_error();
                 // switch to latin-1 interpretation of this byte
@@ -1164,6 +1262,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             push_char(&mut conv, b as u32);
         }
         inp.data = Rc::new(conv);
+        if self.st.inputs.len() == 1 {
+            self.conv_enc = Some("ISO-8859-1".into());
+        }
     }
 
     fn skip_blanks(&mut self) -> usize {
@@ -1259,7 +1360,23 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.skip(l);
         }
         let end = self.pos();
+        if end - start > self.max_name_length() {
+            self.fatal(
+                XML_ERR_NAME_TOO_LONG,
+                Some(if nc { "NCName" } else { "Name" }),
+            );
+            return None;
+        }
         Some(String::from_utf8_lossy(&self.inp().data[start..end]).into_owned())
+    }
+
+    /// XML_MAX_NAME_LENGTH, or XML_MAX_TEXT_LENGTH with XML_PARSE_HUGE.
+    fn max_name_length(&self) -> usize {
+        if self.st.options & XML_PARSE_HUGE != 0 {
+            10_000_000
+        } else {
+            50_000
+        }
     }
 
     fn parse_name(&mut self) -> Option<String> {
@@ -1335,18 +1452,21 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.inp_mut().data = Rc::new(conv);
             self.inp_mut().pos = 0;
             self.st.input_encoding = Some("UTF-16".into());
+            self.conv_enc = Some(enc.into());
             return;
         }
         if d.len() >= 4 && d[0] == b'<' && d[1] == 0 && d[2] == b'?' && d[3] == 0 {
             let conv = decode_to_utf8(d, "UTF-16LE").unwrap_or_default();
             self.inp_mut().data = Rc::new(conv);
             self.st.input_encoding = Some("UTF-16LE".into());
+            self.conv_enc = Some("UTF-16LE".into());
             return;
         }
         if d.len() >= 4 && d[0] == 0 && d[1] == b'<' && d[2] == 0 && d[3] == b'?' {
             let conv = decode_to_utf8(d, "UTF-16BE").unwrap_or_default();
             self.inp_mut().data = Rc::new(conv);
             self.st.input_encoding = Some("UTF-16BE".into());
+            self.conv_enc = Some("UTF-16BE".into());
         }
     }
 
@@ -1379,6 +1499,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                 all.extend_from_slice(&rest);
                 inp.data = Rc::new(all);
                 self.st.input_encoding = Some(enc.to_string());
+                self.conv_enc = Some(enc.to_string());
             }
             None => {
                 self.fatal(XML_ERR_UNSUPPORTED_ENCODING, Some(enc));
@@ -3084,18 +3205,30 @@ impl<'a, S: Sink> Parser<'a, S> {
             "quot" => Some("\""),
             _ => None,
         };
-        if let Some(p) = predef {
-            return Some(PEntity {
-                name: name.into(),
-                kind: EntKind::Predefined,
-                content: p.into(),
-                orig: None,
-                public: None,
-                system: None,
-                notation: None,
-                parsed: true,
-                expanding: false,
-            });
+        let predef = predef.map(|p| PEntity {
+            name: name.into(),
+            kind: EntKind::Predefined,
+            content: p.into(),
+            orig: None,
+            public: None,
+            system: None,
+            notation: None,
+            parsed: true,
+            expanding: false,
+        });
+        if self.st.sax_get_entity && self.st.in_subset == 0 {
+            // XML_PARSE_OLDSAX: the SAX getEntity callback is asked first,
+            // for predefined entities too.
+            let ent = predef.or_else(|| self.entities.get(name).cloned());
+            self.sink
+                .get_entity(&mut self.st, name, ent.as_ref(), !in_attr);
+            if let Some(e) = &ent {
+                if e.kind == EntKind::Predefined {
+                    return ent;
+                }
+            }
+        } else if predef.is_some() {
+            return predef;
         }
         let ent = self.entities.get(name).cloned();
         match ent {
@@ -4423,6 +4556,21 @@ impl<'a, S: Sink> Parser<'a, S> {
     }
 }
 
+/// Whether `b[i..]` is a truncated (so far valid) UTF-8 sequence.
+fn incomplete_utf8_at_end(b: &[u8], i: usize) -> bool {
+    let c = b[i];
+    let need = if c & 0xE0 == 0xC0 {
+        2
+    } else if c & 0xF0 == 0xE0 {
+        3
+    } else if c & 0xF8 == 0xF0 {
+        4
+    } else {
+        return false;
+    };
+    i + need > b.len() && b[i + 1..].iter().all(|&x| x & 0xC0 == 0x80)
+}
+
 fn is_test_char_data(c: u8) -> bool {
     c == 0x09 || ((0x20..0x80).contains(&c) && c != b'&' && c != b'<' && c != b']')
 }
@@ -4452,6 +4600,10 @@ fn dummy_state() -> ParserState {
         stop: false,
         quiet: false,
         ids: HashMap::new(),
+        err_no: 0,
+        last_err_level: 0,
+        sax1: false,
+        sax_get_entity: false,
     }
 }
 
@@ -4475,4 +4627,719 @@ pub fn normalize_attr_value(s: &str) -> String {
         out.pop();
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Push parser (xmlParseChunk / xmlParseTryOrFinish)
+
+impl<'a, S: Sink> Parser<'a, S> {
+    pub fn push_state(&self) -> PushState {
+        self.push_state
+    }
+
+    /// Append raw bytes to the main input, converting them like the data
+    /// already there.
+    fn push_append(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let conv = match &self.conv_enc {
+            None => None,
+            Some(enc) => {
+                let mut raw = std::mem::take(&mut self.conv_pending);
+                raw.extend_from_slice(chunk);
+                let up = enc.to_ascii_uppercase();
+                if up.starts_with("UTF-16") && raw.len() % 2 == 1 {
+                    self.conv_pending.push(raw.pop().unwrap());
+                }
+                Some(decode_to_utf8(&raw, enc).unwrap_or(raw))
+            }
+        };
+        let inp = &mut self.st.inputs[0];
+        let d = Rc::make_mut(&mut inp.data);
+        match conv {
+            Some(c) => d.extend_from_slice(&c),
+            None => d.extend_from_slice(chunk),
+        }
+    }
+
+    fn avail(&self) -> usize {
+        let i = self.inp();
+        i.data.len().saturating_sub(i.pos)
+    }
+
+    /// xmlParseLookupChar
+    fn lookup_char(&mut self, c: u8) -> bool {
+        let i = self.inp();
+        let start = i.pos
+            + if self.check_index == 0 {
+                1
+            } else {
+                self.check_index
+            };
+        let found = start < i.data.len() && i.data[start..].contains(&c);
+        if found {
+            self.check_index = 0;
+        } else {
+            self.check_index = i.data.len() - i.pos;
+        }
+        found
+    }
+
+    /// xmlParseLookupString
+    fn lookup_string(&mut self, start_delta: usize, s: &[u8]) -> bool {
+        let i = self.inp();
+        let cur = (i.pos
+            + if self.check_index == 0 {
+                start_delta
+            } else {
+                self.check_index
+            })
+        .min(i.data.len());
+        let hay = &i.data[cur..];
+        let found = hay.len() >= s.len() && hay.windows(s.len()).any(|w| w == s);
+        if found {
+            self.check_index = 0;
+        } else {
+            let mut end = i.data.len();
+            if end - cur < s.len() {
+                end = cur;
+            } else {
+                end -= s.len() - 1;
+            }
+            self.check_index = end - i.pos;
+        }
+        found
+    }
+
+    /// xmlParseLookupCharData
+    fn lookup_char_data(&mut self) -> bool {
+        let i = self.inp();
+        let start = (i.pos + self.check_index).min(i.data.len());
+        if i.data[start..].iter().any(|&b| b == b'<' || b == b'&') {
+            self.check_index = 0;
+            true
+        } else {
+            self.check_index = i.data.len() - i.pos;
+            false
+        }
+    }
+
+    /// xmlParseLookupGt: a '>' outside quotes.
+    fn lookup_gt(&mut self) -> bool {
+        let i = self.inp();
+        let d = &i.data;
+        let mut cur = i.pos
+            + if self.check_index == 0 {
+                1
+            } else {
+                self.check_index
+            };
+        let mut state = self.end_check_state;
+        while cur < d.len() {
+            let c = d[cur];
+            if state != 0 {
+                if c == state {
+                    state = 0;
+                }
+            } else if c == b'\'' || c == b'"' {
+                state = c;
+            } else if c == b'>' {
+                self.check_index = 0;
+                self.end_check_state = 0;
+                return true;
+            }
+            cur += 1;
+        }
+        self.check_index = cur - i.pos;
+        self.end_check_state = state;
+        false
+    }
+
+    /// xmlParseLookupInternalSubset
+    fn lookup_internal_subset(&mut self) -> bool {
+        let i = self.inp();
+        let d = &i.data;
+        let at = |k: usize| -> u8 { if k < d.len() { d[k] } else { 0 } };
+        let mut cur = i.pos
+            + if self.check_index == 0 {
+                1
+            } else {
+                self.check_index
+            };
+        let mut start = cur;
+        let mut state = self.end_check_state;
+        while cur < d.len() {
+            let c = d[cur];
+            if state == b'-' {
+                if c == b'-' && at(cur + 1) == b'-' && at(cur + 2) == b'>' {
+                    state = 0;
+                    cur += 3;
+                    start = cur;
+                    continue;
+                }
+            } else if state == b']' {
+                if c == b'>' {
+                    self.check_index = 0;
+                    self.end_check_state = 0;
+                    return true;
+                }
+                if is_blank(c) {
+                    state = b' ';
+                } else if c != b']' {
+                    state = 0;
+                    start = cur;
+                    continue;
+                }
+            } else if state == b' ' {
+                if c == b'>' {
+                    self.check_index = 0;
+                    self.end_check_state = 0;
+                    return true;
+                }
+                if !is_blank(c) {
+                    state = 0;
+                    start = cur;
+                    continue;
+                }
+            } else if state != 0 {
+                if c == state {
+                    state = 0;
+                    start = cur + 1;
+                }
+            } else if c == b'<' {
+                if at(cur + 1) == b'!' && at(cur + 2) == b'-' && at(cur + 3) == b'-' {
+                    state = b'-';
+                    cur += 4;
+                    start = cur;
+                    continue;
+                }
+            } else if c == b'"' || c == b'\'' || c == b']' {
+                state = c;
+            }
+            cur += 1;
+        }
+        if state == 0 || state == b'-' {
+            if cur - start < 3 {
+                cur = start;
+            } else {
+                cur -= 3;
+            }
+        }
+        self.check_index = cur.saturating_sub(i.pos);
+        self.end_check_state = state;
+        false
+    }
+
+    /// xmlFinishDocument
+    fn finish_document(&mut self) {
+        let enc = self.st.encoding.clone();
+        self.sink.end_document(enc.as_deref());
+    }
+
+    /// xmlParseChunk: feed `chunk`; parse as far as complete constructs
+    /// allow (everything when `terminate`). Returns an xmlParserErrors code
+    /// (ctxt->errNo when the document is not well-formed, else 0).
+    pub fn parse_chunk(&mut self, chunk: &[u8], terminate: bool) -> i32 {
+        if self.st.disable_sax != 0 {
+            return self.st.err_no;
+        }
+        let mut chunk = chunk;
+        let mut end_in_cr = false;
+        if !chunk.is_empty() && !terminate && chunk[chunk.len() - 1] == b'\r' {
+            end_in_cr = true;
+            chunk = &chunk[..chunk.len() - 1];
+        }
+        self.push_append(chunk);
+        self.try_or_finish(terminate);
+        let max = if self.st.options & XML_PARSE_HUGE != 0 {
+            1_000_000_000
+        } else {
+            10_000_000
+        };
+        if self.st.inputs.len() == 1 && self.st.inputs[0].pos > max {
+            self.fatal_msg(
+                XML_ERR_RESOURCE_LIMIT,
+                "Buffer size limit exceeded, try XML_PARSE_HUGE\n".into(),
+            );
+        }
+        if self.st.err_no != 0 && self.st.disable_sax != 0 {
+            return self.st.err_no;
+        }
+        if end_in_cr {
+            self.push_append(b"\r");
+        }
+        if terminate {
+            if self.push_state != PushState::Eof && self.push_state != PushState::Epilog {
+                if let Some(n) = self.names.last() {
+                    let msg = format!("Premature end of data in tag {} line {}\n", n.name, n.line);
+                    self.fatal_msg(XML_ERR_TAG_NOT_FINISHED, msg);
+                } else if self.push_state == PushState::Start {
+                    self.fatal(XML_ERR_DOCUMENT_EMPTY, None);
+                } else {
+                    self.fatal_msg(
+                        XML_ERR_DOCUMENT_EMPTY,
+                        "Start tag expected, '<' not found\n".into(),
+                    );
+                }
+            } else if self.st.err_no == 0 && self.avail() > 0 {
+                self.fatal(XML_ERR_DOCUMENT_END, None);
+            }
+            if self.push_state != PushState::Eof {
+                self.push_state = PushState::Eof;
+                self.finish_document();
+            }
+        }
+        if !self.st.well_formed {
+            self.st.err_no
+        } else {
+            0
+        }
+    }
+
+    /// xmlParseTryOrFinish
+    fn try_or_finish(&mut self, terminate: bool) {
+        if self.st.inputs.len() == 1 && self.st.inputs[0].pos > 4096 {
+            self.st.inputs[0].shrink(80);
+        }
+        while self.st.disable_sax == 0 && !self.st.stop {
+            let avail = self.avail();
+            if avail < 1 {
+                break;
+            }
+            match self.push_state {
+                PushState::Eof => break,
+                PushState::Start => {
+                    if !terminate && avail < 4 {
+                        break;
+                    }
+                    self.detect_encoding();
+                    self.push_state = PushState::XmlDecl;
+                }
+                PushState::XmlDecl => {
+                    if !terminate && avail < 2 {
+                        break;
+                    }
+                    if self.cur() == b'<' && self.nxt(1) == b'?' {
+                        if !terminate && !self.lookup_string(2, b"?>") {
+                            break;
+                        }
+                        if self.cmp(b"<?xml") && is_blank(self.nxt(5)) {
+                            self.parse_xml_decl();
+                        } else {
+                            self.st.version = Some("1.0".into());
+                        }
+                    } else {
+                        self.st.version = Some("1.0".into());
+                    }
+                    if self.sax_ok() {
+                        let v = self.st.version.clone().unwrap_or_else(|| "1.0".into());
+                        let e = self.st.encoding.clone();
+                        let sa = self.st.standalone;
+                        self.sink.start_document(&v, e.as_deref(), sa);
+                    }
+                    self.push_state = PushState::Misc;
+                }
+                PushState::StartTag => {
+                    if !terminate && avail < 2 {
+                        break;
+                    }
+                    if self.cur() != b'<' {
+                        self.fatal_msg(
+                            XML_ERR_DOCUMENT_EMPTY,
+                            "Start tag expected, '<' not found\n".into(),
+                        );
+                        self.push_state = PushState::Eof;
+                        self.finish_document();
+                        break;
+                    }
+                    if !terminate && !self.lookup_gt() {
+                        break;
+                    }
+                    if !self.push_start_tag() {
+                        self.push_state = PushState::Eof;
+                        self.finish_document();
+                        break;
+                    }
+                    self.push_state = if self.names.is_empty() {
+                        PushState::Epilog
+                    } else {
+                        PushState::Content
+                    };
+                }
+                PushState::Content => {
+                    let c = self.cur();
+                    if c == b'<' {
+                        if !terminate && avail < 2 {
+                            break;
+                        }
+                        let next = self.nxt(1);
+                        if next == b'/' {
+                            self.push_state = PushState::EndTag;
+                            continue;
+                        } else if next == b'?' {
+                            if !terminate && !self.lookup_string(2, b"?>") {
+                                break;
+                            }
+                            self.parse_pi();
+                            continue;
+                        } else if next == b'!' {
+                            if !terminate && avail < 3 {
+                                break;
+                            }
+                            let n2 = self.nxt(2);
+                            if n2 == b'-' {
+                                if !terminate && avail < 4 {
+                                    break;
+                                }
+                                if self.nxt(3) == b'-' {
+                                    if !terminate && !self.lookup_string(4, b"-->") {
+                                        break;
+                                    }
+                                    self.parse_comment();
+                                    continue;
+                                }
+                            } else if n2 == b'[' {
+                                if !terminate && avail < 9 {
+                                    break;
+                                }
+                                if self.cmp(b"<![CDATA[") {
+                                    if !terminate && !self.lookup_string(9, b"]]>") {
+                                        break;
+                                    }
+                                    self.parse_cdsect();
+                                    continue;
+                                }
+                            }
+                        }
+                        self.push_state = PushState::StartTag;
+                    } else if c == b'&' {
+                        if !terminate && !self.lookup_char(b';') {
+                            break;
+                        }
+                        self.parse_reference();
+                    } else {
+                        if avail < 300 && !terminate && !self.lookup_char_data() {
+                            break;
+                        }
+                        self.check_index = 0;
+                        self.partial = !terminate;
+                        let before = self.pos();
+                        self.parse_char_data();
+                        self.partial = false;
+                        if self.pos() == before {
+                            // incomplete multi-byte character: wait for more
+                            break;
+                        }
+                    }
+                }
+                PushState::EndTag => {
+                    if !terminate && !self.lookup_char(b'>') {
+                        break;
+                    }
+                    if self.st.sax1 {
+                        self.parse_end_tag1(0);
+                    } else {
+                        self.parse_element_end();
+                    }
+                    self.push_state = if self.names.is_empty() {
+                        PushState::Epilog
+                    } else {
+                        PushState::Content
+                    };
+                }
+                PushState::Misc | PushState::Prolog | PushState::Epilog => {
+                    self.skip_blanks();
+                    let avail = self.avail();
+                    if avail < 1 {
+                        break;
+                    }
+                    if self.cur() == b'<' {
+                        if !terminate && avail < 2 {
+                            break;
+                        }
+                        let next = self.nxt(1);
+                        if next == b'?' {
+                            if !terminate && !self.lookup_string(2, b"?>") {
+                                break;
+                            }
+                            self.parse_pi();
+                            continue;
+                        } else if next == b'!' {
+                            if !terminate && avail < 3 {
+                                break;
+                            }
+                            if self.nxt(2) == b'-' {
+                                if !terminate && avail < 4 {
+                                    break;
+                                }
+                                if self.nxt(3) == b'-' {
+                                    if !terminate && !self.lookup_string(4, b"-->") {
+                                        break;
+                                    }
+                                    self.parse_comment();
+                                    continue;
+                                }
+                            } else if self.push_state == PushState::Misc {
+                                if !terminate && avail < 9 {
+                                    break;
+                                }
+                                if self.cmp(b"<!DOCTYPE") {
+                                    if !terminate && !self.lookup_gt() {
+                                        break;
+                                    }
+                                    self.st.in_subset = 1;
+                                    self.parse_doctype_decl();
+                                    if self.cur() == b'[' {
+                                        self.push_state = PushState::Dtd;
+                                    } else {
+                                        if self.cur() == b'>' {
+                                            self.skip(1);
+                                        }
+                                        self.end_doctype();
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if self.push_state == PushState::Epilog {
+                        if self.st.err_no == 0 {
+                            self.fatal(XML_ERR_DOCUMENT_END, None);
+                        }
+                        self.push_state = PushState::Eof;
+                        self.finish_document();
+                    } else {
+                        self.push_state = PushState::StartTag;
+                    }
+                }
+                PushState::Dtd => {
+                    if !terminate && !self.lookup_internal_subset() {
+                        break;
+                    }
+                    self.parse_internal_subset();
+                    self.end_doctype();
+                }
+            }
+        }
+    }
+
+    fn end_doctype(&mut self) {
+        self.st.in_subset = 2;
+        if self.sax_ok() {
+            let (n, s, u) = (
+                self.int_sub_name.clone(),
+                self.ext_sub_system.clone(),
+                self.ext_sub_uri.clone(),
+            );
+            self.sink
+                .external_subset(n.as_deref(), s.as_deref(), u.as_deref());
+        }
+        self.st.in_subset = 0;
+        self.clean_special_attr();
+        self.push_state = PushState::Prolog;
+    }
+
+    /// The XML_PARSER_START_TAG step. Returns false when no element name
+    /// could be parsed.
+    fn push_start_tag(&mut self) -> bool {
+        let sp = match self.space.last() {
+            None | Some(-2) => -1,
+            Some(v) => *v,
+        };
+        self.space.push(sp);
+        let line = self.st.cur_line();
+        let r = if self.st.sax1 {
+            self.parse_start_tag1().map(|n| (n, None, None, 0, false))
+        } else {
+            self.parse_start_tag2()
+        };
+        let (name, prefix, uri, nb_ns, has_node) = match r {
+            Some(x) => x,
+            None => {
+                self.space.pop();
+                return false;
+            }
+        };
+        if self.cur() == b'/' && self.nxt(1) == b'>' {
+            self.skip(2);
+            if self.sax_ok() {
+                self.sink
+                    .end_element(&mut self.st, &name, prefix.as_deref(), uri.as_deref());
+            } else if has_node {
+                self.sink
+                    .end_element(&mut self.st, "\u{0}abort", None, None);
+            }
+            self.ns_pop(nb_ns);
+            self.space.pop();
+        } else if self.cur() == b'>' {
+            self.skip(1);
+            self.names.push(NameEntry {
+                name,
+                prefix,
+                uri,
+                line,
+                ns_nr: nb_ns,
+                has_node,
+            });
+        } else {
+            self.fatal_msg(
+                XML_ERR_GT_REQUIRED,
+                format!("Couldn't find end of Start Tag {}\n", name),
+            );
+            if has_node {
+                self.sink
+                    .end_element(&mut self.st, "\u{0}abort", None, None);
+            }
+            self.space.pop();
+            self.ns_pop(nb_ns);
+        }
+        true
+    }
+
+    /// xmlParseStartTag (SAX1): names as written, no namespace processing.
+    fn parse_start_tag1(&mut self) -> Option<String> {
+        if self.cur() != b'<' {
+            return None;
+        }
+        self.skip(1);
+        let name = match self.parse_name() {
+            Some(n) => n,
+            None => {
+                self.fatal_msg(
+                    XML_ERR_NAME_REQUIRED,
+                    "xmlParseStartTag: invalid element name\n".into(),
+                );
+                return None;
+            }
+        };
+        self.skip_blanks();
+        let mut atts: Vec<SaxAttr> = Vec::new();
+        loop {
+            let c = self.cur();
+            if c == b'>'
+                || (c == b'/' && self.nxt(1) == b'>')
+                || !(c >= 0x20 || c == 0x9 || c == 0xA || c == 0xD)
+                || self.stopped()
+            {
+                break;
+            }
+            // xmlParseAttribute
+            let attname = match self.parse_name() {
+                Some(n) => n,
+                None => {
+                    self.fatal_msg(
+                        XML_ERR_NAME_REQUIRED,
+                        "error parsing attribute name\n".into(),
+                    );
+                    break;
+                }
+            };
+            self.skip_blanks();
+            let val = if self.cur() == b'=' {
+                self.skip(1);
+                self.skip_blanks();
+                self.parse_att_value_internal(0, false)
+            } else {
+                self.fatal_msg(
+                    XML_ERR_ATTRIBUTE_WITHOUT_VALUE,
+                    format!("Specification mandates value for attribute {}\n", attname),
+                );
+                None
+            };
+            if let Some(v) = val {
+                if attname == "xml:space" {
+                    if v == "default" {
+                        if let Some(s) = self.space.last_mut() {
+                            *s = 0;
+                        }
+                    } else if v == "preserve" {
+                        if let Some(s) = self.space.last_mut() {
+                            *s = 1;
+                        }
+                    } else {
+                        self.warning(XML_WAR_SPACE_VALUE, format!("Invalid value \"{}\" for xml:space : \"default\" or \"preserve\" expected\n", v));
+                    }
+                }
+                if atts.iter().any(|a| a.localname == attname) {
+                    self.fatal_msg(
+                        XML_ERR_ATTRIBUTE_REDEFINED,
+                        format!("Attribute {} redefined\n", attname),
+                    );
+                } else {
+                    atts.push(SaxAttr {
+                        localname: attname,
+                        prefix: None,
+                        uri: None,
+                        value: v,
+                        defaulted: false,
+                    });
+                }
+            }
+            if self.cur() == b'>' || (self.cur() == b'/' && self.nxt(1) == b'>') {
+                break;
+            }
+            if self.skip_blanks() == 0 {
+                self.fatal_msg(
+                    XML_ERR_SPACE_REQUIRED,
+                    "attributes construct error\n".into(),
+                );
+            }
+        }
+        if self.sax_ok() {
+            let line = self.st.cur_line();
+            self.sink
+                .start_element(&mut self.st, &name, None, None, &[], &atts, 0, line);
+        }
+        Some(name)
+    }
+
+    /// xmlParseEndTag1 (SAX1)
+    fn parse_end_tag1(&mut self, line: u32) {
+        if !(self.cur() == b'<' && self.nxt(1) == b'/') {
+            self.fatal_msg(
+                XML_ERR_LTSLASH_REQUIRED,
+                "xmlParseEndTag: '</' not found\n".into(),
+            );
+            return;
+        }
+        self.skip(2);
+        let tname = self
+            .names
+            .last()
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        // xmlParseNameAndCompare
+        let mut mismatch: Option<String> = None;
+        let nb = self.nxt(tname.len());
+        if self.cmp(tname.as_bytes()) && (nb == b'>' || is_blank(nb)) {
+            self.skip(tname.len());
+        } else {
+            match self.parse_name() {
+                Some(n) if n == tname => {}
+                Some(n) => mismatch = Some(n),
+                None => mismatch = Some("unparsable".into()),
+            }
+        }
+        self.skip_blanks();
+        if self.cur() != b'>' {
+            self.fatal(XML_ERR_GT_REQUIRED, None);
+        } else {
+            self.skip(1);
+        }
+        if let Some(m) = mismatch {
+            self.fatal_msg(
+                XML_ERR_TAG_NAME_MISMATCH,
+                format!(
+                    "Opening and ending tag mismatch: {} line {} and {}\n",
+                    tname, line, m
+                ),
+            );
+        }
+        if self.sax_ok() {
+            self.sink.end_element(&mut self.st, &tname, None, None);
+        }
+        self.names.pop();
+        self.space.pop();
+    }
 }
