@@ -33068,7 +33068,11 @@ impl Vm {
                                                         }
                                                         return Err(e);
                                                     }
-                                                    Value::False
+                                                    // A fatal error in the included file ends
+                                                    // the script; it is reported against that
+                                                    // file (current_file is left pointing at it).
+                                                    self.pending_classes = saved_pending;
+                                                    return Err(e);
                                                 }
                                             };
 
@@ -33078,7 +33082,27 @@ impl Vm {
 
                                             result
                                         }
-                                        Err(_) => Value::False,
+                                        Err(e) => {
+                                            // E_COMPILE_ERROR in the included file: the
+                                            // diagnostics collected before it, then the
+                                            // fatal error naming that file.
+                                            for (kind, msg, wline) in
+                                                crate::compiler::take_pending_compile_warnings()
+                                            {
+                                                self.display_error(kind, &msg, &abs_path, wline);
+                                            }
+                                            self.display_error(
+                                                "Fatal error",
+                                                &e.message,
+                                                &abs_path,
+                                                e.line,
+                                            );
+                                            self.fatal_emitted = true;
+                                            return Err(VmError {
+                                                message: e.message,
+                                                line: e.line,
+                                            });
+                                        }
                                     }
                                 }
                                 Err(e) => {
