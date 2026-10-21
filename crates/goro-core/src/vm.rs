@@ -6221,6 +6221,9 @@ impl Vm {
             return None;
         }
         if Self::spl_iter_class(class_lower) {
+            if method_lower == b"__construct" {
+                return None; // needs the call arguments (handle_spl_docall)
+            }
             return self.spl_iter_dispatch(class_lower, method_lower, obj, &[]);
         }
         match class_lower {
@@ -9029,7 +9032,7 @@ impl Vm {
             return (h.has_method)(class, method, false);
         }
         if Self::spl_iter_class(class) {
-            return crate::spl_stubs::spl_stub_method(class, method).is_some() && method != b"__construct";
+            return crate::spl_stubs::spl_stub_method(class, method).is_some();
         }
         match class {
             b"phptoken" => matches!(method, b"is"),
@@ -20099,9 +20102,17 @@ impl Vm {
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
                             // If $this isn't already first arg (e.g. parent::__construct from method
                             // body) and we're inside an instance method, inject it.
-                            // For parent::__construct() (a forwarding call) the args never
-                            // contain $this, even when the first argument is an object.
-                            if is_forwarding_call || !matches!(call.args.first(), Some(Value::Object(_))) {
+                            // Forwarding calls (parent::/self::) never carry $this
+                            // in their arguments, even when the first argument is
+                            // an object.
+                            let fwd_this = is_forwarding_call
+                                && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this".as_slice())
+                                && matches!(cvs.first(), Some(Value::Object(_)));
+                            if fwd_this {
+                                if let Some(this_val @ Value::Object(_)) = cvs.first() {
+                                    call.args.insert(0, this_val.clone());
+                                }
+                            } else if !matches!(call.args.first(), Some(Value::Object(_))) {
                                 if let Some(this_val @ Value::Object(_)) = cvs.first() {
                                     call.args.insert(0, this_val.clone());
                                 }

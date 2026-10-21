@@ -878,7 +878,17 @@ impl Vm {
             return None;
         }
         if method == b"__construct" {
-            return None;
+            // parent::__construct() from a userland constructor (the
+            // __spl:: call path already pushed a frame).
+            let has_frame = self.call_stack.last().map(|f| f.0.ends_with("->__construct")).unwrap_or(false);
+            if !has_frame {
+                self.spl_push_ctor_frame(obj, args);
+            }
+            self.dit_construct(obj, args);
+            if !has_frame {
+                self.call_stack.pop();
+            }
+            return Some(Value::Null);
         }
         if crate::spl_stubs::spl_stub_method(class_lower, method).is_none() && method != b"__tostring" {
             return None;
