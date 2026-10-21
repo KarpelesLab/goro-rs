@@ -3899,9 +3899,21 @@ impl Vm {
         }
     }
 
+    /// "unexpected NAN value was coerced to <type>" (zend_nan_coerced_to_type_warning).
+    pub fn warn_nan_coercion(&mut self, v: &Value, type_name: &str, line: u32) {
+        let is_nan = match v {
+            Value::Double(d) => d.is_nan(),
+            Value::Reference(r) => matches!(&*r.borrow(), Value::Double(d) if d.is_nan()),
+            _ => false,
+        };
+        if is_nan {
+            self.emit_warning_at(&format!("unexpected NAN value was coerced to {}", type_name), line);
+        }
+    }
+
     /// "The float X is not representable as an int, cast occurred" for
     /// non-finite / out-of-range floats converted with zend_dval_to_lval.
-    pub(crate) fn warn_oob_float_to_int(&mut self, v: &Value, line: u32) {
+    pub fn warn_oob_float_to_int(&mut self, v: &Value, line: u32) {
         let d = match v {
             Value::Double(d) => *d,
             Value::Reference(r) => match &*r.borrow() { Value::Double(d) => *d, _ => return },
@@ -18020,6 +18032,7 @@ impl Vm {
                 }
                 OpCode::JmpZ => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Value::Double(d) = &val { if d.is_nan() { self.warn_nan_coercion(&val, "bool", op.line); } }
                     if !val.is_truthy()
                         && let OperandType::JmpTarget(target) = op.op2
                     {
@@ -18028,6 +18041,7 @@ impl Vm {
                 }
                 OpCode::JmpNz => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    if let Value::Double(d) = &val { if d.is_nan() { self.warn_nan_coercion(&val, "bool", op.line); } }
                     if val.is_truthy()
                         && let OperandType::JmpTarget(target) = op.op2
                     {
@@ -23806,6 +23820,7 @@ impl Vm {
                 }
                 OpCode::CastBool => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.warn_nan_coercion(&val, "bool", op.line);
                     // For objects that opt in to scalar casts (e.g. GMP),
                     // use the registered to_long handler to decide truthiness.
                     let truthy = if matches!(&val, Value::Object(_)) {
@@ -23831,6 +23846,7 @@ impl Vm {
                 }
                 OpCode::CastArray => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.warn_nan_coercion(&val, "array", op.line);
                     let arr = match val {
                         Value::Array(a) => a,
                         Value::Object(obj) => self.object_to_array(&obj),
@@ -23854,6 +23870,7 @@ impl Vm {
 
                 OpCode::CastObject => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.warn_nan_coercion(&val, "object", op.line);
                     let obj = match val {
                         Value::Object(o) => Value::Object(o),
                         Value::Array(arr) => {
@@ -36180,6 +36197,10 @@ impl Vm {
 
     /// Convert a value to string, but throw an Error for objects without __toString
     pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
+        if matches!(val, Value::Double(d) if d.is_nan()) {
+            let l = self.current_line;
+            self.warn_nan_coercion(val, "string", l);
+        }
         // Check for closures stored as strings/arrays
         if Self::is_closure_value(val) {
             let msg = "Object of class Closure could not be converted to string";

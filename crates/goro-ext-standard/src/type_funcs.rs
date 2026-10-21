@@ -361,7 +361,10 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
                     _vm.emit_warning(&format!("Object of class {} could not be converted to int", class_name));
                 }
-                Value::Long(current.to_long())
+                let l = current.to_long();
+                let line = _vm.current_line;
+                _vm.warn_oob_float_to_int(&current, line);
+                Value::Long(l)
             }
             "float" | "double" => {
                 if let Value::Object(obj) = &current {
@@ -384,18 +387,22 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                 } else {
+                    let line = _vm.current_line;
+                    _vm.warn_nan_coercion(&current, "string", line);
                     Value::String(current.to_php_string())
                 }
             }
             "bool" | "boolean" => {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "bool", line);
                 if current.is_truthy() {
                     Value::True
                 } else {
                     Value::False
                 }
             }
-            "array" => match current {
-                Value::Array(_) => current,
+            "array" => match { let line = _vm.current_line; _vm.warn_nan_coercion(&current, "array", line); if matches!(current, Value::Double(d) if d.is_nan()) { r.borrow().clone() } else { current } } {
+                cur @ Value::Array(_) => cur,
                 Value::Null | Value::Undef => {
                     Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
                         goro_core::array::PhpArray::new(),
@@ -408,8 +415,8 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
                 }
             },
-            "object" => match current {
-                Value::Object(_) => current,
+            "object" => match { let line = _vm.current_line; _vm.warn_nan_coercion(&current, "object", line); if matches!(current, Value::Double(d) if d.is_nan()) { r.borrow().clone() } else { current } } {
+                cur @ Value::Object(_) => cur,
                 Value::Array(arr) => {
                     let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
                     {
@@ -434,7 +441,11 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
                 }
             },
-            "null" => Value::Null,
+            "null" => {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "null", line);
+                Value::Null
+            }
             "resource" => {
                 let msg = "Cannot convert to resource type";
                 let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
