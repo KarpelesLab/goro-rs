@@ -440,9 +440,12 @@ class Parser {
             $default = null;
             if (self::is($this->peek(), '=')) { $this->next(); $default = $this->readExpr([',']); }
             if (in_array($pname, $preferRef, true)) $byRef = 2;
+            // `= UNKNOWN`: optional, but the default isn't expressible.
+            $unknownDefault = false;
+            if ($default === 'UNKNOWN') { $default = null; $unknownDefault = true; }
             $sensitive = false;
             foreach ($pattrs as $a) if (preg_match('/SensitiveParameter/', $a)) $sensitive = true;
-            $params[] = ['name' => $pname, 'type' => $type, 'default' => $default, 'by_ref' => $byRef, 'variadic' => $variadic, 'sensitive' => $sensitive];
+            $params[] = ['name' => $pname, 'type' => $type, 'default' => $default, 'by_ref' => $byRef, 'variadic' => $variadic, 'sensitive' => $sensitive, 'unknown_default' => $unknownDefault];
             if (self::is($this->peek(), ',')) $this->next();
         }
         $this->next(); // )
@@ -477,7 +480,7 @@ function rstr(string $s): string {
 function params_rs(array $params): string {
     $out = [];
     foreach ($params as $p) {
-        $f = $p['by_ref'] | ($p['variadic'] ? 4 : 0) | ($p['sensitive'] ? 8 : 0);
+        $f = $p['by_ref'] | ($p['variadic'] ? 4 : 0) | ($p['sensitive'] ? 8 : 0) | ($p['unknown_default'] ? 16 : 0);
         $out[] = 'StubArg { name: ' . rstr($p['name']) . ', ty: ' . rstr($p['type']) . ', default: ' . rs($p['default']) . ', flags: ' . $f . ' }';
     }
     return '&[' . implode(', ', $out) . ']';

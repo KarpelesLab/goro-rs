@@ -35,6 +35,8 @@ pub const A_BY_REF: u8 = 1;
 pub const A_PREFER_REF: u8 = 2;
 pub const A_VARIADIC: u8 = 4;
 pub const A_SENSITIVE: u8 = 8;
+/// Optional parameter whose default can't be expressed (`= UNKNOWN`).
+pub const A_UNKNOWN_DEFAULT: u8 = 16;
 
 pub const K_CLASS: u8 = 0;
 pub const K_INTERFACE: u8 = 1;
@@ -114,7 +116,7 @@ impl StubFunc {
     pub fn required_args(&self) -> usize {
         let mut req = 0;
         for (i, a) in self.args.iter().enumerate() {
-            if a.default.is_none() && a.flags & A_VARIADIC == 0 {
+            if a.default.is_none() && a.flags & (A_VARIADIC | A_UNKNOWN_DEFAULT) == 0 {
                 req = i + 1;
             }
         }
@@ -309,7 +311,7 @@ pub fn op_array_for(f: &'static StubFunc, scope: Option<&[u8]>, is_method: bool)
             implicitly_nullable: false,
         }));
         oa.by_ref_params.push(a.flags & (A_BY_REF | A_PREFER_REF) != 0);
-        oa.param_has_default.push(a.default.is_some());
+        oa.param_has_default.push(a.default.is_some() || a.flags & A_UNKNOWN_DEFAULT != 0);
         if a.flags & A_VARIADIC != 0 {
             oa.variadic_param = Some(cv);
         }
