@@ -1911,7 +1911,23 @@ impl Vm {
     /// Emit a PHP warning message to output
     /// Call the user error handler if set. Returns true if the handler was called and handled the error.
     pub fn call_user_error_handler(&mut self, errno: i64, errstr: &str, line: u32) -> bool {
-        if let Some(handler) = self.error_handler.clone() {
+        // zend_error_impl: the handler is detached while it runs, so errors
+        // raised inside it use the default handling; it is restored unless
+        // the handler installed another one.
+        let handler = match self.error_handler.clone() {
+            Some(h) => h,
+            None => return false,
+        };
+        let saved = self.error_handler.take();
+        let r = self.call_user_error_handler_inner(Some(handler), errno, errstr, line);
+        if self.error_handler.is_none() {
+            self.error_handler = saved;
+        }
+        r
+    }
+
+    fn call_user_error_handler_inner(&mut self, handler_opt: Option<Value>, errno: i64, errstr: &str, line: u32) -> bool {
+        if let Some(handler) = handler_opt {
             // If the error handler itself is #[\Deprecated], emit that banner
             // first, located at the original error site (the deprecated call's
             // file/line, not "Unknown:0" — error handlers are invoked from user
