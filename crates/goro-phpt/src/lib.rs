@@ -2254,6 +2254,12 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     // would no longer name the script (or its includes) from there.
     let abs_dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let dir = abs_dir.as_path();
+    // run-tests.php is run from the php-src root, and tests rely on it (e.g.
+    // `open_basedir=.` must cover the test's own directory). Run from the
+    // nearest ancestor holding run-tests.php, wherever the runner was started.
+    if let Some(root) = dir.ancestors().find(|a| a.join("run-tests.php").is_file()) {
+        let _ = std::env::set_current_dir(root);
+    }
     let mut pass = 0;
     let mut fail = 0;
     let mut skip = 0;
