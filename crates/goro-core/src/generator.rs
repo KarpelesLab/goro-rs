@@ -50,8 +50,6 @@ pub struct PhpGenerator {
     pub tmps: Vec<Value>,
     /// The frame's symbol table, once dynamic variables needed one.
     pub(crate) symtab: Option<crate::symtab::FrameSymtab>,
-    /// Foreach iteration positions
-    pub foreach_positions: HashMap<u32, usize>,
     /// Static variable keys
     pub static_cv_keys: HashMap<u32, Vec<u8>>,
     /// Global variable keys
@@ -148,6 +146,8 @@ pub struct PhpGenerator {
     /// lives until the object is freed).
     pub(crate) last_value: Value,
     pub(crate) last_key: Value,
+    /// Iterator state of the foreach loops running in the frame.
+    pub(crate) fe: crate::vm::ForeachState,
 }
 
 impl Drop for PhpGenerator {
@@ -215,7 +215,6 @@ impl PhpGenerator {
             cvs,
             tmps: vec![Value::Undef; temp_count],
             symtab: None,
-            foreach_positions: HashMap::new(),
             static_cv_keys: HashMap::new(),
             global_cv_keys: HashMap::new(),
             exception_handlers: Vec::new(),
@@ -255,6 +254,7 @@ impl PhpGenerator {
             do_init: false,
             last_value: Value::Null,
             last_key: Value::Null,
+            fe: Default::default(),
         }
     }
 
@@ -278,11 +278,6 @@ impl PhpGenerator {
                 | OpCode::SaveJump
                 | OpCode::ReturnDeferred
                 | OpCode::FinallyEnter
-                | OpCode::ForeachInit
-                | OpCode::ForeachNext
-                | OpCode::ForeachKey
-                | OpCode::ForeachInitRef
-                | OpCode::ForeachNextRef
                 | OpCode::ExitOp
                 | OpCode::BindGlobal
                 | OpCode::StaticVarInit
@@ -523,7 +518,7 @@ impl PhpGenerator {
                 }
                 *t = Value::Undef;
             }
-            self.foreach_positions.clear();
+            self.fe = Default::default();
             if freed {
                 vm.run_pending_destructors_pub();
             }
@@ -1124,6 +1119,7 @@ impl PhpGenerator {
                     &mut self.cvs,
                     &mut self.tmps,
                     &mut self.symtab,
+                    &mut self.fe,
                 ) {
                     Ok(next) => ip = next,
                     Err(e) => {
@@ -2132,150 +2128,6 @@ impl PhpGenerator {
                     self.write_operand(&op.result, result);
                 }
 
-                // Foreach within generators
-                OpCode::ForeachInit => {
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, arr_val);
-                    let iter_idx = match op.result {
-                        OperandType::Tmp(idx) => idx,
-                        _ => 0,
-                    };
-                    self.foreach_positions.insert(iter_idx, 0usize);
-                }
-                OpCode::ForeachNext => {
-                    let iter_idx = match op.op1 {
-                        OperandType::Tmp(idx) => idx,
-                        _ => 0,
-                    };
-                    let pos = self.foreach_positions.get(&iter_idx).copied().unwrap_or(0);
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        let entries: Vec<_> = arr_borrow.iter().collect();
-                        if pos >= entries.len() {
-                            if let OperandType::JmpTarget(target) = op.op2 {
-                                ip = target as usize;
-                            }
-                        } else {
-                            let (_, value) = entries[pos];
-                            self.write_operand(&op.result, value.clone());
-                            self.foreach_positions.insert(iter_idx, pos + 1);
-                        }
-                    } else {
-                        if let OperandType::JmpTarget(target) = op.op2 {
-                            ip = target as usize;
-                        }
-                    }
-                }
-                OpCode::ForeachKey => {
-                    let iter_idx = match op.op1 {
-                        OperandType::Tmp(idx) => idx,
-                        _ => 0,
-                    };
-                    let pos = self.foreach_positions.get(&iter_idx).copied().unwrap_or(1);
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        let entries: Vec<_> = arr_borrow.iter().collect();
-                        let actual_pos = pos.saturating_sub(1);
-                        if actual_pos < entries.len() {
-                            let (key, _) = entries[actual_pos];
-                            let key_val = match key {
-                                crate::array::ArrayKey::Int(n) => Value::Long(*n),
-                                crate::array::ArrayKey::String(s) => Value::String(s.clone()),
-                            };
-                            self.write_operand(&op.result, key_val);
-                        }
-                    }
-                }
-
-                OpCode::ForeachInitRef => {
-                    // By-ref foreach over an array iterates (and modifies) the
-                    // variable's own array, separated from other holders.
-                    let iter_idx = match op.result {
-                        OperandType::Tmp(idx) => idx,
-                        _ => 0,
-                    };
-                    let src = match op.op1 {
-                        OperandType::Cv(i) => {
-                            let i = i as usize;
-                            let cur = self.cvs.get(i).map(|v| v.deref()).unwrap_or(Value::Undef);
-                            match cur {
-                                Value::Array(a) => {
-                                    let a = if Rc::strong_count(&a) > 2 {
-                                        let sep = Rc::new(RefCell::new(a.borrow().clone()));
-                                        match &mut self.cvs[i] {
-                                            Value::Reference(r) => {
-                                                *r.borrow_mut() = Value::Array(sep.clone())
-                                            }
-                                            slot => *slot = Value::Array(sep.clone()),
-                                        }
-                                        sep
-                                    } else {
-                                        a
-                                    };
-                                    Value::Array(a)
-                                }
-                                other => other,
-                            }
-                        }
-                        _ => match self.read_operand(&op.op1, &op_array.literals) {
-                            Value::Reference(r) => r.borrow().clone(),
-                            v => v,
-                        },
-                    };
-                    self.write_operand(&op.result, src);
-                    self.foreach_positions.insert(iter_idx, 0usize);
-                }
-                OpCode::ForeachNextRef => {
-                    let iter_idx = match op.op1 {
-                        OperandType::Tmp(idx) => idx,
-                        _ => 0,
-                    };
-                    let pos = self.foreach_positions.get(&iter_idx).copied().unwrap_or(0);
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    if let Value::Array(arr) = &arr_val {
-                        let n = arr.borrow().len();
-                        if pos >= n {
-                            if let OperandType::JmpTarget(target) = op.op2 {
-                                ip = target as usize;
-                            }
-                        } else {
-                            // The element becomes a reference shared with the loop variable.
-                            let r = {
-                                let mut b = arr.borrow_mut();
-                                let slot = b.iter_mut().nth(pos).map(|(_, v)| v);
-                                match slot {
-                                    Some(Value::Reference(r)) => r.clone(),
-                                    Some(v) => {
-                                        let r = Rc::new(RefCell::new(std::mem::replace(
-                                            v,
-                                            Value::Null,
-                                        )));
-                                        *v = Value::Reference(r.clone());
-                                        r
-                                    }
-                                    None => Rc::new(RefCell::new(Value::Null)),
-                                }
-                            };
-                            // A plain loop variable is rebound to the reference.
-                            match op.result {
-                                OperandType::Cv(ci) => {
-                                    if let Some(slot) = self.cvs.get_mut(ci as usize) {
-                                        *slot = Value::Reference(r);
-                                    }
-                                }
-                                _ => self.write_operand(&op.result, Value::Reference(r)),
-                            }
-                            self.foreach_positions.insert(iter_idx, pos + 1);
-                        }
-                    } else {
-                        if let OperandType::JmpTarget(target) = op.op2 {
-                            ip = target as usize;
-                        }
-                    }
-                }
-
                 OpCode::ConstLookup => {
                     let name = self
                         .read_operand(&op.op1, &op_array.literals)
@@ -2938,6 +2790,7 @@ impl PhpGenerator {
                     &mut self.cvs,
                     &mut self.tmps,
                     &mut self.symtab,
+                    &mut self.fe,
                 ) {
                     Ok(next) => ip = next,
                     Err(e) => {

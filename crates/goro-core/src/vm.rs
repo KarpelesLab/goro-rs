@@ -295,6 +295,36 @@ pub(crate) enum RecvFail {
     HandlerThrew,
 }
 
+/// Iterator state of the foreach loops running in a frame, keyed by
+/// iterator tmp.
+#[derive(Debug, Default)]
+pub(crate) struct ForeachState {
+    pub(crate) positions: crate::fxhash::FxHashMap<u32, usize>,
+    /// Object handles held by the internal iterators of running foreach
+    /// loops over Traversables (zend_iterator_init allocates one); released
+    /// with the loop.
+    pub(crate) iter_handles: crate::fxhash::FxHashMap<u32, Value>,
+    /// By-value foreach over an array iterates the array as it was when the
+    /// loop started (PHP iterates a copy): a shallow snapshot of its entries.
+    pub(crate) snap: crate::fxhash::FxHashMap<u32, Vec<(ArrayKey, Value)>>,
+    /// Key of the element the foreach is currently on (ForeachKey, and the
+    /// by-ref iterator's position tracking).
+    pub(crate) cur_key: crate::fxhash::FxHashMap<u32, ArrayKey>,
+    /// By-ref foreach: the reference of the current element (the iterator
+    /// follows it when elements before it are removed or inserted).
+    pub(crate) cur_ref: crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<Value>>>,
+    /// foreach over a plain object: the object, and the storage name of the
+    /// current property slot.
+    pub(crate) obj: crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>>,
+    pub(crate) obj_cur: crate::fxhash::FxHashMap<u32, Vec<u8>>,
+    /// Generator key storage for foreach (saved before advancing to next yield)
+    pub(crate) gen_keys: crate::fxhash::FxHashMap<u32, Value>,
+    /// WeakMap iteration: maps iterator index to key objects
+    pub(crate) weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<Value>>,
+    /// By-reference foreach iterators (the source array)
+    pub(crate) ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
+}
+
 /// Pending function call being assembled
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
@@ -15519,7 +15549,14 @@ impl Vm {
         // The frame's symbol table, if it gets one.
         let mut sym = None;
         let r = self.execute_frame(
-            op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym,
+            op_array,
+            &mut cvs,
+            &mut tmps,
+            None,
+            cv_frame,
+            &mut fin,
+            &mut sym,
+            &mut ForeachState::default(),
         );
         self.gc_frames.pop();
         if let Some(fs) = sym.as_mut() {
@@ -15561,10 +15598,20 @@ impl Vm {
         cvs: &mut Vec<Value>,
         tmps: &mut Vec<Value>,
         sym: &mut Option<crate::symtab::FrameSymtab>,
+        fe: &mut ForeachState,
     ) -> Result<usize, VmError> {
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
-        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false, &mut Vec::new(), sym);
+        let r = self.execute_frame(
+            op_array,
+            cvs,
+            tmps,
+            Some(ip),
+            false,
+            &mut Vec::new(),
+            sym,
+            fe,
+        );
         self.is_global_scope = was_global;
         // A write to $GLOBALS[...] may have changed the symbol table's shape.
         if let Some(op) = op_array.ops.get(ip) {
@@ -15598,43 +15645,27 @@ impl Vm {
         // exception that led into it).
         fin: &mut Vec<(usize, Option<Value>)>,
         fsym: &mut Option<crate::symtab::FrameSymtab>,
+        // Iterator state of the running foreach loops (kept by a generator
+        // frame across single steps).
+        fe: &mut ForeachState,
     ) -> Result<Value, VmError> {
         let mut ip: usize = single_step.unwrap_or(0);
         let temp_count = op_array.temp_count as usize;
         let mut cvs = cvs;
         let mut tmps = tmps;
         let mut stepped = false;
-        let mut foreach_positions: crate::fxhash::FxHashMap<u32, usize> = Default::default();
-        // Object handles held by the internal iterators of running foreach
-        // loops over Traversables (zend_iterator_init allocates one), keyed
-        // by iterator tmp; released with the loop.
-        let mut foreach_iter_handles: crate::fxhash::FxHashMap<u32, Value> = Default::default();
-        // By-value foreach over an array iterates the array as it was when the
-        // loop started (PHP iterates a copy): a shallow snapshot of its entries.
-        let mut foreach_snap: crate::fxhash::FxHashMap<u32, Vec<(ArrayKey, Value)>> =
-            Default::default();
-        // Key of the element the foreach is currently on (ForeachKey, and the
-        // by-ref iterator's position tracking).
-        let mut foreach_cur_key: crate::fxhash::FxHashMap<u32, ArrayKey> = Default::default();
-        // By-ref foreach: the reference of the current element (the iterator
-        // follows it when elements before it are removed or inserted).
-        let mut foreach_cur_ref: crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<Value>>> =
-            Default::default();
-        // foreach over a plain object: the object, and the storage name of the
-        // current property slot.
-        // (The iterator tmp holds the object itself, so it is released with it.)
-        let mut foreach_obj: crate::fxhash::FxHashMap<
-            u32,
-            std::rc::Weak<RefCell<crate::object::PhpObject>>,
-        > = Default::default();
-        let mut foreach_obj_cur: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
-        // Generator key storage for foreach (saved before advancing to next yield)
-        let mut foreach_gen_keys: crate::fxhash::FxHashMap<u32, Value> = Default::default();
-        // WeakMap iteration: maps iterator index to key objects
-        let mut weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<Value>> = Default::default();
-        // Track which foreach iterators are by-reference (stores the source array Rc)
-        let mut foreach_ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>> =
-            Default::default();
+        let ForeachState {
+            positions: foreach_positions,
+            iter_handles: foreach_iter_handles,
+            snap: foreach_snap,
+            cur_key: foreach_cur_key,
+            cur_ref: foreach_cur_ref,
+            obj: foreach_obj,
+            obj_cur: foreach_obj_cur,
+            gen_keys: foreach_gen_keys,
+            weakmap_iter_keys,
+            ref_arrays: foreach_ref_arrays,
+        } = fe;
         // Maps CV index -> static var key (for saving back on write)
         let static_cv_keys: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx, error_reporting_depth, pending_calls_depth)
