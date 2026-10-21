@@ -5205,9 +5205,16 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === String extras ===
 
-fn str_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let len = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
+fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = crate::strings::zpp_str(vm, args, 0, "str_split", "string")?;
+    let len = args.get(1).map(|v| v.to_long()).unwrap_or(1);
+    if len < 1 {
+        let msg = "str_split(): Argument #2 ($length) must be greater than 0".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let len = len as usize;
     let bytes = s.as_bytes();
     let mut result = PhpArray::new();
     // PHP 8.3+: empty string returns empty array
