@@ -54,6 +54,69 @@ pub struct Parser {
 const MAX_PARSE_DEPTH: u32 = 512;
 
 impl Parser {
+    /// `__halt_compiler();` at the top level: drop everything after it and
+    /// resolve direct references to `__COMPILER_HALT_OFFSET__` (unqualified
+    /// or `\`-qualified) to the byte offset right after the statement.
+    fn apply_halt_compiler(tokens: &mut Vec<Token>, docs: &mut Vec<Option<Vec<u8>>>) {
+        let mut depth: i32 = 0;
+        let mut halt: Option<(usize, u32)> = None;
+        for i in 0..tokens.len() {
+            match &tokens[i].kind {
+                TokenKind::OpenBrace => depth += 1,
+                TokenKind::CloseBrace => depth -= 1,
+                TokenKind::Identifier(n) if depth == 0 && n.eq_ignore_ascii_case(b"__halt_compiler") => {
+                    if matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::OpenParen))
+                        && matches!(tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::CloseParen))
+                        && matches!(tokens.get(i + 3).map(|t| &t.kind), Some(TokenKind::Semicolon) | Some(TokenKind::CloseTag))
+                    {
+                        let is_member = i > 0 && matches!(tokens[i - 1].kind,
+                            TokenKind::Arrow | TokenKind::NullsafeArrow | TokenKind::DoubleColon | TokenKind::Function | TokenKind::Backslash);
+                        if !is_member {
+                            halt = Some((i, tokens[i + 3].span.end));
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some((hi, offset)) = halt else { return };
+        // Keep `__halt_compiler ( ) ;` and the Eof token; drop the rest.
+        if let Some(eof) = tokens.last().cloned() {
+            if tokens.len() > hi + 4 {
+                tokens.truncate(hi + 4);
+                docs.truncate(hi + 4);
+                if eof.kind == TokenKind::Eof {
+                    tokens.push(eof);
+                    docs.push(None);
+                }
+            }
+        }
+        let mut j = 0;
+        while j < hi.min(tokens.len()) {
+            let is_const = matches!(&tokens[j].kind, TokenKind::Identifier(n) if n.as_slice() == b"__COMPILER_HALT_OFFSET__");
+            if is_const {
+                let prev = if j > 0 { Some(&tokens[j - 1].kind) } else { None };
+                let prev2 = if j > 1 { Some(&tokens[j - 2].kind) } else { None };
+                let member = matches!(prev, Some(TokenKind::Arrow) | Some(TokenKind::NullsafeArrow) | Some(TokenKind::DoubleColon) | Some(TokenKind::Const) | Some(TokenKind::Function));
+                if !member {
+                    if matches!(prev, Some(TokenKind::Backslash)) {
+                        // `\X` is the global constant; `ns\X` / `namespace\X` are not.
+                        if !matches!(prev2, Some(TokenKind::Identifier(_)) | Some(TokenKind::Namespace)) {
+                            tokens[j].kind = TokenKind::LongNumber(offset as i64);
+                            tokens.remove(j - 1);
+                            docs.remove(j - 1);
+                            continue;
+                        }
+                    } else {
+                        tokens[j].kind = TokenKind::LongNumber(offset as i64);
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+
     pub fn new(tokens: Vec<Token>) -> Self {
         // Strip DocComment tokens out of the stream and attach each to the
         // *next* non-doc token. token_doc_comments[i] is the (last) doc comment
@@ -70,6 +133,7 @@ impl Parser {
             doc_comments.push(pending_doc.take());
             filtered.push(tok);
         }
+        Self::apply_halt_compiler(&mut filtered, &mut doc_comments);
         Self {
             tokens: filtered,
             token_doc_comments: doc_comments,

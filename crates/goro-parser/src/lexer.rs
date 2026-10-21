@@ -49,6 +49,19 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Skip a leading `#!...` line (the CLI does this for the main script).
+    pub fn skip_shebang(&mut self) {
+        if self.pos == 0 && self.source.starts_with(b"#!") {
+            match self.source.iter().position(|&b| b == b'\n') {
+                Some(nl) => {
+                    self.pos = nl + 1;
+                    self.line += 1;
+                }
+                None => self.pos = self.source.len(),
+            }
+        }
+    }
+
     /// Turn on whitespace/comment token preservation. Must be set before
     /// calling `tokenize()`.
     pub fn set_preserve_trivia(&mut self, preserve: bool) {
