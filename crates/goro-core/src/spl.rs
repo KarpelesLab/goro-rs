@@ -285,7 +285,7 @@ impl Vm {
         }
         let base = self.spl_find_base(&class_lower, &[b"recursiveiteratoriterator", b"iteratoriterator"])?;
         let target = if base == b"recursiveiteratoriterator" {
-            let stack = obj.borrow().get_property(b"__spl_iter_stack");
+            let stack = obj.borrow().get_property(b"__spl_rii_its");
             let top = match &stack {
                 Value::Array(s) => s.borrow().values().last().cloned(),
                 _ => None,
@@ -386,10 +386,11 @@ impl Vm {
             &cl,
             &[
                 b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap",
-                b"directoryiterator", b"splfileobject", b"splfileinfo",
+                b"directoryiterator", b"splfileobject", b"splfileinfo", b"splfixedarray",
             ],
         )?;
         match base {
+            b"splfixedarray" => Some(self.fa_debug_info(obj, true)),
             b"splfileobject" => Some(self.sfi_debug_info(obj, true)),
             b"splfileinfo" => Some(self.sfi_debug_info(obj, false)),
             b"splpriorityqueue" => Some(self.heap_debug_info(obj, true)),
@@ -504,6 +505,7 @@ pub fn spl_class_interfaces(class_lower: &[u8]) -> Option<Vec<&'static str>> {
         b"iterator" | b"iteratoraggregate" => return Some(vec!["Traversable"]),
         b"traversable" | b"arrayaccess" | b"countable" | b"serializable" | b"stringable"
         | b"jsonserializable" => return Some(vec![]),
+        b"internaliterator" => return Some(vec!["Iterator", "Traversable"]),
         _ => {}
     }
     if class_lower.ends_with(b"exception") {

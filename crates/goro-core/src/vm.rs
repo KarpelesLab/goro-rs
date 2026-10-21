@@ -6088,6 +6088,11 @@ impl Vm {
 
     /// Check if a built-in class implements a given interface
     pub fn builtin_implements_interface(&self, class_lower: &[u8], iface_name: &[u8]) -> bool {
+        // SPL classes and the core iterator interfaces (Iterator and
+        // IteratorAggregate extend Traversable) per the stubs.
+        if let Some(r) = crate::spl::spl_class_implements(class_lower, iface_name) {
+            return r;
+        }
         match iface_name {
             b"iterator" => matches!(
                 class_lower,
@@ -6300,7 +6305,10 @@ impl Vm {
                 }
             }
             b"splfixedarray" => {
-                self.spl_fixed_array_method(method_lower, obj)
+                self.spl_fixed_call(method_lower, obj, None)
+            }
+            b"internaliterator" => {
+                self.spl_internal_iterator_call(method_lower, obj)
             }
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
                 self.spl_linked_list_method(method_lower, obj)
@@ -7167,89 +7175,6 @@ impl Vm {
                 arr.push(Value::Array(Rc::new(RefCell::new(props))));
                 arr.push(iter_class);
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
-            }
-            _ => None,
-        }
-    }
-
-    fn spl_fixed_array_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        match method {
-            b"count" | b"getsize" => {
-                let ob = obj.borrow();
-                let size = ob.get_property(b"__spl_size");
-                Some(size)
-            }
-            b"setsize" => None,
-            b"toarray" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
-                } else {
-                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-                }
-            }
-            // Iterator methods
-            b"rewind" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                Some(Value::Null)
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let size = ob.get_property(b"__spl_size");
-                let pos = ob.get_property(b"__spl_pos");
-                let size_val = if let Value::Long(s) = size { s } else { 0 };
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                Some(if pos_val >= 0 && pos_val < size_val { Value::True } else { Value::False })
-            }
-            b"current" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    Some(a.get(&ArrayKey::Int(pos_val)).cloned().unwrap_or(Value::Null))
-                } else {
-                    Some(Value::Null)
-                }
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let pos = ob.get_property(b"__spl_pos");
-                Some(if let Value::Long(p) = pos { Value::Long(p) } else { Value::Long(0) })
-            }
-            b"next" => {
-                let mut ob = obj.borrow_mut();
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos_val + 1));
-                Some(Value::Null)
-            }
-            b"__serialize" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
-                } else {
-                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-                }
-            }
-            b"__unserialize" => None, // handled in handle_spl_docall
-            b"fromarray" => None, // static method, handled in handle_spl_docall
-            b"jsonserialize" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
-                } else {
-                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-                }
             }
             _ => None,
         }
@@ -10311,210 +10236,7 @@ impl Vm {
                     }
                 }
                 b"splfixedarray" => {
-                    match method {
-                        b"offsetget" => {
-                            let key = args.get(1)?;
-                            // Type check: reject non-integer keys
-                            if let Value::String(_) = key {
-                                let exc = self.create_exception(b"TypeError", "Cannot access offset of type string on SplFixedArray", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let idx = key.to_long();
-                            let ob = obj.borrow();
-                            let size = if let Value::Long(s) = ob.get_property(b"__spl_size") { s } else { 0 };
-                            if idx < 0 || idx >= size {
-                                drop(ob);
-                                let exc = self.create_exception(b"OutOfBoundsException", "Index invalid or out of range", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                Some(a.borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null))
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        b"offsetset" => {
-                            let key = args.get(1).cloned().unwrap_or(Value::Null);
-                            let val = args.get(2).cloned().unwrap_or(Value::Null);
-                            // Null key = [] operator, which is not supported
-                            if matches!(key, Value::Null) {
-                                let exc = self.create_exception(b"Error", "[] operator not supported for SplFixedArray", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            // Type check: reject non-integer keys
-                            if let Value::String(_) = &key {
-                                let exc = self.create_exception(b"TypeError", "Cannot access offset of type string on SplFixedArray", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let idx = key.to_long();
-                            let ob = obj.borrow();
-                            let size = if let Value::Long(s) = ob.get_property(b"__spl_size") { s } else { 0 };
-                            if idx < 0 || idx >= size {
-                                drop(ob);
-                                let exc = self.create_exception(b"OutOfBoundsException", "Index invalid or out of range", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().set(ArrayKey::Int(idx), val);
-                            }
-                            Some(Value::Null)
-                        }
-                        b"offsetexists" => {
-                            let key = args.get(1)?;
-                            if let Value::String(_) = key {
-                                return Some(Value::False);
-                            }
-                            let ob = obj.borrow();
-                            let size = if let Value::Long(s) = ob.get_property(b"__spl_size") { s } else { 0 };
-                            let idx = key.to_long();
-                            if idx < 0 || idx >= size {
-                                Some(Value::False)
-                            } else {
-                                let arr = ob.get_property(b"__spl_array");
-                                if let Value::Array(a) = arr {
-                                    let val = a.borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null);
-                                    Some(if matches!(val, Value::Null) { Value::False } else { Value::True })
-                                } else {
-                                    Some(Value::False)
-                                }
-                            }
-                        }
-                        b"offsetunset" => {
-                            let key = args.get(1)?;
-                            let idx = key.to_long();
-                            let ob = obj.borrow();
-                            let size = if let Value::Long(s) = ob.get_property(b"__spl_size") { s } else { 0 };
-                            if idx < 0 || idx >= size {
-                                drop(ob);
-                                let exc = self.create_exception(b"OutOfBoundsException", "Index invalid or out of range", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().set(ArrayKey::Int(idx), Value::Null);
-                            }
-                            Some(Value::Null)
-                        }
-                        b"setsize" => {
-                            // Emit deprecation for null parameter
-                            if let Some(arg) = args.get(1) {
-                                if matches!(arg, Value::Null) {
-                                    self.emit_deprecated_at(
-                                        "SplFixedArray::setSize(): Passing null to parameter #1 ($size) of type int is deprecated",
-                                        0,
-                                    );
-                                }
-                            }
-                            let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            if size < 0 || size > 10_000_000 {
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_size".to_vec(), Value::Long(size));
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut a = a.borrow_mut();
-                                let current = a.len();
-                                if (size as usize) > current {
-                                    for _ in current..(size as usize) {
-                                        a.push(Value::Null);
-                                    }
-                                } else if (size as usize) < current {
-                                    // Truncate: rebuild array with only the first `size` elements
-                                    let mut new_arr = PhpArray::new();
-                                    for i in 0..size {
-                                        let key = ArrayKey::Int(i);
-                                        let val = a.get(&key).cloned().unwrap_or(Value::Null);
-                                        new_arr.set(key, val);
-                                    }
-                                    *a = new_arr;
-                                }
-                            }
-                            Some(Value::Null)
-                        }
-                        b"__unserialize" => {
-                            let data = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                            if let Value::Array(a) = data {
-                                let a_borrow = a.borrow();
-                                let size = a_borrow.len() as i64;
-                                let mut new_arr = PhpArray::new();
-                                for (i, (_k, v)) in a_borrow.iter().enumerate() {
-                                    new_arr.set(ArrayKey::Int(i as i64), v.clone());
-                                }
-                                drop(a_borrow);
-                                let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
-                                ob.set_property(b"__spl_size".to_vec(), Value::Long(size));
-                            }
-                            Some(Value::Null)
-                        }
-                        b"fromarray" => {
-                            // Static method: SplFixedArray::fromArray(array $array, bool $preserveKeys = true)
-                            let arr_arg = args.get(1).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                            let preserve_keys = args.get(2).map(|v| v.to_bool()).unwrap_or(true);
-                            if let Value::Array(a) = arr_arg {
-                                // Collect entries first to avoid borrow issues
-                                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                let mut new_arr = PhpArray::new();
-                                let size;
-                                if preserve_keys {
-                                    let mut max_key: i64 = -1;
-                                    let mut has_string_key = false;
-                                    for (k, v) in &entries {
-                                        if let ArrayKey::Int(n) = k {
-                                            if *n > max_key { max_key = *n; }
-                                            new_arr.set(k.clone(), v.clone());
-                                        } else {
-                                            has_string_key = true;
-                                            break;
-                                        }
-                                    }
-                                    if has_string_key {
-                                        let exc = self.create_exception(b"InvalidArgumentException",
-                                            "array must contain only positive integer keys", 0);
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                    // Detect integer overflow when max_key + 1 overflows i64
-                                    if max_key == i64::MAX {
-                                        let exc = self.create_exception(b"OverflowException",
-                                            "integer overflow detected", 0);
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                    size = max_key + 1;
-                                    // Fill in missing indices with NULL
-                                    for i in 0..size {
-                                        if new_arr.get(&ArrayKey::Int(i)).is_none() {
-                                            new_arr.set(ArrayKey::Int(i), Value::Null);
-                                        }
-                                    }
-                                } else {
-                                    size = entries.len() as i64;
-                                    for (_k, v) in &entries {
-                                        new_arr.push(v.clone());
-                                    }
-                                }
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
-                                let mut fa_obj = PhpObject::new(b"SplFixedArray".to_vec(), obj_id);
-                                fa_obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
-                                fa_obj.set_property(b"__spl_size".to_vec(), Value::Long(size));
-                                Some(Value::Object(Rc::new(RefCell::new(fa_obj))))
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        _ => None,
-                    }
+                    self.spl_fixed_call(method, obj, Some(&args[1..]))
                 }
                 b"splobjectstorage" => {
                     match method {
@@ -17963,41 +17685,25 @@ impl Vm {
                         );
                     } else if func_name_lower == b"splfixedarray::fromarray" {
                         // SplFixedArray::fromArray($array, $preserveKeys = true)
-                        let input = call.args.first().cloned().unwrap_or(Value::Null);
-                        let _preserve_keys = call.args.get(1).cloned().unwrap_or(Value::True);
-                        let oid = self.next_object_id();
-                        let obj = PhpObject::new(b"SplFixedArray".to_vec(), oid);
-                        let obj_rc = Rc::new(RefCell::new(obj));
-                        if let Value::Array(src) = &input {
-                            let src = src.borrow();
-                            let len = src.len();
-                            let mut arr = PhpArray::new();
-                            for (i, (_, v)) in src.iter().enumerate() {
-                                arr.set(ArrayKey::Int(i as i64), v.clone());
+                        let fa_args = call.args.clone();
+                        let result = self.fa_from_array(&fa_args);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
                             }
-                            {
-                                let mut obj_mut = obj_rc.borrow_mut();
-                                obj_mut.set_property(
-                                    b"__spl_array".to_vec(),
-                                    Value::Array(Rc::new(RefCell::new(arr))),
-                                );
-                                obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(len as i64));
-                            }
-                        } else {
-                            let mut obj_mut = obj_rc.borrow_mut();
-                            obj_mut.set_property(
-                                b"__spl_array".to_vec(),
-                                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
-                            );
-                            obj_mut.set_property(b"__spl_size".to_vec(), Value::Long(0));
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => {
+                                    let ob = o.borrow();
+                                    format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name),
+                                        ob.get_property(b"message").to_php_string().to_string_lossy())
+                                }
+                                _ => "Uncaught exception".to_string(),
+                            };
+                            return Err(VmError { message: msg, line: op.line });
                         }
-                        self.write_operand(
-                            &op.result,
-                            Value::Object(obj_rc),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"uri\\whatwg\\url::parse"
                         || func_name_lower == b"uri\\rfc3986\\uri::parse" {
                         // static parse(string $uri, ?string $baseUrl = null, mixed &$errors = null): ?static
@@ -22743,7 +22449,12 @@ impl Vm {
                         // ArrayAccess: $obj[] = $val -> offsetSet(null, $val)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let spl_args = vec![arr_val.clone(), Value::Null, val.clone()];
-                        if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
+                        if self.spl_find_base(&class_lower, &[b"splfixedarray"]).is_some()
+                            && !self.classes.get(&class_lower).map(|c| c.get_method(b"offsetset").is_some()).unwrap_or(false)
+                        {
+                            // write_dimension without offset
+                            self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
+                        } else if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
                             self.call_object_method(&arr_val, b"offsetset", &[Value::Null, val]);
                         }
                         if let Some(exc_val) = self.current_exception.take() {
@@ -23653,12 +23364,20 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                        } else if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator") {
+                        } else if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator")
+                            && !(self.spl_find_base(&class_lower, &[b"splfixedarray"]).is_some() && self.fa_user_get_iterator(obj))
+                        {
                             // SPL class with internal array - iterate the array directly
+                            // (SplFixedArray iterates its live storage).
+                            let is_fixed = self.spl_find_base(&class_lower, &[b"splfixedarray"]).is_some();
                             let obj_borrow = obj.borrow();
                             let spl_arr = obj_borrow.get_property(b"__spl_array");
                             let arr_val = if let Value::Array(a) = spl_arr {
-                                Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                if is_fixed {
+                                    Value::Array(a.clone())
+                                } else {
+                                    Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                }
                             } else {
                                 Value::Array(Rc::new(RefCell::new(PhpArray::new())))
                             };
@@ -33801,7 +33520,8 @@ impl Vm {
                                             || class_lower == b"stdclass"
                                             || class_lower == b"__php_incomplete_class"
                                             || (!self.classes.contains_key(&class_lower)
-                                                && !self.native_class_handlers.contains_key(&class_lower));
+                                                && !self.native_class_handlers.contains_key(&class_lower)
+                                                && !crate::spl::SPL_CLASSES.contains(&class_lower.as_slice()));
                                         let allows_dynamic = self.classes.get(&class_lower)
                                             .map(|c| c.allow_dynamic_properties)
                                             .unwrap_or(false);

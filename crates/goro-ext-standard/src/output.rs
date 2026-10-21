@@ -1975,7 +1975,7 @@ fn var_dump_mangled_table(
     for (key, value) in &items {
         match key {
             goro_core::array::ArrayKey::Int(n) => {
-                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, n).as_bytes());
+                vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
             }
             goro_core::array::ArrayKey::String(s) => {
                 let bytes = s.as_bytes();

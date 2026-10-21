@@ -668,7 +668,11 @@ impl Vm {
             let msg = format!(
                 "{}(): Argument #1 ($iterator) must be of type {}, {} given",
                 func,
-                self.builtin_canonical_name(inner_iface),
+                match inner_iface {
+                    b"traversable" => "Traversable",
+                    b"recursiveiterator" => "RecursiveIterator",
+                    _ => "Iterator",
+                },
                 Self::value_type_name(&inner)
             );
             self.spl_throw(b"TypeError", &msg);
