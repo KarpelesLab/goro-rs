@@ -11,6 +11,7 @@ members = [
     "crates/goro-ext-hash",
     "crates/goro-ext-openssl",
     "crates/goro-ext-zlib",
+    "crates/goro-zlib",
     "crates/goro-ext-gmp",
     "crates/goro-ext-bz2",
     "crates/goro-ext-curl",
