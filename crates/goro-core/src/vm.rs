@@ -17733,7 +17733,9 @@ impl Vm {
                             }
                         }
                     }
-                    match cv_val.modulo(&rhs) {
+                    let mod_a = Value::Long(self.op_to_long(&cv_val));
+                    let mod_b = Value::Long(self.op_to_long(&rhs));
+                    match mod_a.modulo(&mod_b) {
                         Ok(result) => self.write_operand(
                             &op.op1,
                             result,
@@ -17852,7 +17854,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] & bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(cv_val.to_long() & rhs.to_long())
+                        Value::Long(self.op_to_long(&cv_val) & self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -17908,7 +17910,7 @@ impl Vm {
                             .collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(cv_val.to_long() | rhs.to_long())
+                        Value::Long(self.op_to_long(&cv_val) | self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -17958,7 +17960,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] ^ bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(cv_val.to_long() ^ rhs.to_long())
+                        Value::Long(self.op_to_long(&cv_val) ^ self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -17990,8 +17992,8 @@ impl Vm {
                             }
                         }
                     }
-                    let a = cv_val.to_long();
-                    let n = rhs.to_long();
+                    let a = self.op_to_long(&cv_val);
+                    let n = self.op_to_long(&rhs);
                     if n < 0 {
                         let msg = "Bit shift by negative number";
                         let exc = self.create_exception(b"ArithmeticError", msg, op.line);
@@ -18043,8 +18045,8 @@ impl Vm {
                             }
                         }
                     }
-                    let a = cv_val.to_long();
-                    let n = rhs.to_long();
+                    let a = self.op_to_long(&cv_val);
+                    let n = self.op_to_long(&rhs);
                     if n < 0 {
                         let msg = "Bit shift by negative number";
                         let exc = self.create_exception(b"ArithmeticError", msg, op.line);
