@@ -688,12 +688,17 @@ pub fn construct(vm: &mut Vm, this: &Obj, base: Base, a: &[Value]) -> R<()> {
         Base::Text | Base::Comment => {
             a.count(vm, 0, 1)?;
             let v = super::node::cstr(&a.str(vm, 0, "data")?).to_string();
+            let null = a.raw(0).is_none();
             tree::with(|t| {
-                if base == Base::Text {
+                let n = if base == Base::Text {
                     t.new_text(None, &v)
                 } else {
                     t.new_comment(None, &v)
+                };
+                if null {
+                    t.nodes[n].flags |= tree::F_NULL_CONTENT;
                 }
+                n
             })
         }
         Base::CdataSection => {
@@ -761,7 +766,7 @@ pub fn dom_import_simplexml(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> 
         }
     };
     let n = match crate::simplexml::sxe_of(&o) {
-        Some(sx) => sx.node.get(),
+        Some(sx) => tree::with(|t| crate::simplexml::first_node(t, &sx, sx.node.get())),
         None => node_of(&o),
     };
     let ok = n

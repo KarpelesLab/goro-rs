@@ -15,6 +15,10 @@ pub type NsId = usize;
 pub const XML_XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 pub const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
+/// Node flag: the content pointer is NULL (e.g. `new DOMComment()`), as
+/// opposed to an empty string; such comments are not serialized.
+pub const F_NULL_CONTENT: u32 = 1;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NType {
     Element = 1,
@@ -921,15 +925,74 @@ impl Tree {
     ) -> NodeId {
         let href = ns.map(|n| self.nss[n].href.clone());
         if let Some(a) = self.has_ns_prop(node, name, href.as_deref()) {
+            let id = self.is_id(node, a);
             self.remove_id_for_attr(a);
             self.nodes[a].ns = ns;
             self.set_children_text(a, value);
+            if id {
+                self.add_id_safe(a, value);
+            }
             return a;
         }
         let doc = self.nodes[node].doc;
         let a = self.new_attr_node(doc, ns, name, Some(value));
         self.link_child_raw(node, a);
+        if self.is_id(node, a) {
+            self.add_id_safe(a, value);
+        }
         a
+    }
+
+    /// xmlIsID: xml:id, "id" (and a@name) in HTML documents, or an
+    /// attribute declared with type ID in the DTD.
+    pub fn is_id(&self, el: NodeId, at: NodeId) -> bool {
+        let aname = &self.nodes[at].name;
+        if aname == "id" && self.ns_prefix(self.nodes[at].ns) == Some("xml") {
+            return true;
+        }
+        let d = match self.nodes[at].doc.or(self.nodes[el].doc) {
+            Some(d) => d,
+            None => return false,
+        };
+        let info = match self.doc_info(d) {
+            Some(i) => i,
+            None => return false,
+        };
+        if self.nodes[d].t == NType::HtmlDocument || info.html {
+            if aname == "id" {
+                return true;
+            }
+            return self.nodes[el].t == NType::Element
+                && aname == "name"
+                && self.nodes[el].name == "a";
+        }
+        let elem_q = self.qname(el);
+        let attr_q = self.qname(at);
+        for sub in [info.int_subset, info.ext_subset].into_iter().flatten() {
+            if let Some(dd) = self.dtd_info(sub) {
+                for ad in &dd.attr_defaults {
+                    let full = match &ad.prefix {
+                        Some(p) => format!("{}:{}", p, ad.name),
+                        None => ad.name.clone(),
+                    };
+                    if ad.elem == elem_q && full == attr_q && ad.atype == "ID" {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// xmlAddIDSafe: mark the attribute as an ID and register it (an
+    /// existing registration of the same value wins).
+    pub fn add_id_safe(&mut self, at: NodeId, value: &str) {
+        self.nodes[at].atype = 2;
+        if let Some(d) = self.nodes[at].doc {
+            if let Some(di) = self.doc_info_mut(d) {
+                di.ids.entry(value.to_string()).or_insert(at);
+            }
+        }
     }
 
     /// xmlNewProp + link (does not replace existing)
@@ -943,6 +1006,11 @@ impl Tree {
         let doc = self.nodes[node].doc;
         let a = self.new_attr_node(doc, ns, name, value);
         self.link_child_raw(node, a);
+        if let Some(v) = value {
+            if self.is_id(node, a) {
+                self.add_id_safe(a, v);
+            }
+        }
         a
     }
 
@@ -1073,6 +1141,7 @@ impl Tree {
             }
             NType::Text | NType::CData | NType::Comment | NType::Pi => {
                 self.nodes[id].content = value.to_string();
+                self.nodes[id].flags &= !F_NULL_CONTENT;
             }
             _ => {}
         }
@@ -1309,7 +1378,9 @@ impl Tree {
                 self.nodes[nid].ns_def.push(nn);
             }
         }
-        if let Some(ns) = src.ns {
+        // xmlCopyProp without a target element drops the namespace
+        let keep_ns = !(src.t == NType::Attribute && parent.is_none());
+        if let Some(ns) = src.ns.filter(|_| keep_ns) {
             let prefix = self.nss[ns].prefix.clone();
             let href = self.nss[ns].href.clone();
             let found = self.search_ns(nid, prefix.as_deref());

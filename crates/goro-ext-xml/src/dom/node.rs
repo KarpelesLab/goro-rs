@@ -650,7 +650,9 @@ fn w_prefix(vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
 
 fn r_local_name(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
     Ok(tree::with(|t| match t.nodes[n].t {
-        NType::Element | NType::Attribute | NType::NamespaceDecl => s(&t.nodes[n].name),
+        // the fake namespace declaration node is named after its prefix
+        NType::NamespaceDecl => s(t.ns_prefix(t.nodes[n].ns).unwrap_or("xmlns")),
+        NType::Element | NType::Attribute => s(&t.nodes[n].name),
         _ => Value::Null,
     }))
 }
@@ -1000,23 +1002,14 @@ pub fn reconcile_attribute_ns_after_insertion(t: &mut Tree, attr: NodeId) {
         None => return,
     };
     let prefix = t.nss[ns].prefix.clone();
-    let href = t.nss[ns].href.clone();
     if let Some(found) = t.search_ns(parent, prefix.as_deref()) {
-        if t.nss[found].href == href {
+        if t.nss[found].href == t.nss[ns].href {
             t.nodes[attr].ns = Some(found);
             return;
         }
     }
-    // declare it
-    match t.search_ns_by_href(parent, &href) {
-        Some(f) if t.nss[f].prefix.is_some() => t.nodes[attr].ns = Some(f),
-        _ => {
-            if let Some(nn) = t.new_ns(Some(parent), &href, prefix.as_deref()) {
-                t.nodes[attr].ns = Some(nn);
-            } else if let Some(nn) = new_reconciled_ns(t, parent, ns) {
-                t.nodes[attr].ns = Some(nn);
-            }
-        }
+    if prefix.is_some() {
+        reconciliate_ns(t, parent);
     }
 }
 

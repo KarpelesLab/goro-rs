@@ -334,9 +334,11 @@ pub fn dump_node(t: &Tree, ctx: &mut SaveCtx, id: NodeId) {
             ctx.out.push_str("?>");
         }
         NType::Comment => {
-            ctx.out.push_str("<!--");
-            ctx.out.push_str(&n.content);
-            ctx.out.push_str("-->");
+            if n.flags & crate::tree::F_NULL_CONTENT == 0 || !n.content.is_empty() {
+                ctx.out.push_str("<!--");
+                ctx.out.push_str(&n.content);
+                ctx.out.push_str("-->");
+            }
         }
         NType::EntityRef => {
             ctx.out.push('&');

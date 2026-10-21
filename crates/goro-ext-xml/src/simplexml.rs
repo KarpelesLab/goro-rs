@@ -302,7 +302,7 @@ fn reset_iter_node(t: &Tree, s: &Sxe) -> Option<NodeId> {
 }
 
 /// php_sxe_get_first_node_non_destructive
-fn first_node(t: &Tree, s: &Sxe, node: Option<NodeId>) -> Option<NodeId> {
+pub fn first_node(t: &Tree, s: &Sxe, node: Option<NodeId>) -> Option<NodeId> {
     if s.itype.get() != It::None {
         reset_iter_node(t, s)
     } else {
