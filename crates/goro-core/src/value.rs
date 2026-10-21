@@ -42,6 +42,20 @@ thread_local! {
     static MEMORY_USAGE: Cell<usize> = const { Cell::new(0) };
     /// Memory limit in bytes (default 128MB, 0 = unlimited)
     static MEMORY_LIMIT: Cell<usize> = const { Cell::new(128 * 1024 * 1024) };
+    /// Size of the allocation that hit the memory limit (0 = none pending);
+    /// the VM turns it into the "Allowed memory size ... exhausted" fatal.
+    static MEMORY_EXHAUSTED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Pending memory-limit violation: the size of the failed allocation.
+#[inline]
+pub fn memory_exhausted() -> usize {
+    MEMORY_EXHAUSTED.with(|c| c.get())
+}
+
+/// Take the pending memory-limit violation (0 = none).
+pub fn take_memory_exhausted() -> usize {
+    MEMORY_EXHAUSTED.with(|c| c.replace(0))
 }
 
 /// Track a memory allocation. Returns false if over limit.
@@ -51,10 +65,32 @@ pub fn memory_alloc(bytes: usize) -> bool {
         let limit = MEMORY_LIMIT.with(|l| l.get());
         let new_total = current.saturating_add(bytes);
         if limit > 0 && new_total > limit {
+            MEMORY_EXHAUSTED.with(|c| {
+                if c.get() == 0 {
+                    c.set(bytes.max(1));
+                }
+            });
             return false;
         }
         m.set(new_total);
         true
+    })
+}
+
+/// Account an allocation that cannot fail (objects): it is always added;
+/// going over the limit raises the pending memory-limit error.
+pub fn memory_charge(bytes: usize) {
+    MEMORY_USAGE.with(|m| {
+        let new_total = m.get().saturating_add(bytes);
+        let limit = MEMORY_LIMIT.with(|l| l.get());
+        if limit > 0 && new_total > limit {
+            MEMORY_EXHAUSTED.with(|c| {
+                if c.get() == 0 {
+                    c.set(bytes.max(1));
+                }
+            });
+        }
+        m.set(new_total);
     })
 }
 
@@ -85,6 +121,7 @@ pub fn set_memory_limit(bytes: i64) {
 /// Reset memory tracking (for test isolation).
 pub fn memory_reset() {
     MEMORY_USAGE.with(|m| m.set(0));
+    MEMORY_EXHAUSTED.with(|c| c.set(0));
 }
 
 /// Set the PHP `precision` ini value (used by float-to-string conversion).

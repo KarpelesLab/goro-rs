@@ -4,7 +4,8 @@ use std::rc::Rc;
 use crate::value::{memory_alloc, memory_free};
 
 /// Overhead per PhpString allocation (Rc + Cell + Vec header)
-const STRING_OVERHEAD: usize = 64;
+/// (zend_string: 24-byte header + NUL, rounded)
+const STRING_OVERHEAD: usize = 32;
 
 /// PHP binary-safe string with cached hash
 #[derive(Clone)]

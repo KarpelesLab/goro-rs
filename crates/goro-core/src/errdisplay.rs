@@ -82,6 +82,18 @@ impl Vm {
         if mode == 0 {
             return;
         }
+        // fatal_error_backtraces: php_error_cb() appends the backtrace taken
+        // when the fatal error was raised (not for uncaught exceptions,
+        // which print their own trace).
+        let trace = if kind == "Fatal error"
+            && !msg.starts_with("Uncaught ")
+            && ini_bool(self, b"fatal_error_backtraces")
+        {
+            self.materialize_builtin_frames(false);
+            format!("\nStack trace:\n{}", self.format_stack_trace())
+        } else {
+            String::new()
+        };
         let prepend = ini_str(self, b"error_prepend_string").unwrap_or_default();
         let append = ini_str(self, b"error_append_string").unwrap_or_default();
         let text = if ini_bool(self, b"html_errors") {
@@ -111,13 +123,13 @@ impl Vm {
                 msg.to_string()
             };
             format!(
-                "{}<br />\n<b>{}</b>:  {} in <b>{}</b> on line <b>{}</b><br />\n{}",
-                prepend, kind, body, file, line, append
+                "{}<br />\n<b>{}</b>:  {} in <b>{}</b> on line <b>{}</b><br />{}\n{}",
+                prepend, kind, body, file, line, trace, append
             )
         } else {
             format!(
-                "{}\n{}: {} in {} on line {}\n{}",
-                prepend, kind, msg, file, line, append
+                "{}\n{}: {} in {} on line {}{}\n{}",
+                prepend, kind, msg, file, line, trace, append
             )
         };
         if mode == 2 {

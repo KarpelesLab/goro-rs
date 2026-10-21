@@ -1501,6 +1501,11 @@ fn execute_php_inner_impl(
     vm.register_extension(b"tokenizer");
     vm.register_extension(b"pcre");
 
+    // run-tests.php's ini overwrites.
+    vm.constants.insert(
+        b"fatal_error_backtraces".to_vec(),
+        Value::String(PhpString::from_bytes(b"0")),
+    );
     // Apply all INI settings to the VM constants
     let mut startup_messages: Vec<u8> = Vec::new();
     for (key, value) in ini_settings {

@@ -825,6 +825,10 @@ impl Vm {
                 );
                 c.insert(b"max_execution_time".to_vec(), Value::Long(30));
                 c.insert(
+                    b"fatal_error_backtraces".to_vec(),
+                    Value::String(PhpString::from_bytes(b"1")),
+                );
+                c.insert(
                     b"default_charset".to_vec(),
                     Value::String(PhpString::from_bytes(b"UTF-8")),
                 );
@@ -13105,6 +13109,18 @@ impl Vm {
         self.ob_write(data);
     }
 
+    /// "Allowed memory size of N bytes exhausted (tried to allocate M bytes)"
+    pub fn memory_limit_fatal(&mut self) -> VmError {
+        let tried = crate::value::take_memory_exhausted();
+        let limit = crate::value::memory_get_limit();
+        let msg = format!(
+            "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+            limit, tried
+        );
+        let line = self.current_line;
+        self.emit_fatal_at(&msg, line)
+    }
+
     /// CLI only: hand output that is not held by an output buffer to stdout
     /// now (before blocking on I/O or spawning a process).
     pub fn flush_cli_output(&mut self) {
@@ -14482,6 +14498,10 @@ impl Vm {
             // exit() unwinds every frame (zend_throw_unwind_exit).
             if self.exit_requested {
                 return Ok(Value::Null);
+            }
+            // An allocation went over memory_limit (zend_mm_safe_error()).
+            if crate::value::memory_exhausted() != 0 {
+                return Err(self.memory_limit_fatal());
             }
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks

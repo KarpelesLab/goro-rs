@@ -346,7 +346,8 @@ impl PhpArray {
     }
 
     /// Approximate bytes per entry (key + value overhead)
-    pub const ENTRY_SIZE: usize = 80;
+    /// (a hash Bucket is 32 bytes)
+    pub const ENTRY_SIZE: usize = 32;
 
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {

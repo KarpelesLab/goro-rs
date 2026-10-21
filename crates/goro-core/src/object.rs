@@ -261,6 +261,7 @@ impl Drop for PhpObject {
         drop(self.native.take());
         drop(std::mem::take(&mut self.properties));
         drop(self.closure.take());
+        crate::value::memory_free(OBJECT_SIZE);
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 {
             // Use try_with so we don't panic during thread-local
@@ -271,8 +272,12 @@ impl Drop for PhpObject {
     }
 }
 
+/// Accounted size of an object (zend_object header).
+const OBJECT_SIZE: usize = 56;
+
 impl PhpObject {
     pub fn new(class_name: Vec<u8>, object_id: u64) -> Self {
+        crate::value::memory_charge(OBJECT_SIZE);
         Self {
             class_name,
             properties: Vec::new(),
