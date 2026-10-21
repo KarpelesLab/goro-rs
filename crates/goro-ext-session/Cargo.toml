@@ -6,3 +6,5 @@ description = "PHP session extension for goro-rs"
 
 [dependencies]
 goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+libc = "0.2"
