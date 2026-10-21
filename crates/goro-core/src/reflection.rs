@@ -3783,6 +3783,76 @@ fn invoke_internal_method(
     }
 }
 
+
+thread_local! {
+    static INTERNAL_FN_CACHE: RefCell<std::collections::HashMap<Vec<u8>, Option<&'static OpArray>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Reflection's view of a function: the user function, or for an internal
+/// function a signature-only `OpArray` synthesized from its stub.
+pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
+    if let Some(op) = vm.user_functions.get(lower) {
+        return Some(op);
+    }
+    if !vm.functions.contains_key(lower) {
+        return None;
+    }
+    if let Some(v) = INTERNAL_FN_CACHE.with(|c| c.borrow().get(lower).copied()) {
+        return v;
+    }
+    let built: Option<&'static OpArray> = crate::stubs::find_function(lower)
+        .map(|f| &*Box::leak(Box::new(crate::stubs::op_array_for(f, None, false))));
+    INTERNAL_FN_CACHE.with(|c| c.borrow_mut().insert(lower.to_vec(), built));
+    built
+}
+
+/// Extension of an internal function, from its stub.
+fn internal_function_ext(vm: &Vm, lower: &[u8]) -> Option<&'static str> {
+    if vm.user_functions.contains_key(lower) || !vm.functions.contains_key(lower) {
+        return None;
+    }
+    crate::stubs::find_function(lower).map(|f| f.ext)
+}
+
+
+/// For an internal parameter default expression, the constant name it
+/// refers to (Zend: ZEND_AST_CONSTANT / ZEND_AST_CLASS_CONST), if any.
+fn internal_default_constant_name(def: &str) -> Option<String> {
+    let d = def.trim();
+    let is_ident = |x: &str| {
+        !x.is_empty()
+            && x.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_' || c == '\\').unwrap_or(false)
+            && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\\')
+    };
+    if let Some((cls, name)) = d.split_once("::") {
+        if is_ident(cls) && is_ident(name) && !name.eq_ignore_ascii_case("class") {
+            return Some(format!("{}::{}", cls.trim_start_matches('\\'), name));
+        }
+        return None;
+    }
+    if is_ident(d) && !matches!(d.to_ascii_lowercase().as_str(), "true" | "false" | "null") {
+        return Some(d.trim_start_matches('\\').to_string());
+    }
+    None
+}
+
+/// Evaluate an internal parameter's default value expression.
+fn eval_internal_default(vm: &mut Vm, def: &str) -> Option<Value> {
+    if let Some(v) = crate::stubs::literal_value(def) {
+        return Some(v);
+    }
+    let source = format!("<?php return ({});", def).into_bytes();
+    let mut lexer = goro_parser::Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    let mut parser = goro_parser::Parser::new(tokens);
+    let program = parser.parse().ok()?;
+    let mut compiler = crate::compiler::Compiler::new();
+    let (op_array, _classes, _warnings) = compiler.compile(&program).ok()?;
+    let cvs = vec![Value::Undef; op_array.cv_names.len()];
+    vm.execute_op_array_pub(&op_array, cvs).ok()
+}
+
 /// ReflectionFunction no-arg method dispatch
 pub fn reflection_function_method(
     vm: &mut Vm,
@@ -3902,7 +3972,7 @@ pub fn reflection_function_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getnumberofparameters" => {
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+            if let Some(op_array) = rfunc(vm, &func_lower) {
                 Some(Value::Long(op_array.param_count as i64))
             } else if vm.functions.get(func_lower.as_slice()).is_some() {
                 // For built-in functions, check param names
@@ -3915,27 +3985,27 @@ pub fn reflection_function_method(
             }
         }
         b"getnumberofrequiredparameters" => {
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+            if let Some(op_array) = rfunc(vm, &func_lower) {
                 Some(Value::Long(op_array.required_param_count as i64))
             } else {
                 Some(Value::Long(0))
             }
         }
         b"returnsreference" => {
-            let by_ref = vm.user_functions.get(func_lower.as_slice())
+            let by_ref = rfunc(vm, &func_lower)
                 .map(|op| op.returns_by_ref)
                 .unwrap_or(false);
             Some(if by_ref { Value::True } else { Value::False })
         }
         b"getparameters" => {
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()).cloned() {
+            if let Some(op_array) = rfunc(vm, &func_lower).cloned() {
                 Some(create_reflection_parameters(vm, &op_array))
             } else {
                 Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
             }
         }
         b"getreturntype" => {
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+            if let Some(op_array) = rfunc(vm, &func_lower) {
                 if let Some(ref rt) = op_array.return_type {
                     let rt = rt.clone();
                     Some(create_reflection_type(vm, &rt))
@@ -3947,7 +4017,7 @@ pub fn reflection_function_method(
             }
         }
         b"hasreturntype" => {
-            let has = vm.user_functions.get(func_lower.as_slice())
+            let has = rfunc(vm, &func_lower)
                 .and_then(|op| op.return_type.as_ref())
                 .is_some();
             Some(if has { Value::True } else { Value::False })
@@ -3958,14 +4028,14 @@ pub fn reflection_function_method(
             Some(if is_closure { Value::True } else { Value::False })
         }
         b"isvariadic" => {
-            let is_variadic = vm.user_functions.get(func_lower.as_slice())
+            let is_variadic = rfunc(vm, &func_lower)
                 .and_then(|op| op.variadic_param)
                 .is_some();
             Some(if is_variadic { Value::True } else { Value::False })
         }
         b"isdeprecated" => {
             // Check for the #[\Deprecated] attribute on the function.
-            let has_dep = vm.user_functions.get(func_lower.as_slice())
+            let has_dep = rfunc(vm, &func_lower)
                 .map(|op| {
                     op.attributes.iter().any(|a| {
                         let n = String::from_utf8_lossy(&a.name);
@@ -3976,14 +4046,14 @@ pub fn reflection_function_method(
             Some(if has_dep { Value::True } else { Value::False })
         }
         b"isgenerator" => {
-            let is_gen = vm.user_functions.get(func_lower.as_slice())
+            let is_gen = rfunc(vm, &func_lower)
                 .map(|op| op.is_generator)
                 .unwrap_or(false);
             Some(if is_gen { Value::True } else { Value::False })
         }
         b"getextension" => {
             let func_str = String::from_utf8_lossy(&func_lower);
-            let ext_name = get_function_extension(&func_str);
+            let ext_name = internal_function_ext(vm, &func_lower).or_else(|| get_function_extension(&func_str));
             if let Some(ext) = ext_name {
                 let obj_id = vm.alloc_object_id();
                 let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
@@ -3995,7 +4065,7 @@ pub fn reflection_function_method(
         }
         b"getextensionname" => {
             let func_str = String::from_utf8_lossy(&func_lower);
-            let ext_name = get_function_extension(&func_str);
+            let ext_name = internal_function_ext(vm, &func_lower).or_else(|| get_function_extension(&func_str));
             if let Some(ext) = ext_name {
                 Some(Value::String(PhpString::from_string(ext.to_string())))
             } else {
@@ -4129,10 +4199,36 @@ pub fn reflection_function_method(
             }
         }
         b"hastentativereturntype" => {
-            Some(Value::False)
+            let t = rfunc(vm, &func_lower)
+                .and_then(|op| op.internal_sig)
+                .map(|f| f.flags & crate::stubs::F_TENTATIVE != 0 && !f.ret.is_empty())
+                .unwrap_or(false);
+            Some(if t { Value::True } else { Value::False })
         }
         b"gettentativereturntype" => {
-            Some(Value::Null)
+            let rt = rfunc(vm, &func_lower)
+                .filter(|op| op.internal_sig.map(|f| f.flags & crate::stubs::F_TENTATIVE != 0).unwrap_or(false))
+                .and_then(|op| op.return_type.clone());
+            Some(match rt {
+                Some(rt) => create_reflection_type(vm, &rt),
+                None => Value::Null,
+            })
+        }
+        b"__tostring" if !vm.user_functions.contains_key(func_lower.as_slice()) && rfunc(vm, &func_lower).is_some() => {
+            let ob = obj.borrow();
+            let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            drop(ob);
+            let op = rfunc(vm, &func_lower).unwrap();
+            let ctx = FnStrCtx {
+                op,
+                method: None,
+                scope: None,
+                is_closure: false,
+                internal_fn_ext: None,
+                display_name: &name,
+                filename: "",
+            };
+            Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))))
         }
         b"__tostring" => {
             let ob = obj.borrow();
@@ -5071,7 +5167,7 @@ fn reflection_parameter_op_array(vm: &Vm, obj: &Rc<RefCell<PhpObject>>) -> Optio
     let func_bytes = func_target.as_bytes().to_vec();
     drop(ob);
     if !func_bytes.is_empty() {
-        if let Some(oa) = vm.user_functions.get(&func_bytes) {
+        if let Some(oa) = rfunc(vm, &func_bytes) {
             return Some(oa.clone());
         }
     }
@@ -5110,6 +5206,39 @@ pub fn reflection_parameter_method(
     // functions and static methods this equals `param_idx`; for non-static
     // methods we shift past the synthetic `$this` slot at index 0.
     let type_idx = param_idx + cv_offset;
+
+    // Internal functions: defaults come from the stub's arginfo text.
+    let internal_default: Option<Option<&'static str>> = resolved_op_array
+        .as_ref()
+        .and_then(|op| op.internal_sig)
+        .map(|f| f.args.get(param_idx).and_then(|a| a.default));
+    if let Some(def) = internal_default {
+        match method {
+            b"hasdefaultvalue" | b"isdefaultvalueavailable" => {
+                return Some(if def.is_some() { Value::True } else { Value::False });
+            }
+            b"getdefaultvalue" | b"isdefaultvalueconstant" | b"getdefaultvalueconstantname" => {
+                let def = match def {
+                    Some(d) => d,
+                    None => {
+                        let exc = vm.create_exception(b"ReflectionException", "Internal error: Failed to retrieve the default value", vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                };
+                let const_name = internal_default_constant_name(def);
+                return Some(match method {
+                    b"isdefaultvalueconstant" => if const_name.is_some() { Value::True } else { Value::False },
+                    b"getdefaultvalueconstantname" => match const_name {
+                        Some(n) => Value::String(PhpString::from_string(n)),
+                        None => Value::Null,
+                    },
+                    _ => eval_internal_default(vm, def).unwrap_or(Value::Null),
+                });
+            }
+            _ => {}
+        }
+    }
 
     match method {
         b"getname" => {
@@ -5474,6 +5603,12 @@ pub fn reflection_parameter_method(
                 }
             }
             Some(Value::True)
+        }
+        b"__tostring" if resolved_op_array.is_some() => {
+            let op = resolved_op_array.as_ref().unwrap();
+            let is_variadic = op.variadic_param.map(|v| v as usize == type_idx).unwrap_or(false);
+            let required = !is_variadic && param_idx < op.required_param_count as usize;
+            Some(Value::String(PhpString::from_string(parameter_string(op, param_idx, cv_offset, required))))
         }
         b"__tostring" => {
             let ob = obj.borrow();
