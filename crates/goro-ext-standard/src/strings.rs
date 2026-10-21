@@ -1449,9 +1449,12 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                         let f = *f;
                         if !f.is_finite() || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
                             if let Some(vm_ref) = vm.as_deref_mut() {
+                                let prev = goro_core::value::get_php_precision();
+                                goro_core::value::set_php_precision(-1);
+                                let fs = goro_core::value::format_php_float(f);
+                                goro_core::value::set_php_precision(prev);
                                 vm_ref.emit_warning(&format!(
-                                    "The float {} is not representable as an int, cast occurred",
-                                    goro_core::value::format_php_float(f)
+                                    "The float {} is not representable as an int, cast occurred", fs
                                 ));
                             }
                             if !f.is_finite() {
