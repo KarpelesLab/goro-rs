@@ -8145,15 +8145,16 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Iterate properties in declaration order from class def. For backed props,
         // read the value from the instance's property bag; for hooked (virtual) props,
         // dispatch through the get hook.
-        let class_props_order: Vec<(Vec<u8>, goro_core::object::Visibility, bool, bool, bool)> =
+        let class_props_order: Vec<(Vec<u8>, goro_core::object::Visibility, bool, bool, bool, Vec<u8>)> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
                 class_def.properties.iter()
-                    .map(|p| (p.name.clone(), p.visibility, p.is_virtual, p.has_get_hook, p.is_static))
+                    .map(|p| (p.name.clone(), p.visibility, p.is_virtual, p.has_get_hook, p.is_static,
+                        p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect()))
                     .collect()
             } else { Vec::new() };
 
         let mut arr = PhpArray::new();
-        for (name, vis, is_virtual, has_get_hook, is_static) in &class_props_order {
+        for (name, vis, is_virtual, has_get_hook, is_static, decl_lower) in &class_props_order {
             if *is_static { continue; }
             // Skip internal properties (none normally collide, but just in case)
             if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
@@ -8176,26 +8177,34 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 goro_core::object::Visibility::Private => {
                     if let Some(ref cc) = calling_class_lower {
-                        cc == &class_name_lower
+                        // Hooked private properties: visible from their declaring class.
+                        if *has_get_hook { cc == decl_lower } else { cc == &class_name_lower }
                     } else { false }
                 }
             };
             if !accessible { continue; }
-            if *is_virtual && *has_get_hook {
+            if *has_get_hook {
+                // Get hooks are called (zend_std_get_properties_for with hooks).
                 // Drop borrow before calling into VM.
-                let obj_v = Value::Object(obj_rc.clone());
                 drop(obj);
-                let mut hook_name = b"__property_get_".to_vec();
-                hook_name.extend_from_slice(name);
-                if let Some(v) = vm.call_object_method(&obj_v, &hook_name, &[]) {
-                    arr.set(
-                        goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                        v,
-                    );
+                let r = vm.call_get_hook_if_accessible(&obj_rc, name);
+                match r {
+                    Some(Ok(v)) => {
+                        arr.set(
+                            goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                            v,
+                        );
+                        obj = obj_rc.borrow();
+                        continue;
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => {}
                 }
                 // Re-borrow
                 obj = obj_rc.borrow();
-                continue;
+                if *is_virtual {
+                    continue;
+                }
             }
             // Skip if the backing slot is absent: an uninitialized typed
             // property, an unset property, or a redeclared private stored under
@@ -8256,7 +8265,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     continue;
                 }
             }
-            if class_props_order.iter().any(|(n, _, _, _, _)| n == name) { continue; }
+            if class_props_order.iter().any(|(n, _, _, _, _, _)| n == name) { continue; }
             let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
             if !arr.contains_key(&key) {
                 arr.set(key, val.clone());

@@ -33752,6 +33752,68 @@ impl Vm {
         Ok(out)
     }
 
+    /// zend_hooked_object_build_properties(): all declared instance properties
+    /// (storage key, value) in declaration order — get hooks are called in
+    /// the declaring class' scope, virtual properties without get hook are
+    /// skipped — followed by dynamic properties. Used by var_export().
+    pub fn hooked_object_build_properties(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Result<Vec<(Vec<u8>, Value)>, VmError> {
+        let (class_lower, class_name_orig) = {
+            let ob = obj.borrow();
+            (ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), ob.class_name.clone())
+        };
+        let defs: Vec<crate::object::PropertyDef> = self.classes.get(&class_lower)
+            .map(|c| c.properties.iter().filter(|p| !p.is_static).cloned().collect())
+            .unwrap_or_default();
+        let mut out: Vec<(Vec<u8>, Value)> = Vec::new();
+        let mut used_keys: Vec<Vec<u8>> = Vec::new();
+        for d in &defs {
+            let decl_lower: Vec<u8> = d.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let key = self.property_storage_key(&class_lower, &d.name, Some(&decl_lower));
+            used_keys.push(key.clone());
+            let mut m = b"__property_get_".to_vec();
+            m.extend(d.name.iter().map(|b| b.to_ascii_lowercase()));
+            let hook = if d.has_get_hook {
+                self.classes.get(&decl_lower).and_then(|c| c.get_method(&m)).map(|md| md.op_array.clone())
+            } else {
+                None
+            };
+            if let Some(method) = hook {
+                let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+                if !fn_cvs.is_empty() {
+                    fn_cvs[0] = Value::Object(obj.clone());
+                }
+                let mut hook_key = class_lower.clone();
+                hook_key.extend_from_slice(b"::");
+                hook_key.extend_from_slice(&d.name);
+                hook_key.extend_from_slice(b"::get");
+                self.property_hook_stack.push(hook_key);
+                self.class_scope_stack.push(decl_lower.clone());
+                self.called_class_stack.push(class_name_orig.clone());
+                let r = self.execute_op_array(&method, fn_cvs);
+                self.called_class_stack.pop();
+                self.class_scope_stack.pop();
+                self.property_hook_stack.pop();
+                out.push((key, r?));
+                continue;
+            }
+            if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
+                continue;
+            }
+            let v = obj.borrow().get_property(&key);
+            if obj.borrow().has_property(&key) && !matches!(v, Value::Undef) {
+                out.push((key, v));
+            }
+        }
+        let ob = obj.borrow();
+        for (k, v) in ob.properties.iter() {
+            if k.starts_with(b"__") || used_keys.contains(k) || matches!(v, Value::Undef) {
+                continue;
+            }
+            out.push((k.clone(), v.clone()));
+        }
+        Ok(out)
+    }
+
     /// True if `class_lower` has a get hook for `pn` and we are not currently
     /// executing a hook of that property (where accesses hit the backing store).
     fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
@@ -33768,7 +33830,7 @@ impl Vm {
 
     /// isset() on a property with a get hook: if the property is accessible
     /// from the current scope, run the hook and return its result.
-    fn call_get_hook_if_accessible(&mut self, obj: &Rc<RefCell<PhpObject>>, pn: &[u8]) -> Option<Result<Value, VmError>> {
+    pub fn call_get_hook_if_accessible(&mut self, obj: &Rc<RefCell<PhpObject>>, pn: &[u8]) -> Option<Result<Value, VmError>> {
         let (class_lower, class_name_orig) = {
             let ob = obj.borrow();
             (ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), ob.class_name.clone())
@@ -33777,6 +33839,8 @@ impl Vm {
             return None;
         }
         let caller_scope_l = self.current_class_scope().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+        // A private property resolves to its declaring class' hook.
+        let mut hook_class = class_lower.clone();
         if let Some((vis, declaring_class, _, _, _)) = self.find_property_def_for_scope(&class_lower, pn, caller_scope_l.as_deref()) {
             if vis != Visibility::Public {
                 let caller_scope = self.current_class_scope();
@@ -33785,11 +33849,15 @@ impl Vm {
                     return None;
                 }
             }
+            if vis == Visibility::Private {
+                hook_class = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+            }
         }
         let mut m = b"__property_get_".to_vec();
         m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
         let (method, hook_declaring) = {
-            let md = self.classes.get(&class_lower)?.get_method(&m)?;
+            let md = self.classes.get(&hook_class).and_then(|c| c.get_method(&m))
+                .or_else(|| self.classes.get(&class_lower).and_then(|c| c.get_method(&m)))?;
             (md.op_array.clone(), md.declaring_class.clone())
         };
         let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];

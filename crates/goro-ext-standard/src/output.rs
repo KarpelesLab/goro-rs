@@ -1591,6 +1591,28 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         original
     };
+    // Objects with hooked properties export the values of their get hooks
+    // (zend_hooked_object_build_properties()).
+    let val_owned: Value = match &val_owned {
+        Value::Object(obj) => {
+            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if vm.class_has_hooked_props(&class_lower) {
+                let props = vm.hooked_object_build_properties(obj)?;
+                let (cn, id) = {
+                    let ob = obj.borrow();
+                    (ob.class_name.clone(), ob.object_id)
+                };
+                let mut tmp = goro_core::object::PhpObject::new(cn, id);
+                for (k, v) in props {
+                    tmp.set_property(k, v);
+                }
+                Value::Object(std::rc::Rc::new(std::cell::RefCell::new(tmp)))
+            } else {
+                val_owned.clone()
+            }
+        }
+        _ => val_owned,
+    };
     let mut buf = Vec::new();
     var_export_value(vm, &val_owned, &mut buf, 1);
 
