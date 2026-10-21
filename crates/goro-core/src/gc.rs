@@ -248,11 +248,13 @@ struct Graph {
     children: Vec<Vec<usize>>,
     internal: Vec<usize>,
     opaque: Vec<bool>,
+    /// WeakMap entries: key object ptr -> values (ephemeron edges key -> value)
+    ephemerons: HashMap<usize, Vec<Value>>,
 }
 
 impl Graph {
     fn new() -> Self {
-        Graph { nodes: Vec::new(), index: HashMap::new(), children: Vec::new(), internal: Vec::new(), opaque: Vec::new() }
+        Graph { nodes: Vec::new(), index: HashMap::new(), children: Vec::new(), internal: Vec::new(), opaque: Vec::new(), ephemerons: HashMap::new() }
     }
     fn add(&mut self, n: Node) -> usize {
         let p = n.ptr();
@@ -285,6 +287,16 @@ impl Graph {
                         if let Some(c) = self.add_value(v) {
                             kids.push(c);
                         }
+                    }
+                    // WeakMap values keyed by this object are reachable
+                    // through it (and only through it).
+                    if let Some(vals) = self.ephemerons.remove(&(Rc::as_ptr(o) as *const u8 as usize)) {
+                        for v in &vals {
+                            if let Some(c) = self.add_value(v) {
+                                kids.push(c);
+                            }
+                        }
+                        self.ephemerons.insert(Rc::as_ptr(o) as *const u8 as usize, vals);
                     }
                     true
                 }
@@ -329,8 +341,9 @@ struct Analysis {
     garbage: Vec<bool>,
 }
 
-fn analyze(extra_refs: &HashMap<usize, usize>, limit: Option<usize>) -> Analysis {
+fn analyze(extra_refs: &HashMap<usize, usize>, ephemerons: HashMap<usize, Vec<Value>>, limit: Option<usize>) -> Analysis {
     let mut g = Graph::new();
+    g.ephemerons = ephemerons;
     // Seed with candidates.
     let objs: Vec<Rc<RefCell<PhpObject>>> = TRACKED_OBJECTS.with(|t| {
         let mut t = t.borrow_mut();
@@ -422,6 +435,10 @@ pub trait GcHost {
     fn gc_call_destructor(&mut self, obj: &Rc<RefCell<PhpObject>>);
     /// Forget VM bookkeeping for objects about to be freed.
     fn gc_forget_objects(&mut self, ptrs: &std::collections::HashSet<usize>);
+    /// WeakMap entries as (key object ptr, value clone).
+    fn gc_ephemerons(&self) -> Vec<(usize, Value)> {
+        Vec::new()
+    }
 }
 
 
@@ -435,8 +452,17 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
     let mut did_rerun = false;
     loop {
         let had_roots = gc_root_count() > 0;
-        let extra = host.gc_extra_refs();
-        let an = analyze(&extra, limit);
+        let mut extra = host.gc_extra_refs();
+        // WeakMap values: each entry's strong ref is modelled as an edge from
+        // its key; our clone of the value is accounted as an extra ref.
+        let mut eph: HashMap<usize, Vec<Value>> = HashMap::new();
+        for (kptr, v) in host.gc_ephemerons() {
+            if let Some(p) = Node::ptr_of(&v) {
+                *extra.entry(p).or_insert(0) += 1;
+            }
+            eph.entry(kptr).or_default().push(v);
+        }
+        let an = analyze(&extra, eph, limit);
         let len = an.graph.nodes.len();
         if had_roots || an.garbage.iter().any(|g| *g) {
             GC_RUNS.with(|c| c.set(c.get() + 1));
@@ -572,5 +598,29 @@ impl GcHost for crate::vm::Vm {
             Value::Object(o) => !ptrs.contains(&(Rc::as_ptr(o) as *const u8 as usize)),
             _ => true,
         });
+        // Entries whose key dies are dropped from their WeakMap.
+        let mut dropped: Vec<Value> = Vec::new();
+        for entries in self.weak_map_entries.values_mut() {
+            entries.retain_mut(|(_, w, v)| {
+                if ptrs.contains(&(w.as_ptr() as *const u8 as usize)) {
+                    dropped.push(std::mem::replace(v, Value::Null));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        drop(dropped);
+    }
+    fn gc_ephemerons(&self) -> Vec<(usize, Value)> {
+        let mut out = Vec::new();
+        for entries in self.weak_map_entries.values() {
+            for (_, w, v) in entries {
+                if w.strong_count() > 0 && matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                    out.push((w.as_ptr() as *const u8 as usize, v.clone()));
+                }
+            }
+        }
+        out
     }
 }
