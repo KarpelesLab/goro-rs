@@ -11,6 +11,9 @@ use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
 
+#[path = "variance.rs"]
+pub(crate) mod variance;
+
 thread_local! {
     /// Pointer to the VM that "owns" the currently running fiber on
     /// this thread. Set immediately before each `PhpFiber::resume()`
@@ -15948,7 +15951,7 @@ impl Vm {
             }
         }
 
-        loop {
+        'exec: loop {
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks
                 return Ok(Value::Undef);
@@ -29843,10 +29846,29 @@ impl Vm {
 
                 OpCode::DeclareClass => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let class_idx = self
+                    let class_idx_raw = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_long() as usize;
-                    if let Some(mut class) = self.pending_classes.get(class_idx).cloned() {
+                        .to_long();
+                    // result = Const(1): early-binding attempt of a hoisted class;
+                    // Const(2): source position of a hoisted class (declares only if
+                    // the early-binding attempt was deferred).
+                    let decl_flag = match op.result {
+                        OperandType::Const(c) => op_array.literals.get(c as usize).map(|v| v.to_long()).unwrap_or(0),
+                        _ => 0,
+                    };
+                    let mut class_opt = if class_idx_raw < 0 {
+                        op_array.local_classes.get((-class_idx_raw - 1) as usize).cloned()
+                    } else {
+                        self.pending_classes.get(class_idx_raw as usize).cloned()
+                    };
+                    if decl_flag == 2 {
+                        let lname: Vec<u8> = name_val.to_php_string().as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        if !variance::take_deferred(&lname) {
+                            class_opt = None;
+                        }
+                    }
+                    let is_early_attempt = decl_flag == 1;
+                    if let Some(mut class) = class_opt {
                         // Check for using "_" as a class/interface/trait/enum name (deprecated since 8.4)
                         {
                             let short_name = if let Some(pos) = class.name.iter().rposition(|b| *b == b'\\') {
@@ -29895,6 +29917,10 @@ impl Vm {
                             {
                                 // Parent class still missing after autoload attempt:
                                 // PHP raises a fatal "Class \"X\" not found".
+                                if is_early_attempt && variance::is_deferred(&parent_lower) {
+                                    variance::defer(&class.name);
+                                    continue 'exec;
+                                }
                                 let parent_display = crate::value::display_class_name(parent_name);
                                 let msg = format!("Class \"{}\" not found", parent_display);
                                 let exc_val = self.create_exception(b"Error", &msg, op.line);
@@ -30104,13 +30130,18 @@ impl Vm {
                                             .unwrap_or_else(|| parent.name.clone());
                                         if should_check {
                                             // Check method signature compatibility
-                                            if let Some(err_msg) = Self::check_method_compatibility(
-                                                &class.name, child_method,
-                                                &parent_decl_name, method,
+                                            if let Some((err_msg, unresolved)) = self.variance_check_method(
+                                                &class, child_method,
+                                                &parent.name, method,
                                             ) {
+                                                if unresolved && is_early_attempt {
+                                                    variance::defer(&class.name);
+                                                    continue 'exec;
+                                                }
+                                                let l = if child_method.op_array.decl_line > 0 { child_method.op_array.decl_line } else { op.line };
                                                 return Err(VmError {
                                                     message: err_msg,
-                                                    line: op.line,
+                                                    line: l,
                                                 });
                                             }
                                         }
@@ -30615,18 +30646,18 @@ impl Vm {
                                         let _mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         // Interface methods (constructors included) are prototypes.
                                         {
-                                            let iface_decl_name = self
-                                                .classes
-                                                .get(&method.declaring_class.to_ascii_lowercase())
-                                                .map(|c| c.name.clone())
-                                                .unwrap_or_else(|| iface.name.clone());
-                                            if let Some(err_msg) = Self::check_method_compatibility(
-                                                &class.name, existing_method,
-                                                &iface_decl_name, method,
+                                            if let Some((err_msg, unresolved)) = self.variance_check_method(
+                                                &class, existing_method,
+                                                &iface.name, method,
                                             ) {
+                                                if unresolved && is_early_attempt {
+                                                    variance::defer(&class.name);
+                                                    continue 'exec;
+                                                }
+                                                let l = if existing_method.op_array.decl_line > 0 { existing_method.op_array.decl_line } else { op.line };
                                                 return Err(VmError {
                                                     message: err_msg,
-                                                    line: op.line,
+                                                    line: l,
                                                 });
                                             }
                                         }
@@ -30706,6 +30737,10 @@ impl Vm {
                                     b"sessionupdatetimestamphandlerinterface",
                                 ];
                                 if !known_builtin_interfaces.contains(&iface_lower.as_slice()) {
+                                    if is_early_attempt && variance::is_deferred(&iface_lower) {
+                                        variance::defer(&class.name);
+                                        continue 'exec;
+                                    }
                                     let iface_display = crate::value::display_class_name(iface_name);
                                     let msg = format!("Interface \"{}\" not found", iface_display);
                                     let exc_val = self.create_exception(b"Error", &msg, op.line);
@@ -31382,13 +31417,18 @@ impl Vm {
                                             });
                                         }
                                         // Check method signature compatibility
-                                        if let Some(err_msg) = Self::check_method_compatibility(
-                                            &class.name, class_method,
+                                        if let Some((err_msg, unresolved)) = self.variance_check_method(
+                                            &class, class_method,
                                             trait_orig_name, trait_method,
                                         ) {
+                                            if unresolved && is_early_attempt {
+                                                variance::defer(&class.name);
+                                                continue 'exec;
+                                            }
+                                            let l = if class_method.op_array.decl_line > 0 { class_method.op_array.decl_line } else { op.line };
                                             return Err(VmError {
                                                 message: err_msg,
-                                                line: op.line,
+                                                line: l,
                                             });
                                         }
                                     }

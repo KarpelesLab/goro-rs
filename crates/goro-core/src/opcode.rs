@@ -407,6 +407,8 @@ pub struct OpArray {
     /// Attribute payloads for top-level constants, keyed by FQN. Indexed via
     /// `OpCode::RegisterConstAttrs` instructions emitted by the compiler.
     pub const_attribute_table: Vec<(Vec<u8>, Vec<crate::object::RuntimeAttribute>)>,
+    /// Classes declared inside this function body (DeclareClass with a negative index).
+    pub local_classes: Vec<crate::object::ClassEntry>,
 }
 
 impl OpArray {
@@ -440,6 +442,7 @@ impl OpArray {
             filename: Vec::new(),
             display_name: Vec::new(),
             const_attribute_table: Vec::new(),
+            local_classes: Vec::new(),
         }
     }
 

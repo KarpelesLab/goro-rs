@@ -151,6 +151,14 @@ pub struct Compiler {
     /// label -> enclosing finally path; gotos -> (label, path, line)
     label_finally_paths: HashMap<Vec<u8>, Vec<u32>>,
     goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
+    /// True for the compiler of a whole file/eval (via `compile()`); false for
+    /// function/method/closure sub-compilers. Classes declared inside a
+    /// sub-compiled body are stored on that body's op_array (`local_classes`).
+    is_top_level: bool,
+    /// True while compiling a hoisted (early-bound) class declaration.
+    in_hoisting_pass: bool,
+    /// compiled_classes index of each hoisted class (lowercase qualified name).
+    hoisted_class_idx: HashMap<Vec<u8>, i64>,
 }
 
 impl Default for Compiler {
@@ -298,6 +306,9 @@ impl Compiler {
             is_discarding_result: false,
             is_in_function_body: false,
             is_in_class_method: false,
+            is_top_level: false,
+            in_hoisting_pass: false,
+            hoisted_class_idx: HashMap::new(),
             deferred_fatal_errors: Vec::new(),
             finally_path: Vec::new(),
             finally_id_counter: 0,
@@ -1086,6 +1097,7 @@ impl Compiler {
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
     pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
+        self.is_top_level = true;
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
         // Reject yield/yield-from at script top level (must appear inside a function).
@@ -1139,6 +1151,8 @@ impl Compiler {
                     self.seen_class_symbols.insert(qn_lower.clone());
                     if !self.hoisted_class_names.contains(&qn_lower) {
                         self.compile_stmt(stmt)?;
+                    } else {
+                        self.emit_late_hoisted_decl(&qn_lower, stmt.span.line);
                     }
                 }
                 StmtKind::NamespaceDecl { name, body } => {
@@ -1175,6 +1189,8 @@ impl Compiler {
                                     self.seen_class_symbols.insert(qn_lower.clone());
                                     if !self.hoisted_class_names.contains(&qn_lower) {
                                         self.compile_stmt(s)?;
+                                    } else {
+                                        self.emit_late_hoisted_decl(&qn_lower, s.span.line);
                                     }
                                 }
                                 _ => {
@@ -1277,7 +1293,11 @@ impl Compiler {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
-                        self.compile_stmt(stmt)?;
+                        self.in_hoisting_pass = true;
+                        let r = self.compile_stmt(stmt);
+                        self.in_hoisting_pass = false;
+                        r?;
+                        self.hoisted_class_idx.insert(qn_lower.clone(), self.compiled_classes.len() as i64 - 1);
                         self.hoisted_class_names.insert(qn_lower);
                     }
                 }
@@ -1285,6 +1305,26 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// At the source position of a hoisted class, emit a DeclareClass flagged as
+    /// "late" (result = Const(2)): it only declares the class if the early-binding
+    /// attempt was deferred at runtime (unresolved variance), like PHP's delayed
+    /// early binding.
+    fn emit_late_hoisted_decl(&mut self, qn_lower: &[u8], line: u32) {
+        if let Some(&idx) = self.hoisted_class_idx.get(qn_lower) {
+            let name = self.compiled_classes.get(idx as usize).map(|c| c.name.clone()).unwrap_or_default();
+            let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name)));
+            let idx_literal = self.op_array.add_literal(Value::Long(idx));
+            let flag = self.op_array.add_literal(Value::Long(2));
+            self.op_array.emit(Op {
+                opcode: OpCode::DeclareClass,
+                op1: OperandType::Const(name_idx),
+                op2: OperandType::Const(idx_literal),
+                result: OperandType::Const(flag),
+                line,
+            });
+        }
     }
 
     /// Decide whether a top-level declaration is eligible for early binding (hoisting),
@@ -5694,18 +5734,32 @@ impl Compiler {
                 self.current_parent_class = saved_parent;
 
                 // Store the class and emit a DeclareClass opcode
-                let class_idx = self.compiled_classes.len();
-                self.compiled_classes.push(class);
+                // Classes declared inside a function/method/closure body live on that
+                // body's op_array (encoded as a negative index), since the sub-compiler's
+                // compiled_classes are never handed to the VM.
+                let class_idx: i64 = if self.is_top_level {
+                    self.compiled_classes.push(class);
+                    (self.compiled_classes.len() - 1) as i64
+                } else {
+                    self.op_array.local_classes.push(class);
+                    -(self.op_array.local_classes.len() as i64)
+                };
 
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(qualified_name)));
-                let idx_literal = self.op_array.add_literal(Value::Long(class_idx as i64));
+                let idx_literal = self.op_array.add_literal(Value::Long(class_idx));
+                // Early-binding attempt marker (result = Const(1)) for hoisted classes.
+                let decl_result = if self.in_hoisting_pass {
+                    OperandType::Const(self.op_array.add_literal(Value::Long(1)))
+                } else {
+                    OperandType::Unused
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareClass,
                     op1: OperandType::Const(name_idx),
                     op2: OperandType::Const(idx_literal),
-                    result: OperandType::Unused,
+                    result: decl_result,
                     line: stmt.span.line,
                 });
 
