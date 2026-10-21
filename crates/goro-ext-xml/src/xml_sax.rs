@@ -94,6 +94,8 @@ struct XmlState {
     toffset: i64,
     parsehuge: bool,
     isparsing: bool,
+    /// The function running the parser (for warnings from handlers).
+    cur_fn: &'static str,
     ns_separator: Vec<u8>,
     // xml_parse_into_struct
     data: Option<Rc<RefCell<Value>>>,
@@ -416,9 +418,7 @@ impl CompatSink {
             }
         } else if b.level == XML_MAXLEVEL + 1 {
             drop(b);
-            self.vm().emit_warning(
-                "xml_parse_into_struct(): Maximum depth exceeded - Results truncated",
-            );
+            self.depth_warning();
         }
     }
 
@@ -548,14 +548,24 @@ impl CompatSink {
                     .try_push(Value::Array(Rc::new(RefCell::new(tag))));
             } else if b.level == XML_MAXLEVEL + 1 {
                 drop(b);
-                self.vm().emit_warning(
-                    "xml_parse_into_struct(): Maximum depth exceeded - Results truncated",
-                );
+                self.depth_warning();
             }
         }
     }
 
     // -- compat.c handlers -------------------------------------------------
+
+    /// php_error_docref from a handler: prefixed with the parsing function.
+    fn depth_warning(&self) {
+        let f = self
+            .state()
+            .map(|s| s.borrow().cur_fn)
+            .unwrap_or("xml_parse");
+        self.vm().emit_warning(&format!(
+            "{}(): Maximum depth exceeded - Results truncated",
+            f
+        ));
+    }
 
     fn installed(&self) -> Installed {
         self.state()
@@ -1180,6 +1190,7 @@ fn create_impl(vm: &mut Vm, args: &[Value], ns: bool) -> Result<Value, VmError> 
         toffset: 0,
         parsehuge: false,
         isparsing: false,
+        cur_fn: "xml_parse",
         ns_separator: sep,
         data: None,
         info: None,
@@ -1208,9 +1219,16 @@ fn xml_parser_create_ns(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// xml_parse_helper
-fn parse_helper(vm: &mut Vm, st: &Rc<State>, data: &[u8], is_final: bool) -> Result<i64, VmError> {
+fn parse_helper(
+    vm: &mut Vm,
+    st: &Rc<State>,
+    data: &[u8],
+    is_final: bool,
+    f: &'static str,
+) -> Result<i64, VmError> {
     let mut engine = {
         let mut b = st.borrow_mut();
+        b.cur_fn = f;
         let huge = b.parsehuge;
         let mut e = match b.engine.take() {
             Some(e) => e,
@@ -1268,7 +1286,7 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "Parser must not be called recursively".into(),
         ));
     }
-    let r = parse_helper(vm, &st, &data, is_final)?;
+    let r = parse_helper(vm, &st, &data, is_final, "xml_parse")?;
     Ok(Value::Long(r))
 }
 
@@ -1302,7 +1320,7 @@ fn xml_parse_into_struct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         b.installed.element = true;
         b.installed.cdata = true;
     }
-    let r = parse_helper(vm, &st, &data, true)?;
+    let r = parse_helper(vm, &st, &data, true, "xml_parse_into_struct")?;
     Ok(Value::Long(r))
 }
 
