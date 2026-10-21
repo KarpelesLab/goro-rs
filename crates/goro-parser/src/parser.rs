@@ -3798,7 +3798,19 @@ impl Parser {
             }
             TokenKind::BooleanNot => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let mut operand = self.parse_unary()?;
+                // `instanceof` binds tighter than `!`: !$a instanceof B is !($a instanceof B)
+                while matches!(self.peek(), TokenKind::Instanceof) {
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    operand = Expr {
+                        span: operand.span.merge(right.span),
+                        kind: ExprKind::Instanceof {
+                            expr: Box::new(operand),
+                            class: Box::new(right),
+                        },
+                    };
+                }
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {

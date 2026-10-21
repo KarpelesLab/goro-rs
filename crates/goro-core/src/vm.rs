@@ -1496,6 +1496,25 @@ impl Vm {
     /// This is the class where the currently executing method was defined.
     /// Used for visibility checks. Falls back to called_class_stack if class_scope_stack is empty.
     /// Returns the canonical (original case) class name by looking up the class table.
+    /// (int) cast of a float: out-of-range or non-finite values warn and
+    /// wrap modulo 2^64 (non-finite gives 0), as in PHP 8.5.
+    pub fn float_to_int_cast(&mut self, d: f64, line: u32) -> i64 {
+        if d.is_finite() && d >= -9.223372036854775808e18 && d < 9.223372036854775808e18 {
+            return d as i64;
+        }
+        let repr = Value::Double(d).to_php_string().to_string_lossy();
+        self.emit_warning_at(&format!("The float {} is not representable as an int, cast occurred", repr), line);
+        if !d.is_finite() {
+            return 0;
+        }
+        let two64 = 18446744073709551616.0_f64;
+        let mut m = d.trunc() % two64;
+        if m < 0.0 {
+            m += two64;
+        }
+        (m as u64) as i64
+    }
+
     pub fn current_class_scope(&self) -> Option<Vec<u8>> {
         let scope_lower = self.class_scope_stack.last().cloned()
             .or_else(|| self.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()));
@@ -16697,6 +16716,20 @@ impl Vm {
                         let bytes = sa.as_bytes();
                         let res: Vec<u8> = bytes.iter().map(|b| !b).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
+                    } else if let Value::Double(d) = a.deref() {
+                        if d.is_finite() && d.fract() != 0.0 && d.abs() < 9.2e18 {
+                            let repr = Value::Double(d).to_php_string().to_string_lossy();
+                            self.emit_deprecated_at(&format!("Implicit conversion from float {} to int loses precision", repr), op.line);
+                        }
+                        let n = self.float_to_int_cast(d, op.line);
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                        }
+                        Value::Long(!n)
                     } else {
                         let al = self.op_to_long(&a);
                         Value::Long(!al)
@@ -23582,7 +23615,11 @@ impl Vm {
                                 op.line,
                             );
                         }
-                        val.to_long()
+                        if let Value::Double(d) = val {
+                            self.float_to_int_cast(d, op.line)
+                        } else {
+                            val.to_long()
+                        }
                     };
                     self.write_operand(
                         &op.result,
