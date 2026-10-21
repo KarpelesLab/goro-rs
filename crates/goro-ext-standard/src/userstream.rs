@@ -220,9 +220,14 @@ fn has_method(vm: &Vm, obj: &Value, name: &[u8]) -> bool {
 fn invoke_method(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<Value>) -> Result<Value, VmError> {
     // Diagnostics raised after the call are attributed to the caller's line.
     let saved_line = vm.current_line;
+    let saved_er = vm.error_reporting;
     let r = invoke_method_inner(vm, obj, method_lower, args);
     if vm.current_exception.is_none() {
         vm.current_line = saved_line;
+    }
+    if r.is_err() {
+        // Unwinding out of an @-silenced region restores error_reporting.
+        vm.error_reporting = saved_er;
     }
     r
 }
@@ -443,8 +448,15 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
     if is_file_proto {
         // Unknown schemes fall back to plain files; virtual_file_ex()
         // normalizes such paths lexically.
+        // (Diagnostics keep naming the path as given, so the normalized
+        // form is only used when it names an existing file.)
         let plain_path = if n_opt.is_some() && protocol.is_none() {
-            normalize_path_lexical(&lossy(path)).into_bytes()
+            let np = normalize_path_lexical(&lossy(path));
+            if std::path::Path::new(&np).exists() {
+                np.into_bytes()
+            } else {
+                path.to_vec()
+            }
         } else {
             path.to_vec()
         };
@@ -1583,9 +1595,15 @@ pub(crate) fn shutdown_streams(vm: &mut Vm) {
     ids.sort();
     for fid in ids.into_iter().rev() {
         if let Some(us) = get_us(fid) {
-            if stream_free(vm, fid, &us).is_err() && vm.current_exception.is_none() {
-                // fatal error during shutdown: keep closing the rest
+            // A fatal error (or exception) raised by a close handler is
+            // reported; the remaining resources are still destroyed.
+            let already = vm.fatal_emitted;
+            vm.fatal_emitted = false;
+            match stream_free(vm, fid, &us) {
+                Err(e) if vm.current_exception.is_some() || !vm.fatal_emitted => vm.report_uncaught(&e),
+                _ => {}
             }
+            vm.fatal_emitted |= already;
             vm.current_exception = None;
         }
     }
@@ -3349,7 +3367,12 @@ fn h_scandir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         }
     }
     let order = int_arg(args, 1).unwrap_or(0);
-    let ctx = context_from_arg(vm, args.get(2), false)?;
+    // scandir() only uses a context when one is passed.
+    let ctx = if args.get(2).map(|v| !matches!(v.deref(), Value::Null | Value::Undef)).unwrap_or(false) {
+        context_from_arg(vm, args.get(2), false)?
+    } else {
+        None
+    };
     let (fid, us) = match opendir_wrapper_located(vm, &p, REPORT_ERRORS, ctx)? {
         Some(x) => x,
         None => {
@@ -3726,6 +3749,13 @@ fn include_open(vm: &mut Vm, p: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
 // Registration
 // ---------------------------------------------------------------------------
 
+/// php_module_startup(): "Check for deprecated directives".
+fn check_deprecated_directives(vm: &mut Vm) {
+    if ini_bool(vm, b"allow_url_include", false) && vm.error_reporting & 8192 != 0 {
+        vm.display_error("Deprecated", "Directive 'allow_url_include' is deprecated", "Unknown", 0);
+    }
+}
+
 macro_rules! intercepts {
     ($( $w:ident => ($name:literal, $h:ident) ),* $(,)?) => {
         $(
@@ -3744,6 +3774,7 @@ macro_rules! intercepts {
             vm.include_stream_hook = Some(include_hook);
             vm.include_resolve_hook = Some(include_resolve);
             vm.resource_shutdown_hooks.push(shutdown_streams);
+            vm.startup_hooks.push(check_deprecated_directives);
         }
     };
 }
