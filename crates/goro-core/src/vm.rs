@@ -286,6 +286,15 @@ pub(crate) fn outlined<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Why recv_typed_params() aborted a call (the exception is pending).
+pub(crate) enum RecvFail {
+    /// An argument does not match its parameter's type: the message, and
+    /// the function's declaration line.
+    TypeError(String, u32),
+    /// An error handler threw (on a deprecation).
+    HandlerThrew,
+}
+
 /// Pending function call being assembled
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
@@ -556,8 +565,13 @@ pub struct Vm {
     stack_configured: bool,
     /// The function found by fast_fcall_target()
     fast_fcall_fn: Option<Rc<OpArray>>,
-    /// (and where "::" is in its name, for a method)
-    fast_fcall_sep: Option<usize>,
+    /// (and for a method, where "::" is in its name and whether it is
+    /// called on an object)
+    fast_fcall_sep: Option<(usize, bool)>,
+    /// Emptied buffers of finished calls (locals, temporaries, backtrace
+    /// frames), reused by the next ones.
+    value_pool: Vec<Vec<Value>>,
+    string_pool: Vec<String>,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -889,6 +903,8 @@ impl Vm {
             stack_configured: false,
             fast_fcall_fn: None,
             fast_fcall_sep: None,
+            value_pool: Vec::new(),
+            string_pool: Vec::new(),
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
             pending_return: None,
@@ -5420,6 +5436,29 @@ impl Vm {
         use variance::{
             T_ANY, T_ARRAY, T_BOOL, T_DOUBLE, T_FALSE, T_LONG, T_NULL, T_OBJECT, T_STRING, T_TRUE,
         };
+        // A value of the declared (simple) type is kept as is: no need to
+        // build the type's view.
+        let simple = match param_type {
+            ParamType::Simple(n) => Some(n),
+            ParamType::Nullable(inner) => match inner.as_ref() {
+                ParamType::Simple(n) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = simple {
+            let exact = match value {
+                Value::Long(_) => n.eq_ignore_ascii_case(b"int"),
+                Value::Double(_) => n.eq_ignore_ascii_case(b"float"),
+                Value::String(_) => n.eq_ignore_ascii_case(b"string"),
+                Value::True | Value::False => n.eq_ignore_ascii_case(b"bool"),
+                Value::Array(_) => n.eq_ignore_ascii_case(b"array"),
+                _ => false,
+            };
+            if exact {
+                return;
+            }
+        }
         let tv = variance::TypeView::from_param_type(param_type);
         let mask = tv.mask;
         let vt = match value {
@@ -14805,10 +14844,10 @@ impl Vm {
 
     /// Whether the call DO_FCALL is about to make is a plain call that the
     /// general handler would run without any of its special cases: a user
-    /// function, or a public instance method of a class declared in a file
-    /// called on an object, without attributes, parameter types or
-    /// variadics, given enough positional arguments. The function is left
-    /// in `fast_fcall_fn` (and for a method, where "::" is in the name, in
+    /// function, or a public method of a class declared in a file (an
+    /// instance method called on an object, or a static method), without
+    /// attributes or variadics, given enough positional arguments. The function is left in `fast_fcall_fn` (and for a
+    /// method, where "::" is in the name and whether $this is passed, in
     /// `fast_fcall_sep`).
     fn fast_fcall_target(&mut self) -> bool {
         let Some(call) = self.pending_calls.last() else {
@@ -14837,10 +14876,12 @@ impl Vm {
                     || lower.starts_with(b"static::")
                     || lower.starts_with(b"self::")
                     || lower.starts_with(b"parent::")
-                    || !matches!(call.args.first(), Some(Value::Object(_)))
                 {
                     return false;
                 }
+                // An object first argument is $this (a static method then
+                // takes the general path).
+                let has_this = matches!(call.args.first(), Some(Value::Object(_)));
                 // A user class declared in a file, not an enum, and the
                 // method is public.
                 let Some(class) = self.classes.get(&lower[..p]) else {
@@ -14848,13 +14889,15 @@ impl Vm {
                 };
                 if class.filename.is_none()
                     || class.is_enum
-                    || !class
-                        .get_method(method)
-                        .is_some_and(|m| m.visibility == Visibility::Public && !m.is_abstract)
+                    || !class.get_method(method).is_some_and(|m| {
+                        m.visibility == Visibility::Public
+                            && !m.is_abstract
+                            && m.is_static != has_this
+                    })
                 {
                     return false;
                 }
-                Some(p)
+                Some((p, has_this))
             }
         };
         if self.functions.contains_key(lower) {
@@ -14863,16 +14906,16 @@ impl Vm {
         let Some(f) = self.user_functions.get(lower) else {
             return false;
         };
-        let implicit = usize::from(sep.is_some());
+        let has_this = sep.is_some_and(|(_, t)| t);
+        let implicit = usize::from(has_this);
         let nargs = call.args.len();
         let required = f.required_param_count as usize;
         let simple = f.attributes.is_empty()
             && !f.is_generator
             && (sep.is_some() || f.scope_class.is_none())
             && f.variadic_param.is_none()
-            && (f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")) == sep.is_some()
+            && (f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")) == has_this
             && !crate::closure::is_closure_fn_name(&f.name)
-            && f.param_types.iter().all(|t| t.is_none())
             && nargs >= implicit + required
             && !call.args[implicit..implicit + required]
                 .iter()
@@ -14882,6 +14925,219 @@ impl Vm {
             self.fast_fcall_sep = sep;
         }
         simple
+    }
+
+    /// A vector of `n` undefined values, from the buffers of finished calls.
+    #[inline]
+    fn take_values(&mut self, n: usize) -> Vec<Value> {
+        let mut v = self.value_pool.pop().unwrap_or_default();
+        v.resize(n, Value::Undef);
+        v
+    }
+
+    /// Keep the buffer of an emptied vector for take_values().
+    #[inline]
+    fn recycle_values(&mut self, v: Vec<Value>) {
+        debug_assert!(v.is_empty());
+        if v.capacity() != 0 && v.capacity() <= 256 && self.value_pool.len() < 64 {
+            self.value_pool.push(v);
+        }
+    }
+
+    /// A call's backtrace frame is done with: keep its buffers.
+    #[inline]
+    fn recycle_frame(&mut self, frame: (String, String, u32, Vec<Value>, bool)) {
+        let (mut name, mut file, _, mut args, _) = frame;
+        args.clear();
+        self.recycle_values(args);
+        for s in [&mut name, &mut file] {
+            if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
+                s.clear();
+                self.string_pool.push(std::mem::take(s));
+            }
+        }
+    }
+
+    /// RECV of a user function's typed parameters (DO_FCALL): checks the
+    /// passed arguments against the declared types and coerces them in weak
+    /// mode. `func_name_lower` is the called name (a method's names its
+    /// class, the scope of self/parent/static in the types).
+    fn recv_typed_params(
+        &mut self,
+        user_fn: &OpArray,
+        call: &mut PendingCall,
+        func_name_lower: &[u8],
+        line: u32,
+        caller_strict: bool,
+    ) -> Result<(), RecvFail> {
+        // Push class scope temporarily for self/parent/static type checking
+        // Use windows(2) to find "::" correctly even in names with embedded colons
+        let temp_scope_pushed =
+            if let Some(pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                let class_part_lower = &func_name_lower[..pos];
+                let method_part_lower = &func_name_lower[pos + 2..];
+                let defining_class = self
+                    .classes
+                    .get(class_part_lower)
+                    .and_then(|c| c.get_method(method_part_lower))
+                    .map(|m| m.declaring_class.clone())
+                    .unwrap_or_else(|| class_part_lower.to_vec());
+                self.class_scope_stack.push(defining_class);
+                true
+            } else if let Some(ref scope) = user_fn.scope_class {
+                self.class_scope_stack.push(scope.clone());
+                true
+            } else {
+                false
+            };
+        // Determine if this is a method call ($this is first implicit arg)
+        let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+            1
+        } else {
+            0
+        };
+        // Build display name from call.name. For closures, prefer
+        // the canonical PHP display name (e.g. {closure:file:line}).
+        let display_name = if !user_fn.display_name.is_empty() {
+            String::from_utf8_lossy(&user_fn.display_name)
+        } else {
+            String::from_utf8_lossy(call.name.as_bytes())
+        };
+        // For method calls like ClassName::method, format as ClassName::method
+        // For regular functions, just the function name
+        let param_err = self.check_param_types_with_strict(
+            user_fn,
+            &call.args,
+            &display_name,
+            implicit_args,
+            line,
+            caller_strict,
+        );
+        // Pop temp scope
+        if temp_scope_pushed {
+            self.class_scope_stack.pop();
+        }
+        self.flush_callable_deprecations();
+        if let Some(err_msg) = param_err {
+            // Use the function definition line for the exception, not the call site
+            let def_line = if user_fn.decl_line > 0 {
+                user_fn.decl_line
+            } else {
+                user_fn.ops.first().map(|o| o.line).unwrap_or(line)
+            };
+            let exc_val = self.create_exception(b"TypeError", &err_msg, def_line);
+            // The exception's file is the function's definition file.
+            if !user_fn.filename.is_empty() {
+                if let Value::Object(ref o) = exc_val {
+                    o.borrow_mut().set_property(
+                        b"file".to_vec(),
+                        Value::String(PhpString::from_vec(user_fn.filename.clone())),
+                    );
+                }
+            }
+            self.current_exception = Some(exc_val);
+            return Err(RecvFail::TypeError(err_msg, def_line));
+        }
+        // Emit implicit float-to-int deprecation for non-strict mode
+        // BEFORE coercion truncates the value.
+        if !caller_strict {
+            let had_exc = self.current_exception.is_some();
+            for (i, arg) in call.args.iter().enumerate() {
+                if i >= user_fn.param_types.len() {
+                    break;
+                }
+                if matches!(arg, Value::Undef) {
+                    continue;
+                }
+                if let Some(type_info) = &user_fn.param_types[i] {
+                    // Reported by the callee's RECV (its declaration line).
+                    let recv_line = if user_fn.decl_line > 0 {
+                        user_fn.decl_line
+                    } else {
+                        line
+                    };
+                    self.emit_implicit_float_to_int_if_needed(
+                        arg,
+                        &type_info.param_type,
+                        recv_line,
+                    );
+                }
+            }
+            // An error handler that throws aborts the call.
+            if !had_exc && self.current_exception.is_some() {
+                return Err(RecvFail::HandlerThrew);
+            }
+        }
+        let nan_args: Vec<usize> = if caller_strict {
+            Vec::new()
+        } else {
+            call.args
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| matches!(a, Value::Double(d) if d.is_nan()))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // Coerce args to their declared types (weak mode)
+        Self::coerce_param_types(user_fn, &mut call.args, implicit_args, caller_strict);
+        for i in nan_args {
+            let target = match call.args.get(i) {
+                Some(Value::String(_)) => "string",
+                Some(Value::True | Value::False) => "bool",
+                _ => continue,
+            };
+            let recv_line = if user_fn.decl_line > 0 {
+                user_fn.decl_line
+            } else {
+                line
+            };
+            self.emit_warning_at(
+                &format!("unexpected NAN value was coerced to {}", target),
+                recv_line,
+            );
+        }
+        // Coerce Stringable objects to string for string-typed params
+        // (zend_verify_weak_scalar_type_hint: a type with string
+        // that does not take the object as is).
+        for (i, arg) in call.args.iter_mut().enumerate() {
+            if i >= user_fn.param_types.len() {
+                break;
+            }
+            if let Some(type_info) = &user_fn.param_types[i] {
+                let is_string_param = matches!(arg, Value::Object(_))
+                    && variance::TypeView::from_param_type(&type_info.param_type).mask
+                        & variance::T_STRING
+                        != 0
+                    && (matches!(&type_info.param_type,
+                    ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string"))
+                        || matches!(&type_info.param_type,
+                        ParamType::Nullable(inner) if matches!(inner.as_ref(), ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string")))
+                        || (!caller_strict
+                            && !self.object_matches_class_part(arg, &type_info.param_type)));
+                if is_string_param {
+                    if let Value::Object(obj) = arg {
+                        let class_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let has_tostring = self
+                            .classes
+                            .get(&class_lower)
+                            .map(|c| c.get_method(b"__tostring").is_some())
+                            .unwrap_or(false);
+                        if has_tostring {
+                            // Error will be handled later
+                            if let Ok(s) = self.value_to_string_checked(arg) {
+                                *arg = Value::String(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The user function called `name` (case-insensitively).
@@ -15187,7 +15443,7 @@ impl Vm {
         cv_frame: bool,
     ) -> Result<Value, VmError> {
         let temp_count = op_array.temp_count as usize;
-        let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
+        let mut tmps: Vec<Value> = self.take_values(temp_count);
         let mut fin = Vec::new();
         let saved_file = self.enter_op_array_file(op_array);
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
@@ -15210,7 +15466,7 @@ impl Vm {
         // running: each one's pending exception becomes its previous.
         if r.is_err() {
             if let Some(cur) = self.current_exception.clone() {
-                for (_, pending) in fin.into_iter().rev() {
+                for (_, pending) in std::mem::take(&mut fin).into_iter().rev() {
                     if let Some(prev) = pending {
                         Self::exception_set_previous(&cur, prev);
                     }
@@ -15218,9 +15474,12 @@ impl Vm {
             }
         }
         // The CVs are released before the symbol table's other variables
-        // (zend_leave_helper).
-        drop(tmps);
-        drop(cvs);
+        // (zend_leave_helper); the vectors' buffers are kept for the next
+        // calls.
+        tmps.clear();
+        cvs.clear();
+        self.recycle_values(tmps);
+        self.recycle_values(cvs);
         drop(sym);
         r
     }
@@ -20558,43 +20817,95 @@ impl Vm {
                             self.closure_pending_calls.pop();
                         }
                         // Push call stack frame early for proper error stack traces
-                        let display = if !user_fn.display_name.is_empty() {
-                            String::from_utf8_lossy(&user_fn.display_name).to_string()
-                        } else if let (Some(sep), Some(scope)) = (method_sep, &user_fn.scope_class)
+                        // (in the buffers of a finished call's frame)
+                        let mut display = self.string_pool.pop().unwrap_or_default();
+                        if !user_fn.display_name.is_empty() {
+                            display.push_str(&String::from_utf8_lossy(&user_fn.display_name));
+                        } else if let (Some((sep, _)), Some(scope)) =
+                            (method_sep, &user_fn.scope_class)
                         {
                             // The method's declaring class, as written
-                            let method_name =
-                                String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..]);
                             let class_display = match self.classes.get(scope) {
                                 Some(c) => String::from_utf8_lossy(&c.name),
                                 None => String::from_utf8_lossy(scope),
                             };
-                            let mut d =
-                                String::with_capacity(class_display.len() + 2 + method_name.len());
-                            d.push_str(&class_display);
-                            d.push_str("::");
-                            d.push_str(&method_name);
-                            d
+                            display.push_str(&class_display);
+                            display.push_str("::");
+                            display.push_str(&String::from_utf8_lossy(
+                                &call.name.as_bytes()[sep + 2..],
+                            ));
                         } else {
-                            String::from_utf8_lossy(call.name.as_bytes()).into_owned()
-                        };
+                            display.push_str(&String::from_utf8_lossy(call.name.as_bytes()));
+                        }
                         let is_method = method_sep.is_some();
+                        // (an instance method: $this is not an argument)
+                        let has_this = method_sep.is_some_and(|(_, t)| t);
+                        let mut file = self.string_pool.pop().unwrap_or_default();
+                        file.push_str(&self.current_file);
+                        let mut trace_args = self.take_values(0);
+                        trace_args.extend_from_slice(&call.args[usize::from(has_this)..]);
                         let call_frame_depth = self.call_stack.len();
-                        self.call_stack.push((
-                            display,
-                            self.current_file.clone(),
-                            op.line,
-                            call.args[usize::from(is_method)..].to_vec(),
-                            is_method,
-                        ));
+                        self.call_stack
+                            .push((display, file, op.line, trace_args, has_this));
+                        // Check parameter types before executing
+                        // (untyped parameters: nothing to check or coerce)
+                        if user_fn.param_types.iter().any(|t| t.is_some()) {
+                            let name = call.name.as_bytes();
+                            let mut buf = [0u8; 128];
+                            for (d, s) in buf.iter_mut().zip(name) {
+                                *d = s.to_ascii_lowercase();
+                            }
+                            let func_name_lower = &buf[..name.len()];
+                            match self.recv_typed_params(
+                                &user_fn,
+                                &mut call,
+                                func_name_lower,
+                                op.line,
+                                op_array.strict_types,
+                            ) {
+                                Ok(()) => {}
+                                Err(RecvFail::TypeError(err_msg, def_line)) => {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        self.call_stack.pop(); // pop early-pushed frame
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", err_msg),
+                                            line: def_line,
+                                        });
+                                    }
+                                }
+                                Err(RecvFail::HandlerThrew) => {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        self.call_stack.pop(); // pop early-pushed frame
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
                         let was_global = self.is_global_scope;
                         self.is_global_scope = false;
-                        if let Some(sep) = method_sep {
-                            // Late static binding: the object's class; the scope:
-                            // the class declaring the method.
+                        if let Some((sep, _)) = method_sep {
+                            // Late static binding: the object's class (the class
+                            // named by a static call); the scope: the class
+                            // declaring the method.
                             let called_class = match call.args.first() {
-                                Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
-                                _ => unreachable!("instance call without $this"),
+                                Some(Value::Object(obj)) if has_this => {
+                                    obj.borrow().class_name.clone()
+                                }
+                                _ => call.name.as_bytes()[..sep].to_vec(),
                             };
                             self.called_class_stack.push(called_class);
                             let name = call.name.as_bytes();
@@ -20611,7 +20922,7 @@ impl Vm {
                                 .unwrap_or_else(|| class_lower.to_vec());
                             self.class_scope_stack.push(defining_class);
                         }
-                        let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                        let mut func_cvs = self.take_values(user_fn.cv_names.len());
                         for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()) {
                             *slot = arg.clone();
                         }
@@ -20645,7 +20956,9 @@ impl Vm {
                         // The frame stays on the call stack for the trace of an error.
                         let call_failed = call_result.is_err();
                         if !call_failed {
-                            self.call_stack.pop();
+                            if let Some(frame) = self.call_stack.pop() {
+                                self.recycle_frame(frame);
+                            }
                         }
                         if is_method {
                             self.called_class_stack.pop();
@@ -24522,119 +24835,30 @@ impl Vm {
 
                         // Check parameter types before executing
                         if !user_fn.param_types.is_empty() {
-                            // Push class scope temporarily for self/parent/static type checking
-                            // Use windows(2) to find "::" correctly even in names with embedded colons
-                            let temp_scope_pushed = if let Some(pos) =
-                                func_name_lower.windows(2).position(|w| w == b"::")
-                            {
-                                let class_part_lower = &func_name_lower[..pos];
-                                let method_part_lower = &func_name_lower[pos + 2..];
-                                let defining_class = self
-                                    .classes
-                                    .get(class_part_lower)
-                                    .and_then(|c| c.get_method(method_part_lower))
-                                    .map(|m| m.declaring_class.clone())
-                                    .unwrap_or_else(|| class_part_lower.to_vec());
-                                self.class_scope_stack.push(defining_class);
-                                true
-                            } else if let Some(ref scope) = user_fn.scope_class {
-                                self.class_scope_stack.push(scope.clone());
-                                true
-                            } else {
-                                false
-                            };
-                            // Determine if this is a method call ($this is first implicit arg)
-                            let implicit_args = if user_fn.cv_names.first().map(|n| n.as_slice())
-                                == Some(b"this")
-                            {
-                                1
-                            } else {
-                                0
-                            };
-                            // Build display name from call.name. For closures, prefer
-                            // the canonical PHP display name (e.g. {closure:file:line}).
-                            let display_name = if !user_fn.display_name.is_empty() {
-                                String::from_utf8_lossy(&user_fn.display_name).into_owned()
-                            } else {
-                                call.name.to_string_lossy()
-                            };
-                            // For method calls like ClassName::method, format as ClassName::method
-                            // For regular functions, just the function name
-                            let param_err = self.check_param_types_with_strict(
+                            match self.recv_typed_params(
                                 &user_fn,
-                                &call.args,
-                                &display_name,
-                                implicit_args,
+                                &mut call,
+                                &func_name_lower,
                                 op.line,
                                 op_array.strict_types,
-                            );
-                            // Pop temp scope
-                            if temp_scope_pushed {
-                                self.class_scope_stack.pop();
-                            }
-                            self.flush_callable_deprecations();
-                            if let Some(err_msg) = param_err {
-                                // Use the function definition line for the exception, not the call site
-                                let def_line = if user_fn.decl_line > 0 {
-                                    user_fn.decl_line
-                                } else {
-                                    user_fn.ops.first().map(|o| o.line).unwrap_or(op.line)
-                                };
-                                let exc_val =
-                                    self.create_exception(b"TypeError", &err_msg, def_line);
-                                // The exception's file is the function's definition file.
-                                if !user_fn.filename.is_empty() {
-                                    if let Value::Object(ref o) = exc_val {
-                                        o.borrow_mut().set_property(
-                                            b"file".to_vec(),
-                                            Value::String(PhpString::from_vec(
-                                                user_fn.filename.clone(),
-                                            )),
-                                        );
+                            ) {
+                                Ok(()) => {}
+                                Err(RecvFail::TypeError(err_msg, def_line)) => {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        self.call_stack.pop(); // pop early-pushed frame
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    } else {
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", err_msg),
+                                            line: def_line,
+                                        });
                                     }
                                 }
-                                self.current_exception = Some(exc_val);
-                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                    exception_handlers.pop()
-                                {
-                                    pending_calls_catch_depth = Some(saved_pc);
-                                    self.call_stack.pop(); // pop early-pushed frame
-                                    ip = catch_target as usize;
-                                    return Ok(Flow::Continue);
-                                } else {
-                                    return Err(VmError {
-                                        message: format!("Uncaught TypeError: {}", err_msg),
-                                        line: def_line,
-                                    });
-                                }
-                            }
-                            // Emit implicit float-to-int deprecation for non-strict mode
-                            // BEFORE coercion truncates the value.
-                            if !op_array.strict_types {
-                                let had_exc = self.current_exception.is_some();
-                                for (i, arg) in call.args.iter().enumerate() {
-                                    if i >= user_fn.param_types.len() {
-                                        break;
-                                    }
-                                    if matches!(arg, Value::Undef) {
-                                        continue;
-                                    }
-                                    if let Some(type_info) = &user_fn.param_types[i] {
-                                        // Reported by the callee's RECV (its declaration line).
-                                        let recv_line = if user_fn.decl_line > 0 {
-                                            user_fn.decl_line
-                                        } else {
-                                            op.line
-                                        };
-                                        self.emit_implicit_float_to_int_if_needed(
-                                            arg,
-                                            &type_info.param_type,
-                                            recv_line,
-                                        );
-                                    }
-                                }
-                                // An error handler that throws aborts the call.
-                                if !had_exc && self.current_exception.is_some() {
+                                Err(RecvFail::HandlerThrew) => {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
                                     {
@@ -24647,86 +24871,6 @@ impl Vm {
                                         message: "Uncaught exception".into(),
                                         line: op.line,
                                     });
-                                }
-                            }
-                            let nan_args: Vec<usize> = if op_array.strict_types {
-                                Vec::new()
-                            } else {
-                                call.args
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, a)| matches!(a, Value::Double(d) if d.is_nan()))
-                                    .map(|(i, _)| i)
-                                    .collect()
-                            };
-                            // Coerce args to their declared types (weak mode)
-                            Self::coerce_param_types(
-                                &user_fn,
-                                &mut call.args,
-                                implicit_args,
-                                op_array.strict_types,
-                            );
-                            for i in nan_args {
-                                let target = match call.args.get(i) {
-                                    Some(Value::String(_)) => "string",
-                                    Some(Value::True | Value::False) => "bool",
-                                    _ => continue,
-                                };
-                                let recv_line = if user_fn.decl_line > 0 {
-                                    user_fn.decl_line
-                                } else {
-                                    op.line
-                                };
-                                self.emit_warning_at(
-                                    &format!("unexpected NAN value was coerced to {}", target),
-                                    recv_line,
-                                );
-                            }
-                            // Coerce Stringable objects to string for string-typed params
-                            // (zend_verify_weak_scalar_type_hint: a type with string
-                            // that does not take the object as is).
-                            for (i, arg) in call.args.iter_mut().enumerate() {
-                                if i >= user_fn.param_types.len() {
-                                    break;
-                                }
-                                if let Some(type_info) = &user_fn.param_types[i] {
-                                    let is_string_param = matches!(arg, Value::Object(_))
-                                        && variance::TypeView::from_param_type(
-                                            &type_info.param_type,
-                                        )
-                                        .mask
-                                            & variance::T_STRING
-                                            != 0
-                                        && (matches!(&type_info.param_type,
-                                        ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string"))
-                                            || matches!(&type_info.param_type,
-                                            ParamType::Nullable(inner) if matches!(inner.as_ref(), ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string")))
-                                            || (!op_array.strict_types
-                                                && !self.object_matches_class_part(
-                                                    arg,
-                                                    &type_info.param_type,
-                                                )));
-                                    if is_string_param {
-                                        if let Value::Object(obj) = arg {
-                                            let class_lower: Vec<u8> = obj
-                                                .borrow()
-                                                .class_name
-                                                .iter()
-                                                .map(|b| b.to_ascii_lowercase())
-                                                .collect();
-                                            let has_tostring = self
-                                                .classes
-                                                .get(&class_lower)
-                                                .map(|c| c.get_method(b"__tostring").is_some())
-                                                .unwrap_or(false);
-                                            if has_tostring {
-                                                // Error will be handled later
-                                                if let Ok(s) = self.value_to_string_checked(arg) {
-                                                    *arg = Value::String(s);
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
