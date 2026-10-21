@@ -681,7 +681,17 @@ impl Vm {
         if cl == b"weakmap" {
             return Ok(None);
         }
-        if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_some() {
+        if let Some(base) = self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]) {
+            // A subclass overriding an Iterator method iterates through
+            // zend_user_it_get_iterator(), which refuses by-ref foreach.
+            if base == b"arrayiterator"
+                && [&b"rewind"[..], b"valid", b"current", b"key", b"next"]
+                    .iter()
+                    .any(|m| self.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false))
+            {
+                self.spl_throw(b"Error", "An iterator cannot be used with foreach by reference");
+                return Err(());
+            }
             return Ok(match obj.borrow().get_property(b"__spl_array") {
                 Value::Array(a) => Some(a),
                 _ => None,

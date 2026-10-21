@@ -20570,12 +20570,12 @@ impl Vm {
                             );
                         } else if self.class_implements_interface(&class_lower, b"iteratoraggregate") {
                             // IteratorAggregate: call getIterator() and iterate the result
-                            let iter_obj = self.call_object_method(&arr_val, b"getIterator", &[]);
+                            let iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
                             if let Some(iter_val) = iter_obj {
                                 match &iter_val {
                                     Value::Object(_) => {
                                         // Call rewind() on the returned Iterator
-                                        self.call_object_method(&iter_val, b"rewind", &[]);
+                                        self.spl_call_method(&iter_val, b"rewind", &[]);
                                         // Store the iterator object for ForeachNext
                                         self.write_operand(
                                             &op.result,
@@ -20629,7 +20629,7 @@ impl Vm {
                             } else {
                                 arr_val.clone()
                             };
-                            self.call_object_method(&iter_obj, b"rewind", &[]);
+                            self.spl_call_method(&iter_obj, b"rewind", &[]);
                             self.write_operand(
                                 &op.result,
                                 iter_obj,
@@ -20923,7 +20923,7 @@ impl Vm {
                         // calls Iterator::key when the user wrote `$k => $v`.
                         // On pos > 0, advance first via next()
                         if pos > 0 {
-                            self.call_object_method(&arr_val, b"next", &[]);
+                            self.spl_call_method(&arr_val, b"next", &[]);
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                                     pending_calls_catch_depth = Some(saved_pc);
@@ -20942,7 +20942,7 @@ impl Vm {
 
                         // Check valid()
                         let valid = self
-                            .call_object_method(&arr_val, b"valid", &[])
+                            .spl_call_method(&arr_val, b"valid", &[])
                             .unwrap_or(Value::False);
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -20968,7 +20968,7 @@ impl Vm {
                         } else {
                             // Get current value
                             let value = self
-                                .call_object_method(&arr_val, b"current", &[])
+                                .spl_call_method(&arr_val, b"current", &[])
                                 .unwrap_or(Value::Null);
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -21104,7 +21104,7 @@ impl Vm {
                             cached.clone()
                         } else {
                             let k = self
-                                .call_object_method(&arr_val, b"key", &[])
+                                .spl_call_method(&arr_val, b"key", &[])
                                 .unwrap_or(Value::Long(0));
                             foreach_gen_keys.insert(iter_idx, k.clone());
                             k
