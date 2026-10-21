@@ -369,6 +369,11 @@ impl PhpArray {
         self.after_push();
     }
 
+    /// The key the next append would use (nNextFreeElement).
+    pub fn next_free_key(&self) -> i64 {
+        self.next_int_key
+    }
+
     /// Append a value with the next integer key ($arr[] = value).
     /// Silently ignores if memory limit is exceeded. Ignores key conflicts.
     pub fn push(&mut self, value: Value) {

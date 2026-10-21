@@ -9,4 +9,3 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-quick-xml = "0.37"
