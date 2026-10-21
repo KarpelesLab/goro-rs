@@ -285,7 +285,8 @@ impl Vm {
             self.emit_warning("Array to string conversion");
             return PhpString::from_bytes(b"Array");
         }
-        self.value_to_string(&v)
+        // convert_to_string(): objects without __toString() throw.
+        self.value_to_string_checked(&v).unwrap_or_else(|_| PhpString::empty())
     }
 
     // ------------------------------------------------------------------
@@ -1088,10 +1089,13 @@ impl Vm {
                 }
             }
             (b"cachingiterator", b"offsetset") => {
+                let k = match self.spl_arg_string("CachingIterator::offsetSet", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                    Some(k) => k,
+                    None => return Some(Value::Null),
+                };
                 if !self.cit_full_cache_check(obj) {
                     return Some(Value::Null);
                 }
-                let k = args.first().cloned().unwrap_or(Value::Null).to_php_string();
                 let v = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Array(c) = prop(obj, b"__spl_cache") {
                     c.borrow_mut().set(Self::value_to_array_key(Value::String(k)), v);
@@ -1099,10 +1103,13 @@ impl Vm {
                 Value::Null
             }
             (b"cachingiterator", b"offsetget") => {
+                let k = match self.spl_arg_string("CachingIterator::offsetGet", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                    Some(k) => k,
+                    None => return Some(Value::Null),
+                };
                 if !self.cit_full_cache_check(obj) {
                     return Some(Value::Null);
                 }
-                let k = args.first().cloned().unwrap_or(Value::Null).to_php_string();
                 let got = match prop(obj, b"__spl_cache") {
                     Value::Array(c) => c.borrow().get(&Self::value_to_array_key(Value::String(k.clone()))).cloned(),
                     _ => None,
@@ -1117,20 +1124,26 @@ impl Vm {
                 }
             }
             (b"cachingiterator", b"offsetunset") => {
+                let k = match self.spl_arg_string("CachingIterator::offsetUnset", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                    Some(k) => k,
+                    None => return Some(Value::Null),
+                };
                 if !self.cit_full_cache_check(obj) {
                     return Some(Value::Null);
                 }
-                let k = args.first().cloned().unwrap_or(Value::Null).to_php_string();
                 if let Value::Array(c) = prop(obj, b"__spl_cache") {
                     c.borrow_mut().remove(&Self::value_to_array_key(Value::String(k)));
                 }
                 Value::Null
             }
             (b"cachingiterator", b"offsetexists") => {
+                let k = match self.spl_arg_string("CachingIterator::offsetExists", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                    Some(k) => k,
+                    None => return Some(Value::Null),
+                };
                 if !self.cit_full_cache_check(obj) {
                     return Some(Value::Null);
                 }
-                let k = args.first().cloned().unwrap_or(Value::Null).to_php_string();
                 match prop(obj, b"__spl_cache") {
                     Value::Array(c) => bv(c.borrow().get(&Self::value_to_array_key(Value::String(k))).is_some()),
                     _ => Value::False,
@@ -1886,7 +1899,11 @@ impl Vm {
         if matches!(data, Value::Array(_)) {
             return Some(PhpString::from_bytes(b"Array"));
         }
-        Some(self.spl_zval_get_string(&data))
+        let s = self.spl_zval_get_string(&data);
+        if self.exc() {
+            return None;
+        }
+        Some(s)
     }
 
     fn rii_check(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {

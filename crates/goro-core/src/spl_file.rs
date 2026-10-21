@@ -431,7 +431,9 @@ impl Vm {
                 let has_ts = self.classes.get(&cl).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false)
                     || self.spl_has_builtin_tostring(&cl);
                 if has_ts {
+                    let line = self.current_line;
                     let s = self.value_to_string(v);
+                    self.current_line = line;
                     if self.current_exception.is_some() {
                         return None;
                     }

@@ -533,10 +533,22 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
                 .unwrap_or(false);
 
             if has_user_count {
-                // Call user-defined count() method
-                if let Some(result) = vm.call_object_method(val, b"count", &[]) {
-                    return Ok(result);
+                // Call user-defined count() method; the result goes through
+                // zval_get_long().
+                let result = vm.call_object_method(val, b"count", &[]);
+                if vm.current_exception.is_some() {
+                    return Err(VmError { message: "Uncaught exception".to_string(), line: vm.current_line });
                 }
+                let n = match result.unwrap_or(Value::Null).deref() {
+                    Value::Object(o) => {
+                        let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+                        vm.emit_warning(&format!("Object of class {} could not be converted to int", cn));
+                        1
+                    }
+                    Value::Array(a) => if a.borrow().len() > 0 { 1 } else { 0 },
+                    other => other.to_long(),
+                };
+                return Ok(Value::Long(n));
             }
 
             // Check if this is an SPL class with __spl_array

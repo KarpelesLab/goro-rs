@@ -6238,6 +6238,9 @@ impl Vm {
             if method_lower == b"__construct" {
                 return None; // needs the call arguments (handle_spl_docall)
             }
+            if crate::spl_stubs::spl_stub_method(class_lower, method_lower).map(|m| m.required > 0).unwrap_or(false) {
+                return None; // needs the call arguments (handle_spl_docall)
+            }
             return self.spl_iter_dispatch(class_lower, method_lower, obj, &[]);
         }
         match class_lower {
@@ -10781,7 +10784,11 @@ impl Vm {
                     }
                     self.called_class_stack.push(class_lower.clone());
                     self.class_scope_stack.push(method.declaring_class.clone());
+                    // Diagnostics raised by the caller after the call report
+                    // the caller's line, not the callee's last line.
+                    let saved_line = self.current_line;
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
+                    self.current_line = saved_line;
                     self.called_class_stack.pop();
                     self.class_scope_stack.pop();
                     return result;
@@ -20955,6 +20962,20 @@ impl Vm {
                             let value = self
                                 .call_object_method(&arr_val, b"current", &[])
                                 .unwrap_or(Value::Null);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let exc_msg = if let Some(Value::Object(o)) = &self.current_exception {
+                                    let ob = o.borrow();
+                                    let class = crate::value::display_class_name(&ob.class_name);
+                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy();
+                                    if msg.is_empty() { format!("Uncaught {}", class) } else { format!("Uncaught {}: {}", class, msg) }
+                                } else { "Uncaught exception".to_string() };
+                                return Err(VmError { message: exc_msg, line: op.line });
+                            }
 
                             // key() is deferred to ForeachKey — PHP does not
                             // call Iterator::key when the foreach has no key
