@@ -1892,7 +1892,11 @@ impl Compiler {
                 }
                 self.emit_by_ref_return_notice(value.as_ref(), stmt.span.line);
                 let operand = if let Some(expr) = value {
-                    self.compile_expr(expr)?
+                    if self.op_array.returns_by_ref && !self.op_array.is_generator {
+                        self.compile_ref_fetch(expr)?
+                    } else {
+                        self.compile_expr(expr)?
+                    }
                 } else {
                     let idx = self.op_array.add_literal(Value::Null);
                     OperandType::Const(idx)
@@ -8106,6 +8110,83 @@ impl Compiler {
         self.compile_expr(expr)
     }
 
+    /// Mark the call whose result is `op` as fetched by reference: a by-ref
+    /// function then returns the reference itself.
+    fn mark_ref_call(&mut self, op: &OperandType) {
+        if let OperandType::Tmp(_) = op {
+            if let Some(call) = self
+                .op_array
+                .ops
+                .iter_mut()
+                .rev()
+                .find(|o| o.opcode == OpCode::DoFCall && o.result == *op)
+            {
+                let lit = self.op_array.literals.len() as u32;
+                self.op_array.literals.push(Value::True);
+                call.op2 = OperandType::Const(lit);
+            }
+        }
+    }
+
+    fn is_call_expr(e: &Expr) -> bool {
+        matches!(
+            e.kind,
+            ExprKind::FunctionCall { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::StaticMethodCall { .. }
+                | ExprKind::DynamicStaticMethodCall { .. }
+        )
+    }
+
+    /// Compile `expr` in a reference context (the operand of a by-ref
+    /// return): variables, elements and properties yield a reference,
+    /// calls keep a returned reference; anything else is a plain value.
+    fn compile_ref_fetch(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let line = expr.span.line;
+        match &expr.kind {
+            ExprKind::Variable(name) if name != b"this" && name != b"GLOBALS" => {
+                let cv = self.op_array.get_or_create_cv(name);
+                self.op_array.emit(Op {
+                    opcode: OpCode::MakeRef,
+                    op1: OperandType::Cv(cv),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                });
+                Ok(OperandType::Cv(cv))
+            }
+            ExprKind::ArrayAccess {
+                array,
+                index: Some(index),
+            } => {
+                let arr = self.compile_dim_write_base(array)?;
+                let idx = self.compile_expr(index)?;
+                let t = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::ArrayGetRef,
+                    op1: arr,
+                    op2: idx,
+                    result: OperandType::Tmp(t),
+                    line,
+                });
+                Ok(OperandType::Tmp(t))
+            }
+            ExprKind::PropertyAccess {
+                object,
+                property,
+                nullsafe: false,
+            } => Ok(OperandType::Tmp(
+                self.compile_property_ref(object, property, line)?,
+            )),
+            _ if Self::is_call_expr(expr) => {
+                let v = self.compile_expr(expr)?;
+                self.mark_ref_call(&v);
+                Ok(v)
+            }
+            _ => self.compile_expr(expr),
+        }
+    }
+
     /// Copy a plain variable operand into a tmp so that a magic method run
     /// between two uses of it (offsetExists/__isset, then offsetGet/__get)
     /// cannot change what the second use sees.
@@ -13653,9 +13734,31 @@ impl Compiler {
                     }
                     (ExprKind::Variable(target_name), _) => {
                         // $target = &<expr> — evaluate expr, assign to target, then make both reference
+                        let is_call = Self::is_call_expr(value);
                         let val = self.compile_expr(value)?;
                         self.emit_assign_ref_call_notice(value, expr.span.line);
                         let target_cv = self.op_array.get_or_create_cv(target_name);
+                        if is_call && matches!(val, OperandType::Tmp(_)) {
+                            // Bind to the returned reference (or assign the value).
+                            self.mark_ref_call(&val);
+                            let result = if result_discarded {
+                                OperandType::Unused
+                            } else {
+                                OperandType::Tmp(self.op_array.alloc_temp())
+                            };
+                            self.op_array.emit(Op {
+                                opcode: OpCode::AssignRef,
+                                op1: OperandType::Cv(target_cv),
+                                op2: val,
+                                result,
+                                line: expr.span.line,
+                            });
+                            return Ok(if result_discarded {
+                                OperandType::Cv(target_cv)
+                            } else {
+                                result
+                            });
+                        }
                         let result = if result_discarded {
                             OperandType::Unused
                         } else {

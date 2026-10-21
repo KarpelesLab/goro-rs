@@ -424,6 +424,9 @@ pub struct Vm {
     /// The next executed op_array is a global-scope frame (main script,
     /// include/eval at global scope) whose CVs live in the symbol table.
     pub(crate) bind_next_frame: bool,
+    /// Call depth of a by-ref function whose result is fetched for writing
+    /// (`$x = &f()`): that frame returns the reference itself.
+    pub(crate) keep_ref_depth: Option<u32>,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -711,6 +714,7 @@ impl Vm {
             ob_fname: None,
             globals_gen: 0,
             bind_next_frame: false,
+            keep_ref_depth: None,
             functions: HashMap::new(),
             builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
@@ -6737,6 +6741,16 @@ impl Vm {
     }
 
     /// Access static_vars (read-only, for reflection)
+    /// The reference cell of a static variable (created from `default`).
+    pub fn static_var_cell(&mut self, key: &[u8], default: Value) -> Value {
+        if let Some(v @ Value::Reference(_)) = self.static_vars.get(key) {
+            return v.clone();
+        }
+        let cell = Value::Reference(Rc::new(RefCell::new(default)));
+        self.static_vars.insert(key.to_vec(), cell.clone());
+        cell
+    }
+
     pub fn static_vars(&self) -> &HashMap<Vec<u8>, Value> {
         &self.static_vars
     }
@@ -14173,6 +14187,9 @@ impl Vm {
         let cv_frame = self.register_cv_frame(op_array);
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
+        // The caller fetches the result of this by-ref function for writing.
+        let keep_ref =
+            self.keep_ref_depth.take() == Some(self.call_depth) && op_array.returns_by_ref;
         let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
         self.is_global_scope = prev_global;
         if cv_frame {
@@ -14215,6 +14232,21 @@ impl Vm {
                 v
             }
         });
+        // A by-ref function returns a reference; callers that do not bind it
+        // get the value.
+        let mut ret_ref: Option<Rc<RefCell<Value>>> = None;
+        if let Ok(Value::Reference(r)) = &result {
+            let r = r.clone();
+            let v = r.borrow().clone();
+            result = Ok(if matches!(v, Value::Undef) {
+                Value::Null
+            } else {
+                v
+            });
+            if keep_ref {
+                ret_ref = Some(r);
+            }
+        }
         // Coerce return value in weak mode
         if let Ok(ref mut val) = result {
             if let Some(ref ret_type) = op_array.return_type {
@@ -14281,7 +14313,10 @@ impl Vm {
             }
         }
 
-        result
+        match (result, ret_ref) {
+            (Ok(_), Some(r)) => Ok(Value::Reference(r)),
+            (result, _) => result,
+        }
     }
 
     fn execute_op_array_inner(
@@ -14588,6 +14623,50 @@ impl Vm {
                 }
 
                 OpCode::AssignRef => {
+                    if let (OperandType::Cv(target_idx), OperandType::Tmp(t)) = (op.op1, op.op2) {
+                        if !matches!(tmps.get(t as usize), Some(Value::Reference(_))) {
+                            // `$x = &f()` where f() did not return a reference:
+                            // a plain assignment (zend_wrong_assign_to_variable_reference).
+                            let val = std::mem::replace(&mut tmps[t as usize], Value::Undef);
+                            let val = if matches!(val, Value::Undef) {
+                                Value::Null
+                            } else {
+                                val
+                            };
+                            self.write_operand(&op.op1, val, &mut cvs, &mut tmps, &static_cv_keys);
+                            if let OperandType::Tmp(r) = op.result {
+                                let v = cvs
+                                    .get(target_idx as usize)
+                                    .map(|v| v.deref())
+                                    .unwrap_or(Value::Null);
+                                tmps[r as usize] = v;
+                            }
+                            if global_bound {
+                                self.symtab_fix_cv(
+                                    target_idx as usize,
+                                    &mut cvs,
+                                    &op_array.cv_names,
+                                    &mut gbind,
+                                );
+                            }
+                            let had_exc = self.current_exception.is_some();
+                            self.run_pending_destructors();
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception from destructor".into(),
+                                    line: op.line,
+                                });
+                            }
+                            continue;
+                        }
+                    }
                     if let OperandType::Cv(target_idx) = op.op1 {
                         let ti = target_idx as usize;
                         let ref_cell = match op.op2 {
@@ -14634,6 +14713,10 @@ impl Vm {
                         };
                         // Point the target to the same reference (direct replace, not write-through)
                         cvs[ti] = Value::Reference(ref_cell);
+                        if let OperandType::Tmp(r) = op.result {
+                            let v = cvs[ti].deref();
+                            tmps[r as usize] = v;
+                        }
                     }
                 }
 
@@ -22728,7 +22811,12 @@ impl Vm {
                         // the inner function's Return opcode would otherwise clear it.
                         let saved_pending_return = self.pending_return.take();
                         let saved_pending_jump = self.pending_finally_jump.take();
+                        if !matches!(op.op2, OperandType::Unused) && user_fn.returns_by_ref {
+                            // `$x = &f()` & co.: keep the returned reference.
+                            self.keep_ref_depth = Some(self.call_depth + 1);
+                        }
                         let call_result = self.execute_op_array(&user_fn, func_cvs);
+                        self.keep_ref_depth = None;
                         // Restore deferred return state from the outer finally scope
                         if self.pending_return.is_none() {
                             self.pending_return = saved_pending_return;
@@ -26571,7 +26659,19 @@ impl Vm {
                 OpCode::Return => {
                     // By-ref returns fetch the operand for writing (no warning).
                     let val = if op_array.returns_by_ref {
-                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        // Keep the reference the compiler fetched for the
+                        // returned variable / element / property.
+                        match &op.op1 {
+                            OperandType::Cv(_) => match Self::read_operand_raw(&cvs, &op.op1) {
+                                Value::Undef => Value::Null,
+                                v => v,
+                            },
+                            OperandType::Tmp(t) => match tmps.get(*t as usize) {
+                                Some(v @ Value::Reference(_)) => v.clone(),
+                                _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                            },
+                            _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                        }
                     } else {
                         self.read_operand_warn(
                             &op.op1,
@@ -29455,23 +29555,28 @@ impl Vm {
                     // (e.g. $foo[] = X on a static array) persist across calls by
                     // sharing the same Rc<RefCell<PhpArray>> between the CV and
                     // self.static_vars.
-                    let value = if let Some(existing) = self.static_vars.get(&key) {
+                    // The CV is bound by reference to the static variable's cell
+                    // (ZEND_BIND_STATIC), so `return $v` from `function &f()`
+                    // and later writes reach the static.
+                    let cell = if let Some(existing) = self.static_vars.get(&key) {
                         existing.clone()
                     } else {
                         let default = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                        self.static_vars.insert(key.clone(), default.clone());
-                        default
+                        let default = match default {
+                            Value::Array(a) => {
+                                Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                            }
+                            v => v,
+                        };
+                        let cell = Value::Reference(Rc::new(RefCell::new(default)));
+                        self.static_vars.insert(key.clone(), cell.clone());
+                        cell
                     };
 
                     if let OperandType::Cv(idx) = op.op1 {
                         if let Some(slot) = cvs.get_mut(idx as usize) {
-                            if let Value::Reference(r) = slot {
-                                *r.borrow_mut() = value;
-                            } else {
-                                *slot = value;
-                            }
+                            *slot = cell;
                         }
-                        static_cv_keys.insert(idx, key);
                     }
                 }
 
@@ -34060,6 +34165,11 @@ impl Vm {
                         } else {
                             raw
                         }
+                    } else if let (true, OperandType::Tmp(t)) = (op_array.returns_by_ref, &op.op1) {
+                        match tmps.get(*t as usize) {
+                            Some(v @ Value::Reference(_)) => v.clone(),
+                            _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                        }
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
@@ -34666,9 +34776,19 @@ impl Vm {
                         // Asymmetric visibility / readonly: a reference would allow
                         // modification. Objects yield a copy, other values error.
                         let mut deny: Option<String> = None;
-                        if let Some((_vis, declaring_class, is_readonly, _pt, set_vis)) =
+                        let mut inaccessible: Option<String> = None;
+                        if let Some((vis, declaring_class, is_readonly, _pt, set_vis)) =
                             self.find_property_def(&class_lower, prop_name.as_bytes())
                         {
+                            let caller_scope = self.current_class_scope();
+                            inaccessible = self.check_visibility(
+                                vis,
+                                &declaring_class,
+                                &class_name_orig,
+                                &prop_name.to_string_lossy(),
+                                true,
+                                caller_scope.as_deref(),
+                            );
                             let declaring_lower: Vec<u8> = declaring_class
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
@@ -34723,14 +34843,26 @@ impl Vm {
                                 ));
                             }
                         }
-                        let overloaded = !obj.borrow().has_property(prop_name.as_bytes())
-                            && self
-                                .classes
-                                .get(&class_lower)
-                                .map(|c| c.get_method(b"__get").is_some())
-                                .unwrap_or(false);
+                        let get_method = self
+                            .classes
+                            .get(&class_lower)
+                            .and_then(|c| c.get_method(b"__get"))
+                            .map(|m| m.op_array.returns_by_ref);
+                        let oid = obj.borrow().object_id;
+                        let guard_key = (oid, prop_name.as_bytes().to_vec(), 0u8);
+                        let overloaded = (inaccessible.is_some() || !obj.borrow().has_property(prop_name.as_bytes()))
+                            && get_method.is_some()
+                            && !self.magic_prop_guards.contains(&guard_key)
+                            // Not every __get dispatch path records its guard:
+                            // inside a magic method an inaccessible property errors.
+                            && !(inaccessible.is_some() && self.magic_depth > 0);
                         if overloaded && deny.is_none() {
-                            // Overloaded property: read through __get (by value).
+                            // Overloaded property: fetched through __get, by
+                            // reference when __get returns by reference.
+                            if get_method == Some(true) {
+                                self.keep_ref_depth = Some(self.call_depth + 1);
+                            }
+                            self.magic_prop_guards.insert(guard_key.clone());
                             let v = self
                                 .call_object_method(
                                     &obj_val,
@@ -34738,12 +34870,17 @@ impl Vm {
                                     &[Value::String(prop_name.clone())],
                                 )
                                 .unwrap_or(Value::Null);
+                            self.magic_prop_guards.remove(&guard_key);
+                            self.keep_ref_depth = None;
                             if !matches!(v, Value::Object(_) | Value::Reference(_)) {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
                                 self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_string_lossy()), op.line);
                             }
                             v
+                        } else if let Some(msg) = inaccessible {
+                            ref_error = Some(msg);
+                            Value::Null
                         } else if let Some(msg) = deny {
                             let cur = obj.borrow().get_property(prop_name.as_bytes());
                             if matches!(cur, Value::Object(_)) {
@@ -34752,9 +34889,12 @@ impl Vm {
                                 ref_error = Some(msg);
                                 Value::Null
                             }
+                        } else if let Ok(mut ob) = obj.try_borrow_mut() {
+                            Value::Reference(ob.get_property_ref(prop_name.as_bytes()))
                         } else {
-                            let r = obj.borrow_mut().get_property_ref(prop_name.as_bytes());
-                            Value::Reference(r)
+                            // The object is being inspected (e.g. var_dump calling
+                            // __debugInfo): fall back to the value.
+                            obj.borrow().get_property(prop_name.as_bytes())
                         }
                     } else {
                         Value::Null
@@ -45885,12 +46025,20 @@ impl Vm {
 
     /// Get a static variable value
     pub fn get_static_var(&self, key: &[u8]) -> Option<Value> {
-        self.static_vars.get(key).cloned()
+        self.static_vars.get(key).map(|v| v.deref())
     }
 
     /// Set a static variable value
     pub fn set_static_var(&mut self, key: Vec<u8>, value: Value) {
-        self.static_vars.insert(key, value);
+        match self.static_vars.get(&key) {
+            Some(Value::Reference(r)) => {
+                *r.borrow_mut() = value;
+            }
+            _ => {
+                self.static_vars
+                    .insert(key, Value::Reference(Rc::new(RefCell::new(value))));
+            }
+        }
     }
 
     /// Get a global variable value

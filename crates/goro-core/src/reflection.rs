@@ -4926,7 +4926,7 @@ pub fn reflection_method_method(
                                         let var_name = &key_bytes[prefix.len()..];
                                         // Get current value (or default)
                                         let val = if let Some(v) = vm.static_vars().get(key_bytes) {
-                                            v.clone()
+                                            v.deref()
                                         } else {
                                             // No invocation yet -> use the default literal.
                                             if let OperandType::Const(d_idx) = op.op2 {
@@ -6082,7 +6082,7 @@ pub fn reflection_function_method(
                     };
                     // Prefer runtime value; fall back to the literal default.
                     let val = if let Some(v) = vm.static_vars().get(&key_bytes) {
-                        v.clone()
+                        v.deref()
                     } else {
                         match op.op2 {
                             crate::opcode::OperandType::Const(idx) => op_array
@@ -6104,7 +6104,7 @@ pub fn reflection_function_method(
                     let var_name = &key_str[prefix.len()..];
                     let key = ArrayKey::String(PhpString::from_string(var_name.to_string()));
                     if result.get(&key).is_none() {
-                        result.set(key, val.clone());
+                        result.set(key, val.deref());
                     }
                 }
             }
@@ -10833,7 +10833,7 @@ fn reflection_collect_parent_constants(vm: &Vm, class_lower: &[u8], result: &mut
                 for (name, val) in &pce.constants {
                     let key = ArrayKey::String(PhpString::from_vec(name.clone()));
                     if result.get(&key).is_none() {
-                        result.set(key, val.clone());
+                        result.set(key, val.deref());
                     }
                 }
             }
