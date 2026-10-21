@@ -421,6 +421,8 @@ pub enum Comb {
     Child,
     Next,
     Subsequent,
+    /// the column combinator `||` (parsed, but unsupported when matching)
+    Column,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -574,6 +576,17 @@ impl Parser {
             Tok::Delim('~') => {
                 self.bump();
                 Some(Comb::Subsequent)
+            }
+            Tok::Delim('|')
+                if self
+                    .toks
+                    .get(self.i + 1)
+                    .map(|t| t.t == Tok::Delim('|'))
+                    .unwrap_or(false) =>
+            {
+                self.bump();
+                self.bump();
+                Some(Comb::Column)
             }
             _ => None,
         }
@@ -1552,6 +1565,10 @@ fn complex_at(ctx: &mut Ctx, t: &Tree, n: NodeId, c: &Complex, idx: usize) -> bo
             }
             false
         }
+        Comb::Column => {
+            ctx.error = Some((UNSUPPORTED, String::new()));
+            false
+        }
     }
 }
 
@@ -1575,6 +1592,10 @@ fn has_relative(ctx: &mut Ctx, t: &Tree, anchor: NodeId, c: &Complex) -> bool {
                 cur = next_in_tree_order(t, x, Some(anchor));
             }
             v
+        }
+        Comb::Column => {
+            ctx.error = Some((UNSUPPORTED, String::new()));
+            Vec::new()
         }
         Comb::Next | Comb::Subsequent => {
             // the subject can be a following sibling or a descendant of one
@@ -1665,6 +1686,10 @@ fn relative_chain(
             }
             false
         }
+        Comb::Column => {
+            ctx.error = Some((UNSUPPORTED, String::new()));
+            false
+        }
     }
 }
 
@@ -1681,7 +1706,23 @@ fn parse_or_throw(vm: &mut Vm, sel: &str) -> R<List> {
     }
 }
 
+/// Pseudo error code: lexbor reports a failed execution status, which PHP
+/// turns into "contains an unsupported selector".
+const UNSUPPORTED: i64 = -1;
+
 fn finish(vm: &mut Vm, ctx: Ctx) -> R<()> {
+    if let Some((UNSUPPORTED, _)) = ctx.error {
+        let f = crate::dom::active_fn(vm);
+        throw_error(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): Argument #1 ($selectors) contains an unsupported selector",
+                f
+            ),
+        );
+        return Err(());
+    }
     if let Some((code, msg)) = ctx.error {
         dom_err_msg(vm, code, &msg);
         return Err(());

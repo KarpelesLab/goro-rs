@@ -756,8 +756,13 @@ fn check_options(vm: &mut Vm, f: &str, options: i64) -> R<()> {
 }
 
 /// dom_should_register_error_handlers
-fn should_report(options: i64) -> bool {
-    options & HTML_PARSE_NOERROR == 0
+fn should_report(vm: &Vm, options: i64) -> bool {
+    if options & HTML_PARSE_NOERROR != 0 {
+        return false;
+    }
+    crate::libxml::use_internal_errors()
+        || vm.error_reporting & 2 != 0
+        || vm.error_handler.is_some()
 }
 
 fn report_errors(vm: &mut Vm, fname: &str, file: &str, errors: &[ParseErr]) {
@@ -811,7 +816,7 @@ pub fn html_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
     }
     check_options(vm, &fname, options)?;
     let ov = resolve_override(vm, &fname, &override_enc)?;
-    let report = should_report(options);
+    let report = should_report(vm, options);
     let no_implied = options & HTML_PARSE_NOIMPLIED != 0;
     let (data, input_name, url) = if file {
         let path = String::from_utf8_lossy(&source).into_owned();
