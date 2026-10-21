@@ -86,6 +86,16 @@ pub struct PhpFiber {
     pub saved_error_reporting: i64,
     /// Saved `error_reporting_stack` snapshot at suspension.
     pub saved_error_reporting_stack: Vec<i64>,
+    /// Arguments passed to `Fiber::start()`, shown on the callback's
+    /// backtrace frame.
+    pub start_args: Vec<Value>,
+    /// VM frame stacks (call stack, class scopes, called classes, active
+    /// property hooks) owned by the suspended fiber; moved off the shared
+    /// VM stacks while the fiber is suspended and restored on resume.
+    pub saved_call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
+    pub saved_class_scope_stack: Vec<Vec<u8>>,
+    pub saved_called_class_stack: Vec<Vec<u8>>,
+    pub saved_property_hook_stack: Vec<Vec<u8>>,
 }
 
 thread_local! {
@@ -133,6 +143,11 @@ impl PhpFiber {
             display_name,
             saved_error_reporting: 0,
             saved_error_reporting_stack: Vec::new(),
+            start_args: Vec::new(),
+            saved_call_stack: Vec::new(),
+            saved_class_scope_stack: Vec::new(),
+            saved_called_class_stack: Vec::new(),
+            saved_property_hook_stack: Vec::new(),
         }
     }
 

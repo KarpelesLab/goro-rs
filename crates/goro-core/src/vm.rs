@@ -3876,6 +3876,46 @@ impl Vm {
         None
     }
 
+    /// Type-check (and coerce, weak mode) the arguments of a user callable
+    /// invoked by an internal function (e.g. a Fiber callback). Returns
+    /// `Some((message, declaration line))` on a mismatch.
+    pub fn check_callback_arg_types(&mut self, callback: &Value, args: &mut Vec<Value>) -> Option<(String, u32)> {
+        let (fname, prefix) = match callback {
+            Value::String(s) => (s.as_bytes().to_ascii_lowercase(), 0usize),
+            Value::Array(arr) => {
+                let vals: Vec<Value> = arr.borrow().values().cloned().collect();
+                match vals.first() {
+                    Some(Value::String(s)) if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_") => {
+                        (s.as_bytes().to_ascii_lowercase(), vals.len() - 1)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let user_fn = self.user_functions.get(&fname)?.clone();
+        if user_fn.param_types.is_empty() || prefix > 0 {
+            // Closures with bound variables keep their own argument layout.
+            return None;
+        }
+        let display = if !user_fn.display_name.is_empty() {
+            String::from_utf8_lossy(&user_fn.display_name).into_owned()
+        } else {
+            String::from_utf8_lossy(&user_fn.name).into_owned()
+        };
+        let line = self.current_line;
+        if let Some(msg) = self.check_param_types_with_strict(&user_fn, args, &display, 0, line, false) {
+            let msg = match msg.find(", called in ") {
+                Some(p) => msg[..p].to_string(),
+                None => msg,
+            };
+            let def_line = if user_fn.decl_line > 0 { user_fn.decl_line } else { line };
+            return Some((msg, def_line));
+        }
+        Self::coerce_param_types(&user_fn, args, 0, false);
+        None
+    }
+
     /// Coerce function arguments to match their declared parameter types (weak mode only).
     /// This should be called after check_param_types passes, to actually convert values
     /// like string "42" to int(42) when the parameter type is int.
@@ -33478,7 +33518,7 @@ impl Vm {
             }
             Value::Object(obj) => {
                 let cls = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                format!("{}::__invoke", cls)
+                format!("{}->__invoke", cls)
             }
             _ => "fiber-callback".to_string(),
         }
@@ -33528,7 +33568,11 @@ impl Vm {
             // same OS thread, so no aliasing occurs while we hold it.
             let vm: &mut Vm = unsafe { &mut *vm_ptr };
 
-            
+            let mut args_owned = args_owned;
+            if let Some((msg, def_line)) = vm.check_callback_arg_types(&callback, &mut args_owned) {
+                let exc = vm.create_exception(b"TypeError", &msg, def_line);
+                return crate::fiber::FiberOutcome::Threw(exc);
+            }
             match vm.call_callback(&callback, &args_owned) {
                 Ok(v) => crate::fiber::FiberOutcome::Returned(v),
                 Err(e) => {
@@ -33544,6 +33588,7 @@ impl Vm {
         };
 
         let mut fiber = crate::fiber::PhpFiber::new(display_name_for_stack.clone(), body);
+        fiber.start_args = args.to_vec();
 
         // Track the fiber object for getCurrent() and for proper nesting.
         self.fiber_stack.push(self.current_fiber.take());
@@ -33578,11 +33623,13 @@ impl Vm {
             display_name_for_stack.clone(),
             "[internal function]".to_string(),
             0,
-            Vec::new(),
+            fiber.start_args.clone(),
             false,
         ));
 
+        let bases = self.fiber_stack_bases();
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
+        self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
 
         self.call_stack.pop();
         clear_current_vm_ptr();
@@ -33960,6 +34007,36 @@ impl Vm {
         self.current_exception = saved_exc;
     }
 
+    fn fiber_stack_bases(&self) -> (usize, usize, usize, usize) {
+        (self.call_stack.len(), self.class_scope_stack.len(), self.called_class_stack.len(), self.property_hook_stack.len())
+    }
+
+    /// Re-install the frames a suspended fiber had pushed on the shared VM
+    /// stacks.
+    fn fiber_enter_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber) {
+        self.call_stack.append(&mut fiber.saved_call_stack);
+        self.class_scope_stack.append(&mut fiber.saved_class_scope_stack);
+        self.called_class_stack.append(&mut fiber.saved_called_class_stack);
+        self.property_hook_stack.append(&mut fiber.saved_property_hook_stack);
+    }
+
+    /// Control left the fiber: if it suspended, move the frames it pushed
+    /// off the shared stacks (so the resumer sees its own frames only).
+    fn fiber_leave_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber, bases: (usize, usize, usize, usize), suspended: bool) {
+        let (a, b, c, d) = bases;
+        if suspended {
+            if self.call_stack.len() > a { fiber.saved_call_stack = self.call_stack.split_off(a); }
+            if self.class_scope_stack.len() > b { fiber.saved_class_scope_stack = self.class_scope_stack.split_off(b); }
+            if self.called_class_stack.len() > c { fiber.saved_called_class_stack = self.called_class_stack.split_off(c); }
+            if self.property_hook_stack.len() > d { fiber.saved_property_hook_stack = self.property_hook_stack.split_off(d); }
+        } else {
+            self.call_stack.truncate(a);
+            self.class_scope_stack.truncate(b);
+            self.called_class_stack.truncate(c);
+            self.property_hook_stack.truncate(d);
+        }
+    }
+
     /// Drive a suspended corosensei-backed fiber with `input` (a resume value
     /// or an exception to throw from the pending `Fiber::suspend()`), then
     /// update the Fiber object's state from the outcome.
@@ -33991,10 +34068,13 @@ impl Vm {
             fiber_display_name,
             "[internal function]".to_string(),
             0,
-            Vec::new(),
+            fiber.start_args.clone(),
             false,
         ));
+        let bases = self.fiber_stack_bases();
+        self.fiber_enter_stacks(&mut fiber);
         let result = fiber.resume(input);
+        self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
         self.call_stack.pop();
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);
