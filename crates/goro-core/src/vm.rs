@@ -14773,7 +14773,41 @@ impl Vm {
                             }
                         };
                         // Point the target to the same reference (direct replace, not write-through)
-                        cvs[ti] = Value::Reference(ref_cell);
+                        let old = std::mem::replace(&mut cvs[ti], Value::Reference(ref_cell));
+                        let released = matches!(
+                            old,
+                            Value::Object(_) | Value::Array(_) | Value::Reference(_)
+                        );
+                        drop(old);
+                        if global_bound {
+                            self.symtab_fix_cv(ti, &mut cvs, &op_array.cv_names, &mut gbind);
+                            if let OperandType::Cv(vi) = op.op2 {
+                                self.symtab_fix_cv(
+                                    vi as usize,
+                                    &mut cvs,
+                                    &op_array.cv_names,
+                                    &mut gbind,
+                                );
+                            }
+                        }
+                        if released {
+                            // The variable's previous value may die here (GH-10168).
+                            let had_exc = self.current_exception.is_some();
+                            self.run_pending_destructors();
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception from destructor".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         if let OperandType::Tmp(r) = op.result {
                             let v = cvs[ti].deref();
                             tmps[r as usize] = v;
@@ -34472,7 +34506,30 @@ impl Vm {
 
                     if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
+                        let old = arr.borrow().get(&key).cloned();
                         arr.borrow_mut().set(key, ref_val);
+                        if matches!(
+                            old,
+                            Some(Value::Object(_) | Value::Array(_) | Value::Reference(_))
+                        ) {
+                            drop(old);
+                            // The element's previous value may die here (GH-10168).
+                            let had_exc = self.current_exception.is_some();
+                            self.run_pending_destructors();
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception from destructor".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array
                         if matches!(&arr_val, Value::False) {

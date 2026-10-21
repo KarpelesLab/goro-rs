@@ -8367,6 +8367,23 @@ impl Compiler {
         })
     }
 
+    /// The value of a `... = &v` expression: the referenced value, read
+    /// after the binding (so destructors run by it are observed).
+    fn ref_assign_result(&mut self, op: OperandType, discarded: bool, line: u32) -> OperandType {
+        if discarded || !matches!(op, OperandType::Tmp(_)) {
+            return op;
+        }
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::QmAssign,
+            op1: op,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(t),
+            line,
+        });
+        OperandType::Tmp(t)
+    }
+
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
         elems.iter().any(|e| {
             e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub))
@@ -13855,7 +13872,11 @@ impl Compiler {
                             result: idx,
                             line: expr.span.line,
                         });
-                        Ok(arr)
+                        Ok(self.ref_assign_result(
+                            OperandType::Tmp(ref_tmp),
+                            result_discarded,
+                            expr.span.line,
+                        ))
                     }
                     (
                         ExprKind::PropertyAccess {
@@ -13995,7 +14016,11 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
-                        Ok(arr)
+                        Ok(self.ref_assign_result(
+                            OperandType::Cv(value_cv),
+                            result_discarded,
+                            expr.span.line,
+                        ))
                     }
                     (
                         ExprKind::ArrayAccess {
@@ -14044,7 +14069,11 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
-                        Ok(dst_arr)
+                        Ok(self.ref_assign_result(
+                            OperandType::Tmp(ref_tmp),
+                            result_discarded,
+                            expr.span.line,
+                        ))
                     }
                     (ExprKind::ArrayAccess { array, index }, _) => {
                         // $arr[key] = &<expr> — evaluate expr and store reference
@@ -14069,7 +14098,7 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
-                        Ok(arr)
+                        Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
                     }
                     (ExprKind::StaticPropertyAccess { class, property }, _) => {
                         // ClassName::$prop =& value
@@ -14110,7 +14139,7 @@ impl Compiler {
                             result: OperandType::Const(prop_idx),
                             line: expr.span.line,
                         });
-                        Ok(OperandType::Const(class_idx))
+                        Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
                     }
                     (ExprKind::DynamicStaticPropertyAccess { class, property }, _) => {
                         // ClassName::$$prop =& value
@@ -14146,7 +14175,7 @@ impl Compiler {
                             result: prop_op,
                             line: expr.span.line,
                         });
-                        Ok(OperandType::Const(class_idx))
+                        Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
                     }
                     _ => {
                         let idx = self.op_array.add_literal(Value::Null);
