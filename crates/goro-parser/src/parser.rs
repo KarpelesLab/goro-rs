@@ -224,6 +224,15 @@ impl Parser {
         }
     }
 
+    /// zend_compile_use_trait(): `static` parses as a class name but is
+    /// rejected when compiled.
+    fn static_trait_name_error(&self) -> ParseError {
+        ParseError {
+            message: "Cannot use \"static\" as trait name, as it is reserved".into(),
+            span: self.current().span,
+        }
+    }
+
     fn enter_depth(&mut self) -> ParseResult<()> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
@@ -922,6 +931,22 @@ impl Parser {
             }
             TokenKind::Namespace => {
                 self.advance();
+                // zend_compile_namespace(): `namespace namespace;` parses (the
+                // keyword is a valid identifier) but is rejected.
+                if matches!(self.peek(), TokenKind::Namespace)
+                    && matches!(self.peek_at(1), TokenKind::Semicolon | TokenKind::OpenBrace)
+                {
+                    let span = self.span();
+                    let text = self
+                        .source
+                        .get(span.start as usize..span.end as usize)
+                        .map(|t| String::from_utf8_lossy(t).into_owned())
+                        .unwrap_or_else(|| "namespace".into());
+                    return Err(ParseError {
+                        message: format!("Cannot use '{}' as namespace name", text),
+                        span: self.current().span,
+                    });
+                }
                 // namespace Name\Space;  or  namespace Name\Space { ... }
                 // Namespace names can contain reserved keywords as parts
                 let mut name_parts = Vec::new();
@@ -2570,8 +2595,22 @@ impl Parser {
                 self.advance();
                 let mut traits = Vec::new();
                 loop {
+                    if matches!(self.peek(), TokenKind::Static) {
+                        return Err(self.static_trait_name_error());
+                    }
                     if matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
-                        traits.push(self.parse_class_name_ref()?);
+                        let span = self.current().span;
+                        let n = self.parse_class_name_ref()?;
+                        if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") {
+                            return Err(ParseError {
+                                message: format!(
+                                    "Cannot use \"{}\" as trait name, as it is reserved",
+                                    String::from_utf8_lossy(&n)
+                                ),
+                                span,
+                            });
+                        }
+                        traits.push(n);
                     } else {
                         break;
                     }
@@ -2591,6 +2630,11 @@ impl Parser {
                             TokenKind::Identifier(name) => {
                                 self.advance();
                                 name
+                            }
+                            TokenKind::Static
+                                if matches!(self.peek_at(1), TokenKind::DoubleColon) =>
+                            {
+                                return Err(self.static_trait_name_error());
                             }
                             _ => {
                                 self.advance(); // skip unexpected
@@ -2615,6 +2659,9 @@ impl Parser {
                                 self.advance(); // consume insteadof
                                 let mut instead_of = Vec::new();
                                 loop {
+                                    if matches!(self.peek(), TokenKind::Static) {
+                                        return Err(self.static_trait_name_error());
+                                    }
                                     let iname = self.parse_class_name_ref()?;
                                     instead_of.push(iname);
                                     if !self.eat(&TokenKind::Comma) {
@@ -2854,6 +2901,12 @@ impl Parser {
                 let const_doc = pre_name_doc.or(pre_type_doc).or(member_doc_comment.clone());
 
                 // Now parse the constant name (if not already)
+                if name.is_none() && matches!(self.peek(), TokenKind::Class) {
+                    return Err(ParseError {
+                        message: "A class constant must not be called 'class'; it is reserved for class name fetching".into(),
+                        span: self.span(),
+                    });
+                }
                 if name.is_none() {
                     name = Some(match self.peek().clone() {
                         TokenKind::Identifier(n) => {

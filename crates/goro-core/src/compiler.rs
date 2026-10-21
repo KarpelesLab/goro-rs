@@ -14939,8 +14939,15 @@ impl Compiler {
                     }
                     _ => {
                         if is_illegal_class_literal(class) {
+                            let message = if constant == b"class"
+                                && matches!(class.kind, ExprKind::Array(_))
+                            {
+                                "Cannot use \"::class\" on value of type array".into()
+                            } else {
+                                "Illegal class name".into()
+                            };
                             return Err(CompileError {
-                                message: "Illegal class name".into(),
+                                message,
                                 line: class.span.line,
                             });
                         }
@@ -19388,8 +19395,21 @@ fn is_illegal_class_literal(e: &Expr) -> bool {
         } => {
             matches!(operand.kind, ExprKind::Int(_) | ExprKind::Float(_))
         }
+        // A constant array literal is a compile-time zval too.
+        ExprKind::Array(elems) => elems.iter().all(|el| {
+            !el.unpack
+                && !el.by_ref
+                && el.key.as_ref().is_none_or(is_scalar_literal)
+                && (is_scalar_literal(&el.value) || matches!(el.value.kind, ExprKind::Array(_)))
+                && (!matches!(el.value.kind, ExprKind::Array(_))
+                    || is_illegal_class_literal(&el.value))
+        }),
         _ => false,
     }
+}
+
+fn is_scalar_literal(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::String(_)) || is_illegal_class_literal(e)
 }
 
 // ---------------------------------------------------------------------------

@@ -8606,12 +8606,18 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if alias.as_bytes() == b"_" {
         vm.emit_deprecated("Using \"_\" as a class alias is deprecated since 8.4");
     }
-    // Reserved class names (e.g. "array", "callable", "bool") cannot be used as aliases.
-    if goro_core::compiler::is_reserved_class_name(alias.as_bytes()) {
+    // zend_assert_valid_class_name(lcname): reserved class names (e.g.
+    // "array", "callable", "bool") cannot be used as aliases, in any
+    // namespace; the message shows the lowercased name.
+    let unqualified = alias_lower
+        .rsplit(|&b| b == b'\\')
+        .next()
+        .unwrap_or(&alias_lower);
+    if goro_core::compiler::is_reserved_class_name(unqualified) {
         let line = vm.current_line;
         let msg = format!(
             "Cannot use \"{}\" as a class alias as it is reserved",
-            std::str::from_utf8(alias.as_bytes()).unwrap_or("")
+            String::from_utf8_lossy(&alias_lower)
         );
         return Err(VmError { message: msg, line });
     }

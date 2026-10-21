@@ -196,10 +196,6 @@ pub(crate) fn defer(name: &[u8]) {
     DEFERRED.with(|d| d.borrow_mut().push(l));
 }
 
-pub(crate) fn is_deferred(name_lower: &[u8]) -> bool {
-    DEFERRED.with(|d| d.borrow().iter().any(|n| n.as_slice() == name_lower))
-}
-
 /// Returns true (and forgets it) if `name_lower` was deferred.
 pub(crate) fn take_deferred(name_lower: &[u8]) -> bool {
     DEFERRED.with(|d| {

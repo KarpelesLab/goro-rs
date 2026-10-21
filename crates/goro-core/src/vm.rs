@@ -33628,6 +33628,42 @@ impl Vm {
                             Value::Object(_) => "object",
                             _ => "unknown",
                         };
+                        // ZEND_FETCH_CLASS_CONSTANT fetches the class first.
+                        let raw = class_name_raw.as_bytes();
+                        let cls_lower = raw.to_ascii_lowercase();
+                        let named =
+                            !matches!(cls_lower.as_slice(), b"static" | b"self" | b"parent");
+                        if type_name != "unknown"
+                            && named
+                            && !self.classes.contains_key(&cls_lower)
+                            && !self.is_known_builtin_class(&cls_lower)
+                        {
+                            self.try_autoload_class(raw);
+                            if self.current_exception.is_none()
+                                && !self.classes.contains_key(&cls_lower)
+                                && !self.is_known_builtin_class(&cls_lower)
+                            {
+                                let err_msg = format!(
+                                    "Class \"{}\" not found",
+                                    crate::value::display_class_name(raw)
+                                );
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                            }
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught Error: class not found".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         if type_name != "unknown" {
                             let err_msg = format!(
                                 "Cannot use value of type {} as class constant name",
@@ -40765,7 +40801,10 @@ impl Vm {
                             {
                                 // Parent class still missing after autoload attempt:
                                 // PHP raises a fatal "Class \"X\" not found".
-                                if is_early_attempt && variance::is_deferred(&parent_lower) {
+                                // Not linkable at early binding: PHP declares it at its
+                                // source position instead (the parent may appear by then,
+                                // e.g. through class_alias()).
+                                if is_early_attempt {
                                     variance::defer(&class.name);
                                     return Ok(Flow::Continue);
                                 }
@@ -41959,23 +41998,33 @@ impl Vm {
                                     // (possibly through an alias) is an error; interfaces reached
                                     // through other listed interfaces are merged silently.
                                     let iface_identity = iface.name.to_ascii_lowercase();
-                                    let already_inherited = class
-                                        .interfaces
-                                        .iter()
-                                        .filter(|other_iface| {
-                                            let other_lower = other_iface.to_ascii_lowercase();
-                                            self.classes
-                                                .get(&other_lower)
-                                                .map(|o| {
-                                                    o.name.to_ascii_lowercase() == iface_identity
-                                                })
-                                                .unwrap_or(other_lower == iface_lower)
-                                        })
-                                        .count()
-                                        > 1;
+                                    // An interface's first parent is kept as `parent`.
+                                    let via_parent = class.parent.as_ref().is_some_and(|p| {
+                                        let pl = p.to_ascii_lowercase();
+                                        self.classes
+                                            .get(&pl)
+                                            .map(|o| o.name.to_ascii_lowercase() == iface_identity)
+                                            .unwrap_or(pl == iface_lower)
+                                    });
+                                    let already_inherited = via_parent
+                                        || class
+                                            .interfaces
+                                            .iter()
+                                            .filter(|other_iface| {
+                                                let other_lower = other_iface.to_ascii_lowercase();
+                                                self.classes
+                                                    .get(&other_lower)
+                                                    .map(|o| {
+                                                        o.name.to_ascii_lowercase()
+                                                            == iface_identity
+                                                    })
+                                                    .unwrap_or(other_lower == iface_lower)
+                                            })
+                                            .count()
+                                            > 1;
                                     if already_inherited {
                                         let iface_display =
-                                            String::from_utf8_lossy(iface_name).to_string();
+                                            String::from_utf8_lossy(&iface.name).to_string();
                                         let class_display =
                                             String::from_utf8_lossy(&class.name).to_string();
                                         return Err(VmError {
@@ -41988,6 +42037,45 @@ impl Vm {
                                     }
                                 }
                                 for (method_name, method) in &iface.methods {
+                                    // An interface inheriting the same method from two
+                                    // parents: do_inheritance_check_on_method() of the one
+                                    // it already has against this one.
+                                    if let Some(existing) = class.methods.get(method_name) {
+                                        if class.is_interface
+                                            && existing.is_static != method.is_static
+                                        {
+                                            let disp = |vm: &Self, d: &[u8]| -> String {
+                                                vm.classes
+                                                    .get(d.to_ascii_lowercase().as_slice())
+                                                    .map(|c| {
+                                                        String::from_utf8_lossy(&c.name).to_string()
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        String::from_utf8_lossy(d).to_string()
+                                                    })
+                                            };
+                                            let pdecl = disp(self, &method.declaring_class);
+                                            let cdecl = disp(self, &existing.declaring_class);
+                                            let mname = String::from_utf8_lossy(&existing.name);
+                                            let message = if existing.is_static {
+                                                format!(
+                                                    "Cannot make non static method {}::{}() static in class {}",
+                                                    pdecl, mname, cdecl
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Cannot make static method {}::{}() non static in class {}",
+                                                    pdecl, mname, cdecl
+                                                )
+                                            };
+                                            let line = if existing.op_array.decl_line > 0 {
+                                                existing.op_array.decl_line
+                                            } else {
+                                                op.line
+                                            };
+                                            return Err(VmError { message, line });
+                                        }
+                                    }
                                     if class.methods.get(method_name).is_none() {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
@@ -42203,7 +42291,7 @@ impl Vm {
                                     b"sessionupdatetimestamphandlerinterface",
                                 ];
                                 if !known_builtin_interfaces.contains(&iface_lower.as_slice()) {
-                                    if is_early_attempt && variance::is_deferred(&iface_lower) {
+                                    if is_early_attempt {
                                         variance::defer(&class.name);
                                         return Ok(Flow::Continue);
                                     }
@@ -42990,6 +43078,37 @@ impl Vm {
                                                                 String::from_utf8_lossy(&pm.name)
                                                             ),
                                                             line: op.line,
+                                                        });
+                                                    }
+                                                    if pm.is_static != m.is_static {
+                                                        let pdecl = self
+                                                            .classes
+                                                            .get(&pm.declaring_class)
+                                                            .map(|c| c.name.clone())
+                                                            .unwrap_or_else(|| {
+                                                                pm.declaring_class.clone()
+                                                            });
+                                                        let (a, b) = if m.is_static {
+                                                            ("non static", "static")
+                                                        } else {
+                                                            ("static", "non static")
+                                                        };
+                                                        return Err(VmError {
+                                                            message: format!(
+                                                                "Cannot make {} method {}::{}() {} in class {}",
+                                                                a,
+                                                                String::from_utf8_lossy(&pdecl),
+                                                                String::from_utf8_lossy(&m.name),
+                                                                b,
+                                                                String::from_utf8_lossy(
+                                                                    &class.name
+                                                                )
+                                                            ),
+                                                            line: if m.op_array.decl_line > 0 {
+                                                                m.op_array.decl_line
+                                                            } else {
+                                                                op.line
+                                                            },
                                                         });
                                                     }
                                                     if key.as_slice() != b"__construct"
