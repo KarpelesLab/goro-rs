@@ -1,5 +1,6 @@
 pub mod c14n;
 pub mod dom;
+pub mod html;
 pub mod io;
 pub mod libxml;
 pub mod parser;
