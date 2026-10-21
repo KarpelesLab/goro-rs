@@ -1029,26 +1029,12 @@ impl Parser {
                         vars.push(name);
                     } else if matches!(
                         self.peek(),
-                        TokenKind::DollarOpenBrace | TokenKind::VariableVariable(_)
+                        TokenKind::DollarOpenBrace
+                            | TokenKind::VariableVariable(_)
+                            | TokenKind::Dollar
                     ) {
                         // global ${expr}; / global $$name;
-                        let vspan = self.span();
-                        let inner = if let TokenKind::VariableVariable(name) = self.peek().clone() {
-                            self.advance();
-                            Expr {
-                                kind: ExprKind::Variable(name),
-                                span: vspan,
-                            }
-                        } else {
-                            self.advance();
-                            let e = self.parse_expression()?;
-                            self.expect(&TokenKind::CloseBrace)?;
-                            e
-                        };
-                        exprs.push(Expr {
-                            kind: ExprKind::DynamicVariable(Box::new(inner)),
-                            span: vspan,
-                        });
+                        exprs.push(self.parse_simple_variable()?);
                         dynamic = true;
                     } else {
                         return Err(ParseError {
@@ -4478,6 +4464,128 @@ impl Parser {
         }
     }
 
+    /// simple_variable: `$v`, `${expr}`, `$$v`, or `$` before another
+    /// simple variable (`$$$v`, `$${expr}`).
+    fn parse_simple_variable(&mut self) -> ParseResult<Expr> {
+        let span = self.span();
+        match self.peek().clone() {
+            TokenKind::Variable(name) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Variable(name),
+                    span,
+                })
+            }
+            TokenKind::VariableVariable(name) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(Expr {
+                        kind: ExprKind::Variable(name),
+                        span,
+                    })),
+                    span,
+                })
+            }
+            TokenKind::DollarOpenBrace => {
+                self.advance();
+                let inner = self.parse_expression()?;
+                self.expect(&TokenKind::CloseBrace)?;
+                Ok(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(inner)),
+                    span,
+                })
+            }
+            TokenKind::Dollar => {
+                self.advance();
+                let inner = self.parse_simple_variable()?;
+                Ok(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(inner)),
+                    span,
+                })
+            }
+            _ => Err(ParseError {
+                message: "expected variable".into(),
+                span,
+            }),
+        }
+    }
+
+    /// The member after `->` / `?->` (property_name / member_name):
+    /// an identifier, `{expr}`, or a simple variable (`$v`, `${expr}`,
+    /// `$$v`), then a method call when followed by `(`.
+    fn parse_object_member(&mut self, object: Expr, nullsafe: bool) -> ParseResult<Expr> {
+        let prop_span = self.span();
+        let member = match self.peek().clone() {
+            TokenKind::OpenBrace => {
+                self.advance();
+                let e = self.parse_expression()?;
+                self.expect(&TokenKind::CloseBrace)?;
+                e
+            }
+            TokenKind::Variable(_)
+            | TokenKind::DollarOpenBrace
+            | TokenKind::VariableVariable(_)
+            | TokenKind::Dollar => self.parse_simple_variable()?,
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Expr {
+                    kind: ExprKind::Identifier(name),
+                    span: prop_span,
+                }
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                let kw = self.keyword_to_identifier();
+                self.advance();
+                Expr {
+                    kind: ExprKind::Identifier(kw),
+                    span: prop_span,
+                }
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "expected property/method name".into(),
+                    span: self.span(),
+                });
+            }
+        };
+        if matches!(self.peek(), TokenKind::OpenParen) {
+            self.advance();
+            let args = self.parse_arguments()?;
+            let is_fcc = self.first_class_callable_flag;
+            let end_span = self.span();
+            self.expect(&TokenKind::CloseParen)?;
+            let span = object.span.merge(end_span);
+            return Ok(if is_fcc {
+                Expr {
+                    span,
+                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
+                        object: Box::new(object),
+                        method: Box::new(member),
+                        nullsafe,
+                    }),
+                }
+            } else {
+                Expr {
+                    span,
+                    kind: ExprKind::MethodCall {
+                        object: Box::new(object),
+                        method: Box::new(member),
+                        args,
+                        nullsafe,
+                    },
+                }
+            });
+        }
+        Ok(Expr {
+            span: object.span.merge(member.span),
+            kind: ExprKind::PropertyAccess {
+                object: Box::new(object),
+                property: Box::new(member),
+                nullsafe,
+            },
+        })
+    }
+
     fn parse_postfix(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_primary()?;
 
@@ -4524,226 +4632,10 @@ impl Parser {
                         },
                     };
                 }
-                TokenKind::Arrow => {
+                TokenKind::Arrow | TokenKind::NullsafeArrow => {
+                    let nullsafe = matches!(self.peek(), TokenKind::NullsafeArrow);
                     self.advance();
-                    if matches!(self.peek(), TokenKind::OpenBrace) {
-                        // $obj->{expr}
-                        self.advance();
-                        let prop = self.parse_expression()?;
-                        self.expect(&TokenKind::CloseBrace)?;
-                        if matches!(self.peek(), TokenKind::OpenParen) {
-                            self.advance();
-                            let args = self.parse_arguments()?;
-                            let is_fcc = self.first_class_callable_flag;
-                            let end_span = self.span();
-                            self.expect(&TokenKind::CloseParen)?;
-                            expr = if is_fcc {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
-                                        object: Box::new(expr),
-                                        method: Box::new(prop),
-                                        nullsafe: false,
-                                    }),
-                                }
-                            } else {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::MethodCall {
-                                        object: Box::new(expr),
-                                        method: Box::new(prop),
-                                        args,
-                                        nullsafe: false,
-                                    },
-                                }
-                            };
-                        } else {
-                            expr = Expr {
-                                span: expr.span.merge(prop.span),
-                                kind: ExprKind::PropertyAccess {
-                                    object: Box::new(expr),
-                                    property: Box::new(prop),
-                                    nullsafe: false,
-                                },
-                            };
-                        }
-                    } else if matches!(self.peek(), TokenKind::Variable(_)) {
-                        // $obj->$var  (dynamic property access)
-                        let prop_span = self.span();
-                        let var_name = match self.peek().clone() {
-                            TokenKind::Variable(name) => {
-                                self.advance();
-                                name
-                            }
-                            _ => unreachable!(),
-                        };
-                        let prop_expr = Expr {
-                            kind: ExprKind::Variable(var_name),
-                            span: prop_span,
-                        };
-                        if matches!(self.peek(), TokenKind::OpenParen) {
-                            self.advance();
-                            let args = self.parse_arguments()?;
-                            let is_fcc = self.first_class_callable_flag;
-                            let end_span = self.span();
-                            self.expect(&TokenKind::CloseParen)?;
-                            expr = if is_fcc {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
-                                        object: Box::new(expr),
-                                        method: Box::new(prop_expr),
-                                        nullsafe: false,
-                                    }),
-                                }
-                            } else {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::MethodCall {
-                                        object: Box::new(expr),
-                                        method: Box::new(prop_expr),
-                                        args,
-                                        nullsafe: false,
-                                    },
-                                }
-                            };
-                        } else {
-                            expr = Expr {
-                                span: expr.span.merge(prop_span),
-                                kind: ExprKind::PropertyAccess {
-                                    object: Box::new(expr),
-                                    property: Box::new(prop_expr),
-                                    nullsafe: false,
-                                },
-                            };
-                        }
-                    } else {
-                        let prop_span = self.span();
-                        let name = match self.peek().clone() {
-                            TokenKind::Identifier(name) => {
-                                self.advance();
-                                name
-                            }
-                            _ if self.is_semi_reserved_keyword() => {
-                                let kw = self.keyword_to_identifier();
-                                self.advance();
-                                kw
-                            }
-                            _ => {
-                                return Err(ParseError {
-                                    message: "expected property/method name".into(),
-                                    span: self.span(),
-                                });
-                            }
-                        };
-                        if matches!(self.peek(), TokenKind::OpenParen) {
-                            self.advance();
-                            let args = self.parse_arguments()?;
-                            let is_fcc = self.first_class_callable_flag;
-                            let end_span = self.span();
-                            self.expect(&TokenKind::CloseParen)?;
-                            let method_expr = Expr {
-                                kind: ExprKind::Identifier(name),
-                                span: prop_span,
-                            };
-                            expr = if is_fcc {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::FirstClassCallable(CallableTarget::Method {
-                                        object: Box::new(expr),
-                                        method: Box::new(method_expr),
-                                        nullsafe: false,
-                                    }),
-                                }
-                            } else {
-                                Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::MethodCall {
-                                        object: Box::new(expr),
-                                        method: Box::new(method_expr),
-                                        args,
-                                        nullsafe: false,
-                                    },
-                                }
-                            };
-                        } else {
-                            expr = Expr {
-                                span: expr.span.merge(prop_span),
-                                kind: ExprKind::PropertyAccess {
-                                    object: Box::new(expr),
-                                    property: Box::new(Expr {
-                                        kind: ExprKind::Identifier(name),
-                                        span: prop_span,
-                                    }),
-                                    nullsafe: false,
-                                },
-                            };
-                        }
-                    }
-                }
-                TokenKind::NullsafeArrow => {
-                    self.advance();
-                    let prop_span = self.span();
-                    let name = match self.peek().clone() {
-                        TokenKind::Identifier(name) => {
-                            self.advance();
-                            name
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            let kw = self.keyword_to_identifier();
-                            self.advance();
-                            kw
-                        }
-                        _ => {
-                            return Err(ParseError {
-                                message: "expected property/method name".into(),
-                                span: self.span(),
-                            });
-                        }
-                    };
-                    if matches!(self.peek(), TokenKind::OpenParen) {
-                        self.advance();
-                        let args = self.parse_arguments()?;
-                        let is_fcc = self.first_class_callable_flag;
-                        let end_span = self.span();
-                        self.expect(&TokenKind::CloseParen)?;
-                        let method_expr = Expr {
-                            kind: ExprKind::Identifier(name),
-                            span: prop_span,
-                        };
-                        expr = if is_fcc {
-                            Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::FirstClassCallable(CallableTarget::Method {
-                                    object: Box::new(expr),
-                                    method: Box::new(method_expr),
-                                    nullsafe: true,
-                                }),
-                            }
-                        } else {
-                            Expr {
-                                span: expr.span.merge(end_span),
-                                kind: ExprKind::MethodCall {
-                                    object: Box::new(expr),
-                                    method: Box::new(method_expr),
-                                    args,
-                                    nullsafe: true,
-                                },
-                            }
-                        };
-                    } else {
-                        expr = Expr {
-                            span: expr.span.merge(prop_span),
-                            kind: ExprKind::PropertyAccess {
-                                object: Box::new(expr),
-                                property: Box::new(Expr {
-                                    kind: ExprKind::Identifier(name),
-                                    span: prop_span,
-                                }),
-                                nullsafe: true,
-                            },
-                        };
-                    }
+                    expr = self.parse_object_member(expr, nullsafe)?;
                 }
                 TokenKind::DoubleColon => {
                     self.advance();
@@ -4901,6 +4793,19 @@ impl Parser {
                             self.advance();
                             let name_expr = self.parse_expression()?;
                             self.expect(&TokenKind::CloseBrace)?;
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::DynamicStaticPropertyAccess {
+                                    class: Box::new(expr),
+                                    property: Box::new(name_expr),
+                                },
+                            };
+                        }
+                        TokenKind::Dollar => {
+                            // Test::$$$bar / Test::$${expr}: the name is the
+                            // value of the simple variable after the `$`.
+                            self.advance();
+                            let name_expr = self.parse_simple_variable()?;
                             expr = Expr {
                                 span: expr.span.merge(member_span),
                                 kind: ExprKind::DynamicStaticPropertyAccess {
@@ -5270,6 +5175,13 @@ impl Parser {
                             }
                             parts.push(StringPart::Expr(expr));
                         }
+                        TokenKind::InterpExprStart => {
+                            // "{$expr}": a full expression up to the `}`.
+                            self.advance();
+                            let expr = self.parse_expression()?;
+                            self.expect(&TokenKind::InterpExprEnd)?;
+                            parts.push(StringPart::Expr(expr));
+                        }
                         TokenKind::InterpolatedStringPart(s) => {
                             self.advance();
                             parts.push(StringPart::Literal(s));
@@ -5317,15 +5229,7 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::DollarOpenBrace => {
-                self.advance();
-                let inner = self.parse_expression()?;
-                self.expect(&TokenKind::CloseBrace)?;
-                Ok(Expr {
-                    kind: ExprKind::DynamicVariable(Box::new(inner)),
-                    span,
-                })
-            }
+            TokenKind::DollarOpenBrace | TokenKind::Dollar => self.parse_simple_variable(),
             TokenKind::VariableVariable(name) => {
                 self.advance();
                 // $$var is DynamicVariable with the inner variable

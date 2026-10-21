@@ -35,6 +35,9 @@ pub enum TokenKind {
     Variable(Vec<u8>),         // $foo (stored without the $)
     VariableVariable(Vec<u8>), // $$foo (stored without the $$)
     DollarOpenBrace,           // `${` starting a `${expr}` variable-variable
+    Dollar,                    // `$` before another simple variable (`$$$a`, `$${e}`)
+    InterpExprStart,           // `{$` opening a braced expression inside a string
+    InterpExprEnd,             // the `}` closing it
 
     // Inline HTML (outside <?php ... ?>)
     InlineHtml(Vec<u8>),
@@ -231,7 +234,7 @@ impl TokenKind {
             TokenKind::Identifier(n) => format!("\"{}\"", String::from_utf8_lossy(n)),
             TokenKind::Variable(n) => format!("\"${}\"", String::from_utf8_lossy(n)),
             TokenKind::VariableVariable(_) => "\"$\"".into(),
-            TokenKind::DollarOpenBrace => "\"$\"".into(),
+            TokenKind::DollarOpenBrace | TokenKind::Dollar => "\"$\"".into(),
             TokenKind::InlineHtml(_) => "inline HTML".into(),
             TokenKind::Whitespace(_) => "whitespace".into(),
             TokenKind::LineComment(_) | TokenKind::BlockComment(_) => "comment".into(),
