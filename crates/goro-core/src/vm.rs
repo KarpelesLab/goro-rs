@@ -13979,7 +13979,7 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"curlhandle" | b"curlmultihandle" | b"curlsharehandle"
                 | b"socket"
                 | b"xmlparser"
-                | b"streambucket"
+                | b"streambucket" | b"weakmap"
                 | b"__php_incomplete_class"
                 | b"weakmap" | b"weakreference" | b"sensitiveparametervalue"
                 | b"roundingmode"
@@ -25497,6 +25497,14 @@ impl Vm {
                                     func_op_array.decl_line,
                                 );
                             }
+                        }
+                        if func_op_array.returns_by_ref
+                            && matches!(&func_op_array.return_type, Some(ParamType::Simple(n)) if n.eq_ignore_ascii_case(b"void"))
+                        {
+                            self.emit_deprecated_at(
+                                &format!("{}(): Returning by reference from a void function is deprecated", func_display),
+                                func_op_array.decl_line,
+                            );
                         }
                         // Emit deprecation for optional parameters before required parameters
                         self.emit_optional_before_required_deprecation(func_op_array, &func_display);

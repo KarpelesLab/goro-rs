@@ -1332,6 +1332,7 @@ impl Compiler {
                         }
                     }
                 }
+                self.emit_by_ref_return_notice(value.as_ref(), stmt.span.line);
                 let operand = if let Some(expr) = value {
                     self.compile_expr(expr)?
                 } else {
@@ -2335,6 +2336,8 @@ impl Compiler {
                 func_compiler.check_pending_gotos()?;
 
                 // Implicit return null
+                let implicit_line = func_compiler.op_array.end_line;
+                func_compiler.emit_by_ref_return_notice(None, implicit_line);
                 let null_idx = func_compiler.op_array.add_literal(Value::Null);
                 func_compiler.op_array.emit(Op {
                     opcode: OpCode::Return,
@@ -6097,6 +6100,45 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// In a by-reference function, returning anything other than a variable
+    /// (or nothing) raises "Only variable references should be returned by
+    /// reference" at runtime. Call results are checked at runtime by PHP and
+    /// are left alone here.
+    fn emit_by_ref_return_notice(&mut self, value: Option<&Expr>, line: u32) {
+        if !self.op_array.returns_by_ref || self.op_array.is_generator {
+            return;
+        }
+        let is_var = match value {
+            None => false,
+            Some(e) => matches!(
+                e.kind,
+                ExprKind::Variable(_)
+                    | ExprKind::PropertyAccess { .. }
+                    | ExprKind::StaticPropertyAccess { .. }
+                    | ExprKind::ArrayAccess { .. }
+                    | ExprKind::FunctionCall { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::StaticMethodCall { .. }
+                    | ExprKind::DynamicStaticPropertyAccess { .. }
+                    | ExprKind::DynamicVariable(_)
+                    | ExprKind::Assign { .. }
+            ),
+        };
+        if is_var {
+            return;
+        }
+        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
+            b"Only variable references should be returned by reference",
+        )));
+        self.op_array.emit(Op {
+            opcode: OpCode::EmitNotice,
+            op1: OperandType::Const(msg_idx),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
     }
 
     fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
