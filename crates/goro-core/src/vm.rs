@@ -13372,9 +13372,8 @@ impl Vm {
                 }
                 if let Some(op_array) = found_op {
                     let name = op_array.name.clone();
-                    self.register_user_function(&name, op_array);
-                    let inner = Value::String(PhpString::from_vec(closure_name.to_vec()));
-                    return self.make_closure_object(inner);
+                    let _ = name;
+                    return self.instantiate_const_closure(op_array);
                 }
             }
             if s_bytes.starts_with(b"__deferred_global_const__::") {
@@ -29974,13 +29973,7 @@ impl Vm {
                                     });
                                     if let Some(op_array) = closure_op {
                                         // Register as a user function and return the closure name
-                                        self.register_user_function(
-                                            &op_array.name.clone(),
-                                            op_array,
-                                        );
-                                        let closure_val = self.make_closure_object(Value::String(
-                                            PhpString::from_vec(closure_name.to_vec()),
-                                        ));
+                                        let closure_val = self.instantiate_const_closure(op_array);
                                         self.write_operand(
                                             &op.result,
                                             closure_val,
@@ -38717,10 +38710,8 @@ impl Vm {
                                             .cloned();
                                         if let Some(op_array) = closure_op {
                                             let name_copy = op_array.name.clone();
-                                            self.register_user_function(&name_copy, op_array);
-                                            let c = self.make_closure_object(Value::String(
-                                                PhpString::from_vec(closure_name),
-                                            ));
+                                            let _ = (name_copy, closure_name);
+                                            let c = self.instantiate_const_closure(op_array);
                                             class.constants.insert(const_name, c);
                                         }
                                     }
@@ -38807,10 +38798,8 @@ impl Vm {
                                         .cloned();
                                     if let Some(op_array) = closure_op {
                                         let name = op_array.name.clone();
-                                        self.register_user_function(&name, op_array);
-                                        prop.default = self.make_closure_object(Value::String(
-                                            PhpString::from_vec(closure_name.to_vec()),
-                                        ));
+                                        let _ = name;
+                                        prop.default = self.instantiate_const_closure(op_array);
                                     }
                                 }
                             }
@@ -38834,10 +38823,8 @@ impl Vm {
                                             .cloned();
                                         if let Some(op_array) = closure_op {
                                             let name = op_array.name.clone();
-                                            self.register_user_function(&name, op_array);
-                                            let c = self.make_closure_object(Value::String(
-                                                PhpString::from_vec(closure_name),
-                                            ));
+                                            let _ = (name, closure_name);
+                                            let c = self.instantiate_const_closure(op_array);
                                             class.static_properties.insert(prop_name, c);
                                         }
                                     }

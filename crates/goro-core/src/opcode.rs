@@ -430,6 +430,9 @@ pub struct OpArray {
     pub closure_capture_names: Vec<Vec<u8>>,
     /// For closures: declared parameters as (name, by_ref).
     pub closure_params: Vec<(Vec<u8>, bool)>,
+    /// For first-class callables in constant expressions: the target
+    /// descriptor resolved when the constant is evaluated (see Vm::make_fcc).
+    pub fcc_desc: Option<Vec<u8>>,
 }
 
 impl OpArray {
@@ -468,6 +471,7 @@ impl OpArray {
             param_default_repr: Vec::new(),
             closure_capture_names: Vec::new(),
             closure_params: Vec::new(),
+            fcc_desc: None,
         }
     }
 

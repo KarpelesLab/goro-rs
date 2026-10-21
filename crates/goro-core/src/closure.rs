@@ -645,6 +645,16 @@ impl Vm {
         let ml = lower(m);
         let ce = match self.classes.get(&cl) {
             Some(c) => c,
+            // stdClass has no methods.
+            None if cl.as_slice() == b"stdclass" => {
+                return Err((
+                    b"Error",
+                    format!(
+                        "Call to undefined method stdClass::{}()",
+                        String::from_utf8_lossy(m)
+                    ),
+                ));
+            }
             // Builtin classes: keep the forwarding closure.
             None => return Ok(self.make_closure_object(wrapper)),
         };
@@ -738,6 +748,15 @@ impl Vm {
         let ce = match self.classes.get(&cl) {
             Some(c) => c,
             None => {
+                if cl.as_slice() == b"stdclass" {
+                    return Err((
+                        b"Error",
+                        format!(
+                            "Call to undefined method stdClass::{}()",
+                            String::from_utf8_lossy(m)
+                        ),
+                    ));
+                }
                 if self.is_known_builtin_class(&cl) {
                     return Ok(self.make_closure_object(wrapper));
                 }
@@ -1317,5 +1336,30 @@ impl Vm {
             _ => str_val(&name),
         };
         Some(self.make_closure_object(new_inner))
+    }
+}
+
+impl Vm {
+    /// Instantiate a closure compiled from a constant expression (class
+    /// constant, property default, attribute argument).
+    pub fn instantiate_const_closure(&mut self, op: OpArray) -> Value {
+        let name = op.name.clone();
+        let desc = op.fcc_desc.clone();
+        let scope = op.scope_class.clone();
+        self.register_user_function(&name, op);
+        match desc {
+            Some(d) => match self.make_fcc(str_val(&name), &d, None, scope) {
+                Ok(c) => c,
+                Err((cls, msg)) => {
+                    if self.current_exception.is_none() && !cls.is_empty() {
+                        let line = self.current_line;
+                        let exc = self.create_exception(cls, &msg, line);
+                        self.current_exception = Some(exc);
+                    }
+                    Value::Null
+                }
+            },
+            None => self.make_closure_object(str_val(&name)),
+        }
     }
 }

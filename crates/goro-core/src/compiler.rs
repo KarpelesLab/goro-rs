@@ -4772,6 +4772,9 @@ impl Compiler {
                                                         self.resolve_function_name(n);
                                                     cc.op_array.fcc_target_name =
                                                         Some(resolved_name.clone());
+                                                    cc.op_array.fcc_desc = Some(
+                                                        [b"f:".as_slice(), &resolved_name].concat(),
+                                                    );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
                                                             PhpString::from_vec(resolved_name),
@@ -4830,6 +4833,11 @@ impl Compiler {
                                                     let mut func_name = resolved;
                                                     func_name.extend_from_slice(b"::");
                                                     func_name.extend_from_slice(method);
+                                                    cc.op_array.fcc_target_name =
+                                                        Some(func_name.clone());
+                                                    cc.op_array.fcc_desc = Some(
+                                                        [b"s:".as_slice(), &func_name].concat(),
+                                                    );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
                                                             PhpString::from_vec(func_name),
@@ -7263,6 +7271,11 @@ impl Compiler {
                                                 if let ExprKind::Identifier(n) = &name_expr.kind {
                                                     let resolved_name =
                                                         self.resolve_function_name(n);
+                                                    cc.op_array.fcc_target_name =
+                                                        Some(resolved_name.clone());
+                                                    cc.op_array.fcc_desc = Some(
+                                                        [b"f:".as_slice(), &resolved_name].concat(),
+                                                    );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
                                                             PhpString::from_vec(resolved_name),
@@ -7322,6 +7335,11 @@ impl Compiler {
                                                     let mut func_name = resolved;
                                                     func_name.extend_from_slice(b"::");
                                                     func_name.extend_from_slice(method);
+                                                    cc.op_array.fcc_target_name =
+                                                        Some(func_name.clone());
+                                                    cc.op_array.fcc_desc = Some(
+                                                        [b"s:".as_slice(), &func_name].concat(),
+                                                    );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
                                                             PhpString::from_vec(func_name),
