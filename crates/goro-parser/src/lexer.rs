@@ -1652,6 +1652,7 @@ impl<'a> Lexer<'a> {
         }
 
         // Consume the newline after the label
+        let label_newline = matches!(self.peek(), Some(b'\r' | b'\n'));
         if self.peek() == Some(b'\r') {
             self.advance();
         }
@@ -1662,6 +1663,7 @@ impl<'a> Lexer<'a> {
         // Now scan until we find the closing label
         let mut content = Vec::new();
         let mut closing_indent = Vec::new();
+        let mut found_closing = false;
         loop {
             // Check for closing label at start of line
             let _line_start = self.pos;
@@ -1674,9 +1676,11 @@ impl<'a> Lexer<'a> {
             if self.remaining().starts_with(&label) {
                 let after_label = self.pos + label.len();
                 let next_ch = self.source.get(after_label).copied();
-                if matches!(next_ch, None | Some(b';') | Some(b'\n') | Some(b'\r') | Some(b',') | Some(b')') | Some(b']')) {
+                // The closing label may be followed by anything but a label character.
+                if !matches!(next_ch, Some(c) if c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
                     self.pos = after_label;
                     closing_indent = indent;
+                    found_closing = true;
                     // Consume ; and newline if present
                     break;
                 }
@@ -1699,6 +1703,9 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        if !found_closing && label_newline {
+            crate::set_lexer_error("syntax error, unexpected end of file, expecting variable or heredoc end or \"${\" or \"{$\"".into(), self.line);
+        }
         // Remove trailing newline from content
         if content.last() == Some(&b'\n') {
             content.pop();
@@ -1707,19 +1714,38 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // PHP 7.3+ flexible heredoc: strip closing label's indentation from each content line
+        // PHP 7.3+ flexible heredoc: strip closing label's indentation from each
+        // content line (strip_multiline_string_indentation).
         if !closing_indent.is_empty() {
             let indent_len = closing_indent.len();
+            let using_spaces = closing_indent[0] == b' ';
+            let closing_line = self.line;
+            if closing_indent.iter().any(|&c| c != closing_indent[0]) {
+                crate::set_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), closing_line);
+            }
             let mut stripped = Vec::new();
-            let lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+            let lines: Vec<&[u8]> = if content.is_empty() { Vec::new() } else { content.split(|&b| b == b'\n').collect() };
+            let first_line = closing_line.saturating_sub(lines.len() as u32);
             for (i, line) in lines.iter().enumerate() {
-                if line.len() >= indent_len && line[..indent_len] == closing_indent[..] {
-                    stripped.extend_from_slice(&line[indent_len..]);
-                } else {
-                    // Lines shorter than indent or with different indent: include as-is
-                    // (PHP would produce an error, but we'll be lenient)
-                    stripped.extend_from_slice(line);
+                let body = line.strip_suffix(b"\r").unwrap_or(line);
+                let mut skip = 0;
+                while skip < indent_len && skip < body.len() {
+                    let c = body[skip];
+                    if c != b' ' && c != b'\t' {
+                        crate::set_lexer_error(
+                            format!("Invalid body indentation level (expecting an indentation level of at least {})", indent_len),
+                            first_line + i as u32,
+                        );
+                        break;
+                    }
+                    if (c == b' ') != using_spaces {
+                        crate::set_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), first_line + i as u32);
+                        break;
+                    }
+                    skip += 1;
                 }
+                // Whitespace-only lines need not be fully indented.
+                stripped.extend_from_slice(&line[skip.min(line.len())..]);
                 if i < lines.len() - 1 {
                     stripped.push(b'\n');
                 }
@@ -2183,6 +2209,7 @@ impl<'a> Lexer<'a> {
 
     /// Tokenize the entire source into a vector
     pub fn tokenize(&mut self) -> Vec<Token> {
+        let _ = crate::take_lexer_error();
         let mut tokens = Vec::new();
         loop {
             let token = self.next_token();

@@ -1212,6 +1212,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 || err_msg.starts_with("The (real) cast")
                 || err_msg.starts_with("Invalid UTF-8 codepoint")
                 || err_msg.starts_with("Invalid numeric literal")
+                || err_msg.starts_with("Invalid body indentation level")
+                || err_msg.starts_with("Invalid indentation - tabs and spaces")
             {
                 format!(
                     "\nParse error: {} in {} on line {}\n",
