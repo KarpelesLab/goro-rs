@@ -464,7 +464,7 @@ class Parser {
         foreach ($tags as $t) if ($t[0] === 'tentative-return-type') $flags |= F_TENTATIVE;
         if ($this->hasDeprecated($attrs, $tags)) $flags |= F_DEPRECATED;
         $alias = null;
-        foreach ($tags as $t) if ($t[0] === 'alias') $alias = $t[1];
+        foreach ($tags as $t) if ($t[0] === 'alias' || $t[0] === 'implementation-alias') $alias = $t[1];
         return ['name' => $name, 'flags' => $flags, 'params' => $params, 'ret' => $ret, 'alias' => $alias];
     }
 }
@@ -523,4 +523,15 @@ foreach ($classes as $c) {
     echo "        ],\n";
     echo "    },\n";
 }
+echo "];\n\n";
+
+// Functions and methods implemented by another one (`@alias` /
+// `@implementation-alias`: ZEND_FALIAS, ZEND_RAW_FENTRY to the target's
+// handler): "name" or "Class::method" -> target "function" or "Class::method".
+$aliases = [];
+foreach ($functions as $f) if ($f['alias'] !== null) $aliases[$f['name']] = $f['alias'];
+foreach ($classes as $c) foreach ($c['methods'] as $m) if ($m['alias'] !== null) $aliases[$c['name'] . '::' . $m['name']] = ltrim($m['alias'], '\\');
+ksort($aliases);
+echo "pub static ALIASES: &[(&str, &str)] = &[\n";
+foreach ($aliases as $k => $v) echo "    (" . rstr($k) . ", " . rstr($v) . "),\n";
 echo "];\n";
