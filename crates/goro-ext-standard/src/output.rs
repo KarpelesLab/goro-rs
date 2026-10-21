@@ -1323,11 +1323,6 @@ fn print_r_value_inner(
             }
             let arr_ptr = Rc::as_ptr(arr) as *const u8 as usize;
             buf.extend_from_slice(b"Array\n");
-            if PRINT_R_STACK.with(|st| st.borrow().contains(&arr_ptr)) {
-                buf.extend_from_slice(b" *RECURSION*");
-                return;
-            }
-            PRINT_R_STACK.with(|st| st.borrow_mut().push(arr_ptr));
             let arr = arr.borrow();
             let prefix = " ".repeat(indent);
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
@@ -1346,7 +1341,6 @@ fn print_r_value_inner(
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
-            PRINT_R_STACK.with(|st| { st.borrow_mut().pop(); });
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
@@ -1469,11 +1463,6 @@ fn print_r_value_inner(
 
             buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
             let obj_ptr = Rc::as_ptr(obj) as *const u8 as usize;
-            if PRINT_R_STACK.with(|st| st.borrow().contains(&obj_ptr)) {
-                buf.extend_from_slice(b" *RECURSION*");
-                return;
-            }
-            PRINT_R_STACK.with(|st| st.borrow_mut().push(obj_ptr));
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties and uninitialized properties
@@ -1537,7 +1526,6 @@ fn print_r_value_inner(
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
-            PRINT_R_STACK.with(|st| { st.borrow_mut().pop(); });
         }
         Value::Generator(_) => {
             buf.extend_from_slice(b"Generator Object\n(\n)\n");
