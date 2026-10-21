@@ -1458,6 +1458,46 @@ impl PhpGenerator {
                     self.write_operand(&op.result, val);
                 }
 
+                OpCode::MakeClosure => {
+                    let inner = self.read_operand(&op.op1, &op_array.literals);
+                    let obj = vm.make_closure_object(inner);
+                    self.write_operand(&op.result, obj);
+                }
+                OpCode::MakeFcc => {
+                    let inner = self.read_operand(&op.op1, &op_array.literals);
+                    let desc = self
+                        .read_operand(&op.op2, &op_array.literals)
+                        .to_php_string();
+                    let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                        Some(self.read_operand(&OperandType::Cv(0), &op_array.literals))
+                            .filter(|v| matches!(v, Value::Object(_)))
+                    } else {
+                        None
+                    };
+                    match vm.make_fcc(inner, desc.as_bytes(), this, op_array.scope_class.clone()) {
+                        Ok(obj) => self.write_operand(&op.result, obj),
+                        Err((cls, msg)) => {
+                            if vm.current_exception.is_none() {
+                                let exc = vm.create_exception(cls, &msg, op.line);
+                                vm.current_exception = Some(exc);
+                            }
+                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            self.state = GeneratorState::Completed;
+                            self.ip = ip;
+                            return Err(VmError {
+                                message: format!(
+                                    "Uncaught {}: {}",
+                                    String::from_utf8_lossy(cls),
+                                    msg
+                                ),
+                                line: op.line,
+                            });
+                        }
+                    }
+                }
                 OpCode::DeclareFunction => {
                     let name_val = self.read_operand(&op.op1, &op_array.literals);
                     let func_idx_val = self.read_operand(&op.op2, &op_array.literals);
@@ -1853,6 +1893,7 @@ impl PhpGenerator {
                 OpCode::CloneObj => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let cloned = match &val {
+                        Value::Object(_) if val.is_closure_obj() => vm.clone_closure(&val),
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
                             let clone_id = vm.next_object_id();
@@ -1906,6 +1947,25 @@ impl PhpGenerator {
                     let method_name = self
                         .read_operand(&op.op2, &op_array.literals)
                         .to_php_string();
+                    if obj_val.is_closure_obj() {
+                        if let Err(msg) =
+                            vm.init_closure_method_call(&obj_val, method_name.as_bytes())
+                        {
+                            let exc = vm.create_exception(b"Error", &msg, op.line);
+                            vm.current_exception = Some(exc);
+                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            self.state = GeneratorState::Completed;
+                            self.ip = ip;
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                        continue;
+                    }
                     if let Value::Object(obj) = &obj_val {
                         let class_name_lower: Vec<u8> = obj
                             .borrow()

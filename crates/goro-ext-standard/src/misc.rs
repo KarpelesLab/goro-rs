@@ -767,6 +767,9 @@ fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 fn validate_exception_handler_callback(vm: &Vm, callback: &Value) -> Option<String> {
     let base =
         "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, ";
+    if callback.is_closure_obj() {
+        return None;
+    }
     match callback {
         Value::String(s) => {
             let name = s.as_bytes();
@@ -1584,7 +1587,7 @@ pub(crate) fn check_callable(
             let mut name = cn.clone();
             name.extend_from_slice(b"::__invoke");
             if cl == b"closure" {
-                return (true, b"Closure::__invoke".to_vec(), None);
+                return (true, vm.closure_function_name(&val), None);
             }
             let has_invoke = vm
                 .classes
@@ -1688,7 +1691,8 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         return Ok(Value::Null);
     }
 
-    let callback = &args[0];
+    let callback_v = args[0].closure_callable();
+    let callback = &callback_v;
     if let Value::String(s) = callback {
         if let Some(msg) = Vm::forbidden_dynamic_call(s.as_bytes()) {
             let exc = vm.create_exception(b"Error", &msg, vm.current_line);
@@ -2947,6 +2951,9 @@ fn validate_callback_generic(
     fn_name: &str,
     arg_label: &str,
 ) -> Result<(), VmError> {
+    if callback.is_closure_obj() {
+        return Ok(());
+    }
     match callback {
         Value::Null => Ok(()), // null is valid (identity/zip)
         Value::String(s) => {
@@ -3187,6 +3194,7 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             });
         }
     }
+    let callback = callback.closure_callable();
     let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
     for i in 1..args.len() {
         match args[i].deref() {
@@ -3674,10 +3682,11 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
 
-    let callback = match args.get(1) {
-        Some(cb) => cb,
+    let callback_v = match args.get(1) {
+        Some(cb) => cb.unwrap_closure(),
         None => return Ok(Value::True),
     };
+    let callback = &callback_v;
     if let Some(reason) = callable_error(vm, callback) {
         let msg = format!(
             "array_walk(): Argument #2 ($callback) must be a valid callback, {}",
@@ -13933,7 +13942,11 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         });
     }
     let arr_val = args.first().unwrap_or(&Value::Null);
-    let callback = args.get(1).unwrap_or(&Value::Null);
+    let callback_v = args
+        .get(1)
+        .map(|c| c.unwrap_closure())
+        .unwrap_or(Value::Null);
+    let callback = &callback_v;
     let extra_data = args.get(2).cloned();
     if matches!(arr_val.deref(), Value::Object(_)) {
         // Objects are walked over their properties like array_walk().
@@ -14851,6 +14864,9 @@ fn validate_array_callback(
     func_name: &str,
     arg_num: usize,
 ) -> Result<(), VmError> {
+    if callback.is_closure_obj() {
+        return Ok(());
+    }
     match callback {
         Value::String(s) => {
             let name = s.as_bytes();

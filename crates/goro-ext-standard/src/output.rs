@@ -343,6 +343,24 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 return;
             }
 
+            if obj_borrow.closure.is_some() {
+                drop(obj_borrow);
+                let props = vm.closure_debug_info(val);
+                vm.write_output(
+                    format!("{}object(Closure)#{} ({}) {{\n", prefix, oid, props.len()).as_bytes(),
+                );
+                seen.insert(oid);
+                for (k, v) in &props {
+                    vm.write_output(
+                        format!("{}  [\"{}\"]=>\n", prefix, String::from_utf8_lossy(k)).as_bytes(),
+                    );
+                    var_dump_value(vm, v, indent + 2, seen);
+                }
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
+
             // WeakReference: show ["object"] => referent or NULL
             if class_lower == b"weakreference" {
                 let weak_id = obj_borrow.get_property(b"__weak_ref_id").to_long() as u64;
@@ -1276,6 +1294,7 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         })
         .collect();
 
+    prepare_closure_debug(vm, &args[0]);
     if return_output {
         let mut buf = Vec::new();
         print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
@@ -1286,6 +1305,76 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.write_output(&buf);
         Ok(Value::True)
     }
+}
+
+thread_local! {
+    /// Debug-info properties of the Closure objects reachable from the value
+    /// being printed (object id -> props), computed up front because the
+    /// printers run without access to the VM.
+    static CLOSURE_DBG: std::cell::RefCell<std::collections::HashMap<u64, Vec<(Vec<u8>, Value)>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Fill CLOSURE_DBG for every Closure object reachable from `v`.
+pub(crate) fn prepare_closure_debug(vm: &Vm, v: &Value) {
+    fn walk(
+        vm: &Vm,
+        v: &Value,
+        seen: &mut HashSet<usize>,
+        out: &mut std::collections::HashMap<u64, Vec<(Vec<u8>, Value)>>,
+    ) {
+        match v {
+            Value::Reference(r) => {
+                let inner = r.borrow().clone();
+                walk(vm, &inner, seen, out);
+            }
+            Value::Array(a) => {
+                if !seen.insert(std::rc::Rc::as_ptr(a) as *const u8 as usize) {
+                    return;
+                }
+                let vals: Vec<Value> = a.borrow().values().cloned().collect();
+                for x in &vals {
+                    walk(vm, x, seen, out);
+                }
+            }
+            Value::Object(o) => {
+                if !seen.insert(std::rc::Rc::as_ptr(o) as *const u8 as usize) {
+                    return;
+                }
+                let (is_closure, oid) = match o.try_borrow() {
+                    Ok(b) => (b.closure.is_some(), b.object_id),
+                    Err(_) => return,
+                };
+                let vals: Vec<Value> = if is_closure {
+                    let info = vm.closure_debug_info(v);
+                    let vals = info.iter().map(|(_, x)| x.clone()).collect();
+                    out.insert(oid, info);
+                    vals
+                } else {
+                    o.borrow()
+                        .properties
+                        .iter()
+                        .map(|(_, x)| x.clone())
+                        .collect()
+                };
+                for x in &vals {
+                    walk(vm, x, seen, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    let mut seen = HashSet::new();
+    walk(vm, v, &mut seen, &mut out);
+    CLOSURE_DBG.with(|m| *m.borrow_mut() = out);
+}
+
+/// Debug-info properties for a Closure object (see prepare_closure_debug).
+pub(crate) fn closure_debug_props(oid: u64) -> Vec<(Vec<u8>, Value)> {
+    CLOSURE_DBG
+        .with(|m| m.borrow().get(&oid).cloned())
+        .unwrap_or_default()
 }
 
 struct ClosurePrintInfo {
@@ -1482,6 +1571,22 @@ fn print_r_value_inner(
                     let case_value = obj_borrow.get_property(b"value");
                     buf.extend_from_slice(format!("{}    [value] => ", prefix).as_bytes());
                     print_r_value(&case_value, buf, indent + 8, classes, closure_info_table);
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                return;
+            }
+            if obj_borrow.closure.is_some() {
+                let oid = obj_borrow.object_id;
+                drop(obj_borrow);
+                let prefix = " ".repeat(indent);
+                buf.extend_from_slice(b"Closure Object\n");
+                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                for (k, v) in closure_debug_props(oid) {
+                    buf.extend_from_slice(
+                        format!("{}    [{}] => ", prefix, String::from_utf8_lossy(&k)).as_bytes(),
+                    );
+                    print_r_value(&v, buf, indent + 8, classes, closure_info_table);
                     buf.push(b'\n');
                 }
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());

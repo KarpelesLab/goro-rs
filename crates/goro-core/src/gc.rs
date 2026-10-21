@@ -248,6 +248,9 @@ struct Graph {
     children: Vec<Vec<usize>>,
     internal: Vec<usize>,
     opaque: Vec<bool>,
+    /// Arrays that are a Closure's internal capture storage (not PHP values,
+    /// so not counted as collected).
+    uncounted: Vec<bool>,
     /// WeakMap entries: key object ptr -> values (ephemeron edges key -> value)
     ephemerons: HashMap<usize, Vec<Value>>,
 }
@@ -260,6 +263,7 @@ impl Graph {
             children: Vec::new(),
             internal: Vec::new(),
             opaque: Vec::new(),
+            uncounted: Vec::new(),
             ephemerons: HashMap::new(),
         }
     }
@@ -274,6 +278,7 @@ impl Graph {
         self.children.push(Vec::new());
         self.internal.push(0);
         self.opaque.push(false);
+        self.uncounted.push(false);
         i
     }
     fn add_value(&mut self, v: &Value) -> Option<usize> {
@@ -297,6 +302,9 @@ impl Graph {
                     }
                     if let Some(cv) = &b.closure {
                         if let Some(c) = self.add_value(cv) {
+                            if matches!(**cv, Value::Array(_)) {
+                                self.uncounted[c] = true;
+                            }
                             kids.push(c);
                         }
                     }
@@ -568,7 +576,9 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                     Node::Arr(a) => {
                         if let Ok(mut b) = a.try_borrow_mut() {
                             dead_arrays.push(std::mem::take(&mut *b));
-                            count += 1;
+                            if !an.graph.uncounted[idx] {
+                                count += 1;
+                            }
                         }
                     }
                     Node::Ref(r) => {

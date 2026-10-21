@@ -152,6 +152,11 @@ pub enum OpCode {
     Return,
     /// Declare a user function: op1 = name (const), op2 = function OpArray index (const)
     DeclareFunction,
+    /// Wrap the internal callable in op1 into a new `Closure` object: result = object
+    MakeClosure,
+    /// First-class callable `f(...)`: op1 = fallback wrapper closure (internal
+    /// form), op2 = target descriptor (const string), result = Closure object
+    MakeFcc,
     /// Register attributes for a top-level constant. op1 = index into the
     /// current OpArray's `const_attribute_table` (const literal of type Long).
     RegisterConstAttrs,
@@ -420,6 +425,11 @@ pub struct OpArray {
     /// Reflection rendering of each parameter's default value (by CV index),
     /// as PHP prints it (evaluated literal or constant-expression AST dump).
     pub param_default_repr: Vec<Option<String>>,
+    /// For closures: CV names bound to the captured values of the closure's
+    /// capture array, in order (`this` first when captured, then `use` vars).
+    pub closure_capture_names: Vec<Vec<u8>>,
+    /// For closures: declared parameters as (name, by_ref).
+    pub closure_params: Vec<(Vec<u8>, bool)>,
 }
 
 impl OpArray {
@@ -456,6 +466,8 @@ impl OpArray {
             local_classes: Vec::new(),
             internal_sig: None,
             param_default_repr: Vec::new(),
+            closure_capture_names: Vec::new(),
+            closure_params: Vec::new(),
         }
     }
 

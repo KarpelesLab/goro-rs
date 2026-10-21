@@ -902,6 +902,13 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     );
     // If constructed from an object, store the object reference
     if let Value::Object(_) = &arg {
+        if arg.is_closure_obj() {
+            let (fname, _) = crate::closure::closure_parts(&closure_legacy_arg(&arg));
+            obj.set_property(
+                b"__reflection_closure_fn".to_vec(),
+                Value::String(PhpString::from_vec(fname)),
+            );
+        }
         obj.set_property(b"__reflection_object".to_vec(), arg);
     } else if let Value::String(s) = &arg {
         // Closure represented as a string: remember the underlying function.
@@ -959,6 +966,11 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         return false;
     }
 
+    if args.get(1).map(|a| a.is_closure_obj()).unwrap_or(false) {
+        let mut a = args.to_vec();
+        a[1] = closure_legacy_arg(&args[1]);
+        return reflection_method_construct(vm, &a, line);
+    }
     // Extract the closure's underlying function name, if any, from the
     // first argument. Supports string-form closures and array callables of
     // the form [closure_obj, 'method'] that flatten to a string closure.
@@ -1146,12 +1158,72 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     true
 }
 
+/// The internal-callable form of a Closure object used by the reflection
+/// code paths: user closures keep their `__closure_N` name (or capture
+/// array); method closures become their "Class::method" name.
+pub(crate) fn closure_legacy_arg(v: &Value) -> Value {
+    let v = v.deref();
+    // `[$closure, '__invoke']`
+    if let Value::Array(arr) = &v {
+        let a = arr.borrow();
+        if a.len() == 2 {
+            if let (Some(c), Some(Value::String(m))) = (a.get_int(0), a.get_int(1)) {
+                if c.is_closure_obj() && m.as_bytes().eq_ignore_ascii_case(b"__invoke") {
+                    let c = c.deref();
+                    drop(a);
+                    return closure_legacy_arg(&c);
+                }
+            }
+        }
+    }
+    match v.closure_inner() {
+        Some(Value::Array(a)) => {
+            let first = a.borrow().get_int(0).cloned();
+            match first {
+                Some(Value::String(s))
+                    if !s.as_bytes().starts_with(b"__")
+                        && s.as_bytes().windows(2).any(|w| w == b"::") =>
+                {
+                    Value::String(s)
+                }
+                _ => Value::Array(a),
+            }
+        }
+        Some(i) => i,
+        None => v,
+    }
+}
+
 /// ReflectionFunction constructor
 fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
     };
+    if let Some(arg) = args.get(1) {
+        if arg.is_closure_obj() && args.len() == 2 {
+            let closure = arg.deref();
+            let legacy = closure_legacy_arg(&closure);
+            let ok = reflection_function_construct(vm, &[args[0].clone(), legacy], line);
+            if ok {
+                let display = vm
+                    .closure_op_array(&closure)
+                    .filter(|op| {
+                        crate::closure::is_closure_fn_name(&op.name)
+                            && op.fcc_target_name.is_none()
+                            && !op.display_name.is_empty()
+                    })
+                    .map(|op| op.display_name.clone());
+                let mut obj = this.borrow_mut();
+                if let Some(d) = display {
+                    obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(d)));
+                }
+                obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+                obj.set_property(b"__reflection_closure_obj".to_vec(), closure);
+            }
+            return ok;
+        }
+    }
 
     // Validate user arg count
     let user_arg_count = args.len().saturating_sub(1);
@@ -1458,6 +1530,13 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
     }
 
     let func_arg = args.get(1).cloned().unwrap_or(Value::Null);
+    let func_arg = if func_arg.is_closure_obj()
+        || matches!(&func_arg, Value::Array(a) if a.borrow().get_int(0).map(|v| v.is_closure_obj()).unwrap_or(false))
+    {
+        closure_legacy_arg(&func_arg)
+    } else {
+        func_arg
+    };
     let param_arg = args.get(2).cloned().unwrap_or(Value::Null);
 
     // Validate the function argument type: must be string, array, or callable object (closure/etc).
@@ -5544,7 +5623,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                     .unwrap_or(class_name.clone());
                 let callable = format!("{}::{}", class_canonical, method_name);
                 if is_static {
-                    Some(Value::String(PhpString::from_string(callable)))
+                    Some(vm.make_closure_object(Value::String(PhpString::from_string(callable))))
                 } else {
                     let target_obj = args.get(1).cloned().unwrap_or(Value::Null);
                     if matches!(target_obj, Value::Null | Value::Undef) {
@@ -5563,10 +5642,27 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             return Some(Value::Null);
                         }
                     }
+                    let key: Vec<u8> = callable.as_bytes().to_ascii_lowercase();
+                    if !vm.user_functions.contains_key(&key) {
+                        let op = vm
+                            .classes
+                            .get(&class_lower)
+                            .and_then(|c| c.get_method(method_lower_bytes.as_bytes()))
+                            .map(|m| {
+                                let mut op = m.op_array.clone();
+                                if op.attributes.is_empty() && !m.attributes.is_empty() {
+                                    op.attributes = m.attributes.clone();
+                                }
+                                op
+                            });
+                        if let Some(op) = op {
+                            vm.user_functions.insert(key, op);
+                        }
+                    }
                     let mut arr = PhpArray::new();
                     arr.push(Value::String(PhpString::from_string(callable)));
                     arr.push(target_obj);
-                    Some(Value::Array(Rc::new(RefCell::new(arr))))
+                    Some(vm.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))))
                 }
             }
             _ => None,
@@ -6118,8 +6214,11 @@ pub fn reflection_function_method(
             let is_fcc = if is_closure {
                 vm.user_functions
                     .get(func_lower.as_slice())
-                    .map(|op| op.fcc_target_name.is_some())
-                    .unwrap_or(false)
+                    .map(|op| {
+                        op.fcc_target_name.is_some()
+                            || !crate::closure::is_closure_fn_name(&op.name)
+                    })
+                    .unwrap_or(true)
             } else {
                 false
             };
@@ -6174,6 +6273,36 @@ pub fn reflection_function_method(
                 Some(Value::String(PhpString::from_string(name)))
             }
         }
+        b"getclosurethis" if obj.borrow().has_property(b"__reflection_closure_obj") => {
+            let c = obj.borrow().get_property(b"__reflection_closure_obj");
+            Some(vm.closure_this(&c).unwrap_or(Value::Null))
+        }
+        b"getclosure" if obj.borrow().has_property(b"__reflection_closure_obj") => {
+            Some(obj.borrow().get_property(b"__reflection_closure_obj"))
+        }
+        b"getclosurescopeclass" | b"getclosurecalledclass"
+            if obj.borrow().has_property(b"__reflection_closure_obj") =>
+        {
+            let c = obj.borrow().get_property(b"__reflection_closure_obj");
+            let scope = if method == b"getclosurecalledclass" {
+                match vm.closure_this(&c) {
+                    Some(Value::Object(o)) => Some(o.borrow().class_name.clone()),
+                    _ => vm.closure_scope(&c),
+                }
+            } else {
+                vm.closure_scope(&c)
+            };
+            match scope {
+                Some(n) => Some(create_reflection_class(vm, &String::from_utf8_lossy(&n))),
+                None => Some(Value::Null),
+            }
+        }
+        b"getclosureusedvariables" if obj.borrow().has_property(b"__reflection_closure_obj") => {
+            let c = obj.borrow().get_property(b"__reflection_closure_obj");
+            Some(Value::Array(Rc::new(RefCell::new(
+                vm.closure_used_vars(&c),
+            ))))
+        }
         b"getclosurethis" => {
             let ob = obj.borrow();
             if ob.has_property(b"__reflection_closure_this") {
@@ -6199,7 +6328,7 @@ pub fn reflection_function_method(
             if vm.user_functions.contains_key(func_lower.as_slice())
                 || vm.functions.contains_key(func_lower.as_slice())
             {
-                Some(Value::String(name))
+                Some(vm.make_closure_object(Value::String(name)))
             } else {
                 Some(Value::Null)
             }
@@ -6466,6 +6595,27 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
         let func_lower = target.as_bytes().to_vec();
         drop(ob);
 
+        let closure_obj = obj.borrow().get_property(b"__reflection_closure_obj");
+        if closure_obj.is_closure_obj() {
+            match method {
+                b"invoke" | b"invokeargs" => {
+                    let invoke_args: Vec<Value> = if method == b"invoke" {
+                        args.iter().skip(1).cloned().collect()
+                    } else {
+                        match args.get(1) {
+                            Some(Value::Array(a)) => a.borrow().values().cloned().collect(),
+                            _ => Vec::new(),
+                        }
+                    };
+                    let r = vm
+                        .call_callback(&closure_obj, &invoke_args)
+                        .unwrap_or(Value::Null);
+                    return Some(r);
+                }
+                b"getclosure" => return Some(closure_obj),
+                _ => {}
+            }
+        }
         match method {
             b"invoke" => {
                 let invoke_args: Vec<Value> = args.iter().skip(1).cloned().collect();

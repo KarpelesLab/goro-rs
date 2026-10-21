@@ -11652,7 +11652,19 @@ impl Compiler {
                     && self.op_array.cv_names.contains(&b"this".to_vec());
                 if has_this {
                     closure_compiler.op_array.get_or_create_cv(b"this");
+                    closure_compiler
+                        .op_array
+                        .closure_capture_names
+                        .push(b"this".to_vec());
                 }
+                for use_var in use_vars {
+                    closure_compiler
+                        .op_array
+                        .closure_capture_names
+                        .push(use_var.variable.clone());
+                }
+                closure_compiler.op_array.closure_params =
+                    params.iter().map(|p| (p.name.clone(), p.by_ref)).collect();
 
                 // Set up use vars as the first CVs (before params)
                 for use_var in use_vars {
@@ -11922,13 +11934,13 @@ impl Compiler {
                             });
                         }
                     }
-                    Ok(OperandType::Tmp(arr_tmp))
+                    Ok(self.wrap_closure_operand(OperandType::Tmp(arr_tmp)))
                 } else {
                     // No use vars - just return the closure name
                     let name_val_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(closure_name)));
-                    Ok(OperandType::Const(name_val_idx))
+                    Ok(self.wrap_closure_operand(OperandType::Const(name_val_idx)))
                 }
             }
 
@@ -12017,9 +12029,39 @@ impl Compiler {
                 for uv in &use_vars {
                     closure_compiler.op_array.get_or_create_cv(uv);
                 }
+                closure_compiler.op_array.closure_capture_names = use_vars.clone();
+                closure_compiler.op_array.closure_params =
+                    params.iter().map(|p| (p.name.clone(), p.by_ref)).collect();
+                closure_compiler.op_array.param_count = (params.len() + use_vars.len()) as u32;
+                closure_compiler.op_array.required_param_count = {
+                    let mut last_req: i64 = -1;
+                    for (i, p) in params.iter().enumerate() {
+                        if !p.variadic && p.default.is_none() {
+                            last_req = i as i64;
+                        }
+                    }
+                    (last_req + 1) as u32
+                };
+                {
+                    let mut by_ref = Vec::new();
+                    let mut has_default = Vec::new();
+                    for _ in &use_vars {
+                        by_ref.push(false);
+                        has_default.push(false);
+                    }
+                    for p in params.iter() {
+                        by_ref.push(p.by_ref);
+                        has_default.push(p.default.is_some());
+                    }
+                    closure_compiler.op_array.by_ref_params = by_ref;
+                    closure_compiler.op_array.param_has_default = has_default;
+                }
                 // Set up parameter CVs
                 for param in params {
                     let cv = closure_compiler.op_array.get_or_create_cv(&param.name);
+                    if param.variadic {
+                        closure_compiler.op_array.variadic_param = Some(cv);
+                    }
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
@@ -12047,6 +12089,69 @@ impl Compiler {
                         closure_compiler.op_array.param_types.push(None);
                     }
                     closure_compiler.op_array.param_types[cv as usize] = type_info;
+
+                    // Compile default value
+                    if let Some(default_expr) = &param.default {
+                        let default_val = closure_compiler.compile_expr(default_expr)?;
+                        if !matches!(default_expr.kind, ExprKind::Null) {
+                            let pcv =
+                                closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
+                            if let Some(Some(pti)) =
+                                closure_compiler.op_array.param_types.get(pcv).cloned()
+                            {
+                                match Self::check_literal_default(&pti.param_type, default_expr) {
+                                    Err((tn, _)) => {
+                                        return Err(CompileError {
+                                            message: format!(
+                                                "Cannot use {} as default value for parameter ${} of type {}",
+                                                tn,
+                                                String::from_utf8_lossy(&param.name),
+                                                crate::vm::variance::type_to_string(
+                                                    &crate::vm::variance::TypeView::from_param_type(
+                                                        &pti.param_type
+                                                    ),
+                                                    None
+                                                )
+                                            ),
+                                            line: default_expr.span.line,
+                                        });
+                                    }
+                                    Ok(Some(widened)) => {
+                                        if let OperandType::Const(li) = default_val {
+                                            closure_compiler.op_array.literals[li as usize] =
+                                                widened;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                }
+                            }
+                        }
+                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = closure_compiler.op_array.alloc_temp();
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(cv),
+                            op2: default_val,
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
+                        let after = closure_compiler.op_array.current_offset();
+                        closure_compiler.op_array.patch_jump(jmp_skip, after);
+                    }
                 }
 
                 closure_compiler.emit_by_ref_return_notice(Some(body), expr.span.line);
@@ -12107,12 +12212,12 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     }
-                    Ok(OperandType::Tmp(arr_tmp))
+                    Ok(self.wrap_closure_operand(OperandType::Tmp(arr_tmp)))
                 } else {
                     let name_val_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(closure_name)));
-                    Ok(OperandType::Const(name_val_idx))
+                    Ok(self.wrap_closure_operand(OperandType::Const(name_val_idx)))
                 }
             }
 
@@ -13440,6 +13545,21 @@ impl Compiler {
         }
     }
 
+    /// Wrap the internal callable produced for a closure expression into a
+    /// `Closure` object (emits MakeClosure).
+    fn wrap_closure_operand(&mut self, inner: OperandType) -> OperandType {
+        let line = self.op_array.ops.last().map(|o| o.line).unwrap_or(0);
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::MakeClosure,
+            op1: inner,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        OperandType::Tmp(tmp)
+    }
+
     /// Compile first-class callable syntax: strlen(...), $obj->method(...), Foo::method(...)
     /// Creates a synthetic closure that wraps the call and forwards arguments via ...$args.
     fn compile_first_class_callable(
@@ -13461,7 +13581,54 @@ impl Compiler {
             });
         }
 
-        let _closure_id = self.op_array.child_functions.len();
+        // Target descriptor resolved at runtime by MakeFcc (see Vm::make_fcc).
+        let fcc_desc: Option<Vec<u8>> = match target {
+            CallableTarget::Function(name_expr) => match &name_expr.kind {
+                ExprKind::Identifier(n) => {
+                    let mut d = b"f:".to_vec();
+                    d.extend_from_slice(&self.resolve_function_name(n));
+                    Some(d)
+                }
+                _ => Some(b"d:".to_vec()),
+            },
+            CallableTarget::Method { method, .. } => match &method.kind {
+                ExprKind::Identifier(m) => {
+                    let mut d = b"m:".to_vec();
+                    d.extend_from_slice(m);
+                    Some(d)
+                }
+                _ => None,
+            },
+            CallableTarget::StaticMethod { class, method } => match &class.kind {
+                ExprKind::Identifier(cn) => {
+                    let class_n = self.resolve_class_name(cn);
+                    let resolved = if class_n.eq_ignore_ascii_case(b"self") {
+                        self.current_class.clone().unwrap_or(class_n.clone())
+                    } else if class_n.eq_ignore_ascii_case(b"static") {
+                        b"static".to_vec()
+                    } else if class_n.eq_ignore_ascii_case(b"parent") {
+                        match &self.current_parent_class {
+                            Some(p) => {
+                                let mut v = b"parent:".to_vec();
+                                v.extend_from_slice(p);
+                                v
+                            }
+                            None => class_n.clone(),
+                        }
+                    } else {
+                        class_n.clone()
+                    };
+                    let mut d = b"s:".to_vec();
+                    d.extend_from_slice(&resolved);
+                    d.extend_from_slice(b"::");
+                    d.extend_from_slice(method);
+                    Some(d)
+                }
+                _ => None,
+            },
+        };
+
+        let closure_id = self.op_array.child_functions.len();
         let global_id = next_closure_id();
         let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
 
@@ -13701,14 +13868,38 @@ impl Compiler {
                 result: OperandType::Unused,
                 line,
             });
-            Ok(OperandType::Tmp(arr_tmp))
+            Ok(self.emit_make_fcc(OperandType::Tmp(arr_tmp), fcc_desc, line))
         } else {
             // No captures - just return the closure name
             let name_val_idx = self
                 .op_array
                 .add_literal(Value::String(PhpString::from_vec(closure_name)));
-            Ok(OperandType::Const(name_val_idx))
+            Ok(self.emit_make_fcc(OperandType::Const(name_val_idx), fcc_desc, line))
         }
+    }
+
+    fn emit_make_fcc(
+        &mut self,
+        wrapper: OperandType,
+        desc: Option<Vec<u8>>,
+        line: u32,
+    ) -> OperandType {
+        let desc = match desc {
+            Some(d) => d,
+            None => return self.wrap_closure_operand(wrapper),
+        };
+        let desc_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_vec(desc)));
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::MakeFcc,
+            op1: wrapper,
+            op2: OperandType::Const(desc_idx),
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        OperandType::Tmp(tmp)
     }
 
     /// Evaluate a constant expression at compile time (for property defaults, etc.)

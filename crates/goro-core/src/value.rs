@@ -256,6 +256,51 @@ impl Value {
         self.closure_inner().unwrap_or_else(|| self.clone())
     }
 
+    /// Like `unwrap_closure`, but a bound-method closure (`["Class::m", $obj]`)
+    /// is returned in the standard `[$obj, "m"]` array-callable form, which
+    /// generic callback dispatchers understand.
+    pub fn closure_callable(&self) -> Value {
+        let inner = match self.closure_inner() {
+            Some(i) => i,
+            None => {
+                // `[$closure, '__invoke']` is the closure itself.
+                if let Value::Array(arr) = self {
+                    let a = arr.borrow();
+                    if a.len() == 2 {
+                        if let (Some(c), Some(Value::String(m))) = (a.get_int(0), a.get_int(1)) {
+                            if c.is_closure_obj() && m.as_bytes().eq_ignore_ascii_case(b"__invoke")
+                            {
+                                let c = c.deref();
+                                drop(a);
+                                return c.closure_callable();
+                            }
+                        }
+                    }
+                }
+                return self.clone();
+            }
+        };
+        if let Value::Array(arr) = &inner {
+            let a = arr.borrow();
+            if a.len() == 2 {
+                if let (Some(Value::String(n)), Some(Value::Object(o))) =
+                    (a.get_int(0), a.get_int(1))
+                {
+                    let b = n.as_bytes();
+                    if !b.starts_with(b"__") {
+                        if let Some(p) = b.windows(2).position(|w| w == b"::") {
+                            let mut out = crate::array::PhpArray::new();
+                            out.push(Value::Object(o.clone()));
+                            out.push(Value::String(PhpString::from_vec(b[p + 2..].to_vec())));
+                            return Value::Array(Rc::new(RefCell::new(out)));
+                        }
+                    }
+                }
+            }
+        }
+        inner
+    }
+
     /// Returns true if this value is a Reference
     pub fn is_reference(&self) -> bool {
         matches!(self, Value::Reference(_))
@@ -760,6 +805,9 @@ impl Value {
                 // Same object reference
                 if std::ptr::eq(a.as_ptr(), b.as_ptr()) {
                     return true;
+                }
+                if a.borrow().closure.is_some() || b.borrow().closure.is_some() {
+                    return crate::closure::closures_equal(&a.borrow(), &b.borrow());
                 }
                 // Depth guard to prevent stack overflow on self-referencing objects
                 thread_local! { static CMP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }

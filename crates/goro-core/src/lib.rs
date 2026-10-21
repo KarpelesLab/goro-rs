@@ -1,5 +1,6 @@
 pub mod array;
 pub mod basedir;
+pub mod closure;
 pub mod compiler;
 pub mod csv;
 pub mod errdisplay;

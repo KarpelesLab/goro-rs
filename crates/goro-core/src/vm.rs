@@ -393,6 +393,9 @@ pub struct Vm {
     pending_finally_jump: Option<u32>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
+    /// Indices into `pending_calls` of calls dispatched through a Closure
+    /// object (closures bypass method visibility checks).
+    pub closure_pending_calls: Vec<usize>,
     /// Set when a user error handler throws an exception during warning/notice emission.
     /// The main execution loop checks this after each opcode to dispatch the exception.
     pub error_handler_threw: bool,
@@ -615,6 +618,7 @@ impl Vm {
             pending_return: None,
             pending_finally_jump: None,
             error_handler: None,
+            closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
@@ -1788,7 +1792,7 @@ impl Vm {
     /// Check if `caller_class` (lowercase) has access to a member with the given visibility
     /// declared in `declaring_class` (lowercase), where the member belongs to `target_class` (lowercase).
     /// Returns None if access is allowed, or Some(error_message) if denied.
-    fn check_visibility(
+    pub(crate) fn check_visibility(
         &self,
         visibility: Visibility,
         declaring_class: &[u8],
@@ -2262,6 +2266,21 @@ impl Vm {
             let file_val = Value::String(PhpString::from_string(self.current_file.clone()));
             let line_val = Value::Long(line as i64);
             let args = vec![errno_val, errstr_val, file_val, line_val];
+            // Closures: dispatch on the underlying function; captured values
+            // bind to the first CVs.
+            let mut handler = handler.closure_callable();
+            let mut captured: Vec<Value> = Vec::new();
+            if let Value::Array(arr) = &handler {
+                let first = arr.borrow().get_int(0).cloned();
+                if let Some(Value::String(s)) = first {
+                    if crate::closure::is_closure_fn_name(s.as_bytes())
+                        || s.as_bytes().starts_with(b"__closure_fcc_")
+                    {
+                        captured = arr.borrow().values().skip(1).cloned().collect();
+                        handler = Value::String(s);
+                    }
+                }
+            }
             match &handler {
                 Value::String(s) => {
                     let func_lower: Vec<u8> = s
@@ -2271,7 +2290,7 @@ impl Vm {
                         .collect();
                     if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
                         let mut cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                        for (i, arg) in args.iter().enumerate() {
+                        for (i, arg) in captured.iter().chain(args.iter()).enumerate() {
                             if i < cvs.len() {
                                 cvs[i] = arg.clone();
                             }
@@ -2396,6 +2415,7 @@ impl Vm {
     }
 
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let callback = &callback.closure_callable();
         match callback {
             Value::String(s) => {
                 if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
@@ -5779,23 +5799,76 @@ impl Vm {
             .insert(name.to_ascii_lowercase(), op_array);
     }
 
-    /// Wrap an internal callable (closure name, capture array, function
-    /// name, bound-method array) into a `Closure` object with its own object
-    /// id. Closure objects and Null (failure) are returned unchanged.
-    pub fn make_closure_object(&mut self, inner: Value) -> Value {
-        if matches!(inner, Value::Null | Value::Undef) || inner.is_closure_obj() {
-            return inner;
-        }
-        let id = self.alloc_object_id();
-        let mut o = PhpObject::new(b"Closure".to_vec(), id);
-        o.closure = Some(Box::new(inner));
-        Value::Object(Rc::new(RefCell::new(o)))
+    /// Set up `$closure->method(...)` on a Closure object: pushes the pending
+    /// call (arguments follow via Send ops). Err carries the Error message.
+    pub fn init_closure_method_call(
+        &mut self,
+        closure: &Value,
+        method_name: &[u8],
+    ) -> Result<(), String> {
+        let method_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let (name, args): (PhpString, Vec<Value>) = match method_lower.as_slice() {
+            b"bindto" => (
+                PhpString::from_bytes(b"__closure_bindto"),
+                vec![closure.clone()],
+            ),
+            b"call" => (
+                PhpString::from_bytes(b"__closure_call"),
+                vec![closure.clone()],
+            ),
+            b"__invoke" => match closure.unwrap_closure() {
+                Value::Array(arr) => {
+                    let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
+                    if values.is_empty() {
+                        (PhpString::empty(), Vec::new())
+                    } else {
+                        let name = values.remove(0).to_php_string();
+                        (name, values)
+                    }
+                }
+                other => (other.to_php_string(), Vec::new()),
+            },
+            // Static methods called through an instance.
+            b"bind" => (PhpString::from_bytes(b"Closure::bind"), Vec::new()),
+            b"fromcallable" => (PhpString::from_bytes(b"Closure::fromCallable"), Vec::new()),
+            _ => {
+                return Err(format!(
+                    "Call to undefined method Closure::{}()",
+                    String::from_utf8_lossy(method_name)
+                ));
+            }
+        };
+        self.pending_calls.push(PendingCall {
+            name,
+            args,
+            named_args: Vec::new(),
+        });
+        Ok(())
     }
 
     /// Convert a callable to a Closure value.
     /// Handles string callables ("func", "Class::method"), array callables ([$obj, "method"],
     /// ["Class", "method"]), and closures (returned as-is).
     pub fn callable_to_closure(&mut self, callable: Value, line: u32) -> Value {
+        let callable = callable.deref();
+        if callable.is_closure_obj() {
+            return callable;
+        }
+        if let Value::Array(a) = &callable {
+            let a = a.borrow();
+            if a.len() == 2 {
+                if let (Some(c), Some(Value::String(m))) = (a.get_int(0), a.get_int(1)) {
+                    if c.is_closure_obj() && m.as_bytes().eq_ignore_ascii_case(b"__invoke") {
+                        return c.deref();
+                    }
+                }
+            }
+        }
+        let inner = self.callable_to_closure_raw(callable, line);
+        self.make_closure_object(inner)
+    }
+
+    pub(crate) fn callable_to_closure_raw(&mut self, callable: Value, line: u32) -> Value {
         match &callable {
             // Already a closure (string starting with __closure_ etc.)
             Value::String(s) if Self::is_closure_value(&callable) => callable,
@@ -6038,6 +6111,19 @@ impl Vm {
         scope: Value,
         scope_provided: bool,
     ) -> Value {
+        let inner = closure_val.unwrap_closure();
+        let r = self.bind_closure_raw(&inner, new_this, scope, scope_provided);
+        self.make_closure_object(r)
+    }
+
+    /// Like `bind_closure`, on (and returning) the internal callable form.
+    pub fn bind_closure_raw(
+        &mut self,
+        closure_val: &Value,
+        new_this: Value,
+        scope: Value,
+        scope_provided: bool,
+    ) -> Value {
         // Extract the closure function name and any existing captured values
         let (closure_name, captured_values) = match closure_val {
             Value::String(s) => (s.as_bytes().to_vec(), Vec::new()),
@@ -6191,6 +6277,50 @@ impl Vm {
                 }
             }
         };
+
+        // Closures that know their capture layout: rebuild it by name.
+        if !original_op.closure_capture_names.is_empty() {
+            let old_names = &original_op.closure_capture_names;
+            let had_this_capture = old_names
+                .first()
+                .map(|n| n.as_slice() == b"this")
+                .unwrap_or(false);
+            let mut use_vals = captured_values;
+            if had_this_capture && !use_vals.is_empty() {
+                use_vals.remove(0);
+            }
+            let use_names: Vec<Vec<u8>> = old_names
+                .iter()
+                .filter(|n| n.as_slice() != b"this")
+                .cloned()
+                .collect();
+            let (names, values): (Vec<Vec<u8>>, Vec<Value>) = if needs_this_cv {
+                let mut n = vec![b"this".to_vec()];
+                n.extend(use_names);
+                let mut v = vec![new_this];
+                v.extend(use_vals);
+                (n, v)
+            } else if had_this_capture {
+                let mut n = vec![b"this".to_vec()];
+                n.extend(use_names);
+                let mut v = vec![Value::Null];
+                v.extend(use_vals);
+                (n, v)
+            } else {
+                (use_names, use_vals)
+            };
+            new_op.closure_capture_names = names;
+            self.register_user_function(&new_closure_name, new_op);
+            if values.is_empty() {
+                return Value::String(PhpString::from_vec(new_closure_name));
+            }
+            let mut arr = crate::array::PhpArray::new();
+            arr.push(Value::String(PhpString::from_vec(new_closure_name)));
+            for v in values {
+                arr.push(v);
+            }
+            return Value::Array(Rc::new(RefCell::new(arr)));
+        }
 
         // Register the new function
         self.register_user_function(&new_closure_name, new_op);
@@ -12769,6 +12899,11 @@ impl Vm {
 
     /// Call a PHP callback function with arbitrary arguments (for filter callbacks etc)
     fn spl_call_filter_callback(&mut self, callback: &Value, call_args: &[Value]) -> Value {
+        if callback.is_closure_obj() {
+            return self
+                .call_callback(callback, call_args)
+                .unwrap_or(Value::False);
+        }
         // Resolve callback
         let (func_name, captured) = match callback {
             Value::String(s) => (s.as_bytes().to_vec(), vec![]),
@@ -17062,6 +17197,8 @@ impl Vm {
                 // Function calls
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let from_closure = name_val.is_closure_obj();
+                    let name_val = name_val.unwrap_closure();
                     // `$callable()` where $callable is an [obj|class, method] array
                     // (closures are also arrays here: [closure_name, captures...]).
                     let is_closure_array = matches!(&name_val, Value::Array(arr)
@@ -17304,6 +17441,9 @@ impl Vm {
                         let mut values: Vec<Value> = arr.values().cloned().collect();
                         if !values.is_empty() {
                             let name = values.remove(0).to_php_string();
+                            if from_closure {
+                                self.closure_pending_calls.push(self.pending_calls.len());
+                            }
                             // Remaining values are captured use vars - prepend as args
                             self.pending_calls.push(PendingCall {
                                 name,
@@ -17382,6 +17522,9 @@ impl Vm {
                                     "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
                                     String::from_utf8_lossy(&tn), String::from_utf8_lossy(&name.as_bytes()[pos + 2..])), op.line);
                             }
+                        }
+                        if from_closure {
+                            self.closure_pending_calls.push(self.pending_calls.len());
                         }
                         self.pending_calls.push(PendingCall {
                             name,
@@ -18134,6 +18277,15 @@ impl Vm {
                         message: "no pending function call".into(),
                         line: op.line,
                     })?;
+                    while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                    {
+                        self.closure_pending_calls.pop();
+                    }
+                    let via_closure =
+                        self.closure_pending_calls.last() == Some(&self.pending_calls.len());
+                    if via_closure {
+                        self.closure_pending_calls.pop();
+                    }
 
                     // Resolve "static::", "self::", and "parent::" in function names
                     // for late static binding. parent:: and self:: are "forwarding calls"
@@ -19977,7 +20129,8 @@ impl Vm {
                         } else {
                             Value::Null
                         };
-                        let bound = self.bind_closure(&closure, new_this, scope, true);
+                        let bound =
+                            self.bind_closure_raw(&closure.unwrap_closure(), new_this, scope, true);
 
                         // Now call the bound closure
                         if let Value::Array(arr) = &bound {
@@ -21051,7 +21204,9 @@ impl Vm {
                                                     line: op.line,
                                                 });
                                             }
-                                            if method.visibility != Visibility::Public {
+                                            if method.visibility != Visibility::Public
+                                                && !via_closure
+                                            {
                                                 let method_vis = method.visibility;
                                                 let method_declaring =
                                                     method.declaring_class.clone();
@@ -26121,6 +26276,12 @@ impl Vm {
                     self.warn_nan_coercion(&val, "array", op.line);
                     let arr = match val {
                         Value::Array(a) => a,
+                        // Closures convert like scalars: [$closure].
+                        Value::Object(obj) if obj.borrow().closure.is_some() => {
+                            let mut arr = PhpArray::new();
+                            arr.push(Value::Object(obj));
+                            Rc::new(RefCell::new(arr))
+                        }
                         Value::Object(obj) => self.object_to_array(&obj),
                         Value::Null | Value::Undef => Rc::new(RefCell::new(PhpArray::new())),
                         other => {
@@ -28780,6 +28941,57 @@ impl Vm {
                     }
                 }
 
+                OpCode::MakeClosure => {
+                    let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let obj = self.make_closure_object(inner);
+                    self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+                OpCode::MakeFcc => {
+                    let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let desc = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                        cvs.first()
+                            .map(|v| v.deref())
+                            .filter(|v| matches!(v, Value::Object(_)))
+                    } else {
+                        None
+                    };
+                    match self.make_fcc(inner, desc.as_bytes(), this, op_array.scope_class.clone())
+                    {
+                        Ok(obj) => {
+                            self.write_operand(
+                                &op.result,
+                                obj,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        }
+                        Err((cls, msg)) => {
+                            if self.current_exception.is_none() {
+                                let exc = self.create_exception(cls, &msg, op.line);
+                                self.current_exception = Some(exc);
+                            }
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!(
+                                    "Uncaught {}: {}",
+                                    String::from_utf8_lossy(cls),
+                                    msg
+                                ),
+                                line: op.line,
+                            });
+                        }
+                    }
+                }
                 OpCode::DeclareFunction => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let func_idx_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
@@ -31496,6 +31708,11 @@ impl Vm {
 
                 OpCode::CloneObj => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if val.is_closure_obj() {
+                        let c = self.clone_closure(&val);
+                        self.write_operand(&op.result, c, &mut cvs, &mut tmps, &static_cv_keys);
+                        continue;
+                    }
                     // Lazy init on clone: ghosts are fully initialized, then cloned.
                     // Proxies initialize their backing object; the clone is a fresh
                     // proxy with a cloned instance.
@@ -39332,10 +39549,14 @@ impl Vm {
                         || name_lower == b"closure"
                         || name_lower == b"fibererror"
                     {
-                        let err_msg = format!(
-                            "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
-                            class_name.to_string_lossy()
-                        );
+                        let err_msg = if name_lower == b"closure" {
+                            "Instantiation of class Closure is not allowed".to_string()
+                        } else {
+                            format!(
+                                "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
+                                class_name.to_string_lossy()
+                            )
+                        };
                         let exc = self.create_exception(b"Error", &err_msg, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -42212,6 +42433,26 @@ impl Vm {
                     let method_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    if obj_val.is_closure_obj() {
+                        if let Err(msg) =
+                            self.init_closure_method_call(&obj_val, method_name.as_bytes())
+                        {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                        continue;
+                    }
 
                     if let Value::Object(obj) = &obj_val {
                         let class_name_orig;
@@ -44291,6 +44532,7 @@ impl Vm {
 
     /// Initialize a function call from generator context
     pub fn generator_init_fcall(&mut self, name_val: Value) {
+        let name_val = name_val.unwrap_closure();
         if let Value::Array(arr) = &name_val {
             let arr = arr.borrow();
             let mut values: Vec<Value> = arr.values().cloned().collect();
@@ -44405,6 +44647,39 @@ impl Vm {
                 message: FIBER_SUSPEND_SENTINEL.to_string(),
                 line,
             });
+        }
+
+        if func_name_lower == b"__closure_bindto" || func_name_lower == b"closure::bind" {
+            let mut a = call.args.clone();
+            if func_name_lower == b"closure::bind" && a.is_empty() {
+                a.push(Value::Null);
+            }
+            let closure = a.first().cloned().unwrap_or(Value::Null);
+            let new_this = a.get(1).cloned().unwrap_or(Value::Null);
+            let scope = a
+                .get(2)
+                .cloned()
+                .unwrap_or(Value::String(PhpString::from_bytes(b"static")));
+            let r = self.bind_closure(&closure, new_this, scope, a.len() >= 3);
+            if self.current_exception.is_some() {
+                return Err(VmError {
+                    message: "Uncaught TypeError".into(),
+                    line,
+                });
+            }
+            return Ok(r);
+        }
+        if func_name_lower == b"__closure_call" {
+            let closure = call.args.first().cloned().unwrap_or(Value::Null);
+            let new_this = call.args.get(1).cloned().unwrap_or(Value::Null);
+            let extra: Vec<Value> = call.args.get(2..).map(|s| s.to_vec()).unwrap_or_default();
+            let scope = if let Value::Object(_) = &new_this {
+                new_this.clone()
+            } else {
+                Value::Null
+            };
+            let bound = self.bind_closure_raw(&closure.unwrap_closure(), new_this, scope, true);
+            return self.call_callback(&bound, &extra);
         }
 
         // Handle Fiber::getCurrent() in generator context
@@ -44922,6 +45197,9 @@ impl Vm {
     /// Name of a callable as shown in stack traces (`{closure:file:line}`
     /// for closures, the function name or `Class::method` otherwise).
     pub fn callable_display_name(&self, callback: &Value) -> String {
+        if callback.is_closure_obj() {
+            return String::from_utf8_lossy(&self.closure_function_name(callback)).to_string();
+        }
         match callback {
             Value::String(s) => {
                 let name_bytes = s.as_bytes();

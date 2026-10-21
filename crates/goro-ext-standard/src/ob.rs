@@ -197,7 +197,7 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
             let cn = o.borrow().class_name.clone();
             let cl = lower(&cn);
             if cl == b"closure" {
-                return Ok(b"Closure::__invoke".to_vec());
+                return Ok(vm.closure_function_name(cb));
             }
             if vm
                 .classes
