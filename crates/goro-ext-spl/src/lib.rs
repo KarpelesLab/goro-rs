@@ -51,6 +51,10 @@ pub fn register(vm: &mut Vm) {
         goro_core::spl_file::spl_file_info_construct_native,
     );
     vm.object_construct_handlers.insert(
+        b"multipleiterator".to_vec(),
+        goro_core::spl_storage::spl_multiple_construct_native,
+    );
+    vm.object_construct_handlers.insert(
         b"splfixedarray".to_vec(),
         goro_core::spl_fixed::spl_fixed_construct_native,
     );

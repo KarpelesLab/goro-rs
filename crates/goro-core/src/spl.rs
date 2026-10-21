@@ -532,10 +532,11 @@ impl Vm {
             &[
                 b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap",
                 b"directoryiterator", b"splfileobject", b"splfileinfo", b"splfixedarray",
-                b"spldoublylinkedlist",
+                b"spldoublylinkedlist", b"splobjectstorage", b"multipleiterator",
             ],
         )?;
         match base {
+            b"splobjectstorage" | b"multipleiterator" => Some(self.sos_debug_info(obj)),
             b"spldoublylinkedlist" => Some(self.dll_debug_info(obj)),
             b"splfixedarray" => Some(self.fa_debug_info(obj, true)),
             b"splfileobject" => Some(self.sfi_debug_info(obj, true)),
