@@ -333,33 +333,14 @@ impl Value {
             Value::Resource(n) => *n,
             Value::Double(f) => *f as i64,
             Value::String(s) => {
-                let s = s.to_string_lossy();
-                let s = s.trim();
-                // PHP-style string to int: parse leading digits
-                if s.is_empty() {
-                    return 0;
-                }
-                let mut chars = s.chars();
-                let negative = if chars.clone().next() == Some('-') {
-                    chars.next();
-                    true
-                } else if chars.clone().next() == Some('+') {
-                    chars.next();
-                    false
-                } else {
-                    false
-                };
-                let mut result: i64 = 0;
-                for ch in chars {
-                    if ch.is_ascii_digit() {
-                        result = result
-                            .wrapping_mul(10)
-                            .wrapping_add((ch as u8 - b'0') as i64);
-                    } else {
-                        break;
+                // zval_get_long(): is_numeric_string(allow_errors), doubles capped
+                match parse_numeric_str(s.as_bytes(), true) {
+                    Some((NumStr::Long(n), _)) => n,
+                    Some((NumStr::Double(f), _)) => {
+                        if f.is_nan() { 0 } else { f as i64 }
                     }
+                    None => 0,
                 }
-                if negative { -result } else { result }
             }
             Value::Array(arr) => {
                 if arr.borrow().is_empty() {
@@ -526,21 +507,28 @@ impl Value {
         if let Value::Reference(r) = other {
             return self.div(&r.borrow());
         }
-        let a = self.to_double();
-        let b = other.to_double();
+        // div_function: operands are converted to numbers first; long/long
+        // stays a long when the division is exact.
+        let an = self.to_numeric();
+        let bn = other.to_numeric();
+        if let (Value::Long(x), Value::Long(y)) = (&an, &bn) {
+            if *y == 0 {
+                return Err("Division by zero");
+            }
+            if *y == -1 && *x == i64::MIN {
+                return Ok(Value::Double(*x as f64 / -1.0));
+            }
+            if x % y == 0 {
+                return Ok(Value::Long(x / y));
+            }
+            return Ok(Value::Double(*x as f64 / *y as f64));
+        }
+        let a = an.to_double();
+        let b = bn.to_double();
         if b == 0.0 {
             return Err("Division by zero");
         }
-        let result = a / b;
-        // If both operands were ints and result is a whole number, return int
-        if matches!(self, Value::Long(_))
-            && matches!(other, Value::Long(_))
-            && result.fract() == 0.0
-            && result.abs() < i64::MAX as f64
-        {
-            return Ok(Value::Long(result as i64));
-        }
-        Ok(Value::Double(result))
+        Ok(Value::Double(a / b))
     }
 
     pub fn modulo(&self, other: &Value) -> Result<Value, &'static str> {
@@ -645,23 +633,11 @@ impl Value {
             Value::Resource(n) => Value::Long(*n),
             Value::True => Value::Long(1),
             Value::False | Value::Null | Value::Undef => Value::Long(0),
-            Value::String(s) => {
-                let s_str = s.to_string_lossy();
-                let trimmed = s_str.trim();
-                if trimmed.is_empty() {
-                    return Value::Long(0);
-                }
-                // Try int first
-                if let Ok(n) = trimmed.parse::<i64>() {
-                    return Value::Long(n);
-                }
-                // Try float
-                if let Ok(f) = trimmed.parse::<f64>() {
-                    return Value::Double(f);
-                }
-                // Leading numeric portion
-                Value::Long(self.to_long())
-            }
+            Value::String(s) => match parse_numeric_str(s.as_bytes(), true) {
+                Some((NumStr::Long(n), _)) => Value::Long(n),
+                Some((NumStr::Double(f), _)) => Value::Double(f),
+                None => Value::Long(0),
+            },
             Value::Array(_) | Value::Object(_) | Value::Generator(_) => {
                 Value::Long(if self.is_truthy() { 1 } else { 0 })
             }
@@ -1727,4 +1703,131 @@ fn compare_integer_strings(a: &str, b: &str) -> i64 {
         }
     };
     if a_neg { -cmp } else { cmp }
+}
+
+/// Result of `_is_numeric_string_ex`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NumStr {
+    Long(i64),
+    Double(f64),
+}
+
+/// Port of zend_operators.c `_is_numeric_string_ex`: leading whitespace, an
+/// optional sign, then an integer or float literal; trailing whitespace is
+/// allowed. With `allow_errors`, trailing garbage is accepted and reported in
+/// the returned flag. Integers that overflow become doubles.
+pub fn parse_numeric_str(bytes: &[u8], allow_errors: bool) -> Option<(NumStr, bool)> {
+    const MAX_LENGTH_OF_LONG: usize = 20;
+    let is_ws = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    let at = |i: usize| -> u8 { bytes.get(i).copied().unwrap_or(0) };
+    let mut start = 0;
+    while start < bytes.len() && is_ws(bytes[start]) {
+        start += 1;
+    }
+    let mut ptr = start;
+    let mut neg = false;
+    if at(ptr) == b'-' {
+        neg = true;
+        ptr += 1;
+    } else if at(ptr) == b'+' {
+        ptr += 1;
+    }
+    let mut is_double = false;
+    let mut digits = 0usize;
+    let mut tmp: u64 = 0;
+    let end;
+    if at(ptr).is_ascii_digit() {
+        while at(ptr) == b'0' {
+            ptr += 1;
+        }
+        loop {
+            if digits >= MAX_LENGTH_OF_LONG {
+                is_double = true;
+                break;
+            }
+            let c = at(ptr);
+            if c.is_ascii_digit() {
+                tmp = tmp.wrapping_mul(10).wrapping_add((c - b'0') as u64);
+                digits += 1;
+                ptr += 1;
+                continue;
+            } else if c == b'.' {
+                is_double = true;
+            } else if c == b'e' || c == b'E' {
+                let mut e = ptr + 1;
+                if at(e) == b'-' || at(e) == b'+' {
+                    e += 1;
+                }
+                if at(e).is_ascii_digit() {
+                    is_double = true;
+                }
+            }
+            break;
+        }
+    } else if at(ptr) == b'.' && at(ptr + 1).is_ascii_digit() {
+        is_double = true;
+    } else {
+        return None;
+    }
+    let mut dval = 0.0;
+    if is_double {
+        // zend_strtod on the longest float prefix
+        let mut q = start;
+        if at(q) == b'-' || at(q) == b'+' {
+            q += 1;
+        }
+        while at(q).is_ascii_digit() {
+            q += 1;
+        }
+        if at(q) == b'.' {
+            q += 1;
+            while at(q).is_ascii_digit() {
+                q += 1;
+            }
+        }
+        if at(q) == b'e' || at(q) == b'E' {
+            let mut e = q + 1;
+            if at(e) == b'-' || at(e) == b'+' {
+                e += 1;
+            }
+            if at(e).is_ascii_digit() {
+                while at(e).is_ascii_digit() {
+                    e += 1;
+                }
+                q = e;
+            }
+        }
+        let txt = std::str::from_utf8(&bytes[start..q]).unwrap_or("0");
+        dval = txt.parse::<f64>().unwrap_or(0.0);
+        end = q;
+    } else {
+        end = ptr;
+    }
+    let mut trailing = false;
+    if end != bytes.len() {
+        let mut e = end;
+        while e < bytes.len() && is_ws(bytes[e]) {
+            e += 1;
+        }
+        if e != bytes.len() {
+            if !allow_errors {
+                return None;
+            }
+            trailing = true;
+        }
+    }
+    if is_double {
+        return Some((NumStr::Double(dval), trailing));
+    }
+    if digits == MAX_LENGTH_OF_LONG - 1 {
+        // Compare against "9223372036854775808"
+        let digit_str = &bytes[end - digits..end];
+        let cmp = digit_str.cmp(b"9223372036854775808".as_slice());
+        if !(cmp == std::cmp::Ordering::Less || (cmp == std::cmp::Ordering::Equal && neg)) {
+            let txt = std::str::from_utf8(&bytes[start..end]).unwrap_or("0");
+            return Some((NumStr::Double(txt.parse::<f64>().unwrap_or(0.0)), trailing));
+        }
+    }
+    let v = if neg { (tmp as i64).wrapping_neg() } else { tmp as i64 };
+    Some((NumStr::Long(v), trailing))
 }
