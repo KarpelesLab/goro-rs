@@ -280,7 +280,13 @@ pub(crate) fn err(vm: &mut Vm, level: i64, msg: &str) {
                 }
             }
             if vm.error_reporting & level != 0 || level == E_ERROR {
+                let (hs, os) = (vm.headers_sent, vm.output_start.clone());
                 vm.display_error(level_label(level), &format!("{}: {}", origin, msg), "Unknown", 0);
+                if origin == "PHP Startup" {
+                    // MINIT messages bypass the SAPI output layer.
+                    vm.headers_sent = hs;
+                    vm.output_start = os;
+                }
             }
         }
     }
