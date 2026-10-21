@@ -1428,6 +1428,53 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 }
             }
+            /// zval_get_long() for the integer conversions: GMP-like objects
+            /// cast, other objects warn (value 1), out-of-range floats warn
+            /// and wrap like zend_dval_to_lval().
+            fn int_arg(vm: &mut Option<&mut Vm>, arg: &Value) -> i64 {
+                let v = arg.deref();
+                match &v {
+                    Value::Object(_) => {
+                        if let Some(vm_ref) = vm.as_deref_mut() {
+                            if vm_ref.object_is_operator_type.map(|f| f(&v)).unwrap_or(false) {
+                                if let Some(n) = vm_ref.object_to_long.and_then(|f| f(&v)) {
+                                    return n;
+                                }
+                            }
+                        }
+                        object_warn_int(vm, arg);
+                        1
+                    }
+                    Value::Double(f) => {
+                        let f = *f;
+                        if !f.is_finite() || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+                            if let Some(vm_ref) = vm.as_deref_mut() {
+                                vm_ref.emit_warning(&format!(
+                                    "The float {} is not representable as an int, cast occurred",
+                                    goro_core::value::format_php_float(f)
+                                ));
+                            }
+                            if !f.is_finite() {
+                                return 0;
+                            }
+                            let two64 = 18446744073709551616.0f64;
+                            let mut dmod = f % two64;
+                            if dmod < 0.0 {
+                                if dmod == -9223372036854775808.0 {
+                                    return i64::MIN;
+                                }
+                                dmod += two64;
+                            }
+                            if dmod > 9223372036854775807.0 {
+                                dmod -= two64;
+                            }
+                            return dmod as i64;
+                        }
+                        f as i64
+                    }
+                    _ => v.to_long(),
+                }
+            }
             fn object_warn_float(vm: &mut Option<&mut Vm>, arg: &Value) {
                 if let Value::Object(obj) = arg.deref() {
                     if let Some(vm_ref) = vm.as_deref_mut() {
@@ -1463,8 +1510,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 }
                 b'd' => {
-                    object_warn_int(&mut vm, arg);
-                    let n = arg.to_long();
+                    let n = int_arg(&mut vm, arg);
                     if show_sign && n >= 0 {
                         format!("+{}", n).into_bytes()
                     } else {
@@ -1588,28 +1634,26 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 }
                 b'x' => {
-                    object_warn_int(&mut vm, arg);
-                    format!("{:x}", arg.to_long()).into_bytes()
+                    let n = int_arg(&mut vm, arg);
+                    if precision_usize.is_some() { Vec::new() } else { format!("{:x}", n).into_bytes() }
                 }
                 b'X' => {
-                    object_warn_int(&mut vm, arg);
-                    format!("{:X}", arg.to_long()).into_bytes()
+                    let n = int_arg(&mut vm, arg);
+                    if precision_usize.is_some() { Vec::new() } else { format!("{:X}", n).into_bytes() }
                 }
                 b'o' => {
-                    object_warn_int(&mut vm, arg);
-                    format!("{:o}", arg.to_long()).into_bytes()
+                    let n = int_arg(&mut vm, arg);
+                    if precision_usize.is_some() { Vec::new() } else { format!("{:o}", n).into_bytes() }
                 }
                 b'b' => {
-                    object_warn_int(&mut vm, arg);
-                    format!("{:b}", arg.to_long()).into_bytes()
+                    let n = int_arg(&mut vm, arg);
+                    if precision_usize.is_some() { Vec::new() } else { format!("{:b}", n).into_bytes() }
                 }
                 b'c' => {
-                    object_warn_int(&mut vm, arg);
-                    vec![arg.to_long() as u8]
+                    vec![int_arg(&mut vm, arg) as u8]
                 }
                 b'u' => {
-                    object_warn_int(&mut vm, arg);
-                    format!("{}", arg.to_long() as u64).into_bytes()
+                    format!("{}", int_arg(&mut vm, arg) as u64).into_bytes()
                 }
                 b'%' => {
                     // `%` as type specifier (after flags/width): output literal `%` and consume arg
@@ -1624,6 +1668,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 }
             };
 
+            // php_sprintf_appendint/appenduint: left-aligned integers never
+            // pad with zeros.
+            let pad_char = if left_align && pad_char == b'0' && matches!(spec, b'd' | b'u') { b' ' } else { pad_char };
             // Apply width and padding (byte-level).
             if width > 0 && formatted.len() < width {
                 let padding = width - formatted.len();
