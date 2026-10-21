@@ -20540,6 +20540,10 @@ impl Vm {
                             let gen_clone = gen_rc.clone();
                             let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
                             let mut gen_err: Option<String> = None;
+                            // The generator is resumed from the unpacking call site.
+                            let prev_caller = self
+                                .generator_caller
+                                .replace((self.current_file.clone(), op.line));
                             // Resume to first yield if not yet started
                             {
                                 let state = gen_clone.borrow().state.clone();
@@ -20589,6 +20593,7 @@ impl Vm {
                                     }
                                 }
                             }
+                            self.generator_caller = prev_caller;
                             match gen_err {
                                 Some(e) => Err(e),
                                 None => Ok(pairs),
