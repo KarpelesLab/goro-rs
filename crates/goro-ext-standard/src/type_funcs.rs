@@ -335,6 +335,7 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
         }
+        return Ok(Value::String(vm.value_to_string_checked(&derefed)?));
     }
     Ok(Value::String(val.to_php_string()))
 }
@@ -373,7 +374,18 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if matches!(&current, Value::Array(_)) {
                     _vm.emit_warning("Array to string conversion");
                 }
-                Value::String(current.to_php_string())
+                if let Value::Object(_) = &current {
+                    match _vm.value_to_string_checked(&current) {
+                        Ok(s) => Value::String(s),
+                        Err(e) => {
+                            // convert_to_string() leaves an empty string behind on failure.
+                            *r.borrow_mut() = Value::String(PhpString::empty());
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    Value::String(current.to_php_string())
+                }
             }
             "bool" | "boolean" => {
                 if current.is_truthy() {
@@ -389,6 +401,7 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         goro_core::array::PhpArray::new(),
                     )))
                 }
+                Value::Object(ref o) => Value::Array(_vm.object_to_array(o)),
                 other => {
                     let mut arr = goro_core::array::PhpArray::new();
                     arr.push(other);
@@ -398,7 +411,7 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "object" => match current {
                 Value::Object(_) => current,
                 Value::Array(arr) => {
-                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), 0);
+                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
                     {
                         let arr_borrow = arr.borrow();
                         for (k, v) in arr_borrow.iter() {
@@ -414,7 +427,7 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
                 }
                 _ => {
-                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), 0);
+                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
                     if !matches!(current, Value::Null | Value::Undef) {
                         obj.set_property(b"scalar".to_vec(), current);
                     }
@@ -424,8 +437,9 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "null" => Value::Null,
             "resource" => {
                 let msg = "Cannot convert to resource type";
-                _vm.emit_warning(msg);
-                return Ok(Value::False);
+                let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
+                _vm.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: _vm.current_line });
             }
             _ => {
                 let msg = "settype(): Argument #2 ($type) must be a valid type";

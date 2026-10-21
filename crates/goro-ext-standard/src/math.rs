@@ -1329,22 +1329,95 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     )))
 }
 
-fn intval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+/// C strtoll(): whitespace, sign, base prefixes, saturating on overflow.
+fn c_strtol(s: &[u8], base: i64) -> i64 {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        neg = s[i] == b'-';
+        i += 1;
+    }
+    let mut base = base;
+    let has_hex_prefix = |i: usize| i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X')
+        && s.get(i + 2).map(|c| c.is_ascii_hexdigit()).unwrap_or(false);
+    if base == 0 {
+        if has_hex_prefix(i) {
+            base = 16;
+            i += 2;
+        } else if i < s.len() && s[i] == b'0' {
+            base = 8;
+        } else {
+            base = 10;
+        }
+    } else if base == 16 && has_hex_prefix(i) {
+        i += 2;
+    }
+    if !(2..=36).contains(&base) {
+        return 0;
+    }
+    let mut acc: i128 = 0;
+    let mut overflow = false;
+    while i < s.len() {
+        let d = match s[i] {
+            c @ b'0'..=b'9' => (c - b'0') as i64,
+            c @ b'a'..=b'z' => (c - b'a' + 10) as i64,
+            c @ b'A'..=b'Z' => (c - b'A' + 10) as i64,
+            _ => break,
+        };
+        if d >= base {
+            break;
+        }
+        if !overflow {
+            acc = acc * base as i128 + d as i128;
+            if acc > i64::MAX as i128 + 1 {
+                overflow = true;
+            }
+        }
+        i += 1;
+    }
+    if neg {
+        if overflow || acc > i64::MAX as i128 + 1 { i64::MIN } else { (-acc) as i64 }
+    } else if overflow || acc > i64::MAX as i128 {
+        i64::MAX
+    } else {
+        acc as i64
+    }
+}
+
+fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
-    if base != 10 && base >= 2 && base <= 36 {
-        if let Value::String(s) = val {
-            let s = s.to_string_lossy();
-            let s = s.trim();
-            let result = i64::from_str_radix(
-                s.trim_start_matches("0x").trim_start_matches("0X").trim_start_matches("0b").trim_start_matches("0B").trim_start_matches("0o").trim_start_matches("0O"),
-                base as u32,
-            )
-            .unwrap_or(0);
-            return Ok(Value::Long(result));
+    let s = match &val {
+        Value::String(s) if base != 10 => s.as_bytes().to_vec(),
+        Value::Object(obj) => {
+            let cn = goro_core::value::display_class_name(&obj.borrow().class_name);
+            vm.emit_warning(&format!("Object of class {} could not be converted to int", cn));
+            return Ok(Value::Long(1));
+        }
+        _ => return Ok(Value::Long(val.to_long())),
+    };
+    if base == 0 || base == 2 {
+        let mut t = 0;
+        while t < s.len() && matches!(s[t], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            t += 1;
+        }
+        let rest = &s[t..];
+        if rest.len() > 2 {
+            let off = if rest[0] == b'-' || rest[0] == b'+' { 1 } else { 0 };
+            if rest[off] == b'0' && (rest.get(off + 1) == Some(&b'b') || rest.get(off + 1) == Some(&b'B')) {
+                let mut tmp = Vec::new();
+                if off == 1 {
+                    tmp.push(rest[0]);
+                }
+                tmp.extend_from_slice(&rest[off + 2..]);
+                return Ok(Value::Long(c_strtol(&tmp, 2)));
+            }
         }
     }
-    Ok(Value::Long(val.to_long()))
+    Ok(Value::Long(c_strtol(&s, base)))
 }
 
 fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
