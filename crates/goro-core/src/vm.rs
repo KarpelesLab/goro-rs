@@ -6588,85 +6588,12 @@ impl Vm {
     /// for private, "\0*\0name" for protected), skipping hidden internal
     /// state. Unlike object_to_array, never substitutes SPL storage.
     pub fn object_props_mangled(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
-        let ob = obj.borrow();
-        let class_name_lower: Vec<u8> = ob
-            .class_name
-            .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-        let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
-            if let Some(class_def) = self.classes.get(&class_name_lower) {
-                class_def
-                    .properties
-                    .iter()
-                    .map(|p| {
-                        let decl_lower = &p.declaring_class;
-                        let decl_display = self
-                            .classes
-                            .get(decl_lower.as_slice())
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| p.declaring_class.clone());
-                        (p.name.clone(), (p.visibility, decl_display))
-                    })
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
         let mut arr = PhpArray::new();
-        for (name, value) in &ob.properties {
-            // Skip internal/lazy bookkeeping properties.
-            if name.starts_with(b"__spl_")
-                || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__enum_")
-                || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_")
-                || name.starts_with(b"__destructed")
-                || name.starts_with(b"__fiber_")
-                || name.starts_with(b"__timestamp")
-                || name.starts_with(b"__lazy_")
-                || name.starts_with(b"__uri_")
-                || name.starts_with(b"__weak_ref_id")
-                || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__hash_")
-                || name.starts_with(b"__hmac_")
-                || name.starts_with(b"__pkey_id")
-                || name.starts_with(b"__cert_id")
-                || name.starts_with(b"__csr_id")
-                || name.starts_with(b"__xml_")
-            {
+        for e in self.object_prop_table(obj) {
+            if matches!(e.value, Value::Undef) {
                 continue;
             }
-            // Skip uninitialized props (Undef).
-            if matches!(value, Value::Undef) {
-                continue;
-            }
-            let mangled = if let Some((vis, declaring_class)) = prop_info.get(name) {
-                match vis {
-                    Visibility::Private => {
-                        let mut m = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
-                        m.push(0);
-                        m.extend_from_slice(declaring_class);
-                        m.push(0);
-                        m.extend_from_slice(name);
-                        m
-                    }
-                    Visibility::Protected => {
-                        let mut m = Vec::with_capacity(3 + name.len());
-                        m.push(0);
-                        m.push(b'*');
-                        m.push(0);
-                        m.extend_from_slice(name);
-                        m
-                    }
-                    Visibility::Public => name.clone(),
-                }
-            } else {
-                name.clone()
-            };
-            arr.set(
-                ArrayKey::String(PhpString::from_vec(mangled)),
-                value.clone(),
-            );
+            arr.set(ArrayKey::String(PhpString::from_vec(e.key)), e.value);
         }
         Rc::new(RefCell::new(arr))
     }

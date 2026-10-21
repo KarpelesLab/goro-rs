@@ -8332,254 +8332,46 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Redirect lazy proxy to real backing object.
         let obj_rc = vm.proxy_redirect(outer);
-        let mut obj = obj_rc.borrow();
-        let class_name_lower: Vec<u8> = obj
-            .class_name
-            .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-
-        // Get the calling class context to determine visibility
-        let calling_class = vm.get_current_class_name();
-        let calling_class_lower: Option<Vec<u8>> = calling_class
-            .as_ref()
-            .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
-
-        // Build a map of property visibility from the class definition
-        let _prop_visibility: std::collections::HashMap<Vec<u8>, goro_core::object::Visibility> =
-            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def
-                    .properties
-                    .iter()
-                    .map(|p| (p.name.clone(), p.visibility))
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
-
-        // Build a set of typed properties to skip when uninitialized
-        let _typed_props: std::collections::HashSet<Vec<u8>> =
-            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def
-                    .properties
-                    .iter()
-                    .filter(|p| p.property_type.is_some())
-                    .map(|p| p.name.clone())
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
-
-        // Iterate properties in declaration order from class def. For backed props,
-        // read the value from the instance's property bag; for hooked (virtual) props,
-        // dispatch through the get hook.
-        let class_props_order: Vec<(
-            Vec<u8>,
-            goro_core::object::Visibility,
-            bool,
-            bool,
-            bool,
-            Vec<u8>,
-        )> = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-            class_def
-                .properties
-                .iter()
-                .map(|p| {
-                    (
-                        p.name.clone(),
-                        p.visibility,
-                        p.is_virtual,
-                        p.has_get_hook,
-                        p.is_static,
-                        p.declaring_class
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect(),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
+        let class_lower = obj_rc.borrow().class_name.to_ascii_lowercase();
+        let table = vm.object_prop_table(&obj_rc);
         let mut arr = PhpArray::new();
-        for (name, vis, is_virtual, has_get_hook, is_static, decl_lower) in &class_props_order {
-            if *is_static {
+        for e in table {
+            let is_dynamic = e.slot.is_none();
+            if !vm.check_property_access(&class_lower, &e.key, is_dynamic) {
                 continue;
             }
-            // Skip internal properties (none normally collide, but just in case)
-            if name.starts_with(b"__spl_")
-                || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__timestamp")
-                || name.starts_with(b"__enum_")
-                || name.starts_with(b"__fiber_")
-                || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_")
-                || name.starts_with(b"__destructed")
-                || name.starts_with(b"__weak_ref_id")
-                || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__lazy_")
-                || name.starts_with(b"__uri_")
-                || name.starts_with(b"__hash_")
-                || name.starts_with(b"__hmac_")
-                || name.starts_with(b"__pkey_id")
-            {
-                continue;
-            }
-            // Visibility check
-            let accessible = match vis {
-                goro_core::object::Visibility::Public => true,
-                goro_core::object::Visibility::Protected => {
-                    if let Some(ref cc) = calling_class_lower {
-                        cc == &class_name_lower
-                            || vm.is_subclass_of(cc, &class_name_lower)
-                            || vm.is_subclass_of(&class_name_lower, cc)
-                    } else {
-                        false
-                    }
-                }
-                goro_core::object::Visibility::Private => {
-                    if let Some(ref cc) = calling_class_lower {
-                        // Hooked private properties: visible from their declaring class.
-                        if *has_get_hook {
-                            cc == decl_lower
-                        } else {
-                            cc == &class_name_lower
+            let mut value = e.value;
+            if let Some(slot) = &e.slot {
+                if slot.has_get_hook {
+                    // Hooked properties are read through their get hook.
+                    match vm.call_get_hook_if_accessible(&obj_rc, &slot.name) {
+                        Some(Ok(v)) => value = v,
+                        Some(Err(err)) => return Err(err),
+                        None => {
+                            if slot.is_virtual || matches!(value, Value::Undef) {
+                                continue;
+                            }
                         }
-                    } else {
-                        false
                     }
                 }
+            }
+            // A reference nothing else holds is copied as its value.
+            let unref = match &value {
+                Value::Reference(r) if Rc::strong_count(r) == 1 => Some(r.borrow().clone()),
+                _ => None,
             };
-            if !accessible {
-                continue;
+            if let Some(v) = unref {
+                value = v;
             }
-            if *has_get_hook {
-                // Get hooks are called (zend_std_get_properties_for with hooks).
-                // Drop borrow before calling into VM.
-                drop(obj);
-                let r = vm.call_get_hook_if_accessible(&obj_rc, name);
-                match r {
-                    Some(Ok(v)) => {
-                        arr.set(
-                            goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                            v,
-                        );
-                        obj = obj_rc.borrow();
-                        continue;
-                    }
-                    Some(Err(e)) => return Err(e),
-                    None => {}
-                }
-                // Re-borrow
-                obj = obj_rc.borrow();
-                if *is_virtual {
-                    continue;
-                }
-            }
-            // Skip if the backing slot is absent: an uninitialized typed
-            // property, an unset property, or a redeclared private stored under
-            // a mangled key (the last is emitted by the dynamic-props pass below
-            // under its bare name). get_property() returns Null for a missing
-            // key, so gate on presence to avoid reporting it as a null value.
-            if !obj.has_property(name) {
-                continue;
-            }
-            // Read value from instance
-            let val = obj.get_property(name);
-            // Skip uninitialized
-            if matches!(val, Value::Undef) {
-                continue;
-            }
-            arr.set(
-                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                val,
-            );
-        }
-        // Also include dynamic properties not declared on the class (e.g. AllowDynamicProperties)
-        for (name, val) in &obj.properties {
-            if name.starts_with(b"__spl_")
-                || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__timestamp")
-                || name.starts_with(b"__enum_")
-                || name.starts_with(b"__fiber_")
-                || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_")
-                || name.starts_with(b"__destructed")
-                || name.starts_with(b"__weak_ref_id")
-                || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__lazy_")
-                || name.starts_with(b"__uri_")
-                || name.starts_with(b"__hash_")
-                || name.starts_with(b"__hmac_")
-            {
-                continue;
-            }
-            if matches!(val, Value::Undef) {
-                continue;
-            }
-            // Mangled private/protected storage keys (\0Class\0name) hold
-            // redeclared private slots that the declared-property loop above
-            // could not read by bare name. Demangle and apply scope visibility,
-            // exposing them under the bare name when accessible.
-            if name.first() == Some(&0) {
-                if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
-                    let decl = &name[1..1 + sep];
-                    let bare = &name[1 + sep + 1..];
-                    let accessible = if decl == b"*" {
-                        if let Some(ref cc) = calling_class_lower {
-                            cc == &class_name_lower
-                                || vm.is_subclass_of(cc, &class_name_lower)
-                                || vm.is_subclass_of(&class_name_lower, cc)
-                        } else {
-                            false
-                        }
-                    } else {
-                        let decl_lower: Vec<u8> =
-                            decl.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        calling_class_lower.as_deref() == Some(decl_lower.as_slice())
-                    };
-                    if accessible {
-                        let key =
-                            goro_core::array::ArrayKey::String(PhpString::from_vec(bare.to_vec()));
-                        if !arr.contains_key(&key) {
-                            arr.set(key, val.clone());
-                        }
-                    }
-                    continue;
-                }
-            }
-            if class_props_order.iter().any(|(n, _, _, _, _, _)| n == name) {
-                continue;
-            }
-            // A property declared by an internal ancestor keeps its visibility.
-            if let Some((vis, internal)) = vm.internal_prop_visibility(&class_name_lower, name) {
-                let ok = match vis {
-                    goro_core::object::Visibility::Public => true,
-                    goro_core::object::Visibility::Protected => {
-                        calling_class_lower.as_ref().is_some_and(|cc| {
-                            cc == &internal
-                                || vm.is_subclass_of(cc, &internal)
-                                || vm.is_subclass_of(&internal, cc)
-                        })
-                    }
-                    goro_core::object::Visibility::Private => {
-                        calling_class_lower.as_deref() == Some(internal.as_slice())
-                    }
-                };
-                if !ok {
-                    continue;
-                }
-            }
-            let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
+            let key = match &e.slot {
+                Some(slot) => ArrayKey::String(PhpString::from_vec(slot.name.clone())),
+                None => Vm::value_to_array_key(Value::String(PhpString::from_vec(e.key))),
+            };
             if !arr.contains_key(&key) {
-                arr.set(key, val.clone());
+                arr.set(key, value);
             }
         }
-        // zend_symtable: numeric property names become integer keys.
-        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(
-            RefCell::new(arr),
-        ))))
+        Ok(Value::Array(Rc::new(RefCell::new(arr))))
     } else {
         Ok(Value::False)
     }
@@ -17021,65 +16813,9 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     if let Some(Value::Object(outer)) = args.first() {
         // For initialized lazy proxy, redirect to the real backing object.
         let obj_rc = vm.proxy_redirect(outer);
-        let obj = obj_rc.borrow();
-        let class_name_lower: Vec<u8> = obj
-            .class_name
-            .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-        let prop_info: std::collections::HashMap<
-            Vec<u8>,
-            (goro_core::object::Visibility, Vec<u8>),
-        > = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-            class_def
-                .properties
-                .iter()
-                .map(|p| {
-                    let decl_lower = &p.declaring_class;
-                    let decl_display = vm
-                        .get_class_def(decl_lower)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| p.declaring_class.clone());
-                    (p.name.clone(), (p.visibility, decl_display))
-                })
-                .collect()
-        } else {
-            std::collections::HashMap::new()
-        };
-        let mut arr = PhpArray::new();
-        for (name, val) in &obj.properties {
-            if name.starts_with(b"__spl_")
-                || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__enum_")
-                || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_")
-                || name.starts_with(b"__destructed")
-                || name.starts_with(b"__fiber_")
-                || name.starts_with(b"__timestamp")
-                || name.starts_with(b"__lazy_")
-                || name.starts_with(b"__uri_")
-                || name.starts_with(b"__weak_ref_id")
-                || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__hash_")
-                || name.starts_with(b"__hmac_")
-                || name.starts_with(b"__pkey_id")
-            {
-                continue;
-            }
-            // Skip uninitialized properties (Undef).
-            if matches!(val, Value::Undef) {
-                continue;
-            }
-            let (vis, declaring_class) = prop_info
-                .get(name)
-                .map(|(v, dc)| (Some(*v), dc.as_slice()))
-                .unwrap_or((None, &[]));
-            let mangled = mangle_property_name(name, declaring_class, vis);
-            arr.set(ArrayKey::String(PhpString::from_vec(mangled)), val.clone());
-        }
-        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(
-            RefCell::new(arr),
-        ))))
+        Ok(Value::Array(Vm::proptable_to_symtable(
+            vm.object_props_mangled(&obj_rc),
+        )))
     } else {
         Ok(Value::Null)
     }

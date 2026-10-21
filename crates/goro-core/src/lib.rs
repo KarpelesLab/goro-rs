@@ -21,6 +21,7 @@ pub mod internal_frames;
 pub mod ob;
 pub mod object;
 pub mod opcode;
+pub mod proptable;
 pub mod random;
 pub mod reflection;
 pub mod rfc1867;
