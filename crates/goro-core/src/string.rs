@@ -207,6 +207,9 @@ impl PhpString {
         inner.tracked_bytes += charge;
         inner.data.extend_from_slice(extra);
         inner.hash.set(None);
+        // The result is a new (refcounted) string, not known to be UTF-8.
+        inner.valid_utf8.set(false);
+        inner.interned.set(false);
         true
     }
 
