@@ -851,7 +851,7 @@ fn delegate(vm: &mut Vm, s: &[u8]) -> Option<Value> {
 }
 
 fn new_object(vm: &mut Vm, name: &[u8], cl: &[u8], known: bool) -> Rc<RefCell<PhpObject>> {
-    let id = vm.next_object_id();
+    let id = vm.alloc_object_id();
     if !known {
         let mut obj = PhpObject::new(b"__PHP_Incomplete_Class".to_vec(), id);
         obj.set_property(b"__PHP_Incomplete_Class_Name".to_vec(), Value::String(PhpString::from_vec(name.to_vec())));

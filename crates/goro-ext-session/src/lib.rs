@@ -314,7 +314,22 @@ pub(crate) fn pending(vm: &Vm) -> bool {
 }
 
 pub(crate) fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
-    let exc = vm.create_exception(class, msg, vm.current_line);
+    // The active session function appears in the exception's trace.
+    let top = FN_STACK.with(|s| s.borrow().last().cloned());
+    let mut pushed = false;
+    let mut line = vm.current_line;
+    if let Some((fname, file, l)) = top {
+        line = l;
+        if !vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&fname)).unwrap_or(false) {
+            let is_method = fname.contains("::");
+            vm.call_stack.push((fname, file, l, Vec::new(), is_method));
+            pushed = true;
+        }
+    }
+    let exc = vm.create_exception(class, msg, line);
+    if pushed {
+        vm.call_stack.pop();
+    }
     vm.current_exception = Some(exc);
 }
 
@@ -958,18 +973,24 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                     pos += namelen + 1;
                 }
                 let idx = names.len();
-                names.push(name);
+                names.push(name.clone());
                 if !var::unserialize_into(vm, data, &mut pos, &mut st, idx) {
                     names.pop();
                     ok = false;
                     break;
                 }
+                // php_set_session_var: replaces (and frees) the old value now.
+                if let Some(arr) = session_vars_arr_mut() {
+                    let v = st.tops.get(idx).cloned().unwrap_or(Value::Null);
+                    arr.borrow_mut().set(ArrayKey::String(PhpString::from_vec(name)), v);
+                }
             }
-            // Assign what was decoded (php_set_session_var + normalize).
+            // php_session_normalize_vars: variables a later R: turned into references.
             if let Some(arr) = session_vars_arr_mut() {
                 for (i, n) in names.iter().enumerate() {
-                    let v = st.tops.get(i).cloned().unwrap_or(Value::Null);
-                    arr.borrow_mut().set(ArrayKey::String(PhpString::from_vec(n.clone())), v);
+                    if let Some(v @ Value::Reference(_)) = st.tops.get(i) {
+                        arr.borrow_mut().set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
+                    }
                 }
             }
             st.finish(vm);
@@ -1081,17 +1102,32 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
     if pushed_outer {
         vm.call_stack.pop();
     }
-    ps(|p| p.in_save_handler = false);
+    let at_shutdown = PHASE.with(|p| p.get()) == Phase::RequestShutdown && FN_STACK.with(|s| s.borrow().is_empty());
     match r {
-        Ok(Value::Undef) => Ok(Some(Value::Null)),
-        Ok(v) => Ok(if vm.exit_requested { None } else { Some(v.deref()) }),
-        Err(e) => {
-            if vm.current_exception.is_some() {
-                Ok(None)
+        Ok(v) if vm.current_exception.is_none() => {
+            ps(|p| p.in_save_handler = false);
+            Ok(if vm.exit_requested {
+                None
+            } else if matches!(v, Value::Undef) {
+                Some(Value::Null)
             } else {
-                Err(e)
-            }
+                Some(v.deref())
+            })
         }
+        Ok(_) | Err(_) if vm.current_exception.is_some() => {
+            if at_shutdown {
+                // No user frame left: the exception is fatal (bailout),
+                // leaving the handler marked as running.
+                let e = r.err().unwrap_or(VmError { message: "Uncaught exception".into(), line: 0 });
+                vm.report_uncaught(&e);
+                return Err(e);
+            }
+            ps(|p| p.in_save_handler = false);
+            Ok(None)
+        }
+        Ok(_) => unreachable!(),
+        // Fatal error (bailout): in_save_handler stays set, as in PHP.
+        Err(e) => Err(e),
     }
 }
 
@@ -2462,10 +2498,13 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
             validate_sid: validate,
             update_timestamp: update,
         };
-        ps(|p| {
+        let old = ps(|p| {
             p.mod_user_class_name = Some(goro_core::value::display_class_name(&class_name).into_bytes());
-            p.mod_user_names = n;
+            std::mem::replace(&mut p.mod_user_names, n)
         });
+        // Releasing the previous handler object may destroy it.
+        drop(old);
+        vm.run_pending_destructors_pub();
         vm.shutdown_functions.retain(|(cb, _)| !is_shutdown_entry(cb));
         if register_shutdown {
             vm.shutdown_functions.push((s(b"session_register_shutdown"), Vec::new()));
@@ -3056,6 +3095,19 @@ fn sh_sanity(vm: &mut Vm, is_open: bool) -> Result<Module, Value> {
 }
 
 fn sh_call(vm: &mut Vm, _native: &[u8], method: &[u8], _called: &[u8], _this: Option<&Value>, args: &[Value]) -> Value {
+    let frame = format!("SessionHandler::{}", lossy(method));
+    let pushed = !vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&frame)).unwrap_or(false);
+    if pushed {
+        vm.call_stack.push((frame, vm.current_file.clone(), vm.current_line, args.to_vec(), true));
+    }
+    let r = sh_call_frame(vm, method, args);
+    if pushed {
+        vm.call_stack.pop();
+    }
+    r
+}
+
+fn sh_call_frame(vm: &mut Vm, method: &[u8], args: &[Value]) -> Value {
     match sh_call_inner(vm, method, args) {
         Ok(v) => v,
         Err(e) => {
@@ -3111,6 +3163,8 @@ fn sh_call_inner(vm: &mut Vm, method: &[u8], args: &[Value]) -> R<Value> {
             Ok(b(r))
         }
         b"close" => {
+            // zend_parse_parameters_none(): the error does not stop close.
+            check_args(vm, &fname, args, 0, 0);
             let dm = sanity!(true);
             ps(|p| p.mod_user_is_open = false);
             let r = match mod_close(vm, dm) {
