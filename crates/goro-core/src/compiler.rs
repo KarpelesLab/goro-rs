@@ -11970,6 +11970,7 @@ impl Compiler {
                 doc_comment: arrow_doc_comment,
                 return_type: arrow_return_type,
                 returns_by_ref: arrow_returns_by_ref,
+                is_static: arrow_is_static,
                 ..
             } => {
                 check_duplicate_params(params, expr.span.line)?;
@@ -11982,10 +11983,18 @@ impl Compiler {
 
                 // Remove parameters from the captured list
                 let param_names: Vec<Vec<u8>> = params.iter().map(|p| p.name.clone()).collect();
-                let use_vars: Vec<Vec<u8>> = body_vars
+                // Like closures, non-static arrow functions in a method bind $this
+                // (captured first); static ones never see it.
+                let arrow_has_this = !*arrow_is_static
+                    && self.current_class.is_some()
+                    && self.op_array.cv_names.contains(&b"this".to_vec());
+                let mut use_vars: Vec<Vec<u8>> = body_vars
                     .into_iter()
-                    .filter(|v| !param_names.contains(v))
+                    .filter(|v| !param_names.contains(v) && v.as_slice() != b"this")
                     .collect();
+                if arrow_has_this {
+                    use_vars.insert(0, b"this".to_vec());
+                }
 
                 let _closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
@@ -12048,6 +12057,8 @@ impl Compiler {
                     closure_compiler.op_array.get_or_create_cv(uv);
                 }
                 closure_compiler.op_array.closure_capture_names = use_vars.clone();
+                closure_compiler.op_array.is_static_closure = *arrow_is_static;
+                closure_compiler.op_array.is_generator = expr_contains_yield(body);
                 closure_compiler.op_array.closure_params =
                     params.iter().map(|p| (p.name.clone(), p.by_ref)).collect();
                 closure_compiler.op_array.param_count = (params.len() + use_vars.len()) as u32;
@@ -15620,6 +15631,7 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
                 vars.push(name.clone());
             }
         }
+        ExprKind::DynamicVariable(inner) => collect_expr_variables(inner, vars),
         ExprKind::BinaryOp { left, right, .. } => {
             collect_expr_variables(left, vars);
             collect_expr_variables(right, vars);
