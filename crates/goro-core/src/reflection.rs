@@ -572,6 +572,22 @@ pub(crate) fn rprop<'a>(vm: &'a Vm, lower: &[u8], name: &[u8]) -> Option<&'a cra
     rprops(vm, lower).into_iter().find(|p| p.name == name)
 }
 
+
+/// Methods of a user or internal class in function-table order (including
+/// methods inherited from internal ancestors), as
+/// (name, visibility, declaring class lowercase). None if the class is unknown.
+pub fn class_method_list(vm: &Vm, class_lower: &[u8]) -> Option<Vec<(Vec<u8>, Visibility, Vec<u8>)>> {
+    let lower = class_lower.to_ascii_lowercase();
+    rcls(vm, &lower)?;
+    Some(
+        rmethods(vm, &lower)
+            .into_iter()
+            .filter(|m| !m.name.starts_with(b"__property_"))
+            .map(|m| (m.name.clone(), m.visibility, m.declaring_class.to_ascii_lowercase()))
+            .collect(),
+    )
+}
+
 /// ReflectionClass constructor: sets up __reflection_target and name properties
 fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {

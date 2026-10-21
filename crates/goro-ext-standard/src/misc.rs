@@ -11185,7 +11185,7 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
                 }
             }
-            if !vm.classes.contains_key(&lower) {
+            if !vm.classes.contains_key(&lower) && goro_core::reflection::class_method_list(vm, &lower).is_none() {
                 return Err(throw_type_error_msg(vm, format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&val))));
             }
             name
@@ -11199,28 +11199,26 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let scope: Option<Vec<u8>> = vm.current_class_scope()
         .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
     let mut result = PhpArray::new();
-    let methods: Vec<(Vec<u8>, Visibility, Vec<u8>)> = match vm.classes.get(&class_lower) {
-        Some(class) => {
-            // Own methods first (declaration order), then inherited ones.
-            let own = class.methods.values().filter(|m| lower_bytes(&m.declaring_class) == class_lower);
-            let inherited = class.methods.values().filter(|m| lower_bytes(&m.declaring_class) != class_lower);
-            own.chain(inherited)
-                .filter(|m| !m.name.starts_with(b"__property_"))
-                .map(|m| (m.name.clone(), m.visibility, lower_bytes(&m.declaring_class)))
-                .collect()
-        }
-        None => Vec::new(),
-    };
-    for (name, vis, decl) in methods {
-        let visible = match vis {
-            Visibility::Public => true,
-            Visibility::Protected => scope.as_ref().map(|sc| {
-                *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
-            }).unwrap_or(false),
-            Visibility::Private => scope.as_ref().map(|sc| *sc == decl).unwrap_or(false),
-        };
-        if visible {
-            result.push(Value::String(PhpString::from_vec(name)));
+    if let Some(methods) = goro_core::reflection::class_method_list(vm, &class_lower) {
+        for (name, vis, declaring) in methods {
+            let visible = match vis {
+                goro_core::object::Visibility::Public => true,
+                goro_core::object::Visibility::Protected => match scope {
+                    Some(ref scope) => {
+                        scope.as_slice() == declaring.as_slice()
+                            || vm.class_extends(scope, &declaring)
+                            || vm.class_extends(&declaring, scope)
+                    }
+                    None => false,
+                },
+                goro_core::object::Visibility::Private => match scope {
+                    Some(ref scope) => scope.as_slice() == declaring.as_slice(),
+                    None => false,
+                },
+            };
+            if visible {
+                result.push(Value::String(PhpString::from_vec(name)));
+            }
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
