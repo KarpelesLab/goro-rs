@@ -16,6 +16,7 @@ struct State {
     errors: Vec<XmlError>,
     last: Option<XmlError>,
     entity_loader: Option<Value>,
+    streams_context: Option<Value>,
 }
 
 thread_local! {
@@ -24,6 +25,99 @@ thread_local! {
 
 pub fn use_internal_errors() -> bool {
     STATE.with(|s| s.borrow().internal)
+}
+
+/// php_libxml_external_entity_loader with a user callback installed:
+/// None when no callback is set (use the default loader), Some(None) when
+/// loading failed (already reported), Some(Some(data)) on success.
+/// `ctx` holds the parser context's directory, intSubName, extSubURI and
+/// extSubSystem.
+pub fn user_entity_load(
+    vm: &mut Vm,
+    public: Option<&str>,
+    system: Option<&str>,
+    ctx: [Option<String>; 4],
+) -> Option<Option<Vec<u8>>> {
+    let cb = entity_loader()?;
+    let s = |v: Option<&str>| match v {
+        Some(x) => Value::String(PhpString::from_string(x.to_string())),
+        None => Value::Null,
+    };
+    let mut arr = PhpArray::new();
+    for (k, v) in ["directory", "intSubName", "extSubURI", "extSubSystem"]
+        .iter()
+        .zip(ctx.iter())
+    {
+        arr.set(
+            goro_core::array::ArrayKey::String(PhpString::from_bytes(k.as_bytes())),
+            s(v.as_deref()),
+        );
+    }
+    let params = [
+        s(public),
+        s(system),
+        Value::Array(Rc::new(RefCell::new(arr))),
+    ];
+    let r = vm.call_callback(&cb, &params);
+    let fname = crate::dom::active_fn(vm);
+    if vm.current_exception.is_some() {
+        return Some(None);
+    }
+    let rv = match r {
+        Ok(v) => v.deref(),
+        Err(_) => return Some(None),
+    };
+    let resource: Option<String> = match &rv {
+        Value::String(st) => Some(st.to_string_lossy()),
+        Value::Resource(_) => {
+            let data = vm
+                .functions
+                .get(&b"stream_get_contents".to_vec())
+                .copied()
+                .and_then(|f| f(vm, std::slice::from_ref(&rv)).ok());
+            if let Some(Value::String(d)) = data {
+                return Some(Some(d.as_bytes().to_vec()));
+            }
+            None
+        }
+        Value::Null | Value::Undef => None,
+        other => {
+            let st = vm.value_to_string(other);
+            if vm.current_exception.is_some() {
+                return Some(None);
+            }
+            Some(st.to_string_lossy())
+        }
+    };
+    match resource {
+        None => {
+            let msg = match public {
+                None => {
+                    "Failed to load external entity because the resolver function returned null"
+                        .to_string()
+                }
+                Some(id) => format!("Failed to load external entity \"{}\"", id),
+            };
+            issue_error(vm, &fname, &msg);
+            Some(None)
+        }
+        Some(path) => match std::fs::read(crate::io::strip_file_scheme(&path)) {
+            Ok(d) => Some(Some(d)),
+            Err(_) => {
+                let msg = format!(
+                    "I/O warning : failed to load \"{}\": No such file or directory",
+                    path
+                );
+                issue_error(vm, &fname, &msg);
+                Some(None)
+            }
+        },
+    }
+}
+
+/// The stream context set with libxml_set_streams_context().
+pub fn streams_context() -> Option<Value> {
+    STATE.with(|s| s.borrow().streams_context.clone())
 }
 
 pub fn entity_loader() -> Option<Value> {
@@ -187,8 +281,32 @@ fn libxml_clear_errors(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Null)
 }
 
-fn libxml_set_streams_context(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
+fn libxml_set_streams_context(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let v = args.first().map(|v| v.deref()).unwrap_or(Value::Undef);
+    match v {
+        Value::Resource(_) => {
+            STATE.with(|s| s.borrow_mut().streams_context = Some(v));
+            Ok(Value::Null)
+        }
+        Value::Undef => {
+            let e = vm.create_exception(
+                b"ArgumentCountError",
+                "libxml_set_streams_context() expects exactly 1 argument, 0 given",
+                vm.current_line,
+            );
+            vm.current_exception = Some(e);
+            Ok(Value::Null)
+        }
+        other => {
+            let msg = format!(
+                "libxml_set_streams_context(): Argument #1 ($context) must be of type resource, {} given",
+                crate::dom::type_name_of(&other)
+            );
+            let e = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(e);
+            Ok(Value::Null)
+        }
+    }
 }
 
 fn libxml_disable_entity_loader(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -196,8 +314,31 @@ fn libxml_disable_entity_loader(vm: &mut Vm, _args: &[Value]) -> Result<Value, V
     Ok(Value::False)
 }
 
-fn libxml_set_external_entity_loader(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let v = args.first().cloned().unwrap_or(Value::Null);
+fn libxml_set_external_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    if !matches!(v, Value::Null | Value::Undef) {
+        let ok = match vm.functions.get(&b"is_callable".to_vec()).copied() {
+            Some(f) => matches!(f(vm, &[v.clone()]), Ok(Value::True)),
+            None => true,
+        };
+        if !ok {
+            let why = match &v {
+                Value::String(s) => format!(
+                    "function \"{}\" not found or invalid function name",
+                    s.to_string_lossy()
+                ),
+                Value::Array(_) => "array callback must have exactly two members".to_string(),
+                _ => "no array or string given".to_string(),
+            };
+            let msg = format!(
+                "libxml_set_external_entity_loader(): Argument #1 ($resolver_function) must be a valid callback or null, {}",
+                why
+            );
+            let e = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(e);
+            return Ok(Value::Null);
+        }
+    }
     STATE.with(|s| {
         s.borrow_mut().entity_loader = if matches!(v, Value::Null | Value::Undef) {
             None

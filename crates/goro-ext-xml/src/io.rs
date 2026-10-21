@@ -5,7 +5,7 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::Vm;
 
-fn strip_file_scheme(path: &str) -> String {
+pub fn strip_file_scheme(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("file://") {
         // file:///abs/path or file://localhost/abs/path
         let rest = rest.strip_prefix("localhost").unwrap_or(rest);
@@ -35,17 +35,53 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Read a resource (local file or PHP stream wrapper) completely.
+fn percent_nul(vm: &mut Vm, filename: &str) -> bool {
+    if filename.contains("%00") {
+        let f = crate::dom::active_fn(vm);
+        vm.emit_warning(&format!(
+            "{}(): URI must not contain percent-encoded NUL bytes",
+            f
+        ));
+        return true;
+    }
+    false
+}
+
+thread_local! {
+    static REPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the last failed read_resource() already reported its error
+/// (user entity loader), so callers must not add an I/O warning.
+pub fn last_failure_reported() -> bool {
+    REPORTED.with(|r| r.get())
+}
+
 pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
+    REPORTED.with(|r| r.set(false));
+    if percent_nul(vm, filename) {
+        return None;
+    }
+    if let Some(r) =
+        crate::libxml::user_entity_load(vm, None, Some(filename), [None, None, None, None])
+    {
+        if r.is_none() {
+            REPORTED.with(|x| x.set(true));
+        }
+        return r;
+    }
     let path = strip_file_scheme(filename);
     if path.contains("://") || path.starts_with("php://") || path.starts_with("data:") {
         // go through file_get_contents (stream wrappers)
         let f = vm.functions.get(&b"file_get_contents".to_vec()).copied()?;
         let silenced = vm.error_reporting;
         vm.error_reporting = 0;
-        let r = f(
-            vm,
-            &[Value::String(PhpString::from_string(filename.to_string()))],
-        );
+        let mut fargs = vec![Value::String(PhpString::from_string(filename.to_string()))];
+        if let Some(ctx) = crate::libxml::streams_context() {
+            fargs.push(Value::False);
+            fargs.push(ctx);
+        }
+        let r = f(vm, &fargs);
         vm.error_reporting = silenced;
         return match r {
             Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
@@ -77,6 +113,9 @@ pub fn resource_url(filename: &str) -> String {
 
 /// Write bytes to a resource. Returns success.
 pub fn write_resource(vm: &mut Vm, filename: &str, data: &[u8]) -> bool {
+    if percent_nul(vm, filename) {
+        return false;
+    }
     let path = strip_file_scheme(filename);
     if path.contains("://") {
         let f = match vm.functions.get(&b"file_put_contents".to_vec()).copied() {

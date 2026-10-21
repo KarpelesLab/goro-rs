@@ -810,6 +810,7 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
         };
         match crate::io::read_resource(vm, &path) {
             Some(d) => (d, Some(path)),
+            None if crate::io::last_failure_reported() => return Ok(Value::False),
             None => {
                 let msg = format!(
                     "I/O warning : failed to load \"{}\": No such file or directory",
@@ -905,6 +906,7 @@ fn html_load(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
         let src = String::from_utf8_lossy(&source).into_owned();
         match crate::io::read_resource(vm, &src) {
             Some(d) => (d, Some(src)),
+            None if crate::io::last_failure_reported() => return Ok(Value::False),
             None => {
                 let msg = format!(
                     "I/O warning : failed to load \"{}\": No such file or directory",

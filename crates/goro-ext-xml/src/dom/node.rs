@@ -1518,24 +1518,50 @@ fn m_get_node_path(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_get_line_no(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     args(a).count(vm, 0, 0)?;
     let n = this_node(vm, o)?;
-    Ok(Value::Long(tree::with(|t| {
-        let nd = &t.nodes[n];
-        match nd.t {
-            NType::Element | NType::Text | NType::Comment | NType::Pi | NType::CData => {
-                nd.line as i64
+    Ok(Value::Long(tree::with(|t| line_no(t, n, 0))))
+}
+
+/// xmlGetLineNoInternal: libxml2 stores lines >= 65535 as 65535 in the node
+/// (text nodes keep the real line with XML_PARSE_BIG_LINES) and looks at
+/// neighbouring nodes for those.
+fn line_no(t: &Tree, n: NodeId, depth: u32) -> i64 {
+    if depth >= 5 {
+        return -1;
+    }
+    let nd = &t.nodes[n];
+    let big = nd
+        .doc
+        .and_then(|d| t.doc_info(d))
+        .map(|i| i.parse_options & crate::parser::XML_PARSE_BIG_LINES != 0)
+        .unwrap_or(false);
+    match nd.t {
+        NType::Element | NType::Text | NType::Comment | NType::Pi | NType::CData => {
+            if nd.line < 65535 {
+                return nd.line as i64;
             }
-            NType::Attribute => nd.parent.map(|p| t.nodes[p].line as i64).unwrap_or(-1),
-            _ => {
-                if let Some(p) = nd.prev {
-                    t.nodes[p].line as i64
-                } else if let Some(p) = nd.parent {
-                    t.nodes[p].line as i64
-                } else {
-                    -1
-                }
+            if nd.t == NType::Text && big {
+                nd.line as i64
+            } else if nd.t == NType::Element && nd.children.is_some() {
+                line_no(t, nd.children.unwrap(), depth + 1)
+            } else if let Some(x) = nd.next {
+                line_no(t, x, depth + 1)
+            } else if let Some(x) = nd.prev {
+                line_no(t, x, depth + 1)
+            } else {
+                65535
             }
         }
-    })))
+        NType::Attribute => nd.parent.map(|p| line_no(t, p, depth + 1)).unwrap_or(-1),
+        _ => {
+            if let Some(p) = nd.prev {
+                line_no(t, p, depth + 1)
+            } else if let Some(p) = nd.parent {
+                line_no(t, p, depth + 1)
+            } else {
+                -1
+            }
+        }
+    }
 }
 
 fn m_contains(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {

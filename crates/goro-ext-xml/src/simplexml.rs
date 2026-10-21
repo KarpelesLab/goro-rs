@@ -2018,6 +2018,7 @@ fn read_file(vm: &mut Vm, fname: &str, filename: &str, options: i64) -> Option<N
             let url = crate::io::resource_url(filename);
             read_memory(vm, fname, &data, options, Some(&url))
         }
+        None if crate::io::last_failure_reported() => None,
         None => {
             let msg = format!(
                 "I/O warning : failed to load \"{}\": No such file or directory",
