@@ -44784,7 +44784,9 @@ impl Vm {
                         {
                             let flags = crate::spl_array::ao_flags(obj);
                             let has_prop = obj.borrow().has_property(prop_name.as_bytes());
-                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0 && !has_prop {
+                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0
+                                && (!has_prop || self.ao_prop_as_dim(obj, prop_name.as_bytes()))
+                            {
                                 let user_get = self
                                     .classes
                                     .get(&class_lower)
@@ -46087,7 +46089,9 @@ impl Vm {
                         {
                             let flags = crate::spl_array::ao_flags(obj);
                             let has_prop = obj.borrow().has_property(prop_name.as_bytes());
-                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0 && !has_prop {
+                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0
+                                && (!has_prop || self.ao_prop_as_dim(obj, prop_name.as_bytes()))
+                            {
                                 let user_set = self
                                     .classes
                                     .get(&class_lower)

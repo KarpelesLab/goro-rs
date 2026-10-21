@@ -461,7 +461,32 @@ impl Vm {
         {
             return false;
         }
-        ao_flags(obj) & ARRAY_AS_PROPS != 0 && !obj.borrow().has_property(name)
+        if ao_flags(obj) & ARRAY_AS_PROPS == 0 {
+            return false;
+        }
+        if !obj.borrow().has_property(name) {
+            return true;
+        }
+        // zend_std_has_property(): a property the calling scope cannot see
+        // does not exist.
+        let Some((vis, decl, ..)) = self.find_property_def(&cl, name) else {
+            return false;
+        };
+        let scope = self
+            .current_class_scope()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let decl = decl.to_ascii_lowercase();
+        match vis {
+            crate::object::Visibility::Public => false,
+            crate::object::Visibility::Private => scope != decl,
+            crate::object::Visibility::Protected => {
+                scope.is_empty()
+                    || !(scope == decl
+                        || self.class_extends(&scope, &decl)
+                        || self.class_extends(&decl, &scope))
+            }
+        }
     }
 
     /// spl_array_has_dimension_ex(check_inherited=true, check_empty=0): isset().

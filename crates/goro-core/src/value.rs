@@ -1042,6 +1042,24 @@ impl Value {
                         // ext/date DateInterval objects are not comparable
                         false
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
+                        && a_b.has_property(b"__spl_array")
+                        && b_b.has_property(b"__spl_array")
+                    {
+                        // spl_array_compare_objects(): the storages, then the
+                        // (non-internal) properties.
+                        let visible = |o: &PhpObject| -> Vec<(Vec<u8>, Value)> {
+                            o.properties
+                                .iter()
+                                .filter(|(k, _)| !k.starts_with(b"__spl_"))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        };
+                        let (av, bv) = (visible(&a_b), visible(&b_b));
+                        a_b.get_property(b"__spl_array")
+                            .equals(&b_b.get_property(b"__spl_array"))
+                            && av.len() == bv.len()
+                            && av.iter().all(|(k, v)| v.equals(&b_b.get_property(k)))
+                    } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
                         && a_b.properties.len() == b_b.properties.len()
                     {
                         let mut eq = true;
@@ -1525,6 +1543,35 @@ impl Value {
                     // <, >, <=, >= all return false; == returns false
                     // <=> returns 1 but </>/>=/<=  use i64::MIN to indicate incomparable
                     return i64::MIN;
+                }
+                // spl_array_compare_objects(): the storages, then the
+                // (non-internal) properties.
+                if a_borrow.has_property(b"__spl_array") && b_borrow.has_property(b"__spl_array") {
+                    let cmp = a_borrow
+                        .get_property(b"__spl_array")
+                        .compare(&b_borrow.get_property(b"__spl_array"));
+                    if cmp != 0 {
+                        return cmp;
+                    }
+                    let visible = |o: &PhpObject| -> Vec<(Vec<u8>, Value)> {
+                        o.properties
+                            .iter()
+                            .filter(|(k, _)| !k.starts_with(b"__spl_"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    };
+                    let (av, bv) = (visible(&a_borrow), visible(&b_borrow));
+                    if av.len() != bv.len() {
+                        return if av.len() < bv.len() { -1 } else { 1 };
+                    }
+                    for (key, a_val) in &av {
+                        let b_val = b_borrow.get_property(key);
+                        let cmp = a_val.compare(&b_val);
+                        if cmp != 0 {
+                            return cmp;
+                        }
+                    }
+                    return 0;
                 }
                 // Same class: compare properties
                 if a_borrow.properties.len() != b_borrow.properties.len() {
