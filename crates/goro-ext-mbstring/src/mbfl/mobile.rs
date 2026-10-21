@@ -187,7 +187,6 @@ fn mb_iso2022jp_kddi_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32)
         p += 1;
         if c == 0x1B {
             if e - p < 2 {
-                p = e;
                 out.push(MBFL_BAD_INPUT);
                 break;
             }

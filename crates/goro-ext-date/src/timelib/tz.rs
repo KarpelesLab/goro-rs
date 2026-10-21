@@ -629,8 +629,8 @@ fn calc_transition(psi: &PosixTransInfo, year: i64) -> i64 {
                 i += 1;
             }
             let mut value = d * SECS_PER_DAY;
-            for i in 0..(psi.month - 1) as usize {
-                value += MONTH_LENGTHS[leap_year][i] * SECS_PER_DAY;
+            for len in &MONTH_LENGTHS[leap_year][..(psi.month - 1) as usize] {
+                value += len * SECS_PER_DAY;
             }
             value
         }

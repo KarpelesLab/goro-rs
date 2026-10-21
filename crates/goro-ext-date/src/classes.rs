@@ -716,7 +716,7 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
         };
         let mut p = PeriodObj::default();
         let mut recurrences = 0;
-        let mut options = 0;
+        let options;
         enum Form {
             Recur,
             End,

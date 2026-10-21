@@ -243,10 +243,7 @@ fn decompress_with_limit(vm: &mut Vm, input: &[u8], max: i64, fname: &str, zlib_
             // Try one decompress with 0 output to see if stream is ended; if not, fail.
             let in_buf = &input[total_in..];
             let mut tmp = [0u8; 0];
-            let in_before = dec.total_in();
             let res = dec.decompress(in_buf, &mut tmp, FlushDecompress::None);
-            let consumed = (dec.total_in() - in_before) as usize;
-            total_in += consumed;
             match res {
                 Ok(Status::StreamEnd) => return Ok(Value::String(PhpString::from_vec(out))),
                 _ => {
@@ -406,6 +403,7 @@ enum GzHandle {
         /// Whether we're at EOF
         eof: bool,
         /// Whether this is the writer mode handle
+        #[allow(dead_code)]
         is_writer: bool,
     },
     Writer {
@@ -964,6 +962,7 @@ fn readgzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // ========== deflate_init / deflate_add / inflate_init / inflate_add ==========
 
 struct DeflateContext {
+    #[allow(dead_code)]
     encoding: i64,
     compress: Compress,
     finished: bool,
@@ -974,7 +973,9 @@ struct InflateContext {
     decompress: Decompress,
     total_read: usize,
     status: i64, // 0 = OK, 1 = STREAM_END
+    #[allow(dead_code)]
     dictionary: Option<Vec<u8>>,
+    #[allow(dead_code)]
     pending_dict_apply: bool,
     /// For gzip encoding (31), we manually parse the gzip header and feed
     /// the rest as raw deflate. This stores the buffer until header is parsed.
@@ -999,13 +1000,9 @@ fn make_compress(encoding: i64, level: Compression) -> Compress {
         15 => Compress::new(level, true),
         -15 => Compress::new(level, false),
         31 => {
-            // GZIP: use window_bits = 15 with new_gzip if available, else fallback
-            #[cfg(feature = "any_zlib")]
-            { Compress::new_gzip(level, 15) }
-            // Default: just use new with zlib_header=true (zlib header).
-            // For miniz_oxide without gzip, fall back to zlib.
-            #[cfg(not(feature = "any_zlib"))]
-            { Compress::new(level, true) }
+            // GZIP: miniz_oxide has no gzip window bits here, so fall back to
+            // new with zlib_header=true (zlib header).
+            Compress::new(level, true)
         }
         _ => Compress::new(level, true),
     }

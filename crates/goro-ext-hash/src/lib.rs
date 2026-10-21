@@ -902,6 +902,7 @@ fn md5_hash(data: &[u8]) -> [u8; 16] {
 }
 
 /// SHA1 hash implementation (FIPS 180-1)
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
 fn sha1_hash(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x67452301;
     let mut h1: u32 = 0xEFCDAB89;
@@ -1406,6 +1407,7 @@ fn sha3_hash(data: &[u8], bits: usize) -> Vec<u8> {
     keccak_sponge(data, rate_bytes, output_bytes, 0x06)
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
 fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8) -> Vec<u8> {
     let mut state = [0u64; 25];
 
@@ -1470,6 +1472,7 @@ fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8
     output
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
 fn keccak_f1600(state: &mut [u64; 25]) {
     const RC: [u64; 24] = [
         0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,

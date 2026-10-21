@@ -559,7 +559,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             }
             let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
             if let Some(w) = warn {
-                err_plain(vm, E_WARNING, &w.replace("Invalid quantity", &format!("Invalid \"{}\" setting.", name)).replace("Invalid \"", "Invalid \""));
+                err_plain(vm, E_WARNING, &w.replace("Invalid quantity", &format!("Invalid \"{}\" setting.", name)));
             }
             let v = v as i64;
             if key == "gc_probability" {

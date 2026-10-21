@@ -57,6 +57,7 @@ impl RegEnc {
     }
 
     /// Length in bytes of the character starting at s[p]
+    #[allow(clippy::if_same_then_else)] // branches mirror the C source
     fn char_len(self, s: &[u8], p: usize) -> usize {
         let c = s[p];
         let n = match self {
@@ -2386,6 +2387,7 @@ impl Regex {
     /// Names in the order onig_foreach_name visits them: Oniguruma keeps
     /// names in an st hash table (11 bins initially, entries prepended to
     /// their bin, rehashed when the density exceeds 5).
+    #[allow(clippy::explicit_counter_loop)] // counter mirrors the C source
     pub fn names_foreach_order(&self) -> Vec<usize> {
         fn hash(s: &[u8]) -> u32 {
             let mut val: u32 = 0;

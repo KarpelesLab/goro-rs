@@ -20,6 +20,7 @@ pub fn type_name(v: &Value) -> String {
 }
 
 /// Is the argument present (not Undef)?
+#[allow(dead_code)]
 pub fn present(args: &[Value], idx: usize) -> bool {
     !matches!(args.get(idx), None | Some(Value::Undef))
 }

@@ -928,26 +928,8 @@ fn parse_tz_cor(ptr: &mut Ptr, tz_not_found: &mut bool) -> i64 {
     0
 }
 
-fn parse_tz_minutes(ptr: &mut Ptr, t: &mut Time) -> i64 {
-    let begin = ptr.p;
-    let first = ptr.c();
-    if first != b'+' && first != b'-' {
-        return UNSET;
-    }
-    ptr.adv();
-    while ptr.c().is_ascii_digit() {
-        ptr.adv();
-    }
-    t.is_localtime = 1;
-    t.zone_type = ZONETYPE_OFFSET;
-    t.dst = 0;
-    let v = smin(strtol(&ptr.s[begin + 1..]));
-    if first == b'+' { v } else { -v }
-}
-
 /// timelib_parse_zone
 pub fn parse_zone(ptr: &mut Ptr, dst: &mut i32, t: &mut Time, tz_not_found: &mut bool) -> i64 {
-    let mut retval = 0;
     let mut paren_count = 0;
     *tz_not_found = false;
     while ptr.c() == b' ' || ptr.c() == b'\t' || ptr.c() == b'(' {
@@ -959,18 +941,18 @@ pub fn parse_zone(ptr: &mut Ptr, dst: &mut i32, t: &mut Time, tz_not_found: &mut
     if ptr.c() == b'G' && ptr.at(1) == b'M' && ptr.at(2) == b'T' && (ptr.at(3) == b'+' || ptr.at(3) == b'-') {
         ptr.p += 3;
     }
-    if ptr.c() == b'+' {
+    let retval = if ptr.c() == b'+' {
         ptr.adv();
         t.is_localtime = 1;
         t.zone_type = ZONETYPE_OFFSET;
         t.dst = 0;
-        retval = parse_tz_cor(ptr, tz_not_found);
+        parse_tz_cor(ptr, tz_not_found)
     } else if ptr.c() == b'-' {
         ptr.adv();
         t.is_localtime = 1;
         t.zone_type = ZONETYPE_OFFSET;
         t.dst = 0;
-        retval = -parse_tz_cor(ptr, tz_not_found);
+        -parse_tz_cor(ptr, tz_not_found)
     } else {
         let mut found = false;
         t.is_localtime = 1;
@@ -989,8 +971,8 @@ pub fn parse_zone(ptr: &mut Ptr, dst: &mut i32, t: &mut Time, tz_not_found: &mut
             }
         }
         *tz_not_found = found_count == 0;
-        retval = offset;
-    }
+        offset
+    };
     while paren_count > 0 && ptr.c() == b')' {
         ptr.adv();
         paren_count -= 1;
@@ -1630,12 +1612,7 @@ pub fn strtotime(input: &[u8]) -> (Time, ErrorContainer) {
     t.relative.days = UNSET;
     let mut st = State { str: buf, tok: 0, cur: 0, errors, time: t };
     let input_len = slice.len();
-    loop {
-        match scan(&mut st, input_len) {
-            Step::Continue => {}
-            Step::Eoi => break,
-        }
-    }
+    while let Step::Continue = scan(&mut st, input_len) {}
     if st.time.have_time != 0 && !valid_time(st.time.h, st.time.i, st.time.s) {
         st.add_warning(WARN_INVALID_TIME, "The parsed time was invalid");
     }

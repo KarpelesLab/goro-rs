@@ -2184,6 +2184,7 @@ fn socket_addrinfo_explain_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
 }
 
 /// socket_sendto(Socket $socket, string $data, int $length, int $flags, string $address, ?int $port = null): int|false
+#[allow(clippy::unnecessary_unwrap)] // Null/Undef share the is_none branch
 fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let socket_id = match arg_socket_id(args.first()) {
         Some(s) => s,

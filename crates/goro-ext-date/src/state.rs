@@ -20,7 +20,6 @@ pub const P_STATE: &[u8] = b"__timestamp_state";
 pub const P_TZ: &[u8] = b"__timestamp_tzobj";
 pub const P_IVAL: &[u8] = b"__timestamp_ival";
 pub const P_PERIOD: &[u8] = b"__timestamp_period";
-pub const P_ITER: &[u8] = b"__timestamp_iter";
 
 pub const CIVIL: i64 = 1;
 pub const WALL: i64 = 2;
@@ -307,6 +306,7 @@ pub struct TzObj {
 }
 
 impl TzObj {
+    #[allow(clippy::inherent_to_string)] // not a Display impl; callers use it as a plain getter
     pub fn to_string(&self) -> String {
         match self.ztype {
             ZONETYPE_ID => self.tz.as_ref().map(|t| t.name.clone()).unwrap_or_default(),

@@ -31,6 +31,7 @@ fn transfer_encoded_size(tmp: &[u8], base64: bool) -> usize {
     }
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)] // keep chunks_exact + remainder like the C loop
 fn transfer_encode_mime_bytes(tmp: &mut ConvBuf, out: &mut Vec<u8>, base64: bool) {
     let p = &tmp.out;
     if base64 {

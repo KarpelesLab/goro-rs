@@ -282,6 +282,7 @@ pub struct Tm {
     pub year: i64,
     pub wday: i64,
     pub yday: i64,
+    #[allow(dead_code)]
     pub isdst: i64,
     pub gmtoff: i64,
     pub zone: String,

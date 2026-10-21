@@ -523,7 +523,7 @@ fn mysqli_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_long() as u16)
         .unwrap_or(3306);
 
-    let actual_host = if host.starts_with("p:") { &host[2..] } else { &host };
+    let actual_host = host.strip_prefix("p:").unwrap_or(&host[..]);
 
     let mut builder = mysql_async::OptsBuilder::default()
         .ip_or_hostname(actual_host)
@@ -1495,7 +1495,7 @@ fn mysqli_real_connect(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .map(|v| v.to_php_string().to_string_lossy());
     let _flags = args.get(7).map(|v| v.to_long()).unwrap_or(0);
 
-    let actual_host = if host.starts_with("p:") { &host[2..] } else { &host };
+    let actual_host = host.strip_prefix("p:").unwrap_or(&host[..]);
     let mut builder = mysql_async::OptsBuilder::default()
         .ip_or_hostname(actual_host)
         .tcp_port(port)

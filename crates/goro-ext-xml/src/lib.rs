@@ -152,11 +152,11 @@ fn decode_entity(entity: &str) -> Option<String> {
         "apos" => Some("'".to_string()),
         "quot" => Some("\"".to_string()),
         _ => {
-            if entity.starts_with('#') {
-                let code = if entity.starts_with("#x") || entity.starts_with("#X") {
-                    u32::from_str_radix(&entity[2..], 16).ok()
+            if let Some(num) = entity.strip_prefix('#') {
+                let code = if num.starts_with('x') || num.starts_with('X') {
+                    u32::from_str_radix(&num[1..], 16).ok()
                 } else {
-                    entity[1..].parse::<u32>().ok()
+                    num.parse::<u32>().ok()
                 };
                 code.and_then(char::from_u32).map(|c| c.to_string())
             } else {
