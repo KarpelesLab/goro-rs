@@ -3120,7 +3120,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "AllowDynamicProperties", kind: 0, flags: 0x20, ext: "Core",
+        name: "AllowDynamicProperties", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3257,7 +3257,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Attribute", kind: 0, flags: 0x20, ext: "Core",
+        name: "Attribute", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[StubConst { name: "TARGET_CLASS", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_FUNCTION", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_METHOD", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_PROPERTY", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_CLASS_CONSTANT", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_PARAMETER", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_CONSTANT", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "TARGET_ALL", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_REPEATABLE", ty: "int", value: None, flags: 0x1, ext: "" }],
         props: &[StubProp { name: "flags", ty: "int", default: None, flags: 0x1 }],
@@ -3666,7 +3666,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "DelayedTargetValidation", kind: 0, flags: 0x20, ext: "Core",
+        name: "DelayedTargetValidation", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3675,7 +3675,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Deprecated", kind: 0, flags: 0x20, ext: "Core",
+        name: "Deprecated", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "message", ty: "?string", default: None, flags: 0x81 }, StubProp { name: "since", ty: "?string", default: None, flags: 0x81 }],
@@ -4217,7 +4217,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "NoDiscard", kind: 0, flags: 0x20, ext: "Core",
+        name: "NoDiscard", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "message", ty: "?string", default: None, flags: 0x81 }],
@@ -4306,7 +4306,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Override", kind: 0, flags: 0x20, ext: "Core",
+        name: "Override", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5173,7 +5173,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReturnTypeWillChange", kind: 0, flags: 0x20, ext: "Core",
+        name: "ReturnTypeWillChange", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5211,7 +5211,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "SensitiveParameter", kind: 0, flags: 0x20, ext: "Core",
+        name: "SensitiveParameter", kind: 0, flags: 0x1000020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],

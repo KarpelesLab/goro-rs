@@ -8641,6 +8641,52 @@ pub fn reflection_attribute_method(
                 let new_obj = PhpObject::new(canonical_name.to_vec(), obj_id);
                 return Some(Value::Object(Rc::new(RefCell::new(new_obj))));
             }
+            // Internal attribute classes (e.g. #[\Deprecated], #[\NoDiscard]).
+            if vm.classes.get(&class_lower).map(|c| c.filename.is_none()).unwrap_or(true) && internal_class_known(vm, &class_lower) {
+                if let Some(sc) = crate::stubs::find_class(&class_lower).filter(|c| c.flags & crate::stubs::F_ATTRIBUTE != 0) {
+                    // Map named arguments onto the stub constructor's positions.
+                    let mut positional: Vec<Value> = Vec::new();
+                    let mut named: Vec<(Vec<u8>, Value)> = Vec::new();
+                    if let Value::Array(a) = &args {
+                        for (k, v) in a.borrow().iter() {
+                            match k {
+                                ArrayKey::Int(_) => positional.push(v.clone()),
+                                ArrayKey::String(n) => named.push((n.as_bytes().to_vec(), v.clone())),
+                            }
+                        }
+                    }
+                    if let Some((_, ctor)) = crate::stubs::find_method(sc.name.as_bytes(), b"__construct") {
+                        for (n, v) in named {
+                            let pos = match ctor.args.iter().position(|a| a.name.as_bytes() == n.as_slice()) {
+                                Some(p) => p,
+                                None => {
+                                    let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                                    let exc = vm.create_exception(b"Error", &msg, call_site_line);
+                                    vm.current_exception = Some(exc);
+                                    return Some(Value::Null);
+                                }
+                            };
+                            while positional.len() < pos {
+                                let i = positional.len();
+                                let d = ctor.args.get(i).and_then(|a| a.default).and_then(|d| eval_internal_default(vm, d)).unwrap_or(Value::Null);
+                                positional.push(d);
+                            }
+                            if positional.len() == pos {
+                                positional.push(v);
+                            } else {
+                                positional[pos] = v;
+                            }
+                        }
+                    }
+                    let mut list = PhpArray::new();
+                    for v in positional {
+                        list.push(v);
+                    }
+                    let src = format!("return new \\{}(...$__a);", sc.name);
+                    let v = run_snippet_in_scope(vm, &src, &[("__a", Value::Array(Rc::new(RefCell::new(list))))], b"");
+                    return Some(v.unwrap_or(Value::Null));
+                }
+            }
             if !vm.classes.contains_key(&class_lower) {
                 let err_msg = format!("Attribute class \"{}\" not found", attr_name);
                 let exc = vm.create_exception(b"Error", &err_msg, call_site_line);

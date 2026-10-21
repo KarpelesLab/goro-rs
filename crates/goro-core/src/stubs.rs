@@ -28,6 +28,8 @@ pub const F_PROTECTED_SET: u32 = 0x100000;
 pub const F_PRIVATE_SET: u32 = 0x200000;
 pub const F_VIRTUAL: u32 = 0x400000;
 pub const F_NOT_SERIALIZABLE: u32 = 0x800000;
+/// Internal class declared with #[Attribute].
+pub const F_ATTRIBUTE: u32 = 0x1000000;
 
 pub const A_BY_REF: u8 = 1;
 pub const A_PREFER_REF: u8 = 2;
