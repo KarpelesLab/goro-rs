@@ -2768,6 +2768,200 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+/// zend_is_callable_error(): None if `cb` is callable from the current scope,
+/// otherwise the reason PHP reports after "must be a valid callback, ".
+pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
+    let cb = cb.deref();
+    let check_method = |vm: &Vm, class_lower: &[u8], method: &[u8], is_static_call: bool| -> Option<String> {
+        let class = match vm.classes.get(class_lower) {
+            Some(c) => c,
+            None => return Some(format!("class \"{}\" not found", String::from_utf8_lossy(class_lower))),
+        };
+        let cname = String::from_utf8_lossy(&class.name).to_string();
+        let mlower = method.to_ascii_lowercase();
+        match class.get_method(&mlower) {
+            Some(m) => {
+                let scope = vm.current_class_scope();
+                let ok = match m.visibility {
+                    goro_core::object::Visibility::Public => true,
+                    goro_core::object::Visibility::Private => scope.as_deref() == Some(m.declaring_class.as_slice()),
+                    goro_core::object::Visibility::Protected => scope.as_ref().map(|sc| {
+                        sc.as_slice() == class_lower || vm.class_extends(sc, class_lower) || vm.class_extends(class_lower, sc)
+                            || sc.as_slice() == m.declaring_class.as_slice() || vm.class_extends(sc, &m.declaring_class)
+                    }).unwrap_or(false),
+                };
+                if !ok {
+                    let vis = if matches!(m.visibility, goro_core::object::Visibility::Private) { "private" } else { "protected" };
+                    return Some(format!("cannot access {} method {}::{}()", vis, cname, String::from_utf8_lossy(&m.name)));
+                }
+                if is_static_call && !m.is_static {
+                    return Some(format!("non-static method {}::{}() cannot be called statically", cname, String::from_utf8_lossy(&m.name)));
+                }
+                None
+            }
+            None => {
+                if class.get_method(b"__call").is_some() || (is_static_call && class.get_method(b"__callstatic").is_some()) {
+                    return None;
+                }
+                Some(format!("class {} does not have a method \"{}\"", cname, String::from_utf8_lossy(method)))
+            }
+        }
+    };
+    match &cb {
+        Value::String(s) => {
+            let name = s.as_bytes();
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with(b"__closure_") || lower.starts_with(b"__arrow_") || lower.starts_with(b"__bound_closure_") {
+                return None;
+            }
+            if let Some(pos) = name.windows(2).position(|w| w == b"::") {
+                let class_lower = name[..pos].to_ascii_lowercase();
+                let class_lower = class_lower.strip_prefix(b"\\").map(|c| c.to_vec()).unwrap_or(class_lower);
+                if !vm.classes.contains_key(&class_lower) {
+                    return Some(format!("class \"{}\" not found", String::from_utf8_lossy(&name[..pos])));
+                }
+                return check_method(vm, &class_lower, &name[pos + 2..], true);
+            }
+            let l = lower.strip_prefix(b"\\").unwrap_or(&lower);
+            if vm.functions.contains_key(l) || vm.user_functions.contains_key(l) {
+                return None;
+            }
+            Some(format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(name)))
+        }
+        Value::Array(arr) => {
+            let a = arr.borrow();
+            if a.len() != 2 {
+                return Some("array callback must have exactly two members".to_string());
+            }
+            let vals: Vec<Value> = a.values().cloned().collect();
+            drop(a);
+            if let Value::String(first) = &vals[0] {
+                let fl = first.as_bytes().to_ascii_lowercase();
+                if fl.starts_with(b"__closure_") || fl.starts_with(b"__arrow_") {
+                    return None;
+                }
+            }
+            let method = match vals[1].deref() {
+                Value::String(m) => m.as_bytes().to_vec(),
+                _ => return Some("second array member is not a valid method".to_string()),
+            };
+            match vals[0].deref() {
+                Value::Object(o) => {
+                    let cl = o.borrow().class_name.to_ascii_lowercase();
+                    if cl == b"closure" {
+                        return None;
+                    }
+                    let method = match method.windows(2).position(|w| w == b"::") {
+                        Some(p) if method[..p].eq_ignore_ascii_case(b"parent") => method[p + 2..].to_vec(),
+                        _ => method,
+                    };
+                    check_method(vm, &cl, &method, false)
+                }
+                Value::String(c) => {
+                    let cl = c.as_bytes().to_ascii_lowercase();
+                    let cl = cl.strip_prefix(b"\\").map(|x| x.to_vec()).unwrap_or(cl);
+                    if !vm.classes.contains_key(&cl) {
+                        return Some(format!("class \"{}\" not found", c.to_string_lossy()));
+                    }
+                    check_method(vm, &cl, &method, true)
+                }
+                _ => Some("first array member is not a valid class name or object".to_string()),
+            }
+        }
+        Value::Object(o) => {
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            if cl == b"closure" || vm.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false) {
+                None
+            } else {
+                Some("no array or string given".to_string())
+            }
+        }
+        _ => Some("no array or string given".to_string()),
+    }
+}
+
+fn walk_key_value(k: &ArrayKey) -> Value {
+    match k { ArrayKey::Int(n) => Value::Long(*n), ArrayKey::String(s) => Value::String(s.clone()) }
+}
+
+/// php_array_walk() for arrays: each element is made a reference (so by-ref
+/// callbacks write back) and the callback is invoked through the generic
+/// callable path, which handles by-value/by-ref parameters and arity.
+fn php_array_walk_arr(
+    vm: &mut Vm,
+    arr: &Rc<RefCell<PhpArray>>,
+    cb: &Value,
+    userdata: Option<&Value>,
+    recursive: bool,
+    depth: usize,
+) -> Result<bool, VmError> {
+    if depth > 256 {
+        return Ok(true);
+    }
+    let mut pos = 0usize;
+    loop {
+        let entry = {
+            let a = arr.borrow();
+            a.iter().nth(pos).map(|(k, v)| (k.clone(), v.clone()))
+        };
+        let (key, val) = match entry {
+            Some(e) => e,
+            None => break,
+        };
+        // ZVAL_MAKE_REF
+        let r = match &val {
+            Value::Reference(r) => r.clone(),
+            other => {
+                let r = Rc::new(RefCell::new(other.clone()));
+                arr.borrow_mut().set(key.clone(), Value::Reference(r.clone()));
+                r
+            }
+        };
+        let inner_arr = if recursive {
+            if let Value::Array(sub) = &*r.borrow() { Some(sub.clone()) } else { None }
+        } else {
+            None
+        };
+        if let Some(sub) = inner_arr {
+            if Rc::ptr_eq(&sub, arr) {
+                vm.emit_warning("array_walk_recursive(): Recursion detected");
+                return Ok(true);
+            }
+            php_array_walk_arr(vm, &sub, cb, userdata, true, depth + 1)?;
+        } else {
+            let mut cargs = vec![cb.clone(), Value::Reference(r.clone()), walk_key_value(&key)];
+            if let Some(u) = userdata {
+                cargs.push(u.clone());
+            }
+            drop(r);
+            call_user_func(vm, &cargs)?;
+            if vm.current_exception.is_some() {
+                return Ok(false);
+            }
+        }
+        // Continue after the current key (its position may have moved).
+        let a = arr.borrow();
+        pos = match a.keys().position(|k| *k == key) {
+            Some(p) => p + 1,
+            None => pos,
+        };
+    }
+    // References only held by the array (rc=1) are indistinguishable from
+    // plain values; store them as such.
+    if let Ok(mut a) = arr.try_borrow_mut() {
+        for (_, v) in a.iter_mut() {
+            let unwrap = match v {
+                Value::Reference(r) if Rc::strong_count(r) == 1 => Some(r.borrow().clone()),
+                _ => None,
+            };
+            if let Some(inner) = unwrap {
+                *v = inner;
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() > 3 {
         let msg = format!("array_walk() expects at most 3 arguments, {} given", args.len());
@@ -2792,6 +2986,12 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(cb) => cb,
         None => return Ok(Value::True),
     };
+    if let Some(reason) = callable_error(vm, callback) {
+        let msg = format!("array_walk(): Argument #2 ($callback) must be a valid callback, {}", reason);
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
 
     // For objects, convert properties to entries with PHP-style mangled names
     if is_object {
@@ -2851,16 +3051,9 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Array case
-    if let Some(Value::Array(arr)) = args.first() {
-        let entries: Vec<_> = {
-            let arr_borrow = arr.borrow();
-            arr_borrow
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-        let extra_data = args.get(2);
-        return array_walk_entries(vm, callback, &entries, extra_data, Some(arr));
+    if let Value::Array(arr) = first.deref() {
+        php_array_walk_arr(vm, &arr, callback, args.get(2), false, 0)?;
+        return Ok(Value::True);
     }
 
     Ok(Value::True)
@@ -12137,8 +12330,15 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         _ => return Ok(Value::True),
     };
 
-    if let Value::Array(a) = arr_val {
-        walk_recursive_inner(vm, a, &func_name, &captured, &extra_data)?;
+    let _ = (&func_name, &captured);
+    if let Value::Array(a) = arr_val.deref() {
+        if let Some(reason) = callable_error(vm, callback) {
+            let msg = format!("array_walk_recursive(): Argument #2 ($callback) must be a valid callback, {}", reason);
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line: vm.current_line });
+        }
+        php_array_walk_arr(vm, &a, callback, extra_data.as_ref(), true, 0)?;
     }
     Ok(Value::True)
 }

@@ -4582,6 +4582,19 @@ impl Vm {
             }
         }
 
+        // By-value array parameters get their own copy.
+        for (ci, slot) in func_cvs.iter_mut().enumerate() {
+            if ci < hidden_cvs || op_array.by_ref_params.get(ci).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Value::Array(a) = slot {
+                if Rc::strong_count(a) > 1 {
+                    let copy = a.borrow().clone();
+                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                }
+            }
+        }
+
         // If this is a generator function, create a Generator instead of executing
         if op_array.is_generator {
             let generator = crate::generator::PhpGenerator::new(op_array.clone(), func_cvs);
