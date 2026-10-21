@@ -204,6 +204,11 @@ pub struct PhpObject {
     /// Listed in the VM's objects awaiting destruction (a hint for
     /// `gc::note_dtor_candidate`).
     pub dtor_listed: GcFlag,
+    /// In the cycle collector's root buffer (Zend's GC_INFO).
+    pub gc_buffered: GcFlag,
+    /// Used as a WeakMap key (Zend's IS_OBJ_WEAKLY_REFERENCED): its entries
+    /// are released when it dies.
+    pub weak_key: GcFlag,
     /// For `Closure` instances: the underlying callable (the internal
     /// `__closure_N` name, a `[name, $this?, captures...]` array, a function
     /// name, or a bound-method `["Class::m", $obj]` array).
@@ -250,6 +255,15 @@ impl GcFlag {
 
 impl Drop for PhpObject {
     fn drop(&mut self) {
+        if self.gc_buffered.get() {
+            crate::gc::root_freed();
+        }
+        // A WeakMap key or map: its entries are released (by the VM, see
+        // gc::purge_weakmaps) before its handle is recycled.
+        let weak_target = self.weak_key.get() || self.class_name.eq_ignore_ascii_case(b"WeakMap");
+        if weak_target {
+            crate::gc::weak_target_freed(self.object_id, !self.weak_key.get());
+        }
         if let Ok(Some(hook)) = OBJECT_FREE_HOOK.try_with(|h| h.get()) {
             hook(self as *const PhpObject as usize);
         }
@@ -266,7 +280,7 @@ impl Drop for PhpObject {
         drop(self.closure.take());
         crate::value::memory_free(OBJECT_SIZE);
         // Don't recycle the sentinel zero id.
-        if self.object_id != 0 {
+        if self.object_id != 0 && !weak_target {
             // Use try_with so we don't panic during thread-local
             // destruction (when other TLS holding PhpObject Rcs may be
             // torn down after FREED_OBJECT_IDS).
@@ -287,6 +301,8 @@ impl PhpObject {
             object_id,
             gc_tracked: GcFlag::default(),
             dtor_listed: GcFlag::default(),
+            gc_buffered: GcFlag::default(),
+            weak_key: GcFlag::default(),
             closure: None,
             native: None,
         }
@@ -311,11 +327,16 @@ impl PhpObject {
         // written through (the reference set stays intact).
         for (k, v) in &mut self.properties {
             if *k == name {
+                // The overwritten value loses a holder (possible GC root).
                 match v {
                     Value::Reference(r) if !matches!(value, Value::Reference(_)) => {
-                        *r.borrow_mut() = value;
+                        let old = std::mem::replace(&mut *r.borrow_mut(), value);
+                        crate::gc::on_child_released(&old);
                     }
-                    _ => *v = value,
+                    _ => {
+                        let old = std::mem::replace(v, value);
+                        crate::gc::on_value_replaced(&old, v);
+                    }
                 }
                 return;
             }
@@ -327,7 +348,8 @@ impl PhpObject {
     pub fn set_property_ref(&mut self, name: Vec<u8>, r: std::rc::Rc<std::cell::RefCell<Value>>) {
         for (k, v) in &mut self.properties {
             if *k == name {
-                *v = Value::Reference(r);
+                let old = std::mem::replace(v, Value::Reference(r));
+                crate::gc::on_value_replaced(&old, v);
                 return;
             }
         }
@@ -363,6 +385,13 @@ impl PhpObject {
     }
 
     pub fn remove_property(&mut self, name: &[u8]) {
-        self.properties.retain(|(k, _)| k != name);
+        self.properties.retain(|(k, v)| {
+            if k == name {
+                crate::gc::on_child_released(v);
+                false
+            } else {
+                true
+            }
+        });
     }
 }

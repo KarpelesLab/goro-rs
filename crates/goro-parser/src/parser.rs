@@ -3614,6 +3614,36 @@ impl Parser {
     }
 
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
+        let e = self.parse_assignment_inner()?;
+        // `@$x .= v` is `@($x .= v)`: the silence operator does not stop the
+        // compound assignment from targeting the variable.
+        if let ExprKind::CompoundAssign { target, .. } = &e.kind {
+            if matches!(&target.kind, ExprKind::Suppress(o) if Self::is_lvalue(o)) {
+                let span = e.span;
+                let ExprKind::CompoundAssign { op, target, value } = e.kind else {
+                    unreachable!()
+                };
+                let ExprKind::Suppress(operand) = target.kind else {
+                    unreachable!()
+                };
+                let inner = Expr {
+                    span: operand.span.merge(value.span),
+                    kind: ExprKind::CompoundAssign {
+                        op,
+                        target: operand,
+                        value,
+                    },
+                };
+                return Ok(Expr {
+                    span,
+                    kind: ExprKind::Suppress(Box::new(inner)),
+                });
+            }
+        }
+        Ok(e)
+    }
+
+    fn parse_assignment_inner(&mut self) -> ParseResult<Expr> {
         let left = self.parse_null_coalesce()?;
 
         match self.peek().clone() {

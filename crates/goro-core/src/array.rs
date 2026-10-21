@@ -52,6 +52,8 @@ pub struct PhpArray {
     packed: bool,
     /// Hash index (slot -> entry position + 1, 0 = empty); empty when unused
     index: Vec<u32>,
+    /// In the cycle collector's root buffer (Zend's GC_INFO); see gc.rs.
+    pub(crate) gc_buffered: std::cell::Cell<bool>,
 }
 
 /// Arrays smaller than this are searched linearly
@@ -158,6 +160,7 @@ impl Clone for PhpArray {
             pointer: self.pointer,
             packed: self.packed,
             index: self.index.clone(),
+            gc_buffered: std::cell::Cell::new(false),
         }
     }
 }
@@ -170,6 +173,7 @@ impl PhpArray {
             pointer: 0,
             packed: true,
             index: Vec::new(),
+            gc_buffered: std::cell::Cell::new(false),
         }
     }
 
@@ -180,6 +184,7 @@ impl PhpArray {
             pointer: 0,
             packed: true,
             index: Vec::new(),
+            gc_buffered: std::cell::Cell::new(false),
         }
     }
 
@@ -353,7 +358,8 @@ impl PhpArray {
     pub fn set(&mut self, key: ArrayKey, value: Value) {
         // Check if key already exists
         if let Some(p) = self.find(&key) {
-            self.entries[p].1 = value;
+            let old = std::mem::replace(&mut self.entries[p].1, value);
+            crate::gc::on_value_replaced(&old, &self.entries[p].1);
             return;
         }
         // Check memory limit before adding
@@ -493,6 +499,14 @@ impl PhpArray {
 
     /// Remove an entry by key
     pub fn remove(&mut self, key: &ArrayKey) -> Option<Value> {
+        let v = self.remove_inner(key);
+        if let Some(v) = &v {
+            crate::gc::on_child_released(v);
+        }
+        v
+    }
+
+    fn remove_inner(&mut self, key: &ArrayKey) -> Option<Value> {
         if let Some(pos) = self.find(key) {
             if pos + 1 == self.entries.len() {
                 return self.pop_entry_raw().map(|(_, v)| v);
@@ -569,6 +583,9 @@ impl Default for PhpArray {
 
 impl Drop for PhpArray {
     fn drop(&mut self) {
+        if self.gc_buffered.get() {
+            crate::gc::root_freed();
+        }
         // Release tracked memory for all entries
         let bytes = self.entries.len() * Self::ENTRY_SIZE;
         if bytes > 0 {

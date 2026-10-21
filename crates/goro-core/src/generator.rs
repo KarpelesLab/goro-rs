@@ -101,6 +101,9 @@ pub struct PhpGenerator {
     pub(crate) saved_calls: Vec<crate::vm::PendingCall>,
     /// Registered with the cycle collector.
     pub(crate) gc_tracked: std::cell::Cell<bool>,
+    /// The collector already ran this generator's destructor
+    /// (zend_generator_dtor_storage; IS_OBJ_DESTRUCTOR_CALLED).
+    pub(crate) gc_dtor_called: std::cell::Cell<bool>,
     /// The reference yielded by a by-ref generator (bound by `foreach (... as &$v)`).
     pub(crate) current_ref: Option<Rc<RefCell<Value>>>,
     /// Property hook this generator is the body of (`get { yield ...; }`).
@@ -144,6 +147,7 @@ impl PhpGenerator {
             advanced_past_first: false,
             saved_calls: Vec::new(),
             gc_tracked: std::cell::Cell::new(false),
+            gc_dtor_called: std::cell::Cell::new(false),
             current_ref: None,
             hook_key: None,
         }

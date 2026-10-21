@@ -340,6 +340,11 @@ final class StreamBucket {
     vm.register_function(b"gc_disable", gc_disable_fn);
     vm.register_function(b"gc_enable", gc_enable_fn);
     vm.register_function(b"gc_status", gc_status_fn);
+    vm.constants
+        .entry(b"zend.enable_gc".to_vec())
+        .or_insert(Value::String(PhpString::from_bytes(b"1")));
+    vm.register_function(goro_core::gc::DESTRUCTOR_FIBER_FN, gc_destructor_fiber_fn);
+    goro_core::gc::gc_request_startup();
     vm.register_function(b"debug_zval_dump", debug_zval_dump_fn);
     vm.register_function(b"get_class_methods", get_class_methods_fn);
     vm.register_function(b"get_object_vars", get_object_vars_fn);
@@ -1280,6 +1285,9 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name_lower: Vec<u8> = stripped.iter().map(|b| b.to_ascii_lowercase()).collect();
     // "Class::method" is not a function
     if name_lower.contains(&b':') {
+        return Ok(Value::False);
+    }
+    if name_lower == goro_core::gc::DESTRUCTOR_FIBER_FN {
         return Ok(Value::False);
     }
     if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
@@ -9140,11 +9148,7 @@ fn gc_collect_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(vm.gc_collect_cycles()))
 }
 fn gc_enabled_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let enabled = vm
-        .constants
-        .get(b"zend.enable_gc".as_ref())
-        .map(|v| v.is_truthy())
-        .unwrap_or(true);
+    let enabled = goro_core::gc::ini_enabled(vm.constants.get(b"zend.enable_gc".as_ref()));
     Ok(if enabled { Value::True } else { Value::False })
 }
 fn gc_disable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -9155,6 +9159,7 @@ fn gc_disable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     vm.constants
         .insert(b"zend.enable_gc".to_vec(), Value::Long(1));
+    goro_core::gc::gc_enabled_changed();
     Ok(Value::Null)
 }
 fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -9931,6 +9936,9 @@ fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 fn get_defined_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut internal = PhpArray::new();
     for name in vm.functions.keys() {
+        if name.as_slice() == goro_core::gc::DESTRUCTOR_FIBER_FN {
+            continue;
+        }
         internal.push(Value::String(PhpString::from_vec(name.clone())));
     }
     let mut user = PhpArray::new();
@@ -13707,7 +13715,15 @@ fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
 
+/// Body of the fiber the collector runs destructors in when it is invoked
+/// inside a fiber (zend_gc.c's gc_destructor_fiber).
+fn gc_destructor_fiber_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    while goro_core::gc::dtor_step(vm) {}
+    Ok(Value::Null)
+}
+
 fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let st = goro_core::gc::gc_status();
     let mut result = PhpArray::new();
     let mut put = |k: &[u8], v: Value| {
         result.set(
@@ -13715,25 +13731,19 @@ fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
             v,
         );
     };
-    put(
-        b"running",
-        if goro_core::gc::gc_active() {
-            Value::True
-        } else {
-            Value::False
-        },
-    );
-    put(b"protected", Value::False);
-    put(b"full", Value::False);
-    put(b"runs", Value::Long(goro_core::gc::gc_runs()));
-    put(b"collected", Value::Long(goro_core::gc::gc_collected()));
-    put(b"threshold", Value::Long(10001));
-    put(b"buffer_size", Value::Long(16384));
-    put(b"roots", Value::Long(goro_core::gc::gc_root_count()));
-    put(b"application_time", Value::Double(0.0));
-    put(b"collector_time", Value::Double(0.0));
-    put(b"destructor_time", Value::Double(0.0));
-    put(b"free_time", Value::Double(0.0));
+    let b = |x: bool| if x { Value::True } else { Value::False };
+    put(b"running", b(st.running));
+    put(b"protected", b(st.protected));
+    put(b"full", b(st.full));
+    put(b"runs", Value::Long(st.runs));
+    put(b"collected", Value::Long(st.collected));
+    put(b"threshold", Value::Long(st.threshold));
+    put(b"buffer_size", Value::Long(st.buffer_size));
+    put(b"roots", Value::Long(st.roots));
+    put(b"application_time", Value::Double(st.application_time));
+    put(b"collector_time", Value::Double(st.collector_time));
+    put(b"destructor_time", Value::Double(st.destructor_time));
+    put(b"free_time", Value::Double(st.free_time));
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 

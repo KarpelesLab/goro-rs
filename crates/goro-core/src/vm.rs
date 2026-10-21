@@ -673,6 +673,8 @@ pub struct Vm {
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     /// Parameter CVs of running user functions (see internal_frames.rs)
     pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
+    /// Locals of the running user functions (see gc::GcFrame).
+    pub(crate) gc_frames: Vec<crate::gc::GcFrame>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub(crate) ucf_call_line: Option<u32>,
     /// INI on-modify handlers registered by extensions (key -> handler).
@@ -1753,6 +1755,7 @@ impl Vm {
             zpp_return_names: HashMap::new(),
             builtin_frames: Vec::new(),
             cv_frames: Vec::new(),
+            gc_frames: Vec::new(),
             ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
             phpinfo_hooks: Vec::new(),
@@ -3838,6 +3841,11 @@ impl Vm {
     /// PHP's handle-recycling behavior, falling back to a fresh increment.
     #[inline]
     pub fn alloc_object_id(&mut self) -> u64 {
+        // Entries of a dead WeakMap must go before its id is reused.
+        if crate::gc::weak_dirty() {
+            crate::gc::purge_weakmaps(self);
+        }
+        crate::gc::flush_weak_ids();
         if self.object_store_no_reuse {
             let id = self.next_object_id;
             self.next_object_id += 1;
@@ -5255,19 +5263,14 @@ impl Vm {
     #[inline]
     pub(crate) fn gc_maybe_auto(&mut self) {
         if crate::gc::gc_pending() {
-            let enabled = self
-                .constants
-                .get(b"zend.enable_gc".as_ref())
-                .map(|v| v.is_truthy())
-                .unwrap_or(true);
+            let enabled = crate::gc::ini_enabled(self.constants.get(b"zend.enable_gc".as_ref()));
             crate::gc::auto_collect(self, enabled);
         }
     }
 
-    /// Call __destruct on a garbage object found by the cycle collector.
+    /// Call __destruct on a garbage object found by the cycle collector
+    /// (which then drops it from `destructible_objects`, in one batch).
     pub(crate) fn gc_run_destructor(&mut self, obj_rc: &Rc<RefCell<PhpObject>>) {
-        self.destructible_objects
-            .retain(|v| !matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj_rc)));
         obj_rc
             .borrow_mut()
             .set_property(b"__destructed".to_vec(), Value::True);
@@ -5333,6 +5336,9 @@ impl Vm {
     }
 
     fn run_pending_destructors(&mut self) {
+        if crate::gc::weak_dirty() {
+            crate::gc::purge_weakmaps(self);
+        }
         loop {
             // Everything released so far is destroyed as one batch, each
             // object completely before the next (like php-src freeing the
@@ -5370,6 +5376,9 @@ impl Vm {
                 self.destruct_released(obj_val);
             }
         }
+        crate::gc::flush_weak_ids();
+        // A safe point: run an automatic collection the root buffer asked for.
+        self.gc_maybe_auto();
     }
 
     /// Run the destructor of an object nothing references any more.
@@ -13641,6 +13650,7 @@ impl Vm {
                         if let Value::Object(key_rc) = &key_obj {
                             let key_oid = key_rc.borrow().object_id;
                             let weak = Rc::downgrade(key_rc);
+                            key_rc.borrow().weak_key.set(true);
                             let entries = self.weak_map_entries.entry(wm_id).or_default();
                             if let Some(entry) =
                                 entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
@@ -14759,7 +14769,13 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
-        self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame)
+        self.gc_frames.push(crate::gc::GcFrame::new(&cvs, &tmps));
+        let r = self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame);
+        self.gc_frames.pop();
+        // i_free_compiled_variables: locals still shared elsewhere become
+        // possible cycle roots.
+        crate::gc::release_frame(&cvs);
+        r
     }
 
     /// Execute the single opcode at `ip` on a suspended frame's variables
@@ -15077,10 +15093,10 @@ impl Vm {
                             match slot {
                                 Value::Undef => {}
                                 Value::Object(_) | Value::Array(_) | Value::Reference(_) => {
+                                    // No possible root here: a statement's
+                                    // temporaries were consumed (moved, in
+                                    // Zend) by the ops that read them.
                                     freed = true;
-                                    if matches!(slot, Value::Object(_)) {
-                                        crate::gc::possible_root(slot);
-                                    }
                                     *slot = Value::Undef;
                                 }
                                 _ => *slot = Value::Undef,
@@ -15247,6 +15263,16 @@ impl Vm {
                             foreach_iter_handles.remove(&idx);
                         }
                     }
+                    // Overwriting a by-ref foreach's iterator temporary (the
+                    // loop's cleanup, FE_FREE) ends the iteration: release
+                    // the array it pinned.
+                    if let OperandType::Tmp(t) = op.op1 {
+                        if !foreach_ref_arrays.is_empty() {
+                            if let Some(a) = foreach_ref_arrays.remove(&t) {
+                                crate::gc::possible_root(&Value::Array(a));
+                            }
+                        }
+                    }
                     if let OperandType::Tmp(r) = op.result {
                         // The expression's value: the value stored in the variable.
                         let stored = match &op.op1 {
@@ -15390,6 +15416,9 @@ impl Vm {
                             old,
                             Value::Object(_) | Value::Array(_) | Value::Reference(_)
                         );
+                        if released {
+                            crate::gc::possible_root(&old);
+                        }
                         drop(old);
                         if global_bound {
                             self.symtab_fix_cv(ti, &mut cvs, &op_array.cv_names, &mut gbind);
@@ -20047,6 +20076,7 @@ impl Vm {
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
                                     let weak = Rc::downgrade(key_rc);
+                                    key_rc.borrow().weak_key.set(true);
                                     let entries = self.weak_map_entries.entry(wm_id).or_default();
                                     if let Some(entry) =
                                         entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
@@ -23860,12 +23890,20 @@ impl Vm {
                                         b"splminheap",
                                         b"splmaxheap",
                                     ];
-                                    let class_lower: Vec<u8> = if matches!(
-                                        raw_class_lower.as_slice(),
-                                        b"arrayobject"
-                                            | b"arrayiterator"
-                                            | b"recursivearrayiterator"
-                                    ) {
+                                    // A root class (no parent, not an alias) is its own
+                                    // nearest built-in ancestor: skip the ancestry scan.
+                                    let is_root_class = raw_class_lower == b"stdclass"
+                                        || self.classes.get(&raw_class_lower).is_some_and(|ce| {
+                                            ce.parent.is_none()
+                                                && ce.name.eq_ignore_ascii_case(&raw_class_lower)
+                                        });
+                                    let class_lower: Vec<u8> = if is_root_class
+                                        || matches!(
+                                            raw_class_lower.as_slice(),
+                                            b"arrayobject"
+                                                | b"arrayiterator"
+                                                | b"recursivearrayiterator"
+                                        ) {
                                         raw_class_lower.clone()
                                     } else if self.class_extends(&raw_class_lower, b"arrayobject") {
                                         b"arrayobject".to_vec()
@@ -46161,6 +46199,9 @@ impl Vm {
                                             class_display, message, conn, file_str, line, trace_str
                                         )
                                     };
+                                    let prev = obj_borrow.get_property(b"previous");
+                                    drop(obj_borrow);
+                                    let result = self.with_previous_exceptions(&prev, result);
                                     Some(Value::String(PhpString::from_string(result)))
                                 }
                                 _ => None,
@@ -47167,6 +47208,16 @@ impl Vm {
     }
 
     /// Convert a value to string, calling __toString for objects if available
+    /// Throwable::__toString(): the previous exceptions come first, each
+    /// followed by "Next" and the one it is the previous of.
+    fn with_previous_exceptions(&mut self, prev: &Value, this: String) -> String {
+        if !matches!(prev, Value::Object(_)) {
+            return this;
+        }
+        let p = self.value_to_string(prev).to_string_lossy();
+        format!("{}\n\nNext {}", p, this)
+    }
+
     pub fn value_to_string(&mut self, val: &Value) -> PhpString {
         // Unwrap References to handle their inner Value
         if let Value::Reference(r) = val {
@@ -47369,6 +47420,8 @@ impl Vm {
                         class_display, message, conn, file_str, line, trace_str
                     )
                 };
+                let prev = obj.borrow().get_property(b"previous");
+                let result = self.with_previous_exceptions(&prev, result);
                 return PhpString::from_string(result);
             }
             // Built-in SPL __toString (SplFileInfo family, CachingIterator)
@@ -47802,7 +47855,9 @@ impl Vm {
                         }
                     }
                     if let Value::Reference(r) = slot {
-                        *r.borrow_mut() = value.clone();
+                        let old = std::mem::replace(&mut *r.borrow_mut(), value.clone());
+                        // The overwritten value loses a holder (possible root).
+                        crate::gc::on_value_replaced(&old, &value);
                     } else {
                         if matches!(slot, Value::Object(_) | Value::Array(_)) {
                             crate::gc::possible_root(slot);
@@ -48642,7 +48697,7 @@ impl Vm {
     /// Execute Fiber::start(...$args) - begin executing the fiber callback
     /// on a fresh corosensei stack. Subsequent `Fiber::suspend()` calls
     /// from any depth resume cleanly.
-    fn fiber_start(
+    pub(crate) fn fiber_start(
         &mut self,
         obj_rc: Rc<RefCell<PhpObject>>,
         args: &[Value],
@@ -49387,13 +49442,15 @@ impl Vm {
         self.current_exception = saved_exc;
     }
 
-    fn fiber_stack_bases(&self) -> (usize, usize, usize, usize, usize) {
+    fn fiber_stack_bases(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
         (
             self.call_stack.len(),
             self.class_scope_stack.len(),
             self.called_class_stack.len(),
             self.property_hook_stack.len(),
             self.builtin_frames.len(),
+            self.gc_frames.len(),
+            self.pending_calls.len(),
         )
     }
 
@@ -49402,6 +49459,11 @@ impl Vm {
     fn fiber_enter_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber) {
         self.fiber_restore_builtin_frames(&mut fiber.saved_builtin_frames);
         self.fiber_restore_cv_frames(&mut fiber.saved_cv_frames);
+        self.gc_frames.append(&mut fiber.saved_gc_frames);
+        let pbase = self.pending_calls.len();
+        self.pending_calls.append(&mut fiber.saved_pending_calls);
+        self.closure_pending_calls
+            .extend(fiber.saved_closure_pending.drain(..).map(|i| i + pbase));
         self.call_stack.append(&mut fiber.saved_call_stack);
         self.class_scope_stack
             .append(&mut fiber.saved_class_scope_stack);
@@ -49416,11 +49478,26 @@ impl Vm {
     fn fiber_leave_stacks(
         &mut self,
         fiber: &mut crate::fiber::PhpFiber,
-        bases: (usize, usize, usize, usize, usize),
+        bases: (usize, usize, usize, usize, usize, usize, usize),
         suspended: bool,
     ) {
-        let (a, b, c, d, e) = bases;
+        let (a, b, c, d, e, g, h) = bases;
         if suspended {
+            fiber.saved_gc_frames = self.gc_frames.split_off(g.min(self.gc_frames.len()));
+            // Argument lists the fiber was building stay with the fiber.
+            let h = h.min(self.pending_calls.len());
+            fiber.saved_pending_calls = self.pending_calls.split_off(h);
+            let cut = self
+                .closure_pending_calls
+                .iter()
+                .position(|&i| i >= h)
+                .unwrap_or(self.closure_pending_calls.len());
+            fiber.saved_closure_pending = self
+                .closure_pending_calls
+                .split_off(cut)
+                .into_iter()
+                .map(|i| i - h)
+                .collect();
             fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
             // (the fiber function's frame, pushed just before `bases`, is its root)
             fiber.saved_cv_frames = self.fiber_take_cv_frames(a.saturating_sub(1));
@@ -49437,6 +49514,9 @@ impl Vm {
                 fiber.saved_property_hook_stack = self.property_hook_stack.split_off(d);
             }
         } else {
+            self.gc_frames.truncate(g);
+            self.pending_calls.truncate(h);
+            self.closure_pending_calls.retain(|&i| i < h);
             self.builtin_frames.truncate(e);
             self.fiber_drop_cv_frames(a.saturating_sub(1));
             self.call_stack.truncate(a);

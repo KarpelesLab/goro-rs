@@ -97,6 +97,13 @@ pub struct PhpFiber {
     pub(crate) saved_builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     /// Parameter CVs of the suspended fiber's running functions
     pub(crate) saved_cv_frames: Vec<crate::internal_frames::CvFrame>,
+    /// Locals of the suspended fiber's running functions, for the cycle
+    /// collector (see gc::GcFrame).
+    pub(crate) saved_gc_frames: Vec<crate::gc::GcFrame>,
+    /// Calls whose arguments the suspended fiber was still building
+    pub(crate) saved_pending_calls: Vec<crate::vm::PendingCall>,
+    /// closure_pending_calls entries of those, relative to their base
+    pub(crate) saved_closure_pending: Vec<usize>,
     pub saved_class_scope_stack: Vec<Vec<u8>>,
     pub saved_called_class_stack: Vec<Vec<u8>>,
     pub saved_property_hook_stack: Vec<Vec<u8>>,
@@ -152,6 +159,9 @@ impl PhpFiber {
             saved_call_stack: Vec::new(),
             saved_builtin_frames: Vec::new(),
             saved_cv_frames: Vec::new(),
+            saved_gc_frames: Vec::new(),
+            saved_pending_calls: Vec::new(),
+            saved_closure_pending: Vec::new(),
             saved_class_scope_stack: Vec::new(),
             saved_called_class_stack: Vec::new(),
             saved_property_hook_stack: Vec::new(),

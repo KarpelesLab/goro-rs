@@ -1027,8 +1027,8 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    let exists =
-        vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower);
+    let exists = name_lower != goro_core::gc::DESTRUCTOR_FIBER_FN
+        && (vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower));
     Ok(if exists { Value::True } else { Value::False })
 }
 

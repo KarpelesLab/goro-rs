@@ -103,10 +103,13 @@ impl Vm {
             let at = depth.min(self.call_stack.len());
             // Some builtins push an equivalent frame themselves around the
             // exceptions they throw: don't show it twice.
-            if self
-                .call_stack
-                .get(at)
-                .is_some_and(|e| e.2 == line && e.0.eq_ignore_ascii_case(&name))
+            // Likewise a builtin run as a fiber's callback right under the
+            // fiber's own "[internal function]" entry for it.
+            let same = |e: &(String, String, u32, Vec<Value>, bool)| {
+                e.2 == line && e.0.eq_ignore_ascii_case(&name)
+            };
+            if self.call_stack.get(at).is_some_and(same)
+                || (line == 0 && at > 0 && self.call_stack.get(at - 1).is_some_and(same))
             {
                 continue;
             }
