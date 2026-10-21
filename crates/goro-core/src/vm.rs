@@ -511,6 +511,9 @@ pub struct Vm {
     /// Builtins that emit their own null/float-to-int deprecations (the generic
     /// call-site check skips those notices for them to avoid duplicates).
     pub builtin_self_coercing: std::collections::HashSet<Vec<u8>>,
+    /// Argument positions of the builtin being called that were skipped via
+    /// named arguments (filled with null). Valid only at the start of the call.
+    pub builtin_named_skipped: Vec<usize>,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -1436,6 +1439,7 @@ impl Vm {
             },
             builtin_param_types: HashMap::new(),
             builtin_self_coercing: std::collections::HashSet::new(),
+            builtin_named_skipped: Vec::new(),
             ini_set_hooks: HashMap::new(),
             startup_hooks: Vec::new(),
             request_startup_hooks: Vec::new(),
@@ -1469,6 +1473,18 @@ impl Vm {
         }
         let iv_lower = b"random\\intervalboundary".to_vec();
         vm.classes.insert(iv_lower, iv);
+        // Built-in enum: RoundingMode
+        let mut rm = ClassEntry::new(b"RoundingMode".to_vec());
+        rm.is_enum = true;
+        rm.enum_backing_type = None;
+        for &name in &[&b"HalfAwayFromZero"[..], b"HalfTowardsZero", b"HalfEven", b"HalfOdd",
+            b"TowardsZero", b"AwayFromZero", b"NegativeInfinity", b"PositiveInfinity"] {
+            rm.enum_cases.push((name.to_vec(), Value::Null));
+            let mut marker = b"__enum_case__::".to_vec();
+            marker.extend_from_slice(name);
+            rm.constants.insert(name.to_vec(), Value::String(PhpString::from_vec(marker)));
+        }
+        vm.classes.insert(b"roundingmode".to_vec(), rm);
 
         // Built-in backed enum: PropertyHookType (ReflectionProperty::getHook())
         {
@@ -16492,6 +16508,7 @@ impl Vm {
                         }
 
                         self.caller_strict_types = op_array.strict_types;
+                        self.builtin_named_skipped = named_skipped_args;
 
                         let had_exception_before = self.current_exception.is_some();
 

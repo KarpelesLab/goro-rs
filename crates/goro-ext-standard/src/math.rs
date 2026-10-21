@@ -106,7 +106,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"abs", vec![num()]);
     vm.register_builtin_param_types(b"ceil", vec![num()]);
     vm.register_builtin_param_types(b"floor", vec![num()]);
-    vm.register_builtin_param_types(b"round", vec![num(), i(), i()]);
+    vm.register_builtin_param_types(b"round", vec![num(), i(), None]);
     vm.register_builtin_param_types(b"sqrt", vec![f()]);
     vm.register_builtin_param_types(b"intdiv", vec![i(), i()]);
     vm.register_builtin_param_types(b"fmod", vec![f(), f()]);
@@ -137,7 +137,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"is_nan", vec![f()]);
     vm.register_builtin_param_types(b"is_infinite", vec![f()]);
     vm.register_builtin_param_types(b"is_finite", vec![f()]);
-    vm.register_builtin_param_types(b"number_format", vec![f(), i(), s(), s()]);
+    let ns = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"string".to_vec()))));
+    vm.register_builtin_param_types(b"number_format", vec![f(), i(), ns(), ns()]);
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
     // These validate their own arguments (check_math_num_arg/check_int_arg) and
     // emit the null / float-to-int deprecations themselves.
@@ -323,7 +324,10 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     let f = val.to_double();
-    let precision = if let Some(prec_val) = args.get(1) {
+    let skipped = std::mem::take(&mut vm.builtin_named_skipped);
+    let precision = if skipped.contains(&1) {
+        0
+    } else if let Some(prec_val) = args.get(1) {
         if !check_int_arg(vm, prec_val, "round", "precision", 2)? {
             return Ok(Value::Null);
         }
@@ -332,101 +336,143 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         0
     };
 
-    // Handle edge cases
-    if f.is_nan() || f.is_infinite() || f == 0.0 { return Ok(Value::Double(f)); }
-    // Clamp precision to avoid overflow in 10^precision
-    if precision > 292 { return Ok(Value::Double(f)); }
-    if precision < -292 { return Ok(Value::Double(0.0)); }
-    let precision_i32 = precision as i32;
-
-    // mode: 0=HALF_UP(default), 1=HALF_DOWN, 2=HALF_EVEN, 3=HALF_ODD
-    // Also support RoundingMode enum backed values
-    let mode = if let Some(mode_val) = args.get(2) {
+    let mode = if let Some(mode_val) = args.get(2).filter(|_| !skipped.contains(&2)) {
         let mode_val = mode_val.deref();
         match &mode_val {
             Value::Object(obj) => {
-                // RoundingMode enum - get the backed value
                 let obj_ref = obj.borrow();
-                let class = String::from_utf8_lossy(&obj_ref.class_name).to_string();
-                if class == "RoundingMode" {
-                    let val = obj_ref.get_property(b"value");
-                    val.to_long()
+                if obj_ref.class_name.eq_ignore_ascii_case(b"RoundingMode") {
+                    match obj_ref.get_property(b"name").to_php_string().as_bytes() {
+                        b"HalfAwayFromZero" => 1,
+                        b"HalfTowardsZero" => 2,
+                        b"HalfEven" => 3,
+                        b"HalfOdd" => 4,
+                        b"PositiveInfinity" => 5,
+                        b"NegativeInfinity" => 6,
+                        b"TowardsZero" => 7,
+                        b"AwayFromZero" => 8,
+                        _ => 0,
+                    }
                 } else {
-                    vm.throw_type_error(format!(
+                    let class = goro_core::value::display_class_name(&obj_ref.class_name);
+                    drop(obj_ref);
+                    throw_math_type_error(vm, format!(
                         "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given",
                         class
                     ));
                     return Ok(Value::Null);
                 }
             }
-            _ => mode_val.to_long(),
+            Value::Long(n) => *n,
+            Value::Double(_) | Value::String(_) | Value::True | Value::False | Value::Null => {
+                if !check_int_arg(vm, &mode_val, "round", "mode", 3)? {
+                    return Ok(Value::Null);
+                }
+                mode_val.to_long_coerced()
+            }
+            other => {
+                let tn = Vm::value_type_name(other);
+                throw_math_type_error(vm, format!(
+                    "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given", tn));
+                return Ok(Value::Null);
+            }
         }
     } else {
-        0 // PHP_ROUND_HALF_UP
+        1 // PHP_ROUND_HALF_UP
     };
-    let factor = 10f64.powi(precision_i32);
-    let scaled = f * factor;
-    // Beyond float64 precision, rounding is pointless - return value as-is
-    if scaled.abs() >= 1e15 {
+    if !(1..=8).contains(&mode) {
+        let msg = "round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
+    }
+    let places: i32 = if precision >= 0 {
+        if precision > i32::MAX as i64 { i32::MAX } else { precision as i32 }
+    } else if precision < i32::MIN as i64 { i32::MIN } else { precision as i32 };
+    // Integers with non-negative precision need no rounding.
+    if matches!(val.deref(), Value::Long(_) | Value::True | Value::False | Value::Null) && places >= 0 {
         return Ok(Value::Double(f));
     }
-    let rounded = match mode {
-        0 | 1 => { // HALF_UP / HalfAwayFromZero (PHP default, PHP_ROUND_HALF_UP=1)
-            // Use PHP's floor(f+0.5) approach for correct edge case handling
-            if scaled >= 0.0 { (scaled + 0.5).floor() } else { (scaled - 0.5).ceil() }
-        }
-        2 => { // HALF_DOWN / HalfTowardsZero (PHP_ROUND_HALF_DOWN=2)
-            let frac = scaled.fract().abs();
-            if (frac - 0.5).abs() < 1e-9 {
-                scaled.trunc()
-            } else {
-                scaled.round()
+    if let Value::String(s) = val.deref() {
+        if places >= 0 {
+            if s.to_string_lossy().trim_start().parse::<i64>().is_ok() {
+                return Ok(Value::Double(f));
             }
         }
-        3 => { // HALF_EVEN / HalfEven (PHP_ROUND_HALF_EVEN=3)
-            let frac = scaled.fract().abs();
-            if (frac - 0.5).abs() < 1e-9 {
-                let t = scaled.trunc();
-                if t as i64 % 2 == 0 {
-                    t
-                } else {
-                    if scaled > 0.0 { t + 1.0 } else { t - 1.0 }
-                }
-            } else {
-                scaled.round()
-            }
-        }
-        4 => { // HALF_ODD / HalfOdd (PHP_ROUND_HALF_ODD=4)
-            let frac = scaled.fract().abs();
-            if (frac - 0.5).abs() < 1e-9 {
-                let t = scaled.trunc();
-                if t as i64 % 2 != 0 {
-                    t
-                } else {
-                    if scaled > 0.0 { t + 1.0 } else { t - 1.0 }
-                }
-            } else {
-                scaled.round()
-            }
-        }
-        5 => { // PHP_ROUND_CEILING / PositiveInfinity
-            scaled.ceil()
-        }
-        6 => { // PHP_ROUND_FLOOR / NegativeInfinity
-            scaled.floor()
-        }
-        7 => { // PHP_ROUND_TOWARD_ZERO / TowardsZero
-            scaled.trunc()
-        }
-        8 => { // PHP_ROUND_AWAY_FROM_ZERO / AwayFromZero
-            if scaled > 0.0 { scaled.ceil() } else { scaled.floor() }
-        }
-        _ => {
-            vm.throw_type_error("round(): Argument #3 ($mode) must be a valid rounding mode (PHP_ROUND_HALF_*)".to_string());
-            return Ok(Value::Null);
-        }
+    }
+    Ok(Value::Double(php_math_round(f, places, mode)))
+}
+
+fn php_intpow10(power: i32) -> f64 {
+    if !(0..=22).contains(&power) {
+        return 10f64.powf(power as f64);
+    }
+    const POWERS: [f64; 23] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+        1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22];
+    POWERS[power as usize]
+}
+
+fn php_round_helper(integral: f64, value: f64, exponent: f64, places: i32, mode: i64) -> f64 {
+    let value_abs = value.abs();
+    let basic = || if places > 0 {
+        ((integral + 0.5f64.copysign(integral)) / exponent).abs()
+    } else {
+        ((integral + 0.5f64.copysign(integral)) * exponent).abs()
     };
-    Ok(Value::Double(rounded / factor))
+    let zero = || if places > 0 { (integral / exponent).abs() } else { (integral * exponent).abs() };
+    match mode {
+        1 => if value_abs >= basic() { integral + 1f64.copysign(integral) } else { integral },
+        2 => if value_abs > basic() { integral + 1f64.copysign(integral) } else { integral },
+        5 => if value > 0.0 && value_abs > zero() { integral + 1.0 } else { integral },
+        6 => if value < 0.0 && value_abs > zero() { integral - 1.0 } else { integral },
+        7 => integral,
+        8 => if value_abs > zero() { integral + 1f64.copysign(integral) } else { integral },
+        3 | 4 => {
+            let edge = basic();
+            if value_abs > edge {
+                integral + 1f64.copysign(integral)
+            } else if value_abs == edge {
+                let even = integral % 2.0 == 0.0;
+                if (mode == 3) != even { integral + 1f64.copysign(integral) } else { integral }
+            } else {
+                integral
+            }
+        }
+        _ => integral,
+    }
+}
+
+/// Port of _php_math_round() (ext/standard/math.c).
+pub fn php_math_round(value: f64, places: i32, mode: i64) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    let places = if places < i32::MIN + 1 { i32::MIN + 1 } else { places };
+    let exponent = php_intpow10(places.abs());
+    let (mut tmp_value, tmp_value2);
+    if value >= 0.0 {
+        tmp_value = (if places > 0 { value * exponent } else { value / exponent }).floor();
+        tmp_value2 = tmp_value + 1.0;
+    } else {
+        tmp_value = (if places > 0 { value * exponent } else { value / exponent }).ceil();
+        tmp_value2 = tmp_value - 1.0;
+    }
+    if (if places > 0 { tmp_value2 / exponent } else { tmp_value2 * exponent }) == value {
+        tmp_value = tmp_value2;
+    }
+    if tmp_value.abs() >= 1e16 {
+        return value;
+    }
+    tmp_value = php_round_helper(tmp_value, value, exponent, places, mode);
+    if places.abs() < 23 {
+        if places > 0 { tmp_value / exponent } else { tmp_value * exponent }
+    } else {
+        let s = format!("{:15.6}e{}", tmp_value, -(places as i64));
+        match s.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => v,
+            _ => value,
+        }
+    }
 }
 
 fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -843,7 +889,7 @@ fn deg2rad_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         args.first()
             .unwrap_or(&Value::Null)
             .to_double()
-            .to_radians(),
+            / 180.0 * std::f64::consts::PI,
     ))
 }
 fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -851,7 +897,7 @@ fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         args.first()
             .unwrap_or(&Value::Null)
             .to_double()
-            .to_degrees(),
+            / std::f64::consts::PI * 180.0,
     ))
 }
 fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

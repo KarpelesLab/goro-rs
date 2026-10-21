@@ -974,6 +974,13 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                 }
+                if let Value::String(ms) = val {
+                    if let Some(case) = ms.as_bytes().strip_prefix(b"__enum_case__::") {
+                        if let Some(v) = vm.get_enum_case(&class_lower, case) {
+                            return Ok(v);
+                        }
+                    }
+                }
                 return Ok(val.clone());
             }
         }
