@@ -13875,6 +13875,7 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"xmlparser"
                 | b"streambucket"
                 | b"__php_incomplete_class"
+                | b"weakmap" | b"weakreference"
                 | b"roundingmode"
                 | b"reflection" | b"reflector" | b"reflectionzendextension"
                 | b"propertyhooktype"
@@ -31892,6 +31893,12 @@ impl Vm {
                                 obj.set_property(name, Value::Undef);
                             } else {
                                 let resolved = self.resolve_deferred_value(&default);
+                                // Each instance gets its own copy of an array
+                                // default (the class entry's Rc must not be shared).
+                                let resolved = match resolved {
+                                    Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                                    other => other,
+                                };
                                 obj.set_property(name, resolved);
                             }
                         }
@@ -35091,6 +35098,9 @@ impl Vm {
                     if let Value::Reference(r) = slot {
                         *r.borrow_mut() = value.clone();
                     } else {
+                        if matches!(slot, Value::Object(_) | Value::Array(_)) {
+                            crate::gc::possible_root(slot);
+                        }
                         *slot = value.clone();
                     }
                 }
