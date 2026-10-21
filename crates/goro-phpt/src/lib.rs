@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::os::unix::io::FromRawFd;
 use std::path::Path;
 
 pub mod mysqli_test;
@@ -1067,8 +1065,6 @@ fn execute_php_with_timeout_and_filename(
     // This prevents memory accumulation across tests (2GB RLIMIT_AS).
     #[cfg(unix)]
     {
-        use std::io::Read as IoRead;
-
         // Create a pipe to communicate output from child to parent
         let (read_fd, write_fd) = {
             let mut fds = [0i32; 2];
@@ -1134,13 +1130,42 @@ fn execute_php_with_timeout_and_filename(
             libc::close(write_fd);
         }
 
-        // Wait for child with timeout
+        // Wait for child with timeout, draining the result pipe meanwhile so
+        // that a large output cannot fill it and block the child. (Reads are
+        // non-blocking: a grandchild may have inherited the write end.)
+        unsafe {
+            let fl = libc::fcntl(read_fd, libc::F_GETFL, 0);
+            libc::fcntl(read_fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        }
+        let mut buf = Vec::new();
+        let drain = |buf: &mut Vec<u8>| -> bool {
+            let mut got = false;
+            let mut chunk = [0u8; 65536];
+            loop {
+                let n = unsafe {
+                    libc::read(
+                        read_fd,
+                        chunk.as_mut_ptr() as *mut libc::c_void,
+                        chunk.len(),
+                    )
+                };
+                if n <= 0 {
+                    return got;
+                }
+                got = true;
+                buf.extend_from_slice(&chunk[..n as usize]);
+            }
+        };
         let start = std::time::Instant::now();
         loop {
             let mut status = 0i32;
             let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             if ret > 0 {
+                drain(&mut buf);
                 break; // Child exited
+            }
+            if drain(&mut buf) {
+                continue;
             }
             if ret < 0 {
                 unsafe {
@@ -1164,10 +1189,9 @@ fn execute_php_with_timeout_and_filename(
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
-        // Read result from pipe
-        let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-        let mut buf = Vec::new();
-        let _ = file.read_to_end(&mut buf);
+        unsafe {
+            libc::close(read_fd);
+        }
 
         if buf.is_empty() {
             return Err("Fatal error: child produced no output".to_string());
@@ -1591,7 +1615,18 @@ fn execute_php_inner_impl(
                     libc::dup2(f.as_raw_fd(), 0);
                 }
             }
+        } else {
+            // run-tests.php gives the test an (empty) stdin pipe.
+            let mut p = [0i32; 2];
+            unsafe {
+                if libc::pipe(p.as_mut_ptr()) == 0 {
+                    libc::close(p[1]);
+                    libc::dup2(p[0], 0);
+                    libc::close(p[0]);
+                }
+            }
         }
+        goro_ext_standard::misc::refresh_std_streams();
         let ini_lookup = |k: &str| -> Option<String> {
             ini_settings
                 .iter()
