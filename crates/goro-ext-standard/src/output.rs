@@ -215,6 +215,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             }
         }
         Value::Array(arr) => {
+            let akey = (std::rc::Rc::as_ptr(arr) as usize as u64) | (1u64 << 63);
+            if !seen.insert(akey) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                return;
+            }
             let arr = arr.borrow();
             vm.write_output(format!("{}array({}) {{\n", prefix, arr.len()).as_bytes());
             for (key, value) in arr.iter() {
@@ -231,6 +236,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 var_dump_value(vm, value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
+            seen.remove(&akey);
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
@@ -249,6 +255,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
             let oid = obj_borrow.object_id;
+            // PHP prints a bare *RECURSION* (no object header) when the
+            // object is already being dumped higher up the stack.
+            if seen.contains(&oid) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                return;
+            }
 
             // WeakReference: show ["object"] => referent or NULL
             if class_lower == b"weakreference" {
@@ -1004,6 +1016,11 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
             );
         }
         Value::Array(arr) => {
+            let akey = (std::rc::Rc::as_ptr(arr) as usize as u64) | (1u64 << 63);
+            if !seen.insert(akey) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                return;
+            }
             let arr = arr.borrow();
             vm.write_output(format!("{}&array({}) {{\n", prefix, arr.len()).as_bytes());
             for (key, value) in arr.iter() {
@@ -1020,6 +1037,7 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
                 var_dump_value(vm, value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
+            seen.remove(&akey);
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
@@ -1034,6 +1052,10 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
             // For regular objects, show &object(...) prefix
             let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
             let oid = obj_borrow.object_id;
+            if seen.contains(&oid) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                return;
+            }
             let prop_count = obj_borrow.properties.iter()
                 .filter(|(name, val)| {
                     if is_internal_property(name) { return false; }
@@ -1165,7 +1187,48 @@ fn render_closure_print_r(buf: &mut Vec<u8>, indent: usize, info: &ClosurePrintI
     buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
 }
 
+thread_local! {
+    /// Arrays/objects currently being printed by print_r (recursion guard).
+    static PRINT_R_SEEN: std::cell::RefCell<HashSet<usize>> = std::cell::RefCell::new(HashSet::new());
+}
+
 fn print_r_value(
+    val: &Value,
+    buf: &mut Vec<u8>,
+    indent: usize,
+    classes: &goro_core::vm::ClassMap,
+    closure_info_table: &std::collections::HashMap<Vec<u8>, ClosurePrintInfo>,
+) {
+    let key = match val {
+        Value::Array(a) => Some(std::rc::Rc::as_ptr(a) as *const u8 as usize),
+        Value::Object(o) => {
+            if o.try_borrow().map(|b| b.has_property(b"__enum_case")).unwrap_or(true) {
+                None
+            } else {
+                Some(std::rc::Rc::as_ptr(o) as *const u8 as usize)
+            }
+        }
+        _ => None,
+    };
+    let Some(key) = key else {
+        return print_r_value_inner(val, buf, indent, classes, closure_info_table);
+    };
+    if !PRINT_R_SEEN.with(|s| s.borrow_mut().insert(key)) {
+        match val {
+            Value::Object(o) => {
+                let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+                buf.extend_from_slice(cn.as_bytes());
+                buf.extend_from_slice(b" Object\n *RECURSION*");
+            }
+            _ => buf.extend_from_slice(b"Array\n *RECURSION*"),
+        }
+        return;
+    }
+    print_r_value_inner(val, buf, indent, classes, closure_info_table);
+    PRINT_R_SEEN.with(|s| s.borrow_mut().remove(&key));
+}
+
+fn print_r_value_inner(
     val: &Value,
     buf: &mut Vec<u8>,
     indent: usize,
