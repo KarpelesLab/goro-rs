@@ -4522,15 +4522,64 @@ impl Vm {
         let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
         let threw = !exc_before && self.current_exception.is_some();
         self.lazy_init_in_progress.remove(&object_id);
-        if threw {
-            // Restore properties to pre-init state so the object remains lazy.
-            let mut ob = obj.borrow_mut();
-            ob.properties = snapshot;
-            return false;
+        if state_bytes == b"ghost" {
+            let returned_value = !matches!(result, None | Some(Value::Null) | Some(Value::Undef));
+            if threw || returned_value {
+                // zend_lazy_object_revert_init(): the object stays lazy.
+                obj.borrow_mut().properties = snapshot;
+                if !threw {
+                    let exc = self.create_exception(b"TypeError", "Lazy object initializer must return NULL or no value", self.current_line);
+                    self.current_exception = Some(exc);
+                }
+                return false;
+            }
         }
         if state_bytes == b"proxy" {
+            // zend_lazy_object_init_proxy(): effects of a failed factory on
+            // the proxy are kept; the proxy stays lazy.
+            if threw {
+                return false;
+            }
+            let class_disp = crate::value::display_class_name(&class_name);
+            let err: Option<(&[u8], String)> = match &result {
+                Some(Value::Object(real)) => {
+                    if Rc::ptr_eq(real, obj) || matches!(real.borrow().get_property(b"__lazy_state"), Value::String(_)) {
+                        Some((b"Error", "Lazy proxy factory must return a non-lazy object".to_string()))
+                    } else if !self.lazy_proxy_compatible(real, obj) {
+                        Some((b"TypeError", format!(
+                            "The real instance class {} is not compatible with the proxy class {}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods.",
+                            crate::value::display_class_name(&real.borrow().class_name), class_disp)))
+                    } else {
+                        None
+                    }
+                }
+                other => {
+                    let v = other.clone().unwrap_or(Value::Null);
+                    let given = match &v {
+                        Value::Null | Value::Undef => "null".to_string(),
+                        Value::True => "true".to_string(),
+                        Value::False => "false".to_string(),
+                        _ => Self::value_type_name(&v),
+                    };
+                    Some((b"TypeError", format!("Lazy proxy factory must return an instance of a class compatible with {}, {} returned", class_disp, given)))
+                }
+            };
+            if let Some((cls, msg)) = err {
+                let exc = self.create_exception(cls, &msg, self.current_line);
+                self.current_exception = Some(exc);
+                return false;
+            }
             if let Some(Value::Object(real)) = result {
                 let mut ob = obj.borrow_mut();
+                // unset() properties of the proxy: all accesses are delegated
+                // to the instance from now on.
+                let names: Vec<Vec<u8>> = ob.properties.iter()
+                    .filter(|(n, _)| !n.starts_with(b"__"))
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                for n in names {
+                    ob.remove_property(&n);
+                }
                 ob.set_property(b"__lazy_real".to_vec(), Value::Object(real));
             }
         }
@@ -4564,6 +4613,44 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// zend_lazy_object_compatible(): same class, or the proxy class is a
+    /// sub-class of the instance class without additional properties and
+    /// without overriding __destruct / __clone.
+    fn lazy_proxy_compatible(&self, real: &Rc<RefCell<PhpObject>>, proxy: &Rc<RefCell<PhpObject>>) -> bool {
+        let rl: Vec<u8> = real.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let pl: Vec<u8> = proxy.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        if rl == pl {
+            return true;
+        }
+        if !self.class_extends(&pl, &rl) {
+            return false;
+        }
+        let count_props = |cl: &[u8]| -> usize {
+            let mut names: Vec<Vec<u8>> = Vec::new();
+            let mut cur = cl.to_vec();
+            for _ in 0..64 {
+                let Some(c) = self.classes.get(&cur) else { break };
+                for p in &c.properties {
+                    if !names.contains(&p.name) {
+                        names.push(p.name.clone());
+                    }
+                }
+                match &c.parent {
+                    Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                    None => break,
+                }
+            }
+            names.len()
+        };
+        if count_props(&pl) != count_props(&rl) {
+            return false;
+        }
+        let decl = |cl: &[u8], m: &[u8]| -> Option<Vec<u8>> {
+            self.classes.get(cl).and_then(|c| c.get_method(m)).map(|md| md.declaring_class.clone())
+        };
+        decl(&pl, b"__destruct") == decl(&rl, b"__destruct") && decl(&pl, b"__clone") == decl(&rl, b"__clone")
     }
 
     /// Initialize any lazy objects contained in the given values so that
@@ -30452,7 +30539,17 @@ impl Vm {
                             let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
                             let skip_init = is_lazy_uninit && has_set && !prop_declared && !guard_active;
                             if !skip_init {
+                                let exc_before_init = self.current_exception.is_some();
                                 self.maybe_run_lazy_init(obj);
+                                // An initializer exception aborts the write.
+                                if !exc_before_init && self.current_exception.is_some() {
+                                    if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(pc);
+                                        ip = if c > 0 { c } else { f } as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".into(), line: op.line });
+                                }
                                 // After init, if guard was active on the proxy,
                                 // propagate the guard to the real object so the
                                 // write doesn't re-enter __set.
