@@ -16901,8 +16901,17 @@ impl Vm {
                     );
                 }
                 OpCode::Identical => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // Comparisons against a literal Undef are compiler-internal
+                    // "was this argument passed" checks; user `===` treats an
+                    // undefined variable as null (with a warning).
+                    let undef_lit = |o: &OperandType| matches!(o, OperandType::Const(i) if matches!(op_array.literals.get(*i as usize), Some(Value::Undef)));
+                    let (a, b) = if undef_lit(&op.op1) || undef_lit(&op.op2) {
+                        (self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                         self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals))
+                    } else {
+                        (self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line),
+                         self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line))
+                    };
                     self.write_operand(
                         &op.result,
                         if a.identical(&b) {
@@ -16916,8 +16925,14 @@ impl Vm {
                     );
                 }
                 OpCode::NotIdentical => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let undef_lit = |o: &OperandType| matches!(o, OperandType::Const(i) if matches!(op_array.literals.get(*i as usize), Some(Value::Undef)));
+                    let (a, b) = if undef_lit(&op.op1) || undef_lit(&op.op2) {
+                        (self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                         self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals))
+                    } else {
+                        (self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line),
+                         self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line))
+                    };
                     self.write_operand(
                         &op.result,
                         if a.identical(&b) {
