@@ -368,6 +368,15 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
     let mut ce = ClassEntry::new(c.name.as_bytes().to_vec());
     ce.parent = c.parent.map(|p| find_class(p.as_bytes()).map(|pc| pc.name).unwrap_or(p).as_bytes().to_vec());
     ce.interfaces = c.interfaces.iter().map(|i| find_class(i.as_bytes()).map(|ic| ic.name).unwrap_or(i).as_bytes().to_vec()).collect();
+    // Internal classes declaring __toString() implicitly implement Stringable
+    // (registered before the explicitly implemented interfaces).
+    if c.kind != K_TRAIT
+        && c.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString"))
+        && !c.interfaces.iter().any(|i| i.eq_ignore_ascii_case("Stringable"))
+        && !c.name.eq_ignore_ascii_case("Stringable")
+    {
+        ce.interfaces.insert(0, b"Stringable".to_vec());
+    }
     ce.is_abstract = c.flags & F_ABSTRACT != 0;
     ce.is_final = c.flags & F_FINAL != 0;
     ce.is_readonly = c.flags & F_READONLY != 0;

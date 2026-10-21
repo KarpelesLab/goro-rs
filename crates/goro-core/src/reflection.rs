@@ -165,6 +165,9 @@ pub(crate) fn rmethod<'a>(vm: &'a Vm, lower: &[u8], method: &[u8]) -> Option<&'a
     let ml = method.to_ascii_lowercase();
     let mut cur = lower.to_ascii_lowercase();
     let mut ifaces: Vec<Vec<u8>> = Vec::new();
+    if let Some(m) = enum_builtin_method(vm, &cur, &ml) {
+        return Some(m);
+    }
     for _ in 0..64 {
         let c = rcls(vm, &cur)?;
         if let Some(m) = c.methods.get(&ml) {
@@ -208,6 +211,11 @@ pub(crate) fn rmethods<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::M
     out.extend(ce.methods.values());
     if !vm.classes.contains_key(&lower) {
         return out;
+    }
+    for em in [&b"cases"[..], b"from", b"tryfrom"] {
+        if let Some(m) = enum_builtin_method(vm, &lower, em) {
+            out.push(m);
+        }
     }
     let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut cur: &crate::object::ClassEntry = ce;
@@ -364,6 +372,204 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], line: u32) ->
 
 pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     with_internal_ctor_frame(vm, args, line, reflection_class_constant_construct_impl)
+}
+
+
+/// Whether a stored class-constant value is still an unevaluated marker.
+fn is_deferred_const_value(v: &Value) -> bool {
+    match v {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            b.starts_with(b"__deferred_") || b.starts_with(b"__enum_case__::")
+        }
+        Value::Array(a) => a.borrow().iter().any(|(_, v)| is_deferred_const_value(v)),
+        _ => false,
+    }
+}
+
+/// Evaluate a class constant the way a `Class::NAME` fetch does (resolving
+/// enum cases and deferred constant expressions). Returns None when the
+/// evaluation threw (the exception is left in `vm.current_exception`).
+pub(crate) fn resolve_class_constant(vm: &mut Vm, class_lower: &[u8], name: &[u8]) -> Option<Value> {
+    let (raw, cname) = {
+        let ce = rcls(vm, class_lower)?;
+        let raw = match ce.constants.get(name) {
+            Some(v) => v.clone(),
+            None => return reflection_class_get_constant(vm, class_lower, name),
+        };
+        (raw, ce.name.clone())
+    };
+    if !is_deferred_const_value(&raw) {
+        return Some(raw);
+    }
+    let cname_s = String::from_utf8_lossy(&cname).to_string();
+    let simple = !cname_s.is_empty()
+        && cname_s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\\' || (c as u32) >= 0x80)
+        && name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 0x80);
+    if !simple {
+        return Some(vm.resolve_deferred_value(&raw));
+    }
+    let source = format!("<?php return \\{}::{};", cname_s.trim_start_matches('\\'), String::from_utf8_lossy(name)).into_bytes();
+    let mut lexer = goro_parser::Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    let mut parser = goro_parser::Parser::new(tokens);
+    let program = match parser.parse() {
+        Ok(p) => p,
+        Err(_) => return Some(vm.resolve_deferred_value(&raw)),
+    };
+    let mut compiler = crate::compiler::Compiler::new();
+    let op_array = match compiler.compile(&program) {
+        Ok((op, _, _)) => op,
+        Err(_) => return Some(vm.resolve_deferred_value(&raw)),
+    };
+    let cvs = vec![Value::Undef; op_array.cv_names.len()];
+    vm.called_class_stack.push(class_lower.to_vec());
+    vm.push_class_scope(class_lower.to_vec());
+    let r = vm.execute_op_array_pub(&op_array, cvs);
+    vm.called_class_stack.pop();
+    vm.pop_class_scope();
+    if vm.current_exception.is_some() {
+        return None;
+    }
+    match r {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
+
+thread_local! {
+    static ENUM_METHOD_CACHE: RefCell<std::collections::HashMap<(Vec<u8>, Vec<u8>), &'static crate::object::MethodDef>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The engine-provided `cases()`/`from()`/`tryFrom()` of a user enum:
+/// internal functions scoped to the enum (prototype UnitEnum/BackedEnum).
+fn enum_builtin_method(vm: &Vm, enum_lower: &[u8], method_lower: &[u8]) -> Option<&'static crate::object::MethodDef> {
+    let ce = vm.classes.get(enum_lower)?;
+    if !ce.is_enum {
+        return None;
+    }
+    let iface: &[u8] = match method_lower {
+        b"cases" => b"UnitEnum",
+        b"from" | b"tryfrom" if ce.enum_backing_type.is_some() => b"BackedEnum",
+        _ => return None,
+    };
+    if ce.methods.contains_key(method_lower) {
+        return None;
+    }
+    let key = (enum_lower.to_vec(), method_lower.to_vec());
+    if let Some(m) = ENUM_METHOD_CACHE.with(|c| c.borrow().get(&key).copied()) {
+        return Some(m);
+    }
+    let (_, sig) = crate::stubs::find_method(iface, method_lower)?;
+    let oa = crate::stubs::op_array_for(sig, Some(enum_lower), true);
+    let m: &'static crate::object::MethodDef = Box::leak(Box::new(crate::object::MethodDef {
+        name: sig.name.as_bytes().to_vec(),
+        param_count: sig.args.len(),
+        op_array: oa,
+        is_static: true,
+        is_abstract: false,
+        is_final: false,
+        visibility: Visibility::Public,
+        declaring_class: enum_lower.to_vec(),
+        doc_comment: None,
+        attributes: Vec::new(),
+    }));
+    ENUM_METHOD_CACHE.with(|c| c.borrow_mut().insert(key, m));
+    Some(m)
+}
+
+
+thread_local! {
+    static ENUM_PROP_CACHE: RefCell<std::collections::HashMap<Vec<u8>, &'static [crate::object::PropertyDef]>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The implicit `name`/`value` properties of a user enum.
+fn enum_builtin_props(vm: &Vm, lower: &[u8]) -> &'static [crate::object::PropertyDef] {
+    let ce = match vm.classes.get(lower) {
+        Some(c) if c.is_enum => c,
+        _ => return &[],
+    };
+    if let Some(v) = ENUM_PROP_CACHE.with(|c| c.borrow().get(lower).copied()) {
+        return v;
+    }
+    let mk = |name: &[u8], ty: &[u8]| crate::object::PropertyDef {
+        name: name.to_vec(),
+        default: Value::Undef,
+        is_static: false,
+        is_readonly: true,
+        visibility: Visibility::Public,
+        set_visibility: None,
+        declaring_class: lower.to_vec(),
+        property_type: Some(ParamType::Simple(ty.to_vec())),
+        has_get_hook: false,
+        has_set_hook: false,
+        is_virtual: false,
+        is_abstract: false,
+        is_final: false,
+        attributes: Vec::new(),
+        doc_comment: None,
+    };
+    let mut v = Vec::new();
+    if !ce.properties.iter().any(|p| p.name == b"name") {
+        v.push(mk(b"name", b"string"));
+    }
+    if let Some(bt) = &ce.enum_backing_type {
+        if !ce.properties.iter().any(|p| p.name == b"value") {
+            v.push(mk(b"value", &bt.to_ascii_lowercase()));
+        }
+    }
+    let leaked: &'static [crate::object::PropertyDef] = Box::leak(v.into_boxed_slice());
+    ENUM_PROP_CACHE.with(|c| c.borrow_mut().insert(lower.to_vec(), leaked));
+    leaked
+}
+
+/// All declared properties of a class, including the implicit enum
+/// properties and those inherited from internal ancestors (which user
+/// `ClassEntry`s don't copy).
+pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::PropertyDef> {
+    let lower = lower.to_ascii_lowercase();
+    let mut out: Vec<&'a crate::object::PropertyDef> = Vec::new();
+    let ce = match rcls(vm, &lower) {
+        Some(c) => c,
+        None => return out,
+    };
+    // Enum `name`/`value` come first (declared by the engine).
+    out.extend(enum_builtin_props(vm, &lower).iter());
+    out.extend(ce.properties.iter());
+    if !vm.classes.contains_key(&lower) {
+        return out;
+    }
+    let mut cur = ce.parent.clone();
+    let mut guard = 0;
+    while let Some(p) = cur {
+        guard += 1;
+        if guard > 64 { break; }
+        let pl = p.to_ascii_lowercase();
+        let pce = match rcls(vm, &pl) {
+            Some(c) => c,
+            None => break,
+        };
+        if !vm.classes.contains_key(&pl) {
+            for prop in &pce.properties {
+                if prop.visibility == Visibility::Private {
+                    continue;
+                }
+                if !out.iter().any(|x| x.name == prop.name) {
+                    out.push(prop);
+                }
+            }
+        }
+        cur = pce.parent.clone();
+    }
+    out
+}
+
+/// Find a declared property (see `rprops`).
+pub(crate) fn rprop<'a>(vm: &'a Vm, lower: &[u8], name: &[u8]) -> Option<&'a crate::object::PropertyDef> {
+    rprops(vm, lower).into_iter().find(|p| p.name == name)
 }
 
 /// ReflectionClass constructor: sets up __reflection_target and name properties
@@ -864,7 +1070,7 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     let mut is_dynamic_prop = false;
     if is_user_class {
         let prop_exists_decl = rcls(vm, &class_lower)
-            .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
+            .map(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).is_some())
             .unwrap_or(false);
 
         if !prop_exists_decl {
@@ -1795,8 +2001,23 @@ pub fn reflection_class_method(
             } else {
                 ReflectionStringKind::Class
             };
+            // Evaluate constants first (zend_update_class_constant); an
+            // evaluation error aborts the string conversion.
+            let const_names: Vec<Vec<u8>> = rcls(vm, &class_lower)
+                .map(|c| c.constants.keys().cloned().collect())
+                .unwrap_or_default();
+            let mut resolved: Vec<(Vec<u8>, Value)> = Vec::new();
+            for cn in const_names {
+                match resolve_class_constant(vm, &class_lower, &cn) {
+                    Some(v) => resolved.push((cn, v)),
+                    None => return Some(Value::Null),
+                }
+            }
+            RESOLVED_CONSTS.with(|r| *r.borrow_mut() = Some(resolved));
+            let out = reflection_class_to_string(vm, &name, &class_lower, kind, wrapped.as_ref());
+            RESOLVED_CONSTS.with(|r| *r.borrow_mut() = None);
             Some(Value::String(PhpString::from_string(
-                reflection_class_to_string(vm, &name, &class_lower, kind, wrapped.as_ref())
+                out
             )))
         }
         _ => None,
@@ -1842,7 +2063,7 @@ pub fn reflection_class_docall(
                 };
                 let prop_name = PhpString::from_string(prop_name_s);
                 let has = rcls(vm, &class_lower)
-                    .map(|c| c.properties.iter().any(|p| {
+                    .map(|_c| rprops(vm, &class_lower).into_iter().any(|p| {
                         if p.name != prop_name.as_bytes() { return false; }
                         // Inherited private (instance) props are not visible.
                         if p.visibility == Visibility::Private && p.declaring_class != class_lower && !p.is_static {
@@ -2196,9 +2417,9 @@ pub fn reflection_class_docall(
                 // Collect declared properties (both static and instance) along
                 // with their declaring class. Private props from a parent are
                 // not visible on subclasses.
-                let declared: Vec<(String, Vec<u8>)> = if let Some(ce) = rcls(vm, &class_lower) {
+                let declared: Vec<(String, Vec<u8>)> = if rcls(vm, &class_lower).is_some() {
                     let mut v = Vec::new();
-                    for prop in ce.properties.iter() {
+                    for prop in rprops(vm, &class_lower) {
                         if filter != -1 {
                             let prop_mod = reflection_property_modifiers_static(prop);
                             if prop_mod & filter == 0 { continue; }
@@ -4573,7 +4794,7 @@ pub fn reflection_property_method(
                 return Some(create_reflection_class(vm, &canonical));
             }
             let declaring = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes())
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes())
                     .map(|p| String::from_utf8_lossy(&p.declaring_class).to_string()))
                 .unwrap_or(class_name.clone());
             let declaring_canonical = rcls(vm, declaring.as_bytes().to_ascii_lowercase().as_slice())
@@ -4584,45 +4805,45 @@ pub fn reflection_property_method(
         b"ispublic" => {
             if is_dynamic { return Some(Value::True); }
             let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Public { Value::True } else { Value::False })
         }
         b"isprotected" => {
             if is_dynamic { return Some(Value::False); }
             let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Protected { Value::True } else { Value::False })
         }
         b"isprivate" => {
             if is_dynamic { return Some(Value::False); }
             let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Private { Value::True } else { Value::False })
         }
         b"isstatic" => {
             let is_static = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_static))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_static))
                 .unwrap_or(false);
             Some(if is_static { Value::True } else { Value::False })
         }
         b"isreadonly" => {
             let is_readonly = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_readonly))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_readonly))
                 .unwrap_or(false);
             Some(if is_readonly { Value::True } else { Value::False })
         }
         b"isvirtual" => {
             let is_virtual = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_virtual))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_virtual))
                 .unwrap_or(false);
             Some(if is_virtual { Value::True } else { Value::False })
         }
         b"isabstract" => {
             let is_abstract = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_abstract))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_abstract))
                 .unwrap_or(false);
             Some(if is_abstract { Value::True } else { Value::False })
         }
@@ -4630,21 +4851,21 @@ pub fn reflection_property_method(
             // Either explicitly final OR `private(set)` (implicit final
             // because the setter cannot be overridden).
             let is_final = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .map(|p| p.is_final || p.set_visibility == Some(Visibility::Private))
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
         b"hashooks" => {
             let has_hooks = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .map(|p| p.has_get_hook || p.has_set_hook)
                 .unwrap_or(false);
             Some(if has_hooks { Value::True } else { Value::False })
         }
         b"isdefault" => {
             let is_default = rcls(vm, &class_lower)
-                .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
+                .map(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).is_some())
                 .unwrap_or(false);
             Some(if is_default { Value::True } else { Value::False })
         }
@@ -4654,7 +4875,7 @@ pub fn reflection_property_method(
             // Untyped properties implicitly default to NULL, so no deprecation.
             // Dynamic properties (looked up by object) also trigger the warning.
             let prop_info = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).cloned());
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).cloned());
             let (default_val, has_default, has_type) = match &prop_info {
                 Some(p) => {
                     let has = !matches!(p.default, Value::Undef);
@@ -4679,20 +4900,20 @@ pub fn reflection_property_method(
         }
         b"hasdefaultvalue" => {
             let has = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .map(|p| !matches!(p.default, Value::Undef))
                 .unwrap_or(false);
             Some(if has { Value::True } else { Value::False })
         }
         b"getmodifiers" => {
             let mods = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(reflection_property_modifiers))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| reflection_property_modifiers(p)))
                 .unwrap_or(1);
             Some(Value::Long(mods))
         }
         b"getdoccomment" => {
             let doc = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .and_then(|p| p.doc_comment.as_ref())
                 .cloned();
             if let Some(d) = doc {
@@ -4703,14 +4924,14 @@ pub fn reflection_property_method(
         }
         b"hastype" => {
             let has = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .map(|p| p.property_type.is_some())
                 .unwrap_or(false);
             Some(if has { Value::True } else { Value::False })
         }
         b"gettype" => {
             let pt = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .and_then(|p| p.property_type.as_ref())
                 .cloned();
             if let Some(pt) = pt {
@@ -4732,7 +4953,7 @@ pub fn reflection_property_method(
             // PHP: private properties -> "\0ClassName\0name",
             // protected properties -> "\0*\0name", public -> "name".
             let (vis, declaring_lower) = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .map(|p| (p.visibility, p.declaring_class.clone()))
                 .unwrap_or((Visibility::Public, class_lower.clone()));
             let declaring_canonical = rcls(vm, &declaring_lower)
@@ -4748,13 +4969,13 @@ pub fn reflection_property_method(
         b"isdynamic" => {
             // Dynamic properties are those not declared on the class.
             let is_declared = rcls(vm, &class_lower)
-                .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
+                .map(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).is_some())
                 .unwrap_or(false);
             Some(if is_declared { Value::False } else { Value::True })
         }
         b"isprivateset" => {
             let is_priv_set = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .and_then(|p| p.set_visibility)
                 .map(|v| v == Visibility::Private)
                 .unwrap_or(false);
@@ -4762,7 +4983,7 @@ pub fn reflection_property_method(
         }
         b"isprotectedset" => {
             let is_prot_set = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .and_then(|p| p.set_visibility)
                 .map(|v| v == Visibility::Protected)
                 .unwrap_or(false);
@@ -4781,7 +5002,7 @@ pub fn reflection_property_method(
             // Default behavior: same as getType(); asymmetric setter types
             // aren't modeled yet.
             let pt = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .and_then(|p| p.property_type.as_ref())
                 .cloned();
             if let Some(pt) = pt {
@@ -4792,7 +5013,7 @@ pub fn reflection_property_method(
         }
         b"__tostring" => {
             let prop = rcls(vm, &class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                 .cloned();
             if let Some(p) = prop {
                 let vis = match p.visibility {
@@ -4912,7 +5133,7 @@ pub fn reflection_property_docall(
 
         // Check if this is a static property
         let is_static = rcls(vm, &class_lower)
-            .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_static))
+            .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.is_static))
             .unwrap_or(false);
 
         match method {
@@ -4980,7 +5201,7 @@ pub fn reflection_property_docall(
                         // an object that is __toString()-able coerces to string
                         // when assigned to a string-typed property — bug #79683.
                         let prop_type = rcls(vm, &class_lower)
-                            .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
+                            .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
                             .and_then(|p| p.property_type.clone());
                         let mut coerced = value.clone();
                         if let Some(pt) = &prop_type {
@@ -5008,7 +5229,7 @@ pub fn reflection_property_docall(
             }
             b"getattributes" => {
                 let attrs = rcls(vm, &class_lower)
-                    .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.attributes.clone()))
+                    .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| p.attributes.clone()))
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -7411,236 +7632,9 @@ fn reflection_class_to_string(
     kind: ReflectionStringKind,
     wrapped_obj: Option<&std::rc::Rc<std::cell::RefCell<PhpObject>>>,
 ) -> String {
-    let mut s = String::new();
-
-    let is_interface = rcls(vm, class_lower).map(|c| c.is_interface).unwrap_or(false);
-    let is_trait = rcls(vm, class_lower).map(|c| c.is_trait).unwrap_or(false);
-    let is_enum = rcls(vm, class_lower).map(|c| c.is_enum).unwrap_or(false);
-    let is_abstract = rcls(vm, class_lower).map(|c| c.is_abstract).unwrap_or(false);
-    let is_final = rcls(vm, class_lower).map(|c| c.is_final).unwrap_or(false);
-    let is_readonly = rcls(vm, class_lower).map(|c| c.is_readonly).unwrap_or(false);
-    // A class is "user-defined" when it has a source filename recorded; built-in
-    // classes loaded synthetically into vm.classes have no filename.
-    let is_user = rcls(vm, class_lower).map(|c| c.filename.is_some()).unwrap_or(false);
-    let user_or_internal = if is_user { "user" } else { "internal" };
-
-    // Header line
-    if is_interface {
-        s.push_str(&format!("Interface [ <{}> interface {} ", user_or_internal, name));
-    } else if is_trait {
-        s.push_str(&format!("Trait [ <{}> trait {} ", user_or_internal, name));
-    } else if is_enum || kind == ReflectionStringKind::Enum {
-        s.push_str(&format!("Enum [ <{}> enum {} ", user_or_internal, name));
-    } else if kind == ReflectionStringKind::Object {
-        let mut modifiers = String::new();
-        if is_abstract { modifiers.push_str("abstract "); }
-        if is_final { modifiers.push_str("final "); }
-        if is_readonly { modifiers.push_str("readonly "); }
-        s.push_str(&format!("Object of class [ <{}> {}class {} ", user_or_internal, modifiers, name));
-    } else {
-        let mut modifiers = String::new();
-        if is_abstract { modifiers.push_str("abstract "); }
-        if is_final { modifiers.push_str("final "); }
-        if is_readonly { modifiers.push_str("readonly "); }
-        s.push_str(&format!("Class [ <{}> {}class {} ", user_or_internal, modifiers, name));
-    }
-
-    // Parent and interfaces
-    if let Some(ce) = rcls(vm, class_lower) {
-        if let Some(ref parent) = ce.parent {
-            s.push_str(&format!("extends {} ", String::from_utf8_lossy(parent)));
-        }
-        if !ce.interfaces.is_empty() {
-            let keyword = if is_interface { "extends" } else { "implements" };
-            s.push_str(&format!("{} ", keyword));
-            let ifaces: Vec<String> = ce.interfaces.iter().map(|i| String::from_utf8_lossy(i).to_string()).collect();
-            s.push_str(&ifaces.join(", "));
-            s.push(' ');
-        }
-    }
-    s.push_str("] {\n");
-
-    // File info
-    if let Some(ce) = rcls(vm, class_lower) {
-        if let Some(ref filename) = ce.filename {
-            if ce.start_line > 0 {
-                let end = if ce.end_line > 0 { ce.end_line } else { ce.start_line };
-                s.push_str(&format!("  @@ {} {}-{}\n", filename, ce.start_line, end));
-            }
-        }
-    }
-
-    // Enum cases section (for enums)
-    if is_enum {
-        if let Some(ce) = rcls(vm, class_lower) {
-            s.push_str(&format!("\n  - Enum cases [{}] {{\n", ce.enum_cases.len()));
-            for (case_name, _) in &ce.enum_cases {
-                s.push_str(&format!("    Case {}\n", String::from_utf8_lossy(case_name)));
-            }
-            s.push_str("  }\n");
-        }
-    }
-
-    // Constants section. Enum cases are constants in the class table but should
-    // not appear in the - Constants - section for an enum.
-    if let Some(ce) = rcls(vm, class_lower) {
-        let case_names: std::collections::HashSet<&[u8]> = ce.enum_cases.iter().map(|(n, _)| n.as_slice()).collect();
-        let regular_consts: Vec<_> = ce.constants.iter().filter(|(n, _)| !case_names.contains(n.as_slice())).collect();
-        s.push_str(&format!("\n  - Constants [{}] {{\n", regular_consts.len()));
-        for (cname, cval) in regular_consts {
-            let const_name_str = String::from_utf8_lossy(cname);
-            let meta = ce.constants_meta.get(cname.as_slice());
-            let vis = meta.map(|m| m.visibility).unwrap_or(Visibility::Public);
-            let is_final_const = meta.map(|m| m.is_final).unwrap_or(false);
-            let vis_str = match vis {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
-            };
-            let final_str = if is_final_const { "final " } else { "" };
-            let type_str = reflection_const_type_name(meta.and_then(|m| m.declared_type.as_ref()), cval)
-                .map(|n| format!("{} ", n))
-                .unwrap_or_default();
-            let val_str = reflection_const_value_repr(cval);
-            s.push_str(&format!("    Constant [ {}{} {}{} ] {{ {} }}\n", final_str, vis_str, type_str, const_name_str, val_str));
-        }
-        s.push_str("  }\n");
-    } else {
-        s.push_str("\n  - Constants [0] {\n  }\n");
-    }
-
-    // Static properties. Inherited private static props are not listed on subclasses.
-    if let Some(ce) = rcls(vm, class_lower) {
-        let static_props: Vec<_> = ce.properties.iter()
-            .filter(|p| p.is_static)
-            .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
-            .collect();
-        s.push_str(&format!("\n  - Static properties [{}] {{\n", static_props.len()));
-        for prop in static_props {
-            let vis = match prop.visibility {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
-            };
-            let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
-            let prop_name_str = String::from_utf8_lossy(&prop.name);
-            // For uninitialized static props, PHP renders the default as NULL.
-            let default_str = if matches!(prop.default, Value::Undef) {
-                " = NULL".to_string()
-            } else {
-                format!(" = {}", reflection_value_repr(&prop.default))
-            };
-            s.push_str(&format!("    Property [ {} static{} ${}{} ]\n", vis, type_str, prop_name_str, default_str));
-        }
-        s.push_str("  }\n");
-    } else {
-        s.push_str("\n  - Static properties [0] {\n  }\n");
-    }
-
-    // Static methods. Hide property hook synthetic methods. Inherited private
-    // methods are not exposed on subclasses.
-    if let Some(ce) = rcls(vm, class_lower) {
-        let static_methods: Vec<_> = ce.methods.values()
-            .filter(|m| m.is_static)
-            .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
-            .filter(|m| !(m.visibility == Visibility::Private && m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() != *class_lower))
-            .collect();
-        s.push_str(&format!("\n  - Static methods [{}] {{\n", static_methods.len()));
-        let total = static_methods.len();
-        for (i, m) in static_methods.iter().enumerate() {
-            reflection_method_to_string_section(&mut s, m, vm, class_lower);
-            if i + 1 < total { s.push('\n'); }
-        }
-        s.push_str("  }\n");
-    } else {
-        s.push_str("\n  - Static methods [0] {\n  }\n");
-    }
-
-    // Properties (non-static). Inherited private (instance) props are not
-    // listed on subclasses.
-    if let Some(ce) = rcls(vm, class_lower) {
-        let is_readonly_class = ce.is_readonly;
-        let inst_props: Vec<_> = ce.properties.iter()
-            .filter(|p| !p.is_static)
-            .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
-            .collect();
-        s.push_str(&format!("\n  - Properties [{}] {{\n", inst_props.len()));
-        for prop in inst_props {
-            let vis = match prop.visibility {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
-            };
-            // In readonly classes, public properties get implicit
-            // protected(set) visibility on the set hook.
-            let set_vis_str = if is_readonly_class && prop.visibility == Visibility::Public {
-                " protected(set)"
-            } else {
-                ""
-            };
-            let readonly_str = if prop.is_readonly { " readonly" } else { "" };
-            let type_str = prop.property_type.as_ref().map(|t| format!(" {}", param_type_name(t))).unwrap_or_default();
-            let prop_name_str = String::from_utf8_lossy(&prop.name);
-            let default_str = if !matches!(prop.default, Value::Undef) {
-                format!(" = {}", reflection_value_repr(&prop.default))
-            } else {
-                String::new()
-            };
-            s.push_str(&format!("    Property [ {}{}{}{} ${}{} ]\n", vis, set_vis_str, readonly_str, type_str, prop_name_str, default_str));
-        }
-        s.push_str("  }\n");
-    } else {
-        s.push_str("\n  - Properties [0] {\n  }\n");
-    }
-
-    // For ReflectionObject, render dynamic instance properties (those not
-    // declared on the class) in a separate "Dynamic properties" section.
-    if kind == ReflectionStringKind::Object {
-        if let Some(inst_rc) = wrapped_obj {
-            let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = rcls(vm, class_lower) {
-                ce.properties.iter()
-                    .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
-                    .map(|p| p.name.clone())
-                    .collect()
-            } else { Vec::new() };
-            let dyn_props: Vec<(Vec<u8>, Value)> = {
-                let io = inst_rc.borrow();
-                io.properties.iter()
-                    .filter(|(name, _)| !name.starts_with(b"__"))
-                    .filter(|(name, _)| !visible_declared_names.iter().any(|n| n == name))
-                    .map(|(n, v)| (n.clone(), v.clone()))
-                    .collect()
-            };
-            s.push_str(&format!("\n  - Dynamic properties [{}] {{\n", dyn_props.len()));
-            for (pname, _pval) in &dyn_props {
-                let prop_name_str = String::from_utf8_lossy(pname);
-                s.push_str(&format!("    Property [ <dynamic> public ${} ]\n", prop_name_str));
-            }
-            s.push_str("  }\n");
-        }
-    }
-
-    // Methods (non-static). Hide property hook synthetic methods and
-    // inherited private methods.
-    if let Some(ce) = rcls(vm, class_lower) {
-        let inst_methods: Vec<_> = ce.methods.values()
-            .filter(|m| !m.is_static)
-            .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
-            .filter(|m| !(m.visibility == Visibility::Private && m.declaring_class != class_lower))
-            .collect();
-        s.push_str(&format!("\n  - Methods [{}] {{\n", inst_methods.len()));
-        let total = inst_methods.len();
-        for (i, m) in inst_methods.iter().enumerate() {
-            reflection_method_to_string_section(&mut s, m, vm, class_lower);
-            if i + 1 < total { s.push('\n'); }
-        }
-        s.push_str("  }\n");
-    } else {
-        s.push_str("\n  - Methods [0] {\n  }\n");
-    }
-
-    s.push_str("}\n");
-    s
+    let _ = name;
+    let obj = if kind == ReflectionStringKind::Object { wrapped_obj } else { None };
+    class_string(vm, class_lower, obj, "")
 }
 
 /// Helper to add a method's __toString to the class output
@@ -8906,4 +8900,514 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
     s.push_str(indent);
     s.push_str("}\n");
     s
+}
+
+/// Port of `smart_str_append_escaped()`.
+fn zend_escape_str(s: &[u8]) -> String {
+    let mut out = String::new();
+    for &c in s {
+        if c < 32 || c == b'\\' || c > 126 {
+            out.push('\\');
+            match c {
+                b'\n' => out.push('n'),
+                b'\r' => out.push('r'),
+                b'\t' => out.push('t'),
+                0x0c => out.push('f'),
+                0x0b => out.push('v'),
+                b'\\' => out.push('\\'),
+                0x1b => out.push('e'),
+                _ => out.push_str(&format!("x{:X}{:X}", c >> 4, c & 0xf)),
+            }
+        } else {
+            out.push(c as char);
+        }
+    }
+    out
+}
+
+/// Port of `format_default_value()` for already-evaluated values.
+pub(crate) fn format_default_value(v: &Value) -> String {
+    match v {
+        Value::Undef | Value::Null => "NULL".to_string(),
+        Value::True => "true".to_string(),
+        Value::False => "false".to_string(),
+        Value::Long(n) => n.to_string(),
+        Value::Double(f) => {
+            let s = crate::value::format_php_float(*f);
+            if f.is_finite() && !s.contains('.') {
+                format!("{}.0", s)
+            } else {
+                s
+            }
+        }
+        Value::String(s) => format!("'{}'", zend_escape_str(s.as_bytes())),
+        Value::Array(a) => {
+            let arr = a.borrow();
+            let mut is_list = true;
+            let mut expect: i64 = 0;
+            for (k, _) in arr.iter() {
+                match k {
+                    ArrayKey::Int(n) if *n == expect => expect += 1,
+                    _ => {
+                        is_list = false;
+                        break;
+                    }
+                }
+            }
+            let mut parts: Vec<String> = Vec::new();
+            for (k, v) in arr.iter() {
+                let val = format_default_value(v);
+                if is_list {
+                    parts.push(val);
+                } else {
+                    let key = match k {
+                        ArrayKey::Int(n) => n.to_string(),
+                        ArrayKey::String(s) => format!("'{}'", zend_escape_str(s.as_bytes())),
+                    };
+                    parts.push(format!("{} => {}", key, val));
+                }
+            }
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Object(o) => {
+            let ob = o.borrow();
+            if ob.has_property(b"__enum_name") {
+                format!("{}::{}", String::from_utf8_lossy(&ob.class_name), ob.get_property(b"__enum_name").to_php_string().to_string_lossy())
+            } else {
+                format!("object({})", String::from_utf8_lossy(&ob.class_name))
+            }
+        }
+        other => other.to_php_string().to_string_lossy(),
+    }
+}
+
+/// Whether a class gets an object iterator (`ce->get_iterator`), shown as
+/// `<iterateable>`: it implements Iterator/IteratorAggregate (not counting the
+/// interfaces themselves) or has hooked properties.
+fn class_is_iterateable(vm: &Vm, class_lower: &[u8]) -> bool {
+    if class_lower == b"iterator" || class_lower == b"iteratoraggregate" || class_lower == b"traversable" {
+        return false;
+    }
+    if vm.class_extends(class_lower, b"iterator") || vm.class_extends(class_lower, b"iteratoraggregate") {
+        return true;
+    }
+    if is_internal_class(vm, class_lower) {
+        let ifs = crate::stubs::class_interfaces(class_lower);
+        if ifs.iter().any(|i| i.eq_ignore_ascii_case("Iterator") || i.eq_ignore_ascii_case("IteratorAggregate")) {
+            return true;
+        }
+    }
+    // User classes: walk interfaces (user ClassEntry interface lists may
+    // include internal ones that extend Iterator).
+    let mut stack: Vec<Vec<u8>> = vec![class_lower.to_vec()];
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    while let Some(c) = stack.pop() {
+        if seen.contains(&c) || seen.len() > 128 {
+            continue;
+        }
+        seen.push(c.clone());
+        if let Some(ce) = rcls(vm, &c) {
+            if ce.properties.iter().any(|p| p.has_get_hook || p.has_set_hook) {
+                return true;
+            }
+            for i in &ce.interfaces {
+                let il = i.to_ascii_lowercase();
+                if il == b"iterator" || il == b"iteratoraggregate" {
+                    return true;
+                }
+                stack.push(il);
+            }
+            if let Some(p) = &ce.parent {
+                stack.push(p.to_ascii_lowercase());
+            }
+        }
+    }
+    false
+}
+
+/// Port of `_property_string()` for a declared property.
+pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &str) -> String {
+    let mut s = String::new();
+    if let Some(doc) = &p.doc_comment {
+        s.push_str(indent);
+        s.push_str(doc);
+        s.push('\n');
+    }
+    s.push_str(indent);
+    s.push_str("Property [ ");
+    let set_vis = match p.set_visibility {
+        Some(v) if v != p.visibility => Some(v),
+        Some(_) => None,
+        None if p.is_readonly && p.visibility == Visibility::Public => Some(Visibility::Protected),
+        None => None,
+    };
+    if p.is_abstract {
+        s.push_str("abstract ");
+    }
+    if p.is_final || set_vis == Some(Visibility::Private) {
+        s.push_str("final ");
+    }
+    s.push_str(match p.visibility {
+        Visibility::Public => "public ",
+        Visibility::Protected => "protected ",
+        Visibility::Private => "private ",
+    });
+    match set_vis {
+        Some(Visibility::Private) => s.push_str("private(set) "),
+        Some(Visibility::Protected) => s.push_str("protected(set) "),
+        _ => {}
+    }
+    if p.is_static {
+        s.push_str("static ");
+    }
+    if p.is_readonly {
+        s.push_str("readonly ");
+    }
+    if p.is_virtual {
+        s.push_str("virtual ");
+    }
+    if let Some(t) = &p.property_type {
+        s.push_str(&zend_type_string(t));
+        s.push(' ');
+    }
+    s.push('$');
+    s.push_str(&String::from_utf8_lossy(&p.name));
+    if !p.is_virtual && !matches!(p.default, Value::Undef) {
+        s.push_str(" = ");
+        s.push_str(&format_default_value(&p.default));
+    }
+    if p.has_get_hook || p.has_set_hook {
+        s.push_str(" {");
+        let decl = p.declaring_class.to_ascii_lowercase();
+        let final_hook = |kind: &str| -> bool {
+            let mname = format!("__property_{}_{}", kind, String::from_utf8_lossy(&p.name));
+            rmethod(vm, &decl, mname.as_bytes()).map(|m| m.is_final).unwrap_or(false)
+        };
+        if p.has_get_hook {
+            s.push_str(if final_hook("get") { " final get;" } else { " get;" });
+        }
+        if p.has_set_hook {
+            s.push_str(if final_hook("set") { " final set;" } else { " set;" });
+        }
+        s.push_str(" }");
+    }
+    s.push_str(" ]\n");
+    s
+}
+
+/// Port of `_class_const_string()`.
+fn class_const_string(name: &[u8], val: &Value, meta: Option<&crate::object::ConstantMeta>, indent: &str) -> String {
+    let mut s = String::new();
+    if let Some(doc) = meta.and_then(|m| m.doc_comment.as_ref()) {
+        s.push_str(indent);
+        s.push_str(doc);
+        s.push('\n');
+    }
+    let vis = match meta.map(|m| m.visibility).unwrap_or(Visibility::Public) {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    };
+    let fin = if meta.map(|m| m.is_final).unwrap_or(false) { "final " } else { "" };
+    let ty = match meta.and_then(|m| m.declared_type.as_ref()) {
+        Some(t) => zend_type_string(t),
+        None => zend_zval_type_name(val).to_string(),
+    };
+    let v = match val {
+        Value::Array(_) => "Array".to_string(),
+        Value::Object(_) => "Object".to_string(),
+        Value::Null => String::new(),
+        Value::True => "1".to_string(),
+        Value::False => String::new(),
+        Value::Double(f) => crate::value::format_php_float(*f),
+        other => other.to_php_string().to_string_lossy(),
+    };
+    s.push_str(&format!("{}Constant [ {}{} {} {} ] {{ {} }}\n", indent, fin, vis, ty, String::from_utf8_lossy(name), v));
+    s
+}
+
+/// `zend_zval_type_name()`.
+fn zend_zval_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Undef | Value::Null => "null",
+        Value::True | Value::False => "bool",
+        Value::Long(_) => "int",
+        Value::Double(_) => "float",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        _ => "mixed",
+    }
+}
+
+thread_local! {
+    /// Constant values pre-evaluated (with a mutable VM) for `class_string`.
+    static RESOLVED_CONSTS: RefCell<Option<Vec<(Vec<u8>, Value)>>> = RefCell::new(None);
+}
+
+/// Port of `_class_string()`.
+pub(crate) fn class_string(
+    vm: &Vm,
+    class_lower: &[u8],
+    obj: Option<&Rc<RefCell<PhpObject>>>,
+    indent: &str,
+) -> String {
+    let ce = match rcls(vm, class_lower) {
+        Some(c) => c,
+        None => return String::new(),
+    };
+    let internal = is_internal_class(vm, class_lower);
+    let sub_indent = format!("{}    ", indent);
+    let mut s = String::new();
+    if let Some(doc) = &ce.doc_comment {
+        s.push_str(indent);
+        s.push_str(doc);
+        s.push('\n');
+    }
+    if obj.is_some() {
+        s.push_str(&format!("{}Object of class [ ", indent));
+    } else {
+        let kind = if ce.is_interface {
+            "Interface"
+        } else if ce.is_trait {
+            "Trait"
+        } else if ce.is_enum {
+            "Enum"
+        } else {
+            "Class"
+        };
+        s.push_str(&format!("{}{} [ ", indent, kind));
+    }
+    s.push_str(if internal { "<internal" } else { "<user" });
+    if internal {
+        if let Some(sc) = crate::stubs::find_class(class_lower) {
+            s.push(':');
+            s.push_str(sc.ext);
+        }
+    }
+    s.push_str("> ");
+    if class_is_iterateable(vm, class_lower) {
+        s.push_str("<iterateable> ");
+    }
+    if ce.is_interface {
+        s.push_str("interface ");
+    } else if ce.is_trait {
+        s.push_str("trait ");
+    } else if ce.is_enum {
+        s.push_str("enum ");
+    } else {
+        if ce.is_abstract {
+            s.push_str("abstract ");
+        }
+        if ce.is_final {
+            s.push_str("final ");
+        }
+        if ce.is_readonly {
+            s.push_str("readonly ");
+        }
+        s.push_str("class ");
+    }
+    s.push_str(&String::from_utf8_lossy(&ce.name));
+    if let Some(p) = &ce.parent {
+        let pn = rcls(vm, &p.to_ascii_lowercase()).map(|c| c.name.clone()).unwrap_or_else(|| p.clone());
+        s.push_str(&format!(" extends {}", String::from_utf8_lossy(&pn)));
+    }
+    if ce.is_enum {
+        if let Some(bt) = &ce.enum_backing_type {
+            s.push_str(if bt.eq_ignore_ascii_case(b"string") { ": string" } else { ": int" });
+        }
+    }
+    let ifaces = class_all_interface_names(vm, class_lower);
+    if !ifaces.is_empty() {
+        s.push_str(if ce.is_interface { " extends " } else { " implements " });
+        s.push_str(&ifaces.join(", "));
+    }
+    s.push_str(" ] {\n");
+    if !internal {
+        let fname = ce.filename.clone().unwrap_or_else(|| vm.current_file.clone());
+        s.push_str(&format!("{}  @@ {} {}-{}\n", indent, fname, ce.start_line, ce.end_line));
+    }
+
+    // Constants & enum cases.
+    let case_names: Vec<&[u8]> = ce.enum_cases.iter().map(|(n, _)| n.as_slice()).collect();
+    let mut const_str = String::new();
+    let mut case_str = String::new();
+    let mut const_count = 0;
+    let mut case_count = 0;
+    let resolved: Option<Vec<(Vec<u8>, Value)>> = RESOLVED_CONSTS.with(|r| r.borrow().clone());
+    for (cname, raw_val) in ce.constants.iter() {
+        let resolved_val = resolved.as_ref().and_then(|r| r.iter().find(|(n, _)| n == cname).map(|(_, v)| v.clone()));
+        let cval = resolved_val.as_ref().unwrap_or(raw_val);
+        if case_names.contains(&cname.as_slice()) {
+            case_count += 1;
+            let meta = ce.constants_meta.get(cname.as_slice());
+            if let Some(doc) = meta.and_then(|m| m.doc_comment.as_ref()) {
+                case_str.push_str(&sub_indent);
+                case_str.push_str(doc);
+                case_str.push('\n');
+            }
+            case_str.push_str(&format!("{}Case {}", sub_indent, String::from_utf8_lossy(cname)));
+            if ce.enum_backing_type.is_some() {
+                let bv = ce.enum_cases.iter().find(|(n, _)| n == cname).map(|(_, v)| v.clone()).unwrap_or(Value::Null);
+                case_str.push_str(&format!(" = {}\n", bv.to_php_string().to_string_lossy()));
+            } else {
+                case_str.push('\n');
+            }
+        } else {
+            const_count += 1;
+            const_str.push_str(&class_const_string(cname, cval, ce.constants_meta.get(cname.as_slice()), &sub_indent));
+        }
+    }
+    // Enum cases not registered as constants.
+    for (cn, cv) in &ce.enum_cases {
+        if ce.constants.contains_key(cn) {
+            continue;
+        }
+        case_count += 1;
+        case_str.push_str(&format!("{}Case {}", sub_indent, String::from_utf8_lossy(cn)));
+        if ce.enum_backing_type.is_some() {
+            case_str.push_str(&format!(" = {}\n", cv.to_php_string().to_string_lossy()));
+        } else {
+            case_str.push('\n');
+        }
+    }
+    if case_count > 0 {
+        s.push('\n');
+        s.push_str(&format!("{}  - Enum cases [{}] {{\n", indent, case_count));
+        s.push_str(&case_str);
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+    s.push('\n');
+    s.push_str(&format!("{}  - Constants [{}] {{\n", indent, const_count));
+    s.push_str(&const_str);
+    s.push_str(&format!("{}  }}\n", indent));
+
+    // Properties.
+    let visible = |p: &&crate::object::PropertyDef| !(p.visibility == Visibility::Private && p.declaring_class.to_ascii_lowercase() != class_lower);
+    let all_props = rprops(vm, class_lower);
+    let static_props: Vec<&crate::object::PropertyDef> = all_props.iter().copied().filter(|p| p.is_static).filter(visible).collect();
+    s.push_str(&format!("\n{}  - Static properties [{}] {{\n", indent, static_props.len()));
+    for p in &static_props {
+        s.push_str(&property_string(vm, p, &sub_indent));
+    }
+    s.push_str(&format!("{}  }}\n", indent));
+
+    let methods = rmethods(vm, class_lower);
+    let mvisible = |m: &&&crate::object::MethodDef| {
+        !(m.visibility == Visibility::Private && m.declaring_class.to_ascii_lowercase() != class_lower)
+            && !m.name.starts_with(b"__property_get_")
+            && !m.name.starts_with(b"__property_set_")
+    };
+    let static_methods: Vec<&&crate::object::MethodDef> = methods.iter().filter(|m| m.is_static).filter(mvisible).collect();
+    s.push_str(&format!("\n{}  - Static methods [{}] {{", indent, static_methods.len()));
+    if static_methods.is_empty() {
+        s.push('\n');
+    }
+    for m in &static_methods {
+        s.push('\n');
+        s.push_str(&method_section_string(vm, m, class_lower, &sub_indent));
+    }
+    s.push_str(&format!("{}  }}\n", indent));
+
+    let inst_props: Vec<&crate::object::PropertyDef> = all_props.iter().copied().filter(|p| !p.is_static).filter(visible).collect();
+    s.push_str(&format!("\n{}  - Properties [{}] {{\n", indent, inst_props.len()));
+    for p in &inst_props {
+        s.push_str(&property_string(vm, p, &sub_indent));
+    }
+    s.push_str(&format!("{}  }}\n", indent));
+
+    if let Some(o) = obj {
+        let declared: Vec<Vec<u8>> = all_props.iter().map(|p| p.name.clone()).collect();
+        let mut dyn_str = String::new();
+        let mut count = 0;
+        for (name, _) in o.borrow().properties.iter() {
+            if name.is_empty() || name[0] == 0 || name.starts_with(b"__") {
+                continue;
+            }
+            if declared.iter().any(|d| d == name) {
+                continue;
+            }
+            count += 1;
+            dyn_str.push_str(&format!("{}Property [ <dynamic> public ${} ]\n", sub_indent, String::from_utf8_lossy(name)));
+        }
+        s.push_str(&format!("\n{}  - Dynamic properties [{}] {{\n", indent, count));
+        s.push_str(&dyn_str);
+        s.push_str(&format!("{}  }}\n", indent));
+    }
+
+    let inst_methods: Vec<&&crate::object::MethodDef> = methods.iter().filter(|m| !m.is_static).filter(mvisible).collect();
+    if inst_methods.is_empty() {
+        s.push_str(&format!("\n{}  - Methods [0] {{\n", indent));
+    } else {
+        s.push_str(&format!("\n{}  - Methods [{}] {{", indent, inst_methods.len()));
+        for m in &inst_methods {
+            s.push('\n');
+            s.push_str(&method_section_string(vm, m, class_lower, &sub_indent));
+        }
+    }
+    s.push_str(&format!("{}  }}\n", indent));
+    s.push_str(&format!("{}}}\n", indent));
+    s
+}
+
+fn method_section_string(vm: &Vm, m: &crate::object::MethodDef, scope_lower: &[u8], indent: &str) -> String {
+    let filename = if m.op_array.filename.is_empty() {
+        vm.current_file.clone()
+    } else {
+        String::from_utf8_lossy(&m.op_array.filename).into_owned()
+    };
+    let display = String::from_utf8_lossy(&m.name).to_string();
+    let ctx = FnStrCtx {
+        op: &m.op_array,
+        method: Some(m),
+        scope: Some(scope_lower),
+        is_closure: false,
+        internal_fn_ext: None,
+        display_name: &display,
+        filename: &filename,
+    };
+    function_string(vm, &ctx, indent)
+}
+
+/// `ce->interfaces` names in Zend's order: the parent's interfaces, then
+/// the declared ones, then interfaces inherited from those (appended while
+/// each is implemented).
+pub(crate) fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
+    fn canon(vm: &Vm, n: &[u8]) -> String {
+        rcls(vm, &n.to_ascii_lowercase())
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(n).to_string())
+    }
+    fn compute(vm: &Vm, lower: &[u8], depth: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if depth > 32 {
+            return out;
+        }
+        let ce = match rcls(vm, lower) {
+            Some(c) => c,
+            None => return out,
+        };
+        if let Some(p) = &ce.parent {
+            out = compute(vm, &p.to_ascii_lowercase(), depth + 1);
+        }
+        let n_parent = out.len();
+        for i in &ce.interfaces {
+            let cn = canon(vm, i);
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(&cn)) {
+                out.push(cn);
+            }
+        }
+        let mut idx = n_parent;
+        while idx < out.len() && idx < 256 {
+            let il = out[idx].to_ascii_lowercase();
+            for pi in compute(vm, il.as_bytes(), depth + 1) {
+                if !out.iter().any(|x| x.eq_ignore_ascii_case(&pi)) {
+                    out.push(pi);
+                }
+            }
+            idx += 1;
+        }
+        out
+    }
+    compute(vm, class_lower, 0)
 }
