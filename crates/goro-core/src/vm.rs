@@ -30590,7 +30590,11 @@ impl Vm {
                             // AND the property is not declared AND we're not
                             // already inside __set for this prop.
                             let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
-                            let skip_init = is_lazy_uninit && has_set && !prop_declared && !guard_active;
+                            // A set hook runs on the still-lazy object; only the
+                            // state it touches initializes it (GH-18000).
+                            let skip_init = is_lazy_uninit
+                                && ((has_set && !prop_declared && !guard_active)
+                                    || self.has_unguarded_hook(&class_lower, pn, b"__property_set_"));
                             if !skip_init {
                                 let exc_before_init = self.current_exception.is_some();
                                 self.maybe_run_lazy_init(obj);
@@ -33887,7 +33891,13 @@ impl Vm {
     /// True if `class_lower` has a get hook for `pn` and we are not currently
     /// executing a hook of that property (where accesses hit the backing store).
     fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
-        let mut m = b"__property_get_".to_vec();
+        self.has_unguarded_hook(class_lower, pn, b"__property_get_")
+    }
+
+    /// Like has_unguarded_get_hook() for the hook method prefix `kind`
+    /// (`__property_get_` / `__property_set_`).
+    fn has_unguarded_hook(&self, class_lower: &[u8], pn: &[u8], kind: &[u8]) -> bool {
+        let mut m = kind.to_vec();
         m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
         if !self.classes.get(class_lower).map(|c| c.methods.contains_key(&m)).unwrap_or(false) {
             return false;
