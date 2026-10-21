@@ -27506,12 +27506,29 @@ impl Vm {
                                 if let Some(clone_method) = class_def.get_method(b"__clone") {
                                     // Check __clone visibility
                                     let current_scope = self.current_class_scope();
+                                    // Visibility is checked against the declaring class
+                                    // (private) / the root of the method's hierarchy (protected).
+                                    let declaring_lower: Vec<u8> = if clone_method.declaring_class.is_empty() {
+                                        class_lower.clone()
+                                    } else {
+                                        clone_method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect()
+                                    };
+                                    let mut root_lower = declaring_lower.clone();
+                                    while let Some(parent) = self.classes.get(&root_lower).and_then(|c| c.parent.clone()) {
+                                        let pl: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if self.classes.get(&pl).map(|c| c.get_method(b"__clone").is_some()).unwrap_or(false) {
+                                            root_lower = pl;
+                                        } else {
+                                            break;
+                                        }
+                                    }
                                     let accessible = match clone_method.visibility {
                                         crate::object::Visibility::Public => true,
                                         crate::object::Visibility::Protected => {
                                             if let Some(scope) = &current_scope {
                                                 let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
                                                 scope_lower == class_lower || self.class_extends(&scope_lower, &class_lower) || self.class_extends(&class_lower, &scope_lower)
+                                                    || scope_lower == root_lower || self.class_extends(&scope_lower, &root_lower) || self.class_extends(&root_lower, &scope_lower)
                                             } else {
                                                 false
                                             }
@@ -27519,7 +27536,7 @@ impl Vm {
                                         crate::object::Visibility::Private => {
                                             if let Some(scope) = &current_scope {
                                                 let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                                scope_lower == class_lower
+                                                scope_lower == declaring_lower
                                             } else {
                                                 false
                                             }

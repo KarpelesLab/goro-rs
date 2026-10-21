@@ -2681,9 +2681,11 @@ impl Compiler {
                 }
 
                 // Compile try body
+                let try_tmp_start = self.op_array.temp_count;
                 for s in try_body {
                     self.compile_stmt(s)?;
                 }
+                let try_tmp_end = self.op_array.temp_count;
 
                 // End of try: clear exception handler and jump to finally/end
                 self.op_array.emit(Op {
@@ -2728,6 +2730,17 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+                // Temporaries of the abandoned try body are dead now (PHP frees
+                // live ranges while unwinding, running destructors before catch).
+                if try_tmp_end > try_tmp_start {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FreeTmps,
+                        op1: OperandType::Tmp(try_tmp_start),
+                        op2: OperandType::Tmp(try_tmp_end),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
 
                 for catch in catches.iter() {
                     // Type check: skip this catch if exception doesn't match
