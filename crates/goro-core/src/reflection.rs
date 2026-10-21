@@ -5838,12 +5838,18 @@ fn internal_default_constant_name(def: &str) -> Option<String> {
     None
 }
 
-/// Evaluate an internal parameter's default value expression.
-fn eval_internal_default(vm: &mut Vm, def: &str) -> Option<Value> {
+/// Evaluate an internal parameter's default value expression. Names in it
+/// resolve in the namespace of the declaring class `scope` (stubs write
+/// `IntervalBoundary::ClosedOpen` inside `namespace Random`).
+fn eval_internal_default(vm: &mut Vm, def: &str, scope: Option<&[u8]>) -> Option<Value> {
     if let Some(v) = crate::stubs::literal_value(def) {
         return Some(v);
     }
-    let source = format!("<?php return ({});", def).into_bytes();
+    let ns = scope
+        .and_then(|s| s.iter().rposition(|&b| b == b'\\').map(|p| &s[..p]))
+        .map(|n| format!("namespace {};", String::from_utf8_lossy(n)))
+        .unwrap_or_default();
+    let source = format!("<?php {} return ({});", ns, def).into_bytes();
     let mut lexer = goro_parser::Lexer::new(&source);
     let tokens = lexer.tokenize();
     let mut parser = goro_parser::Parser::new(tokens);
@@ -7913,7 +7919,12 @@ pub fn reflection_parameter_method(
                         Some(n) => Value::String(PhpString::from_string(n)),
                         None => Value::Null,
                     },
-                    _ => eval_internal_default(vm, def).unwrap_or(Value::Null),
+                    _ => {
+                        let scope = resolved_op_array
+                            .as_ref()
+                            .and_then(|op| op.scope_class.clone());
+                        eval_internal_default(vm, def, scope.as_deref()).unwrap_or(Value::Null)
+                    }
                 });
             }
             _ => {}
@@ -11318,7 +11329,7 @@ pub fn reflection_attribute_method(
                                     .args
                                     .get(i)
                                     .and_then(|a| a.default)
-                                    .and_then(|d| eval_internal_default(vm, d))
+                                    .and_then(|d| eval_internal_default(vm, d, None))
                                     .unwrap_or(Value::Null);
                                 positional.push(d);
                             }

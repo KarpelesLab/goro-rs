@@ -1044,6 +1044,9 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 return Ok(val.clone());
             }
+        } else if let Some(v) = vm.get_builtin_class_constant(&class_lower, const_name.as_bytes()) {
+            // A natively implemented internal class.
+            return Ok(v);
         }
         let msg = format!("Undefined constant {}", name_str);
         let line = vm.current_line;

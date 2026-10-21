@@ -12521,6 +12521,22 @@ impl Vm {
         class_lower: &[u8],
         const_name: &[u8],
     ) -> Option<Value> {
+        if let Some(v) = self.get_builtin_class_constant_own(class_lower, const_name) {
+            return Some(v);
+        }
+        // Constants inherited from internal ancestors and interfaces.
+        let (_, h) = crate::stubs::class_hierarchy(class_lower)?;
+        h.parents_lower
+            .iter()
+            .chain(h.interfaces_lower.iter())
+            .find_map(|c| self.get_builtin_class_constant_own(c, const_name))
+    }
+
+    fn get_builtin_class_constant_own(
+        &self,
+        class_lower: &[u8],
+        const_name: &[u8],
+    ) -> Option<Value> {
         // Try exact match first, then uppercase (for keyword names like "match" -> "MATCH")
         self.get_builtin_class_constant_inner(class_lower, const_name)
             .or_else(|| {
@@ -12530,6 +12546,15 @@ impl Vm {
                 } else {
                     None
                 }
+            })
+            .or_else(|| {
+                // A literal value declared in the stub.
+                let c = crate::stubs::find_class_lower(class_lower)?;
+                c.consts
+                    .iter()
+                    .find(|k| k.name.as_bytes() == const_name)
+                    .and_then(|k| k.value)
+                    .and_then(crate::stubs::literal_value)
             })
     }
 
