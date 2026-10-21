@@ -2231,6 +2231,10 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
 
 /// Run all .phpt files in a directory (recursively)
 pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
+    // Each test runs with its own directory as cwd, so a relative test path
+    // would no longer name the script (or its includes) from there.
+    let abs_dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let dir = abs_dir.as_path();
     let mut pass = 0;
     let mut fail = 0;
     let mut skip = 0;
