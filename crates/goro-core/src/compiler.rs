@@ -322,6 +322,27 @@ impl Compiler {
     /// a clean compile-time fatal error instead of a placeholder Jmp to ip=0 that
     /// would otherwise spin forever at runtime.
     fn check_pending_gotos(&self) -> CompileResult<()> {
+        // (Also run at the end of every function body:) zend_mark_function_as_generator:
+        // a generator's declared return type must be a supertype of Generator.
+        if self.op_array.is_generator {
+            if let Some(rt) = &self.op_array.return_type {
+                let tv = crate::vm::variance::TypeView::from_param_type(rt);
+                let valid = tv.mask & crate::vm::variance::T_OBJECT != 0
+                    || tv.elems.iter().any(|e| match e {
+                        crate::vm::variance::TElem::Name(n) => {
+                            n.eq_ignore_ascii_case(b"Traversable") || n.eq_ignore_ascii_case(b"Iterator") || n.eq_ignore_ascii_case(b"Generator")
+                        }
+                        _ => false,
+                    });
+                if !valid {
+                    return Err(CompileError {
+                        message: format!("Generator return type must be a supertype of Generator, {} given",
+                            crate::vm::variance::type_to_string(&tv, None)),
+                        line: self.op_array.decl_line,
+                    });
+                }
+            }
+        }
         if let Some((name, locs)) = self.pending_gotos.iter().next() {
             let label = String::from_utf8_lossy(name).into_owned();
             let line = locs.first().map(|(_, l)| *l).unwrap_or(0);
@@ -4454,53 +4475,40 @@ impl Compiler {
                                                 _ => false,
                                             }
                                         };
-                                        // __clone, __set, __unset, __unserialize, __wakeup: must be void
-                                        if mn_lower == b"__clone" || mn_lower == b"__set" || mn_lower == b"__unset"
-                                            || mn_lower == b"__unserialize" || mn_lower == b"__wakeup"
+                                        // zend_check_magic_method_return_type: the declared type must be
+                                        // a subset of the expected one (never is always allowed).
+                                        let _ = (&is_simple_type, &is_nullable_array);
                                         {
-                                            if !is_simple_type(rt, b"void") {
-                                                return Err(CompileError {
-                                                    message: format!("{}::{}(): Return type must be void when declared",
-                                                        class_display, String::from_utf8_lossy(method_name)),
-                                                    line: *method_line,
-                                                });
-                                            }
-                                        }
-                                        // __isset: must be bool
-                                        if mn_lower == b"__isset" {
-                                            if !is_simple_type(rt, b"bool") {
-                                                return Err(CompileError {
-                                                    message: format!("{}::__isset(): Return type must be bool when declared", class_display),
-                                                    line: *method_line,
-                                                });
-                                            }
-                                        }
-                                        // __toString: must be string
-                                        if mn_lower == b"__tostring" {
-                                            if !is_simple_type(rt, b"string") {
-                                                return Err(CompileError {
-                                                    message: format!("{}::__toString(): Return type must be string when declared", class_display),
-                                                    line: *method_line,
-                                                });
-                                            }
-                                        }
-                                        // __debugInfo: must be ?array (array or null|array or ?array)
-                                        if mn_lower == b"__debuginfo" {
-                                            if !is_nullable_array(rt) {
-                                                return Err(CompileError {
-                                                    message: format!("{}::__debugInfo(): Return type must be ?array when declared", class_display),
-                                                    line: *method_line,
-                                                });
-                                            }
-                                        }
-                                        // __serialize, __sleep: must be array
-                                        if mn_lower == b"__serialize" || mn_lower == b"__sleep" {
-                                            if !is_simple_type(rt, b"array") {
-                                                return Err(CompileError {
-                                                    message: format!("{}::{}(): Return type must be array when declared",
-                                                        class_display, String::from_utf8_lossy(method_name)),
-                                                    line: *method_line,
-                                                });
+                                            use crate::vm::variance::{TypeView, T_ARRAY, T_BOOL, T_NEVER, T_NULL, T_OBJECT, T_STATIC, T_STRING, T_VOID};
+                                            let expected: Option<u32> = match mn_lower.as_slice() {
+                                                b"__clone" | b"__set" | b"__unset" | b"__unserialize" | b"__wakeup" => Some(T_VOID),
+                                                b"__isset" => Some(T_BOOL),
+                                                b"__tostring" => Some(T_STRING),
+                                                b"__debuginfo" => Some(T_ARRAY | T_NULL),
+                                                b"__serialize" | b"__sleep" => Some(T_ARRAY),
+                                                b"__set_state" => Some(T_OBJECT),
+                                                _ => None,
+                                            };
+                                            if let Some(exp) = expected {
+                                                let pt = type_hint_to_param_type_with_ns(rt, &self.current_namespace, &self.use_map);
+                                                let tv = TypeView::from_param_type(&pt);
+                                                if tv.mask & T_NEVER == 0 {
+                                                    let mut is_complex = !tv.elems.is_empty();
+                                                    let mut extra = tv.mask & !exp;
+                                                    if extra & T_STATIC != 0 {
+                                                        extra &= !T_STATIC;
+                                                        is_complex = true;
+                                                    }
+                                                    if extra != 0 || (is_complex && exp != T_OBJECT) {
+                                                        let exp_tv = TypeView { mask: exp, elems: Vec::new(), is_intersection: false };
+                                                        return Err(CompileError {
+                                                            message: format!("{}::{}(): Return type must be {} when declared",
+                                                                class_display, String::from_utf8_lossy(method_name),
+                                                                crate::vm::variance::type_to_string(&exp_tv, None)),
+                                                            line: *method_line,
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
