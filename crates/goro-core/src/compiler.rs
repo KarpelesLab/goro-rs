@@ -2928,6 +2928,66 @@ impl Compiler {
                         });
                     }
                 }
+                // Member declaration checks done by zend_compile_class_decl's members
+                // (in declaration order).
+                {
+                    let cname = String::from_utf8_lossy(&qualified_name).to_string();
+                    let mut seen_consts: Vec<Vec<u8>> = Vec::new();
+                    for member in body.iter() {
+                        match member {
+                            ClassMember::ClassConstant { name: cn, value, visibility, .. } => {
+                                let line = value.span.line;
+                                if modifiers.is_interface && !matches!(visibility, Visibility::Public) {
+                                    return Err(CompileError {
+                                        message: format!("Access type for interface constant {}::{} must be public",
+                                            cname, String::from_utf8_lossy(cn)),
+                                        line,
+                                    });
+                                }
+                                if matches!(value.kind, ExprKind::InterpolatedString(_) | ExprKind::Variable(_)) {
+                                    return Err(CompileError {
+                                        message: "Constant expression contains invalid operations".into(),
+                                        line,
+                                    });
+                                }
+                                if seen_consts.iter().any(|c| c == cn) {
+                                    return Err(CompileError {
+                                        message: format!("Cannot redefine class constant {}::{}",
+                                            cname, String::from_utf8_lossy(cn)),
+                                        line,
+                                    });
+                                }
+                                seen_consts.push(cn.clone());
+                            }
+                            ClassMember::Property { get_hook, set_hook, is_abstract, default, get_hook_abstract, set_hook_abstract, .. }
+                                if modifiers.is_interface && get_hook.is_none() && set_hook.is_none() && !*is_abstract
+                                    && !*get_hook_abstract && !*set_hook_abstract =>
+                            {
+                                return Err(CompileError {
+                                    message: "Interfaces may only include hooked properties".into(),
+                                    line: default.as_ref().map(|d| d.span.line).unwrap_or(stmt.span.line),
+                                });
+                            }
+                            ClassMember::Method { name: mn, body: mbody, visibility, line, .. } if modifiers.is_interface => {
+                                if !matches!(visibility, Visibility::Public) {
+                                    return Err(CompileError {
+                                        message: format!("Access type for interface method {}::{}() must be public",
+                                            cname, String::from_utf8_lossy(mn)),
+                                        line: *line,
+                                    });
+                                }
+                                if mbody.is_some() {
+                                    return Err(CompileError {
+                                        message: format!("Interface function {}::{}() cannot contain body",
+                                            cname, String::from_utf8_lossy(mn)),
+                                        line: *line,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let mut class = ClassEntry::new(qualified_name.clone());
                 class.start_line = stmt.span.line;
                 class.end_line = if *class_end_line > 0 { *class_end_line } else { stmt.span.line };
