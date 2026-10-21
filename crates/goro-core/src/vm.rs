@@ -43,6 +43,31 @@ pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 pub struct NativeClassHandler {
     pub has_method: fn(&[u8], &[u8], bool) -> bool,
     pub call: fn(&mut Vm, &[u8], &[u8], &[u8], Option<&Value>, &[Value]) -> Value,
+    /// Called after a new (dynamic) property was added to an object of the class.
+    pub prop_added: Option<fn(&Rc<RefCell<PhpObject>>)>,
+    /// Called before a property write (kind 0) or unset (kind 1). Returning
+    /// false aborts the operation; the hook must have set `current_exception`.
+    pub prop_write: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], u8) -> bool>,
+    /// Called before comparing two objects (one of them of this class); may
+    /// emit warnings or set `current_exception`.
+    pub compare_check: Option<fn(&mut Vm, &Value, &Value)>,
+}
+
+impl Vm {
+    /// Run the native property write/unset guard for `obj`, if any.
+    /// Returns false when the operation must be aborted (exception set).
+    pub fn native_prop_write_allowed(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8) -> bool {
+        if self.native_class_handlers.is_empty() {
+            return true;
+        }
+        let cl = obj.borrow().class_name.to_ascii_lowercase();
+        if let Some((_, h)) = self.find_native_class_handler(&cl) {
+            if let Some(f) = h.prop_write {
+                return f(self, obj, name, kind);
+            }
+        }
+        true
+    }
 }
 
 /// Type alias for the class map (used by external crates)
@@ -2123,6 +2148,19 @@ impl Vm {
                     &format!("Object of class {} could not be converted to float", class_name),
                     line,
                 );
+            }
+            (Value::Object(oa), Value::Object(ob)) if !self.native_class_handlers.is_empty() => {
+                // Extension compare handlers may warn or throw (e.g. DateTimeZone).
+                let cl = oa.borrow().class_name.to_ascii_lowercase();
+                let h = self.find_native_class_handler(&cl).or_else(|| {
+                    let cl = ob.borrow().class_name.to_ascii_lowercase();
+                    self.find_native_class_handler(&cl)
+                });
+                if let Some((_, h)) = h {
+                    if let Some(f) = h.compare_check {
+                        f(self, &a_inner, &b_inner);
+                    }
+                }
             }
             _ => {}
         }
@@ -16271,6 +16309,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     self.write_operand(
                         &op.result,
                         if a.equals_with_object_cast(&b) {
@@ -16320,6 +16370,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     self.write_operand(
                         &op.result,
                         if a.equals_with_object_cast(&b) {
@@ -16391,6 +16453,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -16433,6 +16507,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -16475,6 +16561,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -16517,6 +16615,18 @@ impl Vm {
                         }
                     }
                     self.emit_object_comparison_notice(&a, &b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError { message: msg, line: op.line });
+                    }
                     let cmp = a.compare(&b);
                     self.write_operand(
                         &op.result,
@@ -20503,7 +20613,9 @@ impl Vm {
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
                             // If $this isn't already first arg (e.g. parent::__construct from method
                             // body) and we're inside an instance method, inject it.
-                            if !matches!(call.args.first(), Some(Value::Object(_))) {
+                            // For parent::__construct() (a forwarding call) the args never
+                            // contain $this, even when the first argument is an object.
+                            if is_forwarding_call || !matches!(call.args.first(), Some(Value::Object(_))) {
                                 if let Some(this_val @ Value::Object(_)) = cvs.first() {
                                     call.args.insert(0, this_val.clone());
                                 }
@@ -24217,6 +24329,24 @@ impl Vm {
                         continue;
                     }
 
+                    // Extension-provided Traversable classes (e.g. DatePeriod) reject by-ref iteration.
+                    if let Value::Object(o) = &arr_val {
+                        let cl = o.borrow().class_name.to_ascii_lowercase();
+                        if let Some((native, _)) = self.find_native_class_handler(&cl) {
+                            if self.builtin_implements_interface(&native, b"traversable") {
+                                let msg = "An iterator cannot be used with foreach by reference";
+                                let exc = self.create_exception(b"Error", msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                            }
+                        }
+                    }
+
                     let iter_idx = match op.result {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -27043,6 +27173,20 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    if let Value::Object(obj) = &obj_val_raw {
+                        if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 1) {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                                _ => "Uncaught exception".to_string(),
+                            };
+                            return Err(VmError { message: msg, line: op.line });
+                        }
+                    }
                     // Lazy object handling: defer init if class has __unset and
                     // prop is not declared on uninitialized lazy obj.
                     let mut propagate_unset_guard_to_real: Option<(u64, Vec<u8>)> = None;
@@ -31955,6 +32099,21 @@ impl Vm {
                         }
                     }
 
+                    if let Value::Object(obj) = &obj_val_raw {
+                        if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 0) {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => o.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+                                _ => "Uncaught exception".to_string(),
+                            };
+                            return Err(VmError { message: msg, line: op.line });
+                        }
+                    }
+
                     // Lazy init on write access (skip internal __lazy_* and
                     // properties marked via ReflectionProperty::skipLazyInitialization).
                     // BUT: if the class has __set and the property doesn't exist
@@ -32627,7 +32786,8 @@ impl Vm {
                                         let is_internal = is_builtin_subclass(&class_lower, b"stdclass")
                                             || class_lower == b"stdclass"
                                             || class_lower == b"__php_incomplete_class"
-                                            || !self.classes.contains_key(&class_lower);
+                                            || (!self.classes.contains_key(&class_lower)
+                                                && !self.native_class_handlers.contains_key(&class_lower));
                                         let allows_dynamic = self.classes.get(&class_lower)
                                             .map(|c| c.allow_dynamic_properties)
                                             .unwrap_or(false);
@@ -32653,8 +32813,16 @@ impl Vm {
                                         }
                                     }
                                 }
+                                let was_new = !obj.borrow().has_property(prop_name.as_bytes());
                                 obj.borrow_mut()
                                     .set_property(prop_name.as_bytes().to_vec(), value);
+                                if was_new && !self.native_class_handlers.is_empty() {
+                                    if let Some((_, h)) = self.find_native_class_handler(&class_lower) {
+                                        if let Some(f) = h.prop_added {
+                                            f(obj);
+                                        }
+                                    }
+                                }
                             }
                         }
                     } else if let Value::Generator(_) = &obj_val {

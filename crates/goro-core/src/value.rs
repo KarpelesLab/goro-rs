@@ -792,6 +792,13 @@ impl Value {
                         let ta = a_b.get_property(b"__timestamp").to_long();
                         let tb = b_b.get_property(b"__timestamp").to_long();
                         ta == tb && a_b.get_property(b"__timestamp_us").to_long() == b_b.get_property(b"__timestamp_us").to_long()
+                    } else if a_b.has_property(b"__timestamp_tzobj") && b_b.has_property(b"__timestamp_tzobj") {
+                        // ext/date DateTimeZone: same kind and same zone
+                        a_b.get_property(b"timezone_type").to_long() == b_b.get_property(b"timezone_type").to_long()
+                            && a_b.get_property(b"timezone").to_php_string().as_bytes() == b_b.get_property(b"timezone").to_php_string().as_bytes()
+                    } else if a_b.has_property(b"__timestamp_ival") && b_b.has_property(b"__timestamp_ival") {
+                        // ext/date DateInterval objects are not comparable
+                        false
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
                         && a_b.properties.len() == b_b.properties.len()
                     {
@@ -1172,6 +1179,15 @@ impl Value {
                         std::cmp::Ordering::Equal => 0,
                         std::cmp::Ordering::Greater => 1,
                     };
+                }
+                // ext/date DateTimeZone: equal or uncomparable; DateInterval: uncomparable.
+                if a_borrow.has_property(b"__timestamp_tzobj") && b_borrow.has_property(b"__timestamp_tzobj") {
+                    let same = a_borrow.get_property(b"timezone_type").to_long() == b_borrow.get_property(b"timezone_type").to_long()
+                        && a_borrow.get_property(b"timezone").to_php_string().as_bytes() == b_borrow.get_property(b"timezone").to_php_string().as_bytes();
+                    return if same { 0 } else { i64::MIN };
+                }
+                if a_borrow.has_property(b"__timestamp_ival") && b_borrow.has_property(b"__timestamp_ival") {
+                    return i64::MIN;
                 }
                 // Regular objects: compare by class name and properties
                 if !a_borrow.class_name.eq_ignore_ascii_case(&b_borrow.class_name) {

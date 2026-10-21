@@ -566,3 +566,74 @@ pub fn new_arr() -> PhpArray {
 pub fn arr_val(a: PhpArray) -> Value {
     Value::Array(Rc::new(RefCell::new(a)))
 }
+
+const PERIOD_PROPS: [&[u8]; 7] = [b"start", b"current", b"end", b"interval", b"recurrences", b"include_start_date", b"include_end_date"];
+
+/// DatePeriod's properties are read-only and cannot be unset.
+pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8) -> bool {
+    if base_of(vm, &o.borrow().class_name.clone()) != Some(Base::Period) || !PERIOD_PROPS.contains(&name) {
+        return true;
+    }
+    let msg = if kind == 1 {
+        format!("Cannot unset {}::${}", class_display(vm, &o.borrow().class_name.clone()), String::from_utf8_lossy(name))
+    } else {
+        format!("Cannot modify readonly property DatePeriod::${}", String::from_utf8_lossy(name))
+    };
+    let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    false
+}
+
+/// Side effects of the date classes' compare handlers.
+pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
+    let (oa, ob) = match (a, b) {
+        (Value::Object(x), Value::Object(y)) => (x.clone(), y.clone()),
+        _ => return,
+    };
+    let ba = obj_base(vm, &oa);
+    let bb = obj_base(vm, &ob);
+    let is_date = |b: Option<Base>| matches!(b, Some(Base::DateTime) | Some(Base::Immutable));
+    let err = |vm: &mut Vm, class: &[u8], msg: &str| {
+        let exc = vm.create_exception(class, msg, vm.current_line);
+        vm.current_exception = Some(exc);
+    };
+    if is_date(ba) && is_date(bb) {
+        if date_get(&oa).is_none() || date_get(&ob).is_none() {
+            err(vm, b"DateObjectError", "Trying to compare an incomplete DateTime or DateTimeImmutable object");
+        }
+    } else if ba == Some(Base::TimeZone) && bb == Some(Base::TimeZone) {
+        match (tz_get(&oa), tz_get(&ob)) {
+            (Some(x), Some(y)) => {
+                if x.ztype != y.ztype {
+                    err(vm, b"DateException", "Cannot compare two different kinds of DateTimeZone objects");
+                }
+            }
+            _ => err(vm, b"DateObjectError", "Trying to compare uninitialized DateTimeZone objects"),
+        }
+    } else if ba == Some(Base::Interval) && bb == Some(Base::Interval) {
+        vm.emit_warning("Cannot compare DateInterval objects");
+    }
+}
+
+/// Keep the engine-provided properties after user-added ones, mirroring the
+/// order PHP's get_properties_for handlers produce.
+pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
+    let mut ob = o.borrow_mut();
+    let names: &[&[u8]] = if ob.has_property(P_STATE) {
+        &[b"date", b"timezone_type", b"timezone"]
+    } else if ob.has_property(P_TZ) {
+        &[b"timezone_type", b"timezone"]
+    } else if ob.has_property(P_IVAL) {
+        &[b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string", b"date_string"]
+    } else if ob.has_property(P_PERIOD) {
+        &[b"start", b"current", b"end", b"interval", b"recurrences", b"include_start_date", b"include_end_date"]
+    } else {
+        return;
+    };
+    for n in names {
+        if let Some(pos) = ob.properties.iter().position(|(k, _)| k.as_slice() == *n) {
+            let e = ob.properties.remove(pos);
+            ob.properties.push(e);
+        }
+    }
+}

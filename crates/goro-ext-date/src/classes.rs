@@ -1815,6 +1815,10 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
         Value::Object(o) => o,
         _ => return Ok(Value::Null),
     };
+    // InternalIterator implicitly rewinds before first use.
+    if method != b"rewind" && !it.borrow().get_property(b"__timestamp_iter_started").is_truthy() {
+        iterator_method(vm, b"rewind", it)?;
+    }
     let index = it.borrow().get_property(b"__timestamp_iter_index").to_long();
     let mut p = period_get(&period).unwrap_or_default();
     match method {

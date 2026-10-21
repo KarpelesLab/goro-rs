@@ -147,7 +147,7 @@ pub fn register(vm: &mut Vm) {
         vm.register_function_with_params(name, *func, params);
     }
 
-    let h = NativeClassHandler { has_method, call: call_method };
+    let h = NativeClassHandler { has_method, call: call_method, prop_added: Some(state::prop_added), prop_write: Some(state::prop_write), compare_check: Some(state::compare_check) };
     for c in [&b"datetime"[..], b"datetimeimmutable", b"datetimezone", b"dateinterval", b"dateperiod", b"internaliterator"] {
         vm.native_class_handlers.insert(c.to_vec(), h);
     }

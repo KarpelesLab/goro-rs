@@ -1591,6 +1591,13 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             }
                             return Ok(Value::Null);
                         }
+                        // Extension-provided static methods of built-in classes.
+                        if let Some((native, h)) = vm.find_native_class_handler(&resolved_class_lower) {
+                            if (h.has_method)(&native, &method_lower, true) {
+                                let called = class_bytes.to_vec();
+                                return Ok((h.call)(vm, &native, &method_lower, &called, None, &call_args));
+                            }
+                        }
                         // Not a closure, not a class - fall through to closure path below
                     }
                     // Fall through to closure handling below
@@ -1651,6 +1658,10 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             ];
                             return vm.execute_fn_with_named_args(&op, magic_args, vec![], Some(Value::Object(obj.clone())));
                         }
+                    }
+                    // Built-in class methods (SPL, ext-provided native classes).
+                    if let Some(r) = vm.call_object_method(&Value::Object(obj.clone()), method_name.as_bytes(), &call_args) {
+                        return Ok(r);
                     }
                     return Ok(Value::Null);
                 }
