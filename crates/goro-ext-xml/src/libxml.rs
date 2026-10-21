@@ -63,7 +63,7 @@ pub fn user_entity_load(
     ];
     let r = vm.call_callback(&cb, &params);
     let fname = crate::dom::active_fn(vm);
-    if vm.current_exception.is_some() {
+    if vm.current_exception.is_some() || vm.exit_requested {
         return Some(None);
     }
     let rv = match r {
@@ -164,7 +164,7 @@ pub fn report_ex(
                 false
             }
         });
-        if internal || vm.current_exception.is_some() || silenced(e) {
+        if internal || vm.current_exception.is_some() || vm.exit_requested || silenced(e) {
             continue;
         }
         let pending = STATE.with(|s| std::mem::take(&mut s.borrow_mut().pending));

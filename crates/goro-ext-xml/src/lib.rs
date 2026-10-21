@@ -13,6 +13,7 @@ pub mod valid;
 pub mod xinclude;
 pub mod xmlerrors;
 pub mod xmlregexp;
+pub mod xmlschema;
 pub mod xmlschemastypes;
 pub mod xmlunicode;
 pub mod xpath;

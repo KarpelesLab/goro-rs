@@ -1610,7 +1610,7 @@ impl Automata {
         if a1.typ > a2.typ {
             std::mem::swap(&mut a1, &mut a2);
         }
-        let mut ret = true;
+        let mut ret;
         if a1.typ != a2.typ {
             ret = compare_atom_types(a1.typ, a2.typ);
             if !ret {
@@ -2194,7 +2194,6 @@ fn compare_ranges(r1: &Range, r2: &Range) -> i32 {
             return 1;
         }
     } else {
-        ret = false;
         let t2 = r2.typ;
         match r1.typ {
             LETTER => ret = (LETTER_UPPERCASE..=LETTER_OTHERS).contains(&t2),

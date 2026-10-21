@@ -468,13 +468,16 @@ impl NodeCtx for TreeNode {
                 return Some(1);
             }
             let at = self.0;
-            t.nodes[at].atype = 2;
+            if value.is_empty() {
+                return Some(0);
+            }
             let d = t.nodes[at].doc?;
             let di = t.doc_info_mut(d)?;
             if di.ids.contains_key(value) {
                 return Some(0);
             }
             di.ids.insert(value.to_string(), at);
+            t.nodes[at].atype = 2;
             Some(1)
         })
     }
@@ -502,7 +505,7 @@ fn is_blank(c: u8) -> bool {
 
 /// xmlSchemaStrip: None if no change is needed.
 pub fn strip(value: &str) -> Option<String> {
-    let t = value.trim_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+    let t = value.trim_matches([' ', '\t', '\n', '\r']);
     if t.len() == value.len() {
         None
     } else {
@@ -1149,7 +1152,7 @@ fn validate_duration(value: &str, collapse: bool) -> Result<Val, i32> {
     let mut seq = 0usize;
     let mut secs: i64 = 0;
     let mut sec_frac = 0.0f64;
-    let desig = [b'Y', b'M', b'D', b'H', b'M', b'S'];
+    let desig = b"YMDHMS";
     while c.c() != 0 {
         let mut num: i64 = 0;
         let mut has_digits = false;
@@ -1590,22 +1593,20 @@ pub fn val_atomic_type(
         }
         BOOLEAN => {
             let b = value.as_bytes();
-            let r;
-            if o.norm_on_the_fly {
-                let t =
-                    value.trim_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
-                r = match t {
+            let r = if o.norm_on_the_fly {
+                let t = value.trim_matches([' ', '\t', '\n', '\r']);
+                match t {
                     "0" | "false" => false,
                     "1" | "true" => true,
                     _ => return bad,
-                };
+                }
             } else {
-                r = match b {
+                match b {
                     b"0" | b"false" => false,
                     b"1" | b"true" => true,
                     _ => return bad,
-                };
-            }
+                }
+            };
             ok(Some(Val::new(BOOLEAN, ValData::Bool(r))))
         }
         TOKEN => {
@@ -1652,8 +1653,7 @@ pub fn val_atomic_type(
         NAME => {
             let r = validate_name(&value, true);
             if r == 0 && want_val {
-                let t = value
-                    .trim_start_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+                let t = value.trim_start_matches([' ', '\t', '\n', '\r']);
                 let end = t.find([' ', '\t', '\n', '\r']).unwrap_or(t.len());
                 return (0, Some(Val::new(NAME, ValData::Str(t[..end].to_string()))));
             }
@@ -1804,7 +1804,7 @@ pub fn val_atomic_type(
                 let tmp: String = value
                     .bytes()
                     .map(|c| {
-                        if c < 32 || c >= 127 || b" <>\"{}|\\^`'".contains(&c) {
+                        if !(32..127).contains(&c) || b" <>\"{}|\\^`'".contains(&c) {
                             '_'
                         } else {
                             c as char
@@ -1835,7 +1835,7 @@ pub fn val_atomic_type(
                     c.i += 1;
                 }
             }
-            if c.c() != 0 || n % 2 != 0 {
+            if c.c() != 0 || !n.is_multiple_of(2) {
                 return bad;
             }
             let s = value[start..start + n].to_ascii_uppercase();
@@ -1995,7 +1995,7 @@ pub fn val_atomic_type(
 
 /// The numeric prefix sscanf("%lf") would consume.
 fn scan_number(s: &str) -> Option<&str> {
-    let t = s.trim_start_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+    let t = s.trim_start_matches([' ', '\t', '\n', '\r']);
     let b = t.as_bytes();
     let mut i = 0;
     if i < b.len() && (b[i] == b'+' || b[i] == b'-') {

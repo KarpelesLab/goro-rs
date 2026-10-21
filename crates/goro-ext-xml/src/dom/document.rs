@@ -1245,13 +1245,65 @@ fn m_xinclude(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     }
 }
 
+/// dom_document_schema_validate (schemaValidate / schemaValidateSource)
 fn m_schema_validate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 2)?;
-    let _src = a.str(vm, 0, "filename")?;
-    let _d = doc_node(vm, o)?;
-    warn(vm, "Invalid Schema");
-    Ok(Value::False)
+    let fname = cur_method();
+    let from_file = fname.ends_with("schemaValidate");
+    let argname = if from_file { "filename" } else { "source" };
+    let src = a.str_bytes(vm, 0, argname)?;
+    let flags = a.long(vm, 1, "flags", 0)?;
+    if src.is_empty() {
+        throw_error(
+            vm,
+            b"ValueError",
+            &format!("{}(): Argument #1 (${}) must not be empty", a.f, argname),
+        );
+        return Err(());
+    }
+    let d = doc_node(vm, o)?;
+    let (schema, errors) = if from_file {
+        if src.contains(&0) {
+            throw_error(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($filename) must not contain any null bytes",
+                    a.f
+                ),
+            );
+            return Err(());
+        }
+        let path = match valid_file_path(&String::from_utf8_lossy(&src)) {
+            Some(p) => p,
+            None => {
+                warn(vm, "Invalid Schema file source");
+                return Ok(Value::False);
+            }
+        };
+        crate::xmlschema::Schema::parse_file(vm, &path)
+    } else {
+        crate::xmlschema::Schema::parse_memory(vm, &src)
+    };
+    crate::libxml::report(vm, &fname, &errors, crate::libxml::Style::Generic);
+    let schema = match schema {
+        Some(s) => s,
+        None => {
+            if vm.current_exception.is_none() && !vm.exit_requested {
+                warn(vm, "Invalid Schema");
+            }
+            return Ok(Value::False);
+        }
+    };
+    let mut v = crate::xmlschema::ValidCtxt::new(schema);
+    if flags & crate::xmlschema::VAL_VC_I_CREATE as i64 != 0 {
+        v.set_options(crate::xmlschema::VAL_VC_I_CREATE);
+    }
+    let r = v.validate_doc(d);
+    let errors = v.take_errors();
+    crate::libxml::report(vm, &fname, &errors, crate::libxml::Style::Generic);
+    Ok(b(r == 0))
 }
 
 fn m_relaxng_validate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
