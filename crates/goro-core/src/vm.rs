@@ -17395,8 +17395,15 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
+                            let exc = self.create_exception(b"DivisionByZeroError", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
                             return Err(VmError {
-                                message: msg.to_string(),
+                                message: format!("Uncaught DivisionByZeroError: {}", msg),
                                 line: op.line,
                             });
                         }
@@ -17438,8 +17445,15 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
+                            let exc = self.create_exception(b"DivisionByZeroError", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
                             return Err(VmError {
-                                message: msg.to_string(),
+                                message: format!("Uncaught DivisionByZeroError: {}", msg),
                                 line: op.line,
                             });
                         }
@@ -17651,9 +17665,23 @@ impl Vm {
                         }
                         return Err(VmError { message: err, line: op.line });
                     }
+                    let a = cv_val.to_long();
+                    let n = rhs.to_long();
+                    if n < 0 {
+                        let msg = "Bit shift by negative number";
+                        let exc = self.create_exception(b"ArithmeticError", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught ArithmeticError: {}", msg), line: op.line });
+                    }
+                    let shifted = if n >= 64 { 0 } else { a.wrapping_shl(n as u32) };
                     self.write_operand(
                         &op.op1,
-                        Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)),
+                        Value::Long(shifted),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
@@ -17673,9 +17701,23 @@ impl Vm {
                         }
                         return Err(VmError { message: err, line: op.line });
                     }
+                    let a = cv_val.to_long();
+                    let n = rhs.to_long();
+                    if n < 0 {
+                        let msg = "Bit shift by negative number";
+                        let exc = self.create_exception(b"ArithmeticError", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught ArithmeticError: {}", msg), line: op.line });
+                    }
+                    let shifted = if n >= 64 { if a < 0 { -1 } else { 0 } } else { a >> n };
                     self.write_operand(
                         &op.op1,
-                        Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)),
+                        Value::Long(shifted),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,
