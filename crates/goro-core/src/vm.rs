@@ -17832,7 +17832,7 @@ impl Vm {
                     }
                 }
                 OpCode::JmpZ => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if !val.is_truthy()
                         && let OperandType::JmpTarget(target) = op.op2
                     {
@@ -17840,7 +17840,7 @@ impl Vm {
                     }
                 }
                 OpCode::JmpNz => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if val.is_truthy()
                         && let OperandType::JmpTarget(target) = op.op2
                     {
@@ -25529,6 +25529,9 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if !self.is_global_scope {
+                        // `global $x` creates the global as NULL when missing.
+                        self.write_operand(&op.op1, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
                     }
                     // Register this CV as global so writes are synced
                     if let OperandType::Cv(cv_idx) = op.op1 {
