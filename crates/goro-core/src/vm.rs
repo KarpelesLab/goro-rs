@@ -14554,6 +14554,14 @@ impl Vm {
 
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
+        let result = self.execute_chunk(op_array);
+        self.finish_request(result)
+    }
+
+    /// Run `op_array` as (part of) the main script in the global scope,
+    /// without the request shutdown sequence. The CLI SAPI runs its
+    /// -B / -R / -E code pieces this way, then calls finish_request().
+    pub fn execute_chunk(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
         if self.included_files_list.is_empty() && !self.current_file.is_empty() {
             let main = std::fs::canonicalize(&self.current_file)
@@ -14566,8 +14574,12 @@ impl Vm {
         // execute_op_array_inner).
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         self.bind_next_frame = true;
-        let result = self.execute_op_array(op_array, cvs);
+        self.execute_op_array(op_array, cvs)
+    }
 
+    /// End of the main script: uncaught exception handling and display,
+    /// shutdown functions, destructors and module request shutdown.
+    pub fn finish_request(&mut self, result: Result<Value, VmError>) -> Result<Value, VmError> {
         // The Return path in global scope force-closes outstanding generator CVs
         // so their finally blocks can run on shutdown. If any such finally raised
         // an Error (e.g., "Cannot yield from finally in a force-closed

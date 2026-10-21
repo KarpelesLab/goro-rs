@@ -28,6 +28,12 @@ pub struct RequestInfo {
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
     /// Script path (PHP_SELF / SCRIPT_FILENAME ...).
     pub script_filename: Vec<u8>,
+    /// CLI: PHP_SELF / SCRIPT_NAME when they differ from script_filename
+    /// ("Standard input code" for code from stdin or -r).
+    pub php_self: Option<Vec<u8>>,
+    /// The SAPI registers $_SERVER itself (the built-in web server):
+    /// entries added after the environment import.
+    pub server_vars: Option<Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 thread_local! {
@@ -1394,11 +1400,18 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     // $_SERVER
     let server = new_arr();
     if has('S') {
-        import_env(&req.env, &server);
+        if req.server_vars.is_none() {
+            import_env(&req.env, &server);
+        }
         let mut s = server.borrow_mut();
-        if !req.cgi {
-            s.set(sym_key(b"PHP_SELF"), sval(&req.script_filename));
-            s.set(sym_key(b"SCRIPT_NAME"), sval(&req.script_filename));
+        if let Some(vars) = &req.server_vars {
+            for (k, v) in vars {
+                s.set(sym_key(k), sval(v));
+            }
+        } else if !req.cgi {
+            let php_self = req.php_self.as_ref().unwrap_or(&req.script_filename);
+            s.set(sym_key(b"PHP_SELF"), sval(php_self));
+            s.set(sym_key(b"SCRIPT_NAME"), sval(php_self));
             s.set(sym_key(b"SCRIPT_FILENAME"), sval(&req.script_filename));
             s.set(sym_key(b"PATH_TRANSLATED"), sval(&req.script_filename));
             s.set(sym_key(b"DOCUMENT_ROOT"), sval(b""));

@@ -48,6 +48,16 @@ struct HighlighterIni {
     string: Vec<u8>,
 }
 
+/// zend_highlight() of a whole source (the CLI's -s mode).
+pub fn highlight_source(vm: &Vm, src: &[u8]) -> Vec<u8> {
+    zend_highlight(src, true, &get_highlight_struct(vm))
+}
+
+/// zend_strip() of a whole source (the CLI's -w mode).
+pub fn strip_source(src: &[u8]) -> Vec<u8> {
+    zend_strip(src, true)
+}
+
 fn get_highlight_struct(vm: &Vm) -> HighlighterIni {
     let get = |k: &[u8], d: &[u8]| -> Vec<u8> {
         vm.constants
