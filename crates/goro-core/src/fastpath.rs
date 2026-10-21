@@ -521,9 +521,10 @@ fn dim_key(
 }
 
 impl crate::vm::Vm {
-    /// `$a[k]` read and `$cv[k] = <scalar>` write on a real array with an
-    /// int / string key, where the element (for a read) exists or (for a
-    /// write) is absent or a plain scalar that is not a reference.  The
+    /// `$a[k]` read, `$cv[k] = <scalar>` write and `$cv[] = <scalar>` append
+    /// on a real array with an int / string key, where the element (for a
+    /// read) exists or (for a write) is absent or a plain scalar that is not
+    /// a reference.  The
     /// general handlers do exactly this in that case, after checks for
     /// objects, strings, undefined variables, illegal offsets and the
     /// release of an overwritten object / array.
@@ -534,7 +535,8 @@ impl crate::vm::Vm {
         tmps: &mut [Value],
         literals: &[Value],
     ) -> Fast {
-        let write = op.opcode == OpCode::ArraySet;
+        let append = op.opcode == OpCode::ArrayAppend;
+        let write = append || op.opcode == OpCode::ArraySet;
         let arr_of = |v: &Value| match v {
             Value::Array(a) => Some(a.clone()),
             Value::Reference(r) => match &*r.try_borrow().ok()? {
@@ -558,21 +560,36 @@ impl crate::vm::Vm {
         if Rc::ptr_eq(&arr, &self.globals) {
             return Fast::No;
         }
-        let key_op = if write { &op.result } else { &op.op2 };
-        let Some(key) = dim_key(key_op, cvs, tmps, literals) else {
-            return Fast::No;
-        };
-        if write {
+        let val = if write {
             let val = match op.op2 {
                 OperandType::Tmp(i) => tmps.get(i as usize),
                 OperandType::Cv(i) => cvs.get(i as usize),
                 OperandType::Const(i) => literals.get(i as usize),
                 _ => None,
             };
-            let val = match val {
-                Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => v.clone(),
+            match val {
+                Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
                 _ => return Fast::No,
+            }
+        } else {
+            None
+        };
+        if append {
+            let Ok(mut a) = arr.try_borrow_mut() else {
+                return Fast::No;
             };
+            // A full array ("next element is already occupied") raises its
+            // Error in the general handler; try_push() leaves it unchanged.
+            return match a.try_push(val.unwrap_or_default()) {
+                Ok(()) => Fast::Done,
+                Err(_) => Fast::No,
+            };
+        }
+        let key_op = if write { &op.result } else { &op.op2 };
+        let Some(key) = dim_key(key_op, cvs, tmps, literals) else {
+            return Fast::No;
+        };
+        if let Some(val) = val {
             let Ok(mut a) = arr.try_borrow_mut() else {
                 return Fast::No;
             };

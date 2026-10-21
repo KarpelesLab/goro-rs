@@ -109,6 +109,9 @@ pub struct PhpGenerator {
     pub(crate) current_ref: Option<Rc<RefCell<Value>>>,
     /// Property hook this generator is the body of (`get { yield ...; }`).
     pub(crate) hook_key: Option<Vec<u8>>,
+    /// frame_name(), computed on the first resume (it only depends on the
+    /// function and its class, which do not change).
+    frame_name_cache: Option<(String, bool)>,
 }
 
 impl PhpGenerator {
@@ -185,6 +188,7 @@ impl PhpGenerator {
             gc_dtor_called: std::cell::Cell::new(false),
             current_ref: None,
             hook_key: None,
+            frame_name_cache: None,
         }
     }
 
@@ -542,7 +546,10 @@ impl PhpGenerator {
         };
 
         // Push a call_stack entry for func_get_args() support
-        let (func_name, is_instance) = self.frame_name(vm);
+        if self.frame_name_cache.is_none() {
+            self.frame_name_cache = Some(self.frame_name(vm));
+        }
+        let (func_name, is_instance) = self.frame_name_cache.clone().unwrap_or_default();
         // The generator's frame in stack traces should reflect the most recent caller.
         // When VM resumes the generator with caller context set (e.g. foreach), we use
         // the caller's file/line; otherwise (Generator method calls, yield-from priming)

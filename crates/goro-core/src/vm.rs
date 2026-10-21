@@ -15569,7 +15569,10 @@ impl Vm {
                         tmps.as_mut_slice(),
                         &op_array.literals,
                     )
-                } else if matches!(op.opcode, OpCode::ArrayGet | OpCode::ArraySet) {
+                } else if matches!(
+                    op.opcode,
+                    OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend
+                ) {
                     self.fast_dim_op(
                         op,
                         cvs.as_mut_slice(),
