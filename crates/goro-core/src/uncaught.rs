@@ -97,7 +97,7 @@ impl Vm {
                 let thrown_line = first.3;
                 let mut fatal = String::new();
                 for (i, (class, msg_str, file_str, line_num, trace_str)) in chain.iter().rev().enumerate() {
-                    let head = if i == 0 { "\nFatal error: Uncaught " } else { "\n\nNext " };
+                    let head = if i == 0 { "Uncaught " } else { "\n\nNext " };
                     if msg_str.is_empty() {
                         fatal.push_str(&format!("{}{} in {}:{}\nStack trace:\n{}", head, class, file_str, line_num, trace_str));
                     } else {
@@ -113,15 +113,15 @@ impl Vm {
                         ));
                     }
                 }
-                fatal.push_str(&format!("\n  thrown in {} on line {}\n", thrown_file, thrown_line));
-                self.write_output(fatal.as_bytes());
+                fatal.push_str("\n  thrown");
+                self.display_error("Fatal error", &fatal, &thrown_file, thrown_line);
                 self.fatal_emitted = true;
                 return;
             }
         }
         if !self.fatal_emitted {
-            let fatal = format!("\nFatal error: {} in {} on line {}\n", e.message, self.current_file, e.line);
-            self.write_output(fatal.as_bytes());
+            let file = self.current_file.clone();
+            self.display_error("Fatal error", &e.message, &file, e.line);
             self.fatal_emitted = true;
         }
     }

@@ -2139,8 +2139,8 @@ impl Vm {
     /// Emit a raw warning (no user error handler, no line tracking)
     pub fn emit_warning_raw(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
-            let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, self.current_line);
-            self.write_output(warning.as_bytes());
+            let (file, line) = (self.current_file.clone(), self.current_line);
+            self.display_error("Warning", msg, &file, line);
         }
     }
 
@@ -2150,8 +2150,8 @@ impl Vm {
             if self.call_user_error_handler(2, msg, line) {
                 return;
             }
-            let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, line);
-            self.write_output(warning.as_bytes());
+            let file = self.current_file.clone();
+            self.display_error("Warning", msg, &file, line);
         }
     }
 
@@ -2160,8 +2160,8 @@ impl Vm {
     /// in an exception — fatal errors halt execution unconditionally. Sets
     /// `self.fatal_emitted` so the top-level handler does not re-emit it.
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
-        let fatal = format!("\nFatal error: {} in {} on line {}\n", msg, self.current_file, line);
-        self.write_output(fatal.as_bytes());
+        let file = self.current_file.clone();
+        self.display_error("Fatal error", msg, &file, line);
         self.fatal_emitted = true;
         VmError { message: msg.to_string(), line }
     }
@@ -2180,8 +2180,8 @@ impl Vm {
     /// Emit a raw notice (no user error handler)
     pub fn emit_notice_raw(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8 != 0 {
-            let notice = format!("\nNotice: {} in {} on line {}\n", msg, self.current_file, line);
-            self.write_output(notice.as_bytes());
+            let file = self.current_file.clone();
+            self.display_error("Notice", msg, &file, line);
         }
     }
 
@@ -2277,8 +2277,8 @@ impl Vm {
     pub fn emit_deprecated_raw(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8192 != 0 {
             let effective_line = if line == 0 { self.current_line } else { line };
-            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
-            self.write_output(deprec.as_bytes());
+            let file = self.current_file.clone();
+            self.display_error("Deprecated", msg, &file, effective_line);
         }
     }
 
@@ -2293,8 +2293,8 @@ impl Vm {
             }
             // Fall back to the standard deprecation banner if no handler ran.
             let effective_line = if line == 0 { self.current_line } else { line };
-            let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
-            self.write_output(deprec.as_bytes());
+            let file = self.current_file.clone();
+            self.display_error("Deprecated", msg, &file, effective_line);
         }
     }
 
