@@ -1037,7 +1037,7 @@ impl Vm {
                 c.insert(b"EXTR_PREFIX_ALL".to_vec(), Value::Long(3));
                 c.insert(b"EXTR_PREFIX_INVALID".to_vec(), Value::Long(4));
                 c.insert(b"EXTR_IF_EXISTS".to_vec(), Value::Long(6));
-                c.insert(b"EXTR_PREFIX_IF_EXISTS".to_vec(), Value::Long(7));
+                c.insert(b"EXTR_PREFIX_IF_EXISTS".to_vec(), Value::Long(5));
                 c.insert(b"EXTR_REFS".to_vec(), Value::Long(256));
                 // String comparison constants
                 c.insert(b"CHAR_MAX".to_vec(), Value::Long(127));
@@ -20208,19 +20208,19 @@ impl Vm {
                     }
                     if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
-                        // Assigning to an element that is a PHP reference writes
-                        // through the reference (zend_assign_to_variable).
-                        let existing_ref = match arr.borrow().get(&key) {
-                            Some(Value::Reference(r)) => Some(r.clone()),
-                            _ => None,
+                        // Assigning to an element that is a reference writes through it.
+                        // (Storing a Reference itself rebinds the slot.)
+                        let existing_ref = if matches!(val, Value::Reference(_)) {
+                            None
+                        } else {
+                            match arr.borrow().get(&key) {
+                                Some(Value::Reference(r)) => Some(r.clone()),
+                                _ => None,
+                            }
                         };
                         match existing_ref {
                             Some(r) => {
-                                let v = match val {
-                                    Value::Reference(vr) => vr.borrow().clone(),
-                                    v => v,
-                                };
-                                *r.borrow_mut() = v;
+                                *r.borrow_mut() = val;
                             }
                             None => arr.borrow_mut().set(key, val),
                         }
@@ -22005,13 +22005,26 @@ impl Vm {
                                         Value::Reference(reference)
                                     };
 
-                                    self.write_operand(
-                                        &op.result,
-                                        ref_val,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
+                                    // Rebind the loop variable to the element's
+                                    // reference (don't write through the previous one).
+                                    if let OperandType::Cv(ci) = op.result {
+                                        if let Some(slot) = cvs.get_mut(ci as usize) {
+                                            *slot = ref_val.clone();
+                                        }
+                                        if self.is_global_scope {
+                                            if let Some(name) = op_array.cv_names.get(ci as usize) {
+                                                self.globals.insert(name.clone(), ref_val);
+                                            }
+                                        }
+                                    } else {
+                                        self.write_operand(
+                                            &op.result,
+                                            ref_val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                    }
                                     foreach_positions.insert(iter_idx, next_pos + 1);
                                     found = true;
                                     break;
@@ -23957,155 +23970,169 @@ impl Vm {
                 OpCode::Extract => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let meta_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    // meta is either a [flags, prefix] array from the newer
-                    // compile path, or a Long (flags) from older call sites.
-                    let (flags, prefix_bytes): (i64, Vec<u8>) = match &meta_val {
+                    let (flags, prefix): (i64, Option<Vec<u8>>) = match &meta_val {
                         Value::Array(a) => {
                             let a = a.borrow();
-                            let f = a
-                                .iter()
-                                .next()
-                                .map(|(_, v)| v.to_long())
-                                .unwrap_or(0);
-                            let p = a
-                                .iter()
-                                .nth(1)
-                                .map(|(_, v)| v.to_php_string().as_bytes().to_vec())
-                                .unwrap_or_default();
+                            let f = a.iter().next().map(|(_, v)| v.to_long()).unwrap_or(0);
+                            let p = match a.iter().nth(1).map(|(_, v)| v.deref()) {
+                                None | Some(Value::Null) => None,
+                                Some(v) => Some(v.to_php_string().as_bytes().to_vec()),
+                            };
                             (f, p)
                         }
-                        _ => (meta_val.to_long(), Vec::new()),
+                        _ => (meta_val.to_long(), None),
                     };
-                    // Mask out EXTR_REFS (256) so we can work with the action alone.
-                    let action = flags & !256;
-                    // EXTR_OVERWRITE = 0, EXTR_SKIP = 1, EXTR_PREFIX_SAME = 2,
-                    // EXTR_PREFIX_ALL = 3, EXTR_PREFIX_INVALID = 4,
-                    // EXTR_IF_EXISTS = 5, EXTR_PREFIX_IF_EXISTS = 6
-                    let mut count = 0i64;
-                    let is_valid_identifier = |name: &[u8]| -> bool {
+                    let refs = flags & 0x100 != 0;
+                    let etype = flags & 0xff;
+                    let valid_name = |name: &[u8]| -> bool {
                         if name.is_empty() {
                             return false;
                         }
                         let first = name[0];
-                        if !(first.is_ascii_alphabetic() || first == b'_' || first >= 0x80) {
+                        if !(first.is_ascii_alphabetic() || first == b'_' || first >= 0x7f) {
                             return false;
                         }
-                        for &c in &name[1..] {
-                            if !(c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
-                                return false;
-                            }
-                        }
-                        true
+                        name[1..].iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x7f)
                     };
-                    let make_prefixed = |name: &[u8]| -> Vec<u8> {
-                        let mut out = Vec::with_capacity(prefix_bytes.len() + 1 + name.len());
-                        out.extend_from_slice(&prefix_bytes);
+                    let mut err: Option<(&[u8], String)> = None;
+                    if !(0..=6).contains(&etype) {
+                        err = Some((b"ValueError", "extract(): Argument #2 ($flags) must be a valid extract type".into()));
+                    } else if etype > 1 && etype <= 5 && prefix.is_none() {
+                        err = Some((b"ValueError", "extract(): Argument #3 ($prefix) is required when using this extract type".into()));
+                    } else if let Some(p) = &prefix {
+                        if !p.is_empty() && !valid_name(p) {
+                            err = Some((b"ValueError", "extract(): Argument #3 ($prefix) must be a valid identifier".into()));
+                        }
+                    }
+                    let prefix = prefix.unwrap_or_default();
+                    let prefixed = |name: &[u8]| -> Vec<u8> {
+                        let mut out = prefix.clone();
                         out.push(b'_');
                         out.extend_from_slice(name);
                         out
                     };
-                    let find_cv = |name: &[u8]| -> Option<usize> {
-                        op_array.cv_names.iter().position(|n| n == name)
-                    };
-                    if let Value::Array(arr) = &arr_val {
-                        let entries: Vec<(crate::array::ArrayKey, Value)> = {
-                            let a = arr.borrow();
-                            a.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                        };
-                        for (key, val) in entries {
-                            // Resolve the variable name and whether it's valid.
-                            let (name_bytes, is_numeric_key) = match &key {
-                                crate::array::ArrayKey::String(s) => (s.as_bytes().to_vec(), false),
-                                crate::array::ArrayKey::Int(n) => (n.to_string().into_bytes(), true),
-                            };
-                            let valid_name = !is_numeric_key && is_valid_identifier(&name_bytes);
-                            // Determine the target variable name based on action.
-                            let target_name: Option<Vec<u8>> = match action {
-                                0 => {
-                                    // EXTR_OVERWRITE
-                                    if valid_name { Some(name_bytes.clone()) } else { None }
-                                }
-                                1 => {
-                                    // EXTR_SKIP
-                                    if valid_name { Some(name_bytes.clone()) } else { None }
-                                }
-                                2 => {
-                                    // EXTR_PREFIX_SAME: if var exists, prefix it
-                                    if !valid_name { None }
-                                    else if let Some(idx) = find_cv(&name_bytes) {
-                                        if !matches!(&cvs[idx], Value::Undef) {
-                                            let pn = make_prefixed(&name_bytes);
-                                            if is_valid_identifier(&pn) { Some(pn) } else { None }
+                    let mut count = 0i64;
+                    if err.is_none() {
+                        if let Value::Array(arr) = &arr_val {
+                            let entries: Vec<(crate::array::ArrayKey, Value)> =
+                                arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            for (key, entry) in entries {
+                                let (name, numeric) = match &key {
+                                    crate::array::ArrayKey::String(s) => (s.as_bytes().to_vec(), false),
+                                    crate::array::ArrayKey::Int(n) => (n.to_string().into_bytes(), true),
+                                };
+                                let exists = |cvs: &[Value], vm: &Self, n: &[u8]| -> bool {
+                                    if n == b"this" {
+                                        return false;
+                                    }
+                                    match op_array.cv_names.iter().position(|c| c.as_slice() == n) {
+                                        Some(i) => match &cvs[i] {
+                                            Value::Undef => false,
+                                            Value::Reference(r) => !matches!(&*r.borrow(), Value::Undef),
+                                            _ => true,
+                                        },
+                                        None => vm.globals.contains_key(n),
+                                    }
+                                };
+                                // Determine the target variable name (None = skip).
+                                let target: Option<Vec<u8>> = match etype {
+                                    0 => if numeric || !valid_name(&name) { None } else { Some(name.clone()) },
+                                    1 => if numeric || !valid_name(&name) || name == b"this" || name == b"GLOBALS" || exists(&cvs, self, &name) { None } else { Some(name.clone()) },
+                                    2 => {
+                                        if numeric || name.is_empty() {
+                                            None
+                                        } else if exists(&cvs, self, &name) || name == b"this" {
+                                            Some(prefixed(&name))
+                                        } else if valid_name(&name) {
+                                            Some(name.clone())
                                         } else {
-                                            Some(name_bytes.clone())
+                                            None
                                         }
-                                    } else if self.globals.contains_key(name_bytes.as_slice()) {
-                                        let pn = make_prefixed(&name_bytes);
-                                        if is_valid_identifier(&pn) { Some(pn) } else { None }
-                                    } else {
-                                        Some(name_bytes.clone())
                                     }
-                                }
-                                3 => {
-                                    // EXTR_PREFIX_ALL: always prefix
-                                    let pn = make_prefixed(&name_bytes);
-                                    if is_valid_identifier(&pn) { Some(pn) } else { None }
-                                }
-                                4 => {
-                                    // EXTR_PREFIX_INVALID: prefix invalid names
-                                    if valid_name {
-                                        Some(name_bytes.clone())
-                                    } else {
-                                        let pn = make_prefixed(&name_bytes);
-                                        if is_valid_identifier(&pn) { Some(pn) } else { None }
-                                    }
-                                }
-                                5 => {
-                                    // EXTR_IF_EXISTS: only if var exists
-                                    if !valid_name { None }
-                                    else if let Some(idx) = find_cv(&name_bytes) {
-                                        if !matches!(&cvs[idx], Value::Undef) {
-                                            Some(name_bytes.clone())
-                                        } else { None }
-                                    } else if self.globals.contains_key(name_bytes.as_slice()) {
-                                        Some(name_bytes.clone())
-                                    } else { None }
-                                }
-                                6 => {
-                                    // EXTR_PREFIX_IF_EXISTS: prefix if exists
-                                    if !valid_name { None }
-                                    else {
-                                        let exists = find_cv(&name_bytes)
-                                            .map(|i| !matches!(&cvs[i], Value::Undef))
-                                            .unwrap_or(false)
-                                            || self.globals.contains_key(name_bytes.as_slice());
-                                        if exists {
-                                            let pn = make_prefixed(&name_bytes);
-                                            if is_valid_identifier(&pn) { Some(pn) } else { None }
-                                        } else { None }
-                                    }
-                                }
-                                _ => {
-                                    if valid_name { Some(name_bytes.clone()) } else { None }
-                                }
-                            };
-                            let Some(target_name) = target_name else { continue };
-                            // Write into a CV if one exists with that name; else
-                            // fall back to a global entry.
-                            if let Some(idx) = find_cv(&target_name) {
-                                if action == 1 && !matches!(&cvs[idx], Value::Undef) {
-                                    // EXTR_SKIP: don't overwrite existing
+                                    3 => Some(prefixed(&name)),
+                                    4 => if numeric || !valid_name(&name) || name == b"this" { Some(prefixed(&name)) } else { Some(name.clone()) },
+                                    5 => if !numeric && exists(&cvs, self, &name) { Some(prefixed(&name)) } else { None },
+                                    _ => if !numeric && valid_name(&name) && name != b"GLOBALS" && exists(&cvs, self, &name) { Some(name.clone()) } else { None },
+                                };
+                                let Some(target) = target else { continue };
+                                if name.is_empty() && !numeric && etype == 3 {
                                     continue;
                                 }
-                                cvs[idx] = val.clone();
-                            } else {
-                                if action == 1 && self.globals.contains_key(target_name.as_slice()) {
+                                if target == b"GLOBALS" && etype == 0 {
+                                    // $GLOBALS is not part of the symbol table; the
+                                    // variable is created but unreachable.
+                                    count += 1;
                                     continue;
                                 }
-                                self.globals.insert(target_name.clone(), val.clone());
+                                if !valid_name(&target) {
+                                    continue;
+                                }
+                                if target == b"this" {
+                                    err = Some((b"Error", "Cannot re-assign $this".into()));
+                                    break;
+                                }
+                                // Value to bind
+                                let cv_idx = op_array.cv_names.iter().position(|c| c.as_slice() == target.as_slice());
+                                if refs {
+                                    let r = match &entry {
+                                        Value::Reference(r) => r.clone(),
+                                        other => {
+                                            let r = Rc::new(RefCell::new(other.clone()));
+                                            arr.borrow_mut().set(key.clone(), Value::Reference(r.clone()));
+                                            r
+                                        }
+                                    };
+                                    match cv_idx {
+                                        Some(i) => cvs[i] = Value::Reference(r.clone()),
+                                        None => { self.globals.insert(target.clone(), Value::Reference(r.clone())); }
+                                    }
+                                    if self.is_global_scope && cv_idx.is_some() {
+                                        self.globals.insert(target.clone(), Value::Reference(r));
+                                    }
+                                } else {
+                                    let mut v = entry.deref();
+                                    if let Value::Array(a) = &v {
+                                        let copy = a.borrow().clone();
+                                        v = Value::Array(Rc::new(RefCell::new(copy)));
+                                    }
+                                    match cv_idx {
+                                        Some(i) => {
+                                            if let Value::Reference(r) = &cvs[i] {
+                                                *r.borrow_mut() = v.clone();
+                                            } else {
+                                                cvs[i] = v.clone();
+                                            }
+                                        }
+                                        None => {
+                                            match self.globals.get(target.as_slice()) {
+                                                Some(Value::Reference(r)) => { *r.borrow_mut() = v.clone(); }
+                                                _ => { self.globals.insert(target.clone(), v.clone()); }
+                                            }
+                                        }
+                                    }
+                                    if self.is_global_scope && cv_idx.is_some() {
+                                        if let Some(i) = cv_idx {
+                                            let cur = cvs[i].clone();
+                                            self.globals.insert(target.clone(), cur);
+                                        }
+                                    }
+                                }
+                                count += 1;
                             }
-                            count += 1;
                         }
+                    }
+                    if let Some((class, msg)) = err {
+                        let exc_val = self.create_exception(class, &msg, op.line);
+                        self.current_exception = Some(exc_val);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught {}: {}", String::from_utf8_lossy(class), msg),
+                            line: op.line,
+                        });
                     }
                     self.write_operand(&op.result, Value::Long(count), &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -33176,6 +33203,12 @@ impl Vm {
                 };
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
                     // If the CV holds a reference, write through the reference
+                    // (never store a reference inside itself).
+                    if let (Value::Reference(r), Value::Reference(v)) = (&*slot, &value) {
+                        if Rc::ptr_eq(r, v) {
+                            return;
+                        }
+                    }
                     if let Value::Reference(r) = slot {
                         *r.borrow_mut() = value.clone();
                     } else {

@@ -7740,11 +7740,11 @@ impl Compiler {
                             result: OperandType::Tmp(meta_tmp),
                             line: expr.span.line,
                         });
-                        // Push prefix (default empty string)
+                        // Push prefix (null when not passed)
                         let prefix = if args.len() > 2 {
                             self.compile_expr(&args[2].value)?
                         } else {
-                            let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(Vec::new())));
+                            let idx = self.op_array.add_literal(Value::Null);
                             OperandType::Const(idx)
                         };
                         self.op_array.emit(Op {
@@ -8784,7 +8784,7 @@ impl Compiler {
                     b"extr_prefix_all" => Value::Long(3),
                     b"extr_prefix_invalid" => Value::Long(4),
                     b"extr_if_exists" => Value::Long(6),
-                    b"extr_prefix_if_exists" => Value::Long(7),
+                    b"extr_prefix_if_exists" => Value::Long(5),
                     b"extr_refs" => Value::Long(256),
                     _ => {
                         // Unknown identifier - emit runtime constant lookup
