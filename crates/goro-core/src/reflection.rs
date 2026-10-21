@@ -5900,6 +5900,14 @@ pub fn reflection_parameter_method(
                 Some(Value::False)
             }
         }
+        b"getdefaultvalue" | b"isdefaultvalueconstant" | b"getdefaultvalueconstantname"
+            if resolved_op_array.as_ref().map(|op| op.internal_sig.is_none()
+                && !op.param_has_default.get(type_idx).copied().unwrap_or(false)).unwrap_or(false) =>
+        {
+            let exc = vm.create_exception(b"ReflectionException", "Internal error: Failed to retrieve the default value", vm.current_line);
+            vm.current_exception = Some(exc);
+            Some(Value::Null)
+        }
         b"getdefaultvalue" => {
             // Try to extract default value from compiled opcode prelude.
             if let Some(op_array) = resolved_op_array.as_ref() {
@@ -6250,6 +6258,13 @@ pub fn reflection_parameter_method(
         b"getdefaultvalueconstantname" => {
             if let Some(op_array) = resolved_op_array.as_ref() {
                 if let Some(name) = extract_param_default_constant(op_array, type_idx as u32) {
+                    // The AST rendering keeps the name as written (self::X).
+                    if let Some(Some(r)) = op_array.param_default_repr.get(type_idx) {
+                        let r = r.trim_start_matches('\\');
+                        if r.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || c == ':') {
+                            return Some(Value::String(PhpString::from_string(r.to_string())));
+                        }
+                    }
                     let display = if let Some(rest) = name.strip_prefix("global:") {
                         // Strip leading backslash from fully-qualified names
                         rest.trim_start_matches('\\').to_string()
