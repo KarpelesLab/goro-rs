@@ -691,6 +691,8 @@ struct UploadCfg {
     upload_max_filesize: i64,
     file_uploads: bool,
     upload_tmp_dir: Option<String>,
+    query_string: Vec<u8>,
+    cookie: Vec<u8>,
 }
 
 /// rfc1867_post_handler. Returns the number of body bytes consumed.
@@ -757,7 +759,17 @@ fn rfc1867_handler(
     let mut max_file_size: i64 = 0;
     let mut count: i64 = 0;
 
-    while !mb.eof() {
+    use goro_core::rfc1867::Event;
+    let cb = ctx.vm.rfc1867_callback;
+    let mut skip_all = false;
+    if let Some(f) = cb {
+        let ev = Event::Start { content_length, query_string: &cfg.query_string, cookie: &cfg.cookie };
+        if !f(ctx.vm, &ev) {
+            skip_all = true;
+        }
+    }
+
+    while !skip_all && !mb.eof() {
         let mut headers = Vec::new();
         if !mb.headers(&mut headers) {
             break;
@@ -802,14 +814,26 @@ fn rfc1867_handler(
                 let value = mb.read_body().unwrap_or_default();
                 count += 1;
                 if count <= cfg.max_input_vars {
+                    if let Some(f) = cb {
+                        let ev = Event::FormData { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), value: &value };
+                        if !f(ctx.vm, &ev) {
+                            continue;
+                        }
+                    }
                     if !protected.contains(&normalize_protected_variable(&param)) {
                         register_variable(ctx, &param, Value::String(PhpString::from_vec(value.clone())), post, false);
                     }
-                } else if count == cfg.max_input_vars + 1 {
-                    warn(ctx.vm, &format!(
-                        "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                        cfg.max_input_vars
-                    ));
+                } else {
+                    if count == cfg.max_input_vars + 1 {
+                        warn(ctx.vm, &format!(
+                            "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                            cfg.max_input_vars
+                        ));
+                    }
+                    if let Some(f) = cb {
+                        let ev = Event::FormData { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), value: &value };
+                        f(ctx.vm, &ev);
+                    }
                 }
                 if param.eq_ignore_ascii_case(b"MAX_FILE_SIZE") {
                     let v = cstr(&value);
@@ -871,10 +895,19 @@ fn rfc1867_handler(
                 skip_upload = true;
             }
         }
+        if !skip_upload {
+            if let Some(f) = cb {
+                let ev = Event::FileStart { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), filename: cstr(&filename) };
+                if !f(ctx.vm, &ev) {
+                    continue;
+                }
+            }
+        }
         if skip_upload {
             continue;
         }
         let mut cancel_upload: i64 = 0;
+        let mut offset: i64 = 0;
         if cstr(&filename).is_empty() {
             cancel_upload = 4;
         }
@@ -903,6 +936,13 @@ fn rfc1867_handler(
             }
         }
         while cancel_upload == 0 && !blen_data.is_empty() {
+            if let Some(f) = cb {
+                let ev = Event::FileData { post_bytes_processed: mb.src_pos as i64, offset, length: blen_data.len() as i64 };
+                if !f(ctx.vm, &ev) {
+                    cancel_upload = 8;
+                    continue;
+                }
+            }
             let blen = blen_data.len() as i64;
             if cfg.upload_max_filesize > 0 && total_bytes + blen > cfg.upload_max_filesize {
                 cancel_upload = 1;
@@ -916,12 +956,20 @@ fn rfc1867_handler(
                     } else {
                         total_bytes += blen;
                     }
+                    offset += blen;
                 }
             }
             blen_data = mb.read(FILLUNIT, &mut end);
         }
         if cancel_upload == 0 && !end {
             cancel_upload = 3;
+        }
+        if let Some(f) = cb {
+            let tn = temp.as_ref().map(|(p, _)| p.to_string_lossy().as_bytes().to_vec());
+            let ev = Event::FileEnd { post_bytes_processed: mb.src_pos as i64, temp_filename: tn.as_deref(), cancel_upload };
+            if !f(ctx.vm, &ev) {
+                cancel_upload = 8;
+            }
         }
         let temp_name: Option<Vec<u8>> = if cancel_upload != 0 {
             if let Some((p, _)) = temp.take() {
@@ -990,6 +1038,9 @@ fn rfc1867_handler(
         reg(ctx, &protected, name_for("error"), Value::Long(cancel_upload), false);
         let size = if cancel_upload != 0 { 0 } else { total_bytes };
         reg(ctx, &protected, name_for("size"), Value::Long(size), false);
+    }
+    if let Some(f) = cb {
+        f(ctx.vm, &Event::End { post_bytes_processed: mb.src_pos as i64 });
     }
     mb.src_pos
 }
@@ -1067,6 +1118,8 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                         upload_max_filesize: ini("upload_max_filesize").map(|v| parse_quantity(&v)).unwrap_or(2 * 1024 * 1024),
                         file_uploads: ini_bool(ini("file_uploads"), true),
                         upload_tmp_dir: ini("upload_tmp_dir"),
+                        query_string: req.query_string.clone(),
+                        cookie: req.cookie_data.clone().unwrap_or_default(),
                     };
                     let ct = req.content_type.clone().unwrap_or_default();
                     let used = rfc1867_handler(&mut ctx, &ct, &req.body, req.content_length, &cfg, &post, &files);

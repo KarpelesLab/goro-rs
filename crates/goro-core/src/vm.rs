@@ -510,6 +510,8 @@ pub struct Vm {
     /// Extension request-shutdown handlers (RSHUTDOWN), run once at the end
     /// of `execute()` after shutdown functions and destructors.
     pub request_shutdown_hooks: Vec<fn(&mut Vm)>,
+    /// php_rfc1867_callback (file upload progress), if any.
+    pub rfc1867_callback: Option<crate::rfc1867::Callback>,
     /// SG(headers_sent): set once output reaches the SAPI.
     pub headers_sent: bool,
     /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
@@ -1421,6 +1423,7 @@ impl Vm {
             request_startup_hooks: Vec::new(),
             request_shutdown_hooks: Vec::new(),
             headers_sent: false,
+            rfc1867_callback: None,
             internal_deprecated_constants: HashMap::new(),
             output_start: None,
             caller_strict_types: false,

@@ -12,6 +12,7 @@ pub mod ob;
 pub mod opcode;
 pub mod random;
 pub mod reflection;
+pub mod rfc1867;
 pub mod string;
 pub mod uncaught;
 pub mod uri;
