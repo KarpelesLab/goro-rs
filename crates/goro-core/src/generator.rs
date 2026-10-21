@@ -672,6 +672,27 @@ impl PhpGenerator {
                     self.write_operand(&op.op1, val);
                 }
 
+                OpCode::LoadConst => {
+                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    self.write_operand(&op.result, val);
+                }
+
+                OpCode::AssignRef if matches!((op.op1, op.op2), (OperandType::Cv(_), OperandType::Tmp(_))) => {
+                    if let (OperandType::Cv(target_idx), OperandType::Tmp(tmp_idx)) = (op.op1, op.op2) {
+                        let ti = tmp_idx as usize;
+                        if ti < self.tmps.len() && (target_idx as usize) < self.cvs.len() {
+                            let r = if let Value::Reference(r) = &self.tmps[ti] {
+                                r.clone()
+                            } else {
+                                let r = Rc::new(RefCell::new(self.tmps[ti].clone()));
+                                self.tmps[ti] = Value::Reference(r.clone());
+                                r
+                            };
+                            self.cvs[target_idx as usize] = Value::Reference(r);
+                        }
+                    }
+                }
+
                 OpCode::AssignRef => {
                     if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) =
                         (op.op1, op.op2)

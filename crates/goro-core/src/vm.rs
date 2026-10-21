@@ -28890,7 +28890,12 @@ impl Vm {
                     }
                 }
 
-                OpCode::LoadConst | OpCode::FastConcat => {
+                OpCode::LoadConst => {
+                    // Copy op1's current value into result (QM_ASSIGN).
+                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+                OpCode::FastConcat => {
                     // TODO: implement
                 }
 

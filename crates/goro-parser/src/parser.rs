@@ -5833,22 +5833,24 @@ impl Parser {
                 break;
             }
 
+            let first_ref = self.eat(&TokenKind::Ampersand);
             let first = self.parse_expression()?;
-            if self.eat(&TokenKind::DoubleArrow) {
+            if !first_ref && self.eat(&TokenKind::DoubleArrow) {
                 // Keyed list: "key" => $var or "key" => list(...)
+                let value_ref = self.eat(&TokenKind::Ampersand);
                 let value = self.parse_expression()?;
                 elements.push(ArrayElement {
                     key: Some(first),
                     value,
                     unpack: false,
-                    by_ref: false,
+                    by_ref: value_ref,
                 });
             } else {
                 elements.push(ArrayElement {
                     key: None,
                     value: first,
                     unpack: false,
-                    by_ref: false,
+                    by_ref: first_ref,
                 });
             }
 

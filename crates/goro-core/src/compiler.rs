@@ -5636,6 +5636,49 @@ impl Compiler {
 
     /// Compile list/array destructuring assignment from a source array operand.
     /// Recursively handles nested list() and [] patterns.
+    fn list_has_ref(elems: &[ArrayElement]) -> bool {
+        elems.iter().any(|e| e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub)))
+    }
+
+    /// Destructuring that contains `&` elements: each element is bound
+    /// directly against `src[key]` (which must be a writable place).
+    fn compile_list_destructure_ref(&mut self, elems: &[ArrayElement], src: &Expr, line: u32) -> CompileResult<()> {
+        if elems.is_empty() || elems.iter().all(|e| matches!(&e.value.kind, ExprKind::Null)) {
+            return Err(CompileError { message: "Cannot use empty list".into(), line });
+        }
+        let has_keyed = elems.iter().any(|e| e.key.is_some());
+        let has_unkeyed = elems.iter().any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
+        if has_keyed && has_unkeyed {
+            return Err(CompileError { message: "Cannot mix keyed and unkeyed array entries in assignments".into(), line });
+        }
+        for (i, elem) in elems.iter().enumerate() {
+            if matches!(&elem.value.kind, ExprKind::Null) {
+                continue;
+            }
+            let span = elem.value.span;
+            let key = elem.key.clone().unwrap_or(Expr { kind: ExprKind::Int(i as i64), span });
+            let sub = Expr {
+                kind: ExprKind::ArrayAccess { array: Box::new(src.clone()), index: Some(Box::new(key)) },
+                span,
+            };
+            let e = match &elem.value.kind {
+                ExprKind::Array(nested) => {
+                    self.compile_list_destructure_ref(nested, &sub, line)?;
+                    continue;
+                }
+                _ if elem.by_ref => Expr {
+                    kind: ExprKind::AssignRef { target: Box::new(elem.value.clone()), value: Box::new(sub) },
+                    span,
+                },
+                _ => Expr { kind: ExprKind::Assign { target: Box::new(elem.value.clone()), value: Box::new(sub) }, span },
+            };
+            let t0 = self.op_array.temp_count;
+            self.compile_expr(&e)?;
+            let _ = t0;
+        }
+        Ok(())
+    }
+
     fn compile_list_destructure(
         &mut self,
         elems: &[ArrayElement],
@@ -5977,6 +6020,26 @@ impl Compiler {
                         });
                     }
                 }
+                // Destructuring with by-reference elements: [&$a, $b] = $src
+                if let ExprKind::Array(elems) = &target.kind {
+                    if Self::list_has_ref(elems) {
+                        match &value.kind {
+                            ExprKind::Variable(_) | ExprKind::ArrayAccess { .. } | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicVariable(_) => {
+                                self.compile_list_destructure_ref(elems, value, expr.span.line)?;
+                                return self.compile_expr(value);
+                            }
+                            ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }
+                            | ExprKind::DynamicStaticMethodCall { .. } => {}
+                            _ => {
+                                return Err(CompileError {
+                                    message: "Cannot assign reference to non referenceable value".into(),
+                                    line: expr.span.line,
+                                });
+                            }
+                        }
+                    }
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
@@ -6137,7 +6200,21 @@ impl Compiler {
                             }
                         };
 
-                        let arr_op = val;
+                        // Snapshot a CV source: `[$a, $b] = $a` must read the
+                        // original array, not $a after its first element is assigned.
+                        let arr_op = if matches!(val, OperandType::Cv(_)) {
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::LoadConst,
+                                op1: val,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(t),
+                                line: expr.span.line,
+                            });
+                            OperandType::Tmp(t)
+                        } else {
+                            val
+                        };
                         self.compile_list_destructure(&elems, arr_op, expr.span.line)?;
                         Ok(arr_op)
                     }
@@ -9903,9 +9980,10 @@ impl Compiler {
                             });
                         }
                         let target_cv = self.op_array.get_or_create_cv(target_name);
-                        // Assign the reference directly to the CV
+                        // Bind the CV to the reference (rebinding, not writing
+                        // through a reference the CV may already hold)
                         self.op_array.emit(Op {
-                            opcode: OpCode::Assign,
+                            opcode: OpCode::AssignRef,
                             op1: OperandType::Cv(target_cv),
                             op2: OperandType::Tmp(ref_tmp),
                             result: OperandType::Unused,
