@@ -19767,6 +19767,11 @@ impl Vm {
                         if self.handle_spl_docall(&class_lower, b"offsetset", &spl_args).is_none() {
                             self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
                         }
+                        drop(spl_args);
+                        // A value replaced in SPL storage is destroyed now.
+                        if self.current_exception.is_none() && !self.destructible_objects.is_empty() {
+                            self.run_pending_destructors();
+                        }
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;

@@ -7457,18 +7457,33 @@ impl Compiler {
 
                     if let ExprKind::PropertyAccess { object, property, .. } = &operand.kind {
                         let obj_op = self.compile_expr(object)?;
-                        let prop_name = match &property.kind {
-                            ExprKind::Identifier(name) => name.clone(),
-                            _ => vec![],
+                        // Property name: a literal identifier, or an expression
+                        // evaluated once ($obj->$name++, $obj->{'a'}++).
+                        let name_op = match &property.kind {
+                            ExprKind::Identifier(name) if !name.is_empty() => {
+                                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                                OperandType::Const(idx)
+                            }
+                            _ => {
+                                let v = self.compile_expr(property)?;
+                                let t = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::Assign,
+                                    op1: OperandType::Tmp(t),
+                                    op2: v,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                                OperandType::Tmp(t)
+                            }
                         };
-                        if !prop_name.is_empty() {
-                            let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(prop_name)));
+                        {
                             // Fetch current value
                             let old_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::PropertyGet,
                                 op1: obj_op,
-                                op2: OperandType::Const(name_idx),
+                                op2: name_op,
                                 result: OperandType::Tmp(old_tmp),
                                 line: expr.span.line,
                             });
@@ -7490,7 +7505,7 @@ impl Compiler {
                                 opcode: OpCode::PropertySet,
                                 op1: obj_op,
                                 op2: OperandType::Tmp(old_tmp),
-                                result: OperandType::Const(name_idx),
+                                result: name_op,
                                 line: expr.span.line,
                             });
                             // For post-inc/dec, return old value (new_tmp); for pre, return new value (old_tmp)

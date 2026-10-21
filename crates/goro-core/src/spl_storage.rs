@@ -497,7 +497,11 @@ impl Vm {
 
     /// MultipleIterator methods.
     pub(crate) fn spl_multiple_call(&mut self, method: &[u8], obj: &Rc<RefCell<PhpObject>>, args: Option<&[Value]>) -> Option<Value> {
-        let needs_args = matches!(method, b"setflags" | b"attachiterator" | b"detachiterator" | b"containsiterator" | b"__unserialize");
+        let needs_args = matches!(
+            method,
+            b"setflags" | b"attachiterator" | b"detachiterator" | b"containsiterator" | b"__unserialize"
+                | b"offsetset" | b"offsetget" | b"offsetexists" | b"offsetunset"
+        );
         if needs_args && args.is_none() {
             return None;
         }
@@ -506,6 +510,53 @@ impl Vm {
             Value::Long(f) => f,
             _ => MIT_NEED_ALL,
         };
+        // Dimension handlers MultipleIterator shares with SplObjectStorage
+        // (spl_multiple_iterator_write_dimension & co.); it has no
+        // ArrayAccess methods of its own.
+        if matches!(method, b"offsetset" | b"offsetget" | b"offsetexists" | b"offsetunset") {
+            let key = a.first().cloned().unwrap_or(Value::Null).deref();
+            let ko = match &key {
+                Value::Object(_) => key.clone(),
+                _ => {
+                    if method == b"offsetexists" {
+                        return Some(Value::False);
+                    }
+                    return self.spl_throw(b"Error", "Cannot use object of type MultipleIterator as array");
+                }
+            };
+            let r = match method {
+                b"offsetset" => {
+                    let is_iter = match &ko {
+                        Value::Object(o) => {
+                            let cl = obj_class_lower(o);
+                            self.class_implements_interface(&cl, b"iterator") || crate::vm::is_builtin_subclass(&cl, b"iterator")
+                        }
+                        _ => false,
+                    };
+                    if !is_iter {
+                        return self.spl_throw(b"TypeError", "Can only attach objects that implement the Iterator interface");
+                    }
+                    let inf = a.get(1).cloned().unwrap_or(Value::Null).deref();
+                    self.sos_attach(obj, &ko, inf);
+                    Value::Null
+                }
+                b"offsetunset" => {
+                    self.sos_detach(obj, &ko);
+                    Self::sos_reset(obj);
+                    Value::Null
+                }
+                b"offsetexists" => match self.sos_find(obj, &ko) {
+                    Ok(f) => bv(f.is_some()),
+                    Err(()) => Value::True,
+                },
+                _ => match self.sos_find(obj, &ko) {
+                    Ok(Some(i)) => load(obj).infs[i].clone(),
+                    Ok(None) => return self.spl_throw(b"UnexpectedValueException", "Object not found"),
+                    Err(()) => Value::Null,
+                },
+            };
+            return Some(r);
+        }
         let r = match method {
             b"getflags" => Value::Long(flags),
             b"setflags" => {

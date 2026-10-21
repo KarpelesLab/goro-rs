@@ -422,10 +422,23 @@ impl Vm {
                 let mut out: Vec<u8> = Vec::new();
                 let f = self.spl_call_builtin(b"serialize", &[Value::Long(dll_flags(self, obj))]).unwrap_or(Value::Null);
                 out.extend_from_slice(f.to_php_string().as_bytes());
-                for v in load(obj).0 {
+                // Walk the live list node by node: serializing an element may
+                // modify the list (only nodes still linked are visited).
+                let mut cur = load(obj).1.first().copied();
+                while let Some(id) = cur {
+                    let (vals, ids) = load(obj);
+                    let pos = match ids.iter().position(|&x| x == id) {
+                        Some(p) => p,
+                        None => break,
+                    };
                     out.push(b':');
-                    let s = self.spl_call_builtin(b"serialize", &[v]).unwrap_or(Value::Null);
+                    let s = self.spl_call_builtin(b"serialize", &[vals[pos].clone()]).unwrap_or(Value::Null);
                     out.extend_from_slice(s.to_php_string().as_bytes());
+                    if self.current_exception.is_some() {
+                        break;
+                    }
+                    let ids = load(obj).1;
+                    cur = ids.iter().position(|&x| x == id).and_then(|p| ids.get(p + 1).copied());
                 }
                 Value::String(PhpString::from_vec(out))
             }

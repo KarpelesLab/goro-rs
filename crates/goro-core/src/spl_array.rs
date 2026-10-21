@@ -474,11 +474,13 @@ impl Vm {
     pub(crate) fn ao_next(&self, obj: &Rc<RefCell<PhpObject>>) {
         let t = self.ao_table(obj);
         let entries = self.table_entries(&t);
+        // zend_hash_move_forward_ex() does not move an exhausted position,
+        // so elements appended later become current.
         let next = match self.ao_current(obj) {
             Some((i, _, _)) => i + 1,
             None => match prop(obj, b"__spl_pos") {
-                Value::Long(n) if n >= 0 => n as usize + 1,
-                _ => 1,
+                Value::Long(n) if n >= 0 => (n as usize).min(entries.len()),
+                _ => entries.len(),
             },
         };
         Self::ao_set_pos(obj, next, entries.get(next).map(|(k, _)| k));
