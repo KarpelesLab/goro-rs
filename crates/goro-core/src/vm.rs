@@ -5980,6 +5980,24 @@ impl Vm {
             }
         }
 
+        // Record an "[internal function]" frame for the callback so backtraces
+        // and func_get_args() see it (zend_call_function pushes a frame too).
+        let frame_display = if !op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&op_array.display_name).to_string()
+        } else if let Some(fcc) = &op_array.fcc_target_name {
+            String::from_utf8_lossy(fcc).to_string()
+        } else if let Some(sc) = &op_array.scope_class {
+            let raw = String::from_utf8_lossy(&op_array.name).to_string();
+            let m = raw.rsplit("::").next().unwrap_or(&raw).to_string();
+            let cname = self
+                .classes
+                .get(sc)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+            format!("{}::{}", cname, m)
+        } else {
+            String::from_utf8_lossy(&op_array.name).to_string()
+        };
         // Too few arguments for an internally invoked callback (PHP throws
         // ArgumentCountError without the "passed in ... on line" part).
         {
@@ -6007,12 +6025,30 @@ impl Vm {
                 } else {
                     "exactly"
                 };
-                let err_msg = format!(
-                    "Too few arguments to function {}(), {} passed and {} {} expected",
-                    fname, provided, qualifier, required
-                );
+                // A direct call_user_func() is compiled away by php-src, so the
+                // callee is reported as called from the call site.
+                let ucf_line = self.ucf_call_line.take();
+                let err_msg = match ucf_line {
+                    Some(l) => format!(
+                        "Too few arguments to function {}(), {} passed in {} on line {} and {} {} expected",
+                        fname, provided, self.current_file, l, qualifier, required
+                    ),
+                    None => format!(
+                        "Too few arguments to function {}(), {} passed and {} {} expected",
+                        fname, provided, qualifier, required
+                    ),
+                };
                 let line = self.current_line;
+                let is_instance =
+                    this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
+                let (file, fline) = match ucf_line {
+                    Some(l) => (self.current_file.clone(), l),
+                    None => (String::new(), 0),
+                };
+                self.call_stack
+                    .push((frame_display, file, fline, Vec::new(), is_instance));
                 let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, line);
+                self.call_stack.pop();
                 self.current_exception = Some(exc_val);
                 return Err(VmError {
                     message: format!("Uncaught ArgumentCountError: {}", err_msg),
@@ -6111,24 +6147,6 @@ impl Vm {
             return Ok(Value::Generator(gen_rc));
         }
 
-        // Record an "[internal function]" frame for the callback so backtraces
-        // and func_get_args() see it (zend_call_function pushes a frame too).
-        let frame_display = if !op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&op_array.display_name).to_string()
-        } else if let Some(fcc) = &op_array.fcc_target_name {
-            String::from_utf8_lossy(fcc).to_string()
-        } else if let Some(sc) = &op_array.scope_class {
-            let raw = String::from_utf8_lossy(&op_array.name).to_string();
-            let m = raw.rsplit("::").next().unwrap_or(&raw).to_string();
-            let cname = self
-                .classes
-                .get(sc)
-                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
-            format!("{}::{}", cname, m)
-        } else {
-            String::from_utf8_lossy(&op_array.name).to_string()
-        };
         let frame_args: Vec<Value> = call.args.iter().skip(lead).map(|v| v.deref()).collect();
         let is_instance =
             this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
