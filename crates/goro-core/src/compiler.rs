@@ -1032,36 +1032,24 @@ impl Compiler {
                 }
                 // Builtins taking `array &$array`: goro passes arrays by shared
                 // handle, but the by-reference diagnostics still apply.
+                if !is_byref && i == 0 && Self::is_array_ref_builtin(func_name) {
+                    if let ExprKind::Variable(vname) = &arg.value.kind {
+                        if vname.as_slice() != b"this" && !Self::is_superglobal_name(vname) {
+                            // SEND_REF fetches for write: no "Undefined variable".
+                            let cv = self.op_array.get_or_create_cv(vname);
+                            self.op_array.emit(Op {
+                                opcode: OpCode::InitCvNull,
+                                op1: OperandType::Cv(cv),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line,
+                            });
+                        }
+                    }
+                }
                 if !is_byref && !Self::is_writable_lvalue(&arg.value) {
                     if let Some(fname) = func_name {
-                        let lower = fname.to_ascii_lowercase();
-                        let array_ref = i == 0
-                            && matches!(
-                                lower.as_slice(),
-                                b"next"
-                                    | b"prev"
-                                    | b"reset"
-                                    | b"end"
-                                    | b"array_shift"
-                                    | b"array_pop"
-                                    | b"array_unshift"
-                                    | b"array_push"
-                                    | b"array_splice"
-                                    | b"sort"
-                                    | b"rsort"
-                                    | b"usort"
-                                    | b"uasort"
-                                    | b"uksort"
-                                    | b"asort"
-                                    | b"arsort"
-                                    | b"ksort"
-                                    | b"krsort"
-                                    | b"natsort"
-                                    | b"natcasesort"
-                                    | b"shuffle"
-                                    | b"array_walk"
-                                    | b"array_walk_recursive"
-                            );
+                        let array_ref = i == 0 && Self::is_array_ref_builtin(Some(fname));
                         if array_ref {
                             let is_call = matches!(
                                 &arg.value.kind,
@@ -15135,6 +15123,57 @@ impl Compiler {
             }
         }
         Err((tn, vn))
+    }
+
+    /// Builtins whose first parameter is `array &$array` (goro passes the
+    /// array by shared handle instead of by reference).
+    fn is_array_ref_builtin(func_name: Option<&[u8]>) -> bool {
+        let Some(fname) = func_name else {
+            return false;
+        };
+        let lower = fname.to_ascii_lowercase();
+        let lower = lower.strip_prefix(b"\\").unwrap_or(&lower);
+        matches!(
+            lower,
+            b"next"
+                | b"prev"
+                | b"reset"
+                | b"end"
+                | b"array_shift"
+                | b"array_pop"
+                | b"array_unshift"
+                | b"array_push"
+                | b"array_splice"
+                | b"sort"
+                | b"rsort"
+                | b"usort"
+                | b"uasort"
+                | b"uksort"
+                | b"asort"
+                | b"arsort"
+                | b"ksort"
+                | b"krsort"
+                | b"natsort"
+                | b"natcasesort"
+                | b"shuffle"
+                | b"array_walk"
+                | b"array_walk_recursive"
+        )
+    }
+
+    fn is_superglobal_name(name: &[u8]) -> bool {
+        matches!(
+            name,
+            b"GLOBALS"
+                | b"_SERVER"
+                | b"_GET"
+                | b"_POST"
+                | b"_COOKIE"
+                | b"_FILES"
+                | b"_ENV"
+                | b"_REQUEST"
+                | b"_SESSION"
+        )
     }
 
     fn eval_const_expr(expr: &Expr) -> Option<Value> {

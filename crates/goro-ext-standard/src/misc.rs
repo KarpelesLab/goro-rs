@@ -2278,6 +2278,13 @@ fn array_push(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Ok(Value::Long(arr.len() as i64))
     } else {
+        require_array_arg(
+            vm,
+            &args.first().map(|v| v.deref()).unwrap_or(Value::Null),
+            "array_push",
+            "array",
+            1,
+        )?;
         Ok(Value::Long(0))
     }
 }

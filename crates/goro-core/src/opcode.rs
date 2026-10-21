@@ -302,6 +302,10 @@ pub enum OpCode {
     ArrayIsset,
     /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
     MakeRef,
+    /// Write-fetch of a CV passed to a builtin's `array &$array` parameter
+    /// (goro passes those by shared handle): an undefined CV becomes null
+    /// silently, as ZEND_SEND_REF would. op1 = CV.
+    InitCvNull,
     /// Send a value as a reference (for by-ref function args like preg_match &$matches)
     SendRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV

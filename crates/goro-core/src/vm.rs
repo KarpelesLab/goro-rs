@@ -3849,6 +3849,8 @@ impl Vm {
     }
 
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
+        // Line 0 means "where we are" (zend_get_executed_lineno()).
+        let line = if line == 0 { self.current_line } else { line };
         let err_id = self.alloc_object_id();
         let mut err_obj = PhpObject::new(class_name.to_vec(), err_id);
         // self/parent/static only reach a class lookup when no class scope
@@ -35782,6 +35784,21 @@ impl Vm {
                     }
                 }
 
+                OpCode::InitCvNull => {
+                    if let OperandType::Cv(idx) = &op.op1 {
+                        if let Some(slot) = cvs.get_mut(*idx as usize) {
+                            match slot {
+                                Value::Undef => *slot = Value::Null,
+                                Value::Reference(r) => {
+                                    if matches!(&*r.borrow(), Value::Undef) {
+                                        *r.borrow_mut() = Value::Null;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 OpCode::MakeRef => {
                     // Convert a CV's value to a Reference if not already one
                     if let OperandType::Cv(idx) = &op.op1 {
