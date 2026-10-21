@@ -378,6 +378,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // __debugInfo returned non-array or null - fall through to
                 // normal display.
             }
+            // SPL classes with a native debug-info handler (heaps, ...):
+            // render the returned property table with mangled names.
+            if let Some(table) = vm.spl_debug_info(obj) {
+                let class_name_owned = class_name.to_string();
+                drop(obj_borrow);
+                var_dump_mangled_table(vm, &class_name_owned, oid, &table, indent, seen);
+                return;
+            }
             // Check if this is an SPL class with __spl_array - display array contents instead
             let is_spl_array_class = matches!(
                 class_lower.as_slice(),
@@ -1945,4 +1953,51 @@ fn format_float(f: f64) -> String {
     } else {
         goro_core::value::format_php_float_with_precision_pub(f, sp as usize)
     }
+}
+
+/// var_dump an object given its (mangled-key) property table, as produced by
+/// a get_debug_info handler.
+fn var_dump_mangled_table(
+    vm: &mut Vm,
+    class_name: &str,
+    oid: u64,
+    table: &goro_core::array::PhpArray,
+    indent: usize,
+    seen: &mut HashSet<u64>,
+) {
+    let prefix = " ".repeat(indent);
+    if !seen.insert(oid) {
+        vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+        return;
+    }
+    vm.write_output(format!("{}object({})#{} ({}) {{\n", prefix, class_name, oid, table.len()).as_bytes());
+    let items: Vec<_> = table.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (key, value) in &items {
+        match key {
+            goro_core::array::ArrayKey::Int(n) => {
+                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, n).as_bytes());
+            }
+            goro_core::array::ArrayKey::String(s) => {
+                let bytes = s.as_bytes();
+                if bytes.first() == Some(&0u8) {
+                    if let Some(end) = bytes[1..].iter().position(|&b| b == 0u8) {
+                        let cls = &bytes[1..1 + end];
+                        let name_str = String::from_utf8_lossy(&bytes[2 + end..]);
+                        if cls == b"*" {
+                            vm.write_output(format!("{}  [\"{}\":protected]=>\n", prefix, name_str).as_bytes());
+                        } else {
+                            let cls_str = String::from_utf8_lossy(cls);
+                            vm.write_output(format!("{}  [\"{}\":\"{}\":private]=>\n", prefix, name_str, cls_str).as_bytes());
+                        }
+                        var_dump_value(vm, value, indent + 2, seen);
+                        continue;
+                    }
+                }
+                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+            }
+        }
+        var_dump_value(vm, value, indent + 2, seen);
+    }
+    vm.write_output(format!("{}}}\n", prefix).as_bytes());
+    seen.remove(&oid);
 }

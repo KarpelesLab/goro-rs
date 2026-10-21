@@ -4623,6 +4623,16 @@ impl Vm {
                 return Rc::new(RefCell::new(result));
             }
         }
+        drop(ob);
+        self.object_props_mangled(&target)
+    }
+
+    /// The object's property table with PHP-mangled keys ("\0Class\0name"
+    /// for private, "\0*\0name" for protected), skipping hidden internal
+    /// state. Unlike object_to_array, never substitutes SPL storage.
+    pub fn object_props_mangled(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
+        let ob = obj.borrow();
+        let class_name_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let prop_info: std::collections::HashMap<Vec<u8>, (Visibility, Vec<u8>)> =
             if let Some(class_def) = self.classes.get(&class_name_lower) {
                 class_def.properties.iter()
@@ -6282,11 +6292,8 @@ impl Vm {
             b"splobjectstorage" => {
                 self.spl_object_storage_method(method_lower, obj)
             }
-            b"splpriorityqueue" => {
-                self.spl_priority_queue_method(method_lower, obj)
-            }
-            b"splheap" | b"splminheap" | b"splmaxheap" => {
-                self.spl_heap_method(method_lower, obj)
+            b"splpriorityqueue" | b"splheap" | b"splminheap" | b"splmaxheap" => {
+                self.spl_heap_call(class_lower, method_lower, obj, None)
             }
             b"emptyiterator" => {
                 match method_lower {
@@ -7547,302 +7554,6 @@ impl Vm {
                 Some(Value::String(PhpString::from_string(format!("x:i:{};m:a:0:{{}}", count))))
             }
             b"unserialize" => None, // handled in handle_spl_docall
-            _ => None,
-        }
-    }
-
-    fn spl_priority_queue_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        match method {
-            b"count" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(Value::Long(a.borrow().len() as i64))
-                } else {
-                    Some(Value::Long(0))
-                }
-            }
-            b"isempty" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(if a.borrow().len() == 0 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::True)
-                }
-            }
-            b"insert" => None, // handled in handle_spl_docall
-            b"extract" | b"next" => None, // handled in handle_spl_docall
-            b"top" | b"current" => {
-                let ob = obj.borrow();
-                // Top/current both reject on corrupted heap (top throws,
-                // current returns null per PHP).
-                if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
-                    drop(ob);
-                    if method == b"current" {
-                        return Some(Value::Null);
-                    } else {
-                        let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                        self.current_exception = Some(exc);
-                        return Some(Value::Null);
-                    }
-                }
-                let arr = ob.get_property(b"__spl_array");
-                let priorities = ob.get_property(b"__spl_priorities");
-                let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    if a.len() == 0 {
-                        drop(a);
-                        drop(ob);
-                        // current() returns NULL on empty queue; top() throws
-                        if method == b"current" {
-                            Some(Value::Null)
-                        } else {
-                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                            self.current_exception = Some(exc);
-                            Some(Value::Null)
-                        }
-                    } else {
-                        // Return data/priority/both per extract flags.
-                        let val = a.values().next().cloned().unwrap_or(Value::Null);
-                        let pri = if let Value::Array(ref p) = priorities {
-                            p.borrow().values().next().cloned().unwrap_or(Value::Null)
-                        } else { Value::Null };
-                        Some(match extract_flags {
-                            2 => pri, // EXTR_PRIORITY
-                            3 => {
-                                // EXTR_BOTH: return array with data + priority
-                                let mut both = PhpArray::new();
-                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
-                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
-                                Value::Array(Rc::new(RefCell::new(both)))
-                            }
-                            _ => val, // EXTR_DATA (1) or anything else
-                        })
-                    }
-                } else {
-                    if method == b"current" {
-                        Some(Value::Null)
-                    } else {
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    }
-                }
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    Some(if a.borrow().len() > 0 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    let count = a.borrow().len() as i64;
-                    Some(Value::Long(count - 1))
-                } else {
-                    Some(Value::Long(-1))
-                }
-            }
-            b"rewind" => {
-                Some(Value::Null) // PriorityQueue rewind does nothing special
-            }
-            b"recoverfromcorruption" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_corrupted".to_vec(), Value::False);
-                Some(Value::Null)
-            }
-            b"iscorrupted" => {
-                let ob = obj.borrow();
-                Some(if matches!(ob.get_property(b"__spl_corrupted"), Value::True) { Value::True } else { Value::False })
-            }
-            b"setextractflags" => None, // handled in handle_spl_docall
-            b"getextractflags" => {
-                let ob = obj.borrow();
-                let flags = ob.get_property(b"__spl_extract_flags");
-                Some(if let Value::Long(f) = flags { Value::Long(f) } else { Value::Long(1) }) // EXTR_DATA = 1
-            }
-            b"__serialize" => {
-                // PHP refuses to serialize a corrupted priority queue.
-                if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                    self.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                let priorities = ob.get_property(b"__spl_priorities");
-                let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
-                let mut result = PhpArray::new();
-                // i:0 => user properties (empty)
-                result.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                // i:1 => internal data
-                let mut internal = PhpArray::new();
-                internal.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(extract_flags));
-                let mut elements = PhpArray::new();
-                if let (Value::Array(a), Value::Array(p)) = (&arr, &priorities) {
-                    let ab = a.borrow();
-                    let pb = p.borrow();
-                    for (i, (_, v)) in ab.iter().enumerate() {
-                        let mut entry = PhpArray::new();
-                        entry.set(ArrayKey::String(PhpString::from_bytes(b"data")), v.clone());
-                        let pri = pb.values().nth(i).cloned().unwrap_or(Value::Long(0));
-                        entry.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
-                        elements.push(Value::Array(Rc::new(RefCell::new(entry))));
-                    }
-                }
-                internal.set(ArrayKey::String(PhpString::from_bytes(b"heap_elements")), Value::Array(Rc::new(RefCell::new(elements))));
-                result.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(internal))));
-                Some(Value::Array(Rc::new(RefCell::new(result))))
-            }
-            b"__unserialize" => None,
-            _ => None,
-        }
-    }
-
-    fn spl_heap_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        let storage_prop = b"__spl_array";
-        match method {
-            b"count" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(Value::Long(a.borrow().len() as i64))
-                } else {
-                    Some(Value::Long(0))
-                }
-            }
-            b"isempty" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(if a.borrow().len() == 0 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::True)
-                }
-            }
-            b"top" | b"current" => {
-                let ob = obj.borrow();
-                if matches!(ob.get_property(b"__spl_corrupted"), Value::True) {
-                    drop(ob);
-                    // current() returns NULL on corrupted heap; top() throws.
-                    if method == b"current" {
-                        return Some(Value::Null);
-                    }
-                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                    self.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    if a.len() == 0 {
-                        drop(a);
-                        drop(ob);
-                        // current() returns NULL on empty heap; top() throws
-                        if method == b"current" {
-                            Some(Value::Null)
-                        } else {
-                            let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                            self.current_exception = Some(exc);
-                            Some(Value::Null)
-                        }
-                    } else {
-                        Some(a.values().next().cloned().unwrap_or(Value::Null))
-                    }
-                } else {
-                    if method == b"current" {
-                        Some(Value::Null)
-                    } else {
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty heap", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    }
-                }
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(if a.borrow().len() > 0 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"key" => {
-                // SplHeap key is count - 1 during first element, decrements as items are extracted
-                let ob = obj.borrow();
-                let arr = ob.get_property(b"__spl_array");
-                if let Value::Array(a) = arr {
-                    let count = a.borrow().len() as i64;
-                    Some(Value::Long(count - 1))
-                } else {
-                    Some(Value::Long(-1))
-                }
-            }
-            b"next" | b"extract" => None, // handled in handle_spl_docall
-            b"insert" => None,
-            b"rewind" => {
-                // Rewind just resets the key counter
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_heap_key".to_vec(), Value::Long(0));
-                Some(Value::Null)
-            }
-            b"recoverfromcorruption" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_corrupted".to_vec(), Value::False);
-                Some(Value::Null)
-            }
-            b"iscorrupted" => {
-                let ob = obj.borrow();
-                Some(if matches!(ob.get_property(b"__spl_corrupted"), Value::True) { Value::True } else { Value::False })
-            }
-            b"__serialize" => {
-                // PHP refuses to serialize a corrupted heap.
-                if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                    let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                    self.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let mut result = PhpArray::new();
-                // i:0 => user properties (empty)
-                let mut user_props = PhpArray::new();
-                for (name, val) in &ob.properties {
-                    if !name.starts_with(b"__spl_") && !name.starts_with(b"__reflection_") {
-                        user_props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
-                    }
-                }
-                result.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(user_props))));
-                // i:1 => internal data
-                let mut internal = PhpArray::new();
-                internal.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(0));
-                let mut elements = PhpArray::new();
-                if let Value::Array(a) = arr {
-                    for (_, v) in a.borrow().iter() {
-                        elements.push(v.clone());
-                    }
-                }
-                internal.set(ArrayKey::String(PhpString::from_bytes(b"heap_elements")), Value::Array(Rc::new(RefCell::new(elements))));
-                result.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(internal))));
-                Some(Value::Array(Rc::new(RefCell::new(result))))
-            }
-            b"__unserialize" => None,
             _ => None,
         }
     }
@@ -11568,424 +11279,8 @@ impl Vm {
                         _ => None,
                     }
                 }
-                b"splpriorityqueue" => {
-                    match method {
-                        b"insert" => {
-                            // Reject if heap is already corrupted.
-                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let priority = args.get(2).cloned().unwrap_or(Value::Long(0));
-                            // Check for user-overridden compare method.
-                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let has_user_compare = self.classes.get(&obj_class_lower)
-                                .map(|c| c.get_method(b"compare").is_some())
-                                .unwrap_or(false);
-                            let this_val = this.clone();
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            let priorities = ob.get_property(b"__spl_priorities");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().push(val);
-                                if let Value::Array(ref p) = priorities {
-                                    p.borrow_mut().push(priority);
-                                }
-                                // Sort by priority (descending) - simple insertion sort.
-                                let mut entries: Vec<(Value, Value)> = {
-                                    let ab = a.borrow();
-                                    let pri = if let Value::Array(ref p) = priorities {
-                                        let pb = p.borrow();
-                                        ab.values().cloned().zip(pb.values().cloned()).collect()
-                                    } else {
-                                        ab.values().cloned().map(|v| (v, Value::Long(0))).collect()
-                                    };
-                                    pri
-                                };
-                                drop(ob);
-                                if has_user_compare {
-                                    // Insertion sort using user comparator with corruption tracking.
-                                    // PHP semantics: compare(parent_priority, new_priority).
-                                    // While compare(parent, new) < 0 the new element sifts up.
-                                    let mut aborted = false;
-                                    'outer: for i in 1..entries.len() {
-                                        let mut j = i;
-                                        while j > 0 {
-                                            let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].1.clone(), entries[j].1.clone()])
-                                                .unwrap_or(Value::Long(0));
-                                            if self.current_exception.is_some() {
-                                                aborted = true;
-                                                break 'outer;
-                                            }
-                                            let cmp = cmp_v.to_long();
-                                            if cmp < 0 {
-                                                entries.swap(j-1, j);
-                                                j -= 1;
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if aborted {
-                                        obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
-                                        return Some(Value::Null);
-                                    }
-                                } else {
-                                    entries.sort_by(|(_, pa), (_, pb)| {
-                                        Self::php_compare_values(pb, pa) // descending by priority
-                                    });
-                                }
-                                let mut new_arr = PhpArray::new();
-                                let mut new_pri = PhpArray::new();
-                                for (v, p) in entries {
-                                    new_arr.push(v);
-                                    new_pri.push(p);
-                                }
-                                let arr_ref = obj.borrow().get_property(b"__spl_array");
-                                let pri_ref = obj.borrow().get_property(b"__spl_priorities");
-                                if let Value::Array(a) = arr_ref {
-                                    *a.borrow_mut() = new_arr;
-                                }
-                                if let Value::Array(p) = pri_ref {
-                                    *p.borrow_mut() = new_pri;
-                                }
-                            }
-                            Some(Value::True)
-                        }
-                        b"extract" | b"next" => {
-                            // Reject if heap is corrupted.
-                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            let priorities = ob.get_property(b"__spl_priorities");
-                            let extract_flags = if let Value::Long(f) = ob.get_property(b"__spl_extract_flags") { f } else { 1 };
-                            if let Value::Array(a) = arr {
-                                let mut a = a.borrow_mut();
-                                if a.len() > 0 {
-                                    let val = a.shift().unwrap_or(Value::Null);
-                                    let pri = if let Value::Array(p) = priorities {
-                                        p.borrow_mut().shift().unwrap_or(Value::Null)
-                                    } else { Value::Null };
-                                    if method == b"extract" {
-                                        Some(match extract_flags {
-                                            2 => pri, // EXTR_PRIORITY
-                                            3 => {
-                                                // EXTR_BOTH
-                                                let mut both = PhpArray::new();
-                                                both.set(ArrayKey::String(PhpString::from_bytes(b"data")), val);
-                                                both.set(ArrayKey::String(PhpString::from_bytes(b"priority")), pri);
-                                                Value::Array(Rc::new(RefCell::new(both)))
-                                            }
-                                            _ => val, // EXTR_DATA (1)
-                                        })
-                                    } else {
-                                        Some(Value::Null) // next() returns void
-                                    }
-                                } else {
-                                    drop(a);
-                                    drop(ob);
-                                    let exc = self.create_exception(b"RuntimeException", "Can't extract from an empty heap", 0);
-                                    self.current_exception = Some(exc);
-                                    Some(Value::Null)
-                                }
-                            } else {
-                                drop(ob);
-                                let exc = self.create_exception(b"RuntimeException", "Can't extract from an empty heap", 0);
-                                self.current_exception = Some(exc);
-                                Some(Value::Null)
-                            }
-                        }
-                        b"setextractflags" => {
-                            let flags_v = args.get(1).cloned().unwrap_or(Value::Long(1));
-                            let flags = flags_v.to_long();
-                            if flags == 0 {
-                                let line = self.current_line;
-                                let exc = self.create_exception(
-                                    b"RuntimeException",
-                                    "Must specify at least one extract flag",
-                                    line,
-                                );
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(flags));
-                            Some(Value::Null)
-                        }
-                        b"compare" => {
-                            // Default SplPriorityQueue::compare(): higher priority first.
-                            let a_val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let b_val = args.get(2).cloned().unwrap_or(Value::Null);
-                            let ord = Self::php_compare_values(&a_val, &b_val);
-                            let n: i64 = match ord {
-                                std::cmp::Ordering::Less => -1,
-                                std::cmp::Ordering::Equal => 0,
-                                std::cmp::Ordering::Greater => 1,
-                            };
-                            Some(Value::Long(n))
-                        }
-                        b"__unserialize" => {
-                            // PHP 8.5: __unserialize receives [props_array, internal_array].
-                            // internal_array has 'flags' and 'heap_elements' keys.
-                            // Flags are validated: (flags & EXTR_BOTH) must be non-zero,
-                            // and excess bits are masked.
-                            let data = args.get(1).cloned().unwrap_or(Value::Null);
-                            if let Value::Array(top) = &data {
-                                let top_b = top.borrow();
-                                let internal = top_b.get(&ArrayKey::Int(1)).cloned();
-                                drop(top_b);
-                                if let Some(Value::Array(internal_arr)) = internal {
-                                    let internal_b = internal_arr.borrow();
-                                    let flags_v = internal_b
-                                        .get(&ArrayKey::String(PhpString::from_bytes(b"flags")))
-                                        .cloned()
-                                        .unwrap_or(Value::Long(1));
-                                    let flags = flags_v.to_long();
-                                    // EXTR_BOTH = 3. Mask flags & 3; if result is 0, fail.
-                                    let masked = flags & 3;
-                                    if masked == 0 {
-                                        drop(internal_b);
-                                        let class_canonical = self.builtin_canonical_name(class);
-                                        let msg = format!(
-                                            "Invalid serialization data for {} object",
-                                            class_canonical
-                                        );
-                                        let exc = self.create_exception(
-                                            b"Exception",
-                                            &msg,
-                                            self.current_line,
-                                        );
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                    let elements = internal_b
-                                        .get(&ArrayKey::String(PhpString::from_bytes(b"heap_elements")))
-                                        .cloned();
-                                    drop(internal_b);
-                                    let mut ob = obj.borrow_mut();
-                                    ob.set_property(b"__spl_extract_flags".to_vec(), Value::Long(masked));
-                                    // heap_elements is an indexed array of {data, priority} pairs.
-                                    let mut new_arr = PhpArray::new();
-                                    let mut new_pri = PhpArray::new();
-                                    if let Some(Value::Array(elems)) = elements {
-                                        for (_k, v) in elems.borrow().iter() {
-                                            if let Value::Array(pair) = v {
-                                                let p = pair.borrow();
-                                                let d = p
-                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"data")))
-                                                    .cloned()
-                                                    .unwrap_or(Value::Null);
-                                                let pr = p
-                                                    .get(&ArrayKey::String(PhpString::from_bytes(b"priority")))
-                                                    .cloned()
-                                                    .unwrap_or(Value::Null);
-                                                new_arr.push(d);
-                                                new_pri.push(pr);
-                                            }
-                                        }
-                                    }
-                                    ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
-                                    ob.set_property(b"__spl_priorities".to_vec(), Value::Array(Rc::new(RefCell::new(new_pri))));
-                                }
-                            }
-                            Some(Value::Null)
-                        }
-                        _ => None,
-                    }
-                }
-                b"splheap" | b"splminheap" | b"splmaxheap" => {
-                    match method {
-                        b"compare" => {
-                            // Default comparator. SplMinHeap/SplMaxHeap define
-                            // the ordering; SplHeap itself is abstract but we
-                            // fall through to natural ordering when called
-                            // via parent::compare() from a user subclass.
-                            let a_val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let b_val = args.get(2).cloned().unwrap_or(Value::Null);
-                            let ord = Self::php_compare_values(&a_val, &b_val);
-                            // SplMinHeap inverts the ordering relative to a max-heap.
-                            let cmp = if class == b"splminheap" { ord.reverse() } else { ord };
-                            let n: i64 = match cmp {
-                                std::cmp::Ordering::Less => -1,
-                                std::cmp::Ordering::Equal => 0,
-                                std::cmp::Ordering::Greater => 1,
-                            };
-                            Some(Value::Long(n))
-                        }
-                        b"insert" => {
-                            // Reject if heap is already corrupted.
-                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let is_min = class == b"splminheap";
-                            let _is_max = class == b"splmaxheap";
-                            // Check if this object has a user-defined compare() method
-                            let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let has_user_compare = self.classes.get(&obj_class_lower)
-                                .map(|c| c.get_method(b"compare").is_some())
-                                .unwrap_or(false);
-                            let this_val = this.clone();
-
-                            let mut ob = obj.borrow_mut();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().push(val.clone());
-                                let mut entries: Vec<Value> = a.borrow().values().cloned().collect();
-                                drop(ob);
-                                let len = entries.len();
-                                if len > 1 {
-                                    if has_user_compare {
-                                        // Use insertion sort with user compare. PHP calls
-                                        // compare(parent, new); while result < 0 the new
-                                        // element sifts up. If the user comparator throws,
-                                        // mark the heap corrupted and bail out — the
-                                        // in-progress entry has already been pushed but
-                                        // cannot be ordered.
-                                        let mut aborted = false;
-                                        'outer: for i in 1..len {
-                                            let mut j = i;
-                                            while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()])
-                                                    .unwrap_or(Value::Null);
-                                                if self.current_exception.is_some() {
-                                                    aborted = true;
-                                                    break 'outer;
-                                                }
-                                                let cmp = cmp_v.to_long();
-                                                if cmp < 0 {
-                                                    entries.swap(j-1, j);
-                                                    j -= 1;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if aborted {
-                                            obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
-                                            return Some(Value::Null);
-                                        }
-                                    } else {
-                                        entries.sort_by(|a_v, b_v| {
-                                            let cmp = Self::php_compare_values(a_v, b_v);
-                                            if is_min { cmp } else { cmp.reverse() }
-                                        });
-                                    }
-                                    let arr_ref = obj.borrow().get_property(b"__spl_array");
-                                    if let Value::Array(a) = arr_ref {
-                                        let mut new_arr = PhpArray::new();
-                                        for v in entries {
-                                            new_arr.push(v);
-                                        }
-                                        *a.borrow_mut() = new_arr;
-                                    }
-                                }
-                            } else {
-                                let mut new_arr = PhpArray::new();
-                                new_arr.push(val);
-                                ob.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(new_arr))));
-                            }
-                            Some(Value::True)
-                        }
-                        b"extract" | b"next" => {
-                            // Reject if heap is already corrupted.
-                            if matches!(obj.borrow().get_property(b"__spl_corrupted"), Value::True) {
-                                let exc = self.create_exception(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut a = a.borrow_mut();
-                                if a.len() == 0 {
-                                    drop(a);
-                                    drop(ob);
-                                    let exc = self.create_exception(b"RuntimeException", "Can't extract from an empty heap", 0);
-                                    self.current_exception = Some(exc);
-                                    Some(Value::Null)
-                                } else {
-                                    // Extract the top (first element).
-                                    // Check if this object has a user-defined compare() method;
-                                    // if so, calling it can throw — and when it does we must
-                                    // surface the exception and mark the heap corrupted (the
-                                    // extract has not completed).
-                                    let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let has_user_compare = self.classes.get(&obj_class_lower)
-                                        .map(|c| c.get_method(b"compare").is_some())
-                                        .unwrap_or(false);
-                                    let val = a.shift().unwrap_or(Value::Null);
-                                    // Restore-heap-property — for a simple array this means
-                                    // re-sorting the remaining entries. With a user comparator
-                                    // a single comparison call after extract is enough to
-                                    // surface any throw.
-                                    let mut entries: Vec<Value> = a.values().cloned().collect();
-                                    drop(a);
-                                    drop(ob);
-                                    if has_user_compare && entries.len() >= 2 {
-                                        let this_val = this.clone();
-                                        // Run one compare(parent, child) to flush any potential throw.
-                                        let _ = self.call_object_method(&this_val, b"compare", &[entries[0].clone(), entries[1].clone()]);
-                                        if self.current_exception.is_some() {
-                                            obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
-                                            return Some(Value::Null);
-                                        }
-                                        // Insertion-sort with user compare to restore order.
-                                        // PHP semantics: compare(parent, new); sift up while < 0.
-                                        for i in 1..entries.len() {
-                                            let mut j = i;
-                                            while j > 0 {
-                                                let cmp_v = self.call_object_method(&this_val, b"compare", &[entries[j-1].clone(), entries[j].clone()]);
-                                                if self.current_exception.is_some() {
-                                                    obj.borrow_mut().set_property(b"__spl_corrupted".to_vec(), Value::True);
-                                                    return Some(Value::Null);
-                                                }
-                                                let cmp = cmp_v.unwrap_or(Value::Long(0)).to_long();
-                                                if cmp < 0 {
-                                                    entries.swap(j-1, j);
-                                                    j -= 1;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        let arr_ref = obj.borrow().get_property(b"__spl_array");
-                                        if let Value::Array(a) = arr_ref {
-                                            let mut new_arr = PhpArray::new();
-                                            for v in entries {
-                                                new_arr.push(v);
-                                            }
-                                            *a.borrow_mut() = new_arr;
-                                        }
-                                    }
-                                    // Update key counter
-                                    let mut ob = obj.borrow_mut();
-                                    let key = ob.get_property(b"__spl_heap_key");
-                                    let key_val = if let Value::Long(k) = key { k } else { 0 };
-                                    ob.set_property(b"__spl_heap_key".to_vec(), Value::Long(key_val + 1));
-                                    if method == b"extract" {
-                                        Some(val)
-                                    } else {
-                                        Some(Value::Null)
-                                    }
-                                }
-                            } else {
-                                drop(ob);
-                                let exc = self.create_exception(b"RuntimeException", "Can't extract from an empty heap", 0);
-                                self.current_exception = Some(exc);
-                                Some(Value::Null)
-                            }
-                        }
-                        _ => None,
-                    }
+                b"splpriorityqueue" | b"splheap" | b"splminheap" | b"splmaxheap" => {
+                    self.spl_heap_call(class, method, obj, Some(&args[1..]))
                 }
                 b"appenditerator" => {
                     match method {
@@ -21880,6 +21175,10 @@ impl Vm {
                                         b"parentiterator",
                                         b"splfileobject",
                                         b"spltempfileobject",
+                                        b"recursivedirectoryiterator",
+                                        b"globiterator",
+                                        b"filesystemiterator",
+                                        b"directoryiterator",
                                         b"splfileinfo",
                                         b"splfixedarray",
                                         b"spldoublylinkedlist",
@@ -36576,6 +35875,14 @@ impl Vm {
                 };
                 return PhpString::from_string(result);
             }
+            // Built-in SPL __toString (SplFileInfo family, CachingIterator)
+            if self.spl_has_builtin_tostring(&class_lower) {
+                let r = self.call_object_method(val, b"__tostring", &[]);
+                return match r {
+                    Some(v) if self.current_exception.is_none() => v.to_php_string(),
+                    _ => PhpString::empty(),
+                };
+            }
             // Built-in __toString for PhpToken
             if class_lower == b"phptoken" {
                 let obj_borrow = obj.borrow();
@@ -36678,7 +35985,8 @@ impl Vm {
             let is_simplexml = class_lower == b"simplexmlelement";
             let is_phptoken = class_lower == b"phptoken";
             let is_uri = class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri";
-            if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml && !is_phptoken && !is_uri {
+            let is_spl_str = self.spl_has_builtin_tostring(&class_lower);
+            if !has_tostring && !is_throwable && !is_reflection && !is_gmp && !is_simplexml && !is_phptoken && !is_uri && !is_spl_str {
                 let class_display = crate::value::display_class_name(&class_name);
                 let msg = format!("Object of class {} could not be converted to string", class_display);
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
@@ -37987,6 +37295,7 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         b"norewinditerator" | b"infiniteiterator" | b"limititerator"
         | b"cachingiterator" | b"appenditerator" | b"filteriterator" => Some(b"IteratorIterator"),
         b"filesystemiterator" => Some(b"DirectoryIterator"),
+        b"directoryiterator" => Some(b"SplFileInfo"),
         b"recursivedirectoryiterator" => Some(b"FilesystemIterator"),
         b"globiterator" => Some(b"FilesystemIterator"),
         b"spltempfileobject" => Some(b"SplFileObject"),
@@ -38221,6 +37530,7 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"parentiterator" => Some(b"recursivefilteriterator".to_vec()),
             b"recursivetreeiterator" => Some(b"recursiveiteratoriterator".to_vec()),
             b"filesystemiterator" => Some(b"directoryiterator".to_vec()),
+            b"directoryiterator" => Some(b"splfileinfo".to_vec()),
             b"recursivedirectoryiterator" => Some(b"filesystemiterator".to_vec()),
             b"globiterator" => Some(b"filesystemiterator".to_vec()),
             b"splfileobject" | b"spltempfileobject" => Some(b"splfileinfo".to_vec()),
