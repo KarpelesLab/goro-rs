@@ -61,3 +61,17 @@ pub fn take_lexer_deprecations() -> Vec<(String, u32)> {
     LEXER_DEPRECATIONS.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
+thread_local! {
+    /// Compile-time warnings found by the lexer (e.g. octal escape overflow).
+    static LEXER_WARNINGS: RefCell<Vec<(String, u32)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Record a compile-time warning discovered by the lexer.
+pub fn push_lexer_warning(msg: String, line: u32) {
+    LEXER_WARNINGS.with(|d| d.borrow_mut().push((msg, line)));
+}
+
+/// Drain lexer warnings collected since the last call.
+pub fn take_lexer_warnings() -> Vec<(String, u32)> {
+    LEXER_WARNINGS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}

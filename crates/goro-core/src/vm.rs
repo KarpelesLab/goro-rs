@@ -17688,8 +17688,7 @@ impl Vm {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     // Check for unsupported operand types
-                    if matches!(&cv_val, Value::Array(_)) || matches!(&rhs, Value::Array(_)) {
-                        let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
+                    if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, "<<") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -17697,6 +17696,13 @@ impl Vm {
                             continue;
                         }
                         return Err(VmError { message: err, line: op.line });
+                    }
+                    for val in [&cv_val, &rhs] {
+                        if let Value::String(s) = val.deref() {
+                            if crate::value::parse_numeric_string(s.as_bytes()).is_none() && !s.as_bytes().is_empty() {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
                     }
                     let a = cv_val.to_long();
                     let n = rhs.to_long();
@@ -17724,8 +17730,7 @@ impl Vm {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     // Check for unsupported operand types
-                    if matches!(&cv_val, Value::Array(_)) || matches!(&rhs, Value::Array(_)) {
-                        let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&cv_val), Vm::value_type_name(&rhs));
+                    if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, ">>") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -17733,6 +17738,13 @@ impl Vm {
                             continue;
                         }
                         return Err(VmError { message: err, line: op.line });
+                    }
+                    for val in [&cv_val, &rhs] {
+                        if let Value::String(s) = val.deref() {
+                            if crate::value::parse_numeric_string(s.as_bytes()).is_none() && !s.as_bytes().is_empty() {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
                     }
                     let a = cv_val.to_long();
                     let n = rhs.to_long();

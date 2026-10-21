@@ -581,7 +581,14 @@ impl<'a> Lexer<'a> {
                                 }
                             }
                             let s: String = oct.iter().map(|&b| b as char).collect();
-                            result.push(u8::from_str_radix(&s, 8).unwrap_or(0));
+                            let v = u32::from_str_radix(&s, 8).unwrap_or(0);
+                            if v > 0xFF {
+                                crate::push_lexer_warning(
+                                    format!("Octal escape sequence overflow \\{} is greater than \\377", s),
+                                    self.line,
+                                );
+                            }
+                            result.push((v & 0xFF) as u8);
                         }
                         Some(ch) => {
                             result.push(b'\\');
@@ -1878,7 +1885,14 @@ impl<'a> Lexer<'a> {
                                 }
                             }
                             let s: String = oct.iter().map(|&b| b as char).collect();
-                            result.push(u8::from_str_radix(&s, 8).unwrap_or(0));
+                            let v = u32::from_str_radix(&s, 8).unwrap_or(0);
+                            if v > 0xFF {
+                                crate::push_lexer_warning(
+                                    format!("Octal escape sequence overflow \\{} is greater than \\377", s),
+                                    self.line,
+                                );
+                            }
+                            result.push((v & 0xFF) as u8);
                         }
                         other => {
                             result.push(b'\\');

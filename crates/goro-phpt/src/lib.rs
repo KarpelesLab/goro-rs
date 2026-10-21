@@ -1137,6 +1137,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
 
     // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
     let lexer_deprecations = goro_parser::take_lexer_deprecations();
+    let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
     let mut parser = Parser::new(tokens);
@@ -1263,6 +1264,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings.
     for (msg, wline) in &lexer_deprecations {
         vm.emit_deprecated_at(msg, *wline);
+    }
+    for (msg, wline) in &lexer_warnings {
+        vm.emit_warning_at(msg, *wline);
     }
     for (msg, wline) in &compile_warnings {
         vm.emit_warning_at(msg, *wline);

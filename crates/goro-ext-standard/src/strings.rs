@@ -3389,8 +3389,8 @@ fn strcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let ca = a_bytes[i].to_ascii_lowercase();
         let cb = b_bytes[i].to_ascii_lowercase();
         if ca != cb {
-            let d = ca as i64 - cb as i64;
-            return Ok(Value::Long(if d < 0 { -1 } else { 1 }));
+            // zend_binary_strcasecmp: difference of the first mismatching bytes
+            return Ok(Value::Long(ca as i64 - cb as i64));
         }
     }
     let d = a_bytes.len() as i64 - b_bytes.len() as i64;
