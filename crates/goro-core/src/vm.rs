@@ -22970,8 +22970,27 @@ impl Vm {
 
                             if !handled {
                                 let func_display = call.name.to_string_lossy();
-                                let err_msg = if func_display.contains("::") {
-                                    format!("Call to undefined method {}()", func_display)
+                                let err_msg = if let Some(pos) = func_display.find("::") {
+                                    let cls = &func_display[..pos];
+                                    let cl = cls.trim_start_matches('\\').to_ascii_lowercase();
+                                    let known = self.classes.contains_key(cl.as_bytes())
+                                        || self.class_aliases.contains_key(cl.as_bytes())
+                                        || {
+                                            // built-in classes implemented natively
+                                            let ce = self.functions.get(b"class_exists".as_slice()).copied();
+                                            let ie = self.functions.get(b"interface_exists".as_slice()).copied();
+                                            let args = [Value::String(PhpString::from_bytes(cl.as_bytes())), Value::False];
+                                            ce.map(|f| matches!(f(self, &args), Ok(Value::True))).unwrap_or(true)
+                                                || ie.map(|f| matches!(f(self, &args), Ok(Value::True))).unwrap_or(false)
+                                        };
+                                    if !cl.is_empty()
+                                        && !matches!(cl.as_str(), "self" | "parent" | "static")
+                                        && !known
+                                    {
+                                        format!("Class \"{}\" not found", cls.trim_start_matches('\\'))
+                                    } else {
+                                        format!("Call to undefined method {}()", func_display)
+                                    }
                                 } else {
                                     format!("Call to undefined function {}()", func_display)
                                 };

@@ -9114,17 +9114,9 @@ impl Compiler {
                             });
                             return Ok(OperandType::Tmp(tmp));
                         }
-                        // $obj::CONST - get class name from object, then look up constant
+                        // $obj::CONST / $name::CONST - the operand is an object (its
+                        // class) or a class-name string; StaticPropGet takes either.
                         let obj_operand = self.compile_expr(class)?;
-                        // Get class name at runtime
-                        let class_tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::GetClassName,
-                            op1: obj_operand,
-                            op2: OperandType::Unused,
-                            result: OperandType::Tmp(class_tmp),
-                            line: expr.span.line,
-                        });
                         // Look up the constant using StaticPropGet
                         let const_name_idx = self
                             .op_array
@@ -9132,7 +9124,7 @@ impl Compiler {
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropGet,
-                            op1: OperandType::Tmp(class_tmp),
+                            op1: obj_operand,
                             op2: OperandType::Const(const_name_idx),
                             result: OperandType::Tmp(tmp),
                             line: expr.span.line,
