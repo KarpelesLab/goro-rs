@@ -819,7 +819,7 @@ impl Vm {
                         let decl = self
                             .classes
                             .get(&m.declaring_class)
-                            .map(|dc| String::from_utf8_lossy(&dc.name).to_string())
+                            .map(|dc| crate::value::display_class_name(&dc.name))
                             .unwrap_or_else(|| {
                                 String::from_utf8_lossy(&m.declaring_class).to_string()
                             });

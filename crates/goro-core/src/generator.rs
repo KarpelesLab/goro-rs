@@ -703,7 +703,6 @@ impl PhpGenerator {
         }
         self.is_running = false;
         vm.running_generators.pop();
-        self.release_finished_frame(vm);
 
         // Pop the call_stack entry
         vm.call_stack.pop();
@@ -717,6 +716,8 @@ impl PhpGenerator {
         }
 
         vm.leave_generator_resume();
+        // The finished frame is freed once the generator's frame is left.
+        self.release_finished_frame(vm);
 
         result
     }
@@ -1174,8 +1175,10 @@ impl PhpGenerator {
                             }
                             _ => self.read_operand(&op.op1, &op_array.literals),
                         }
-                    } else {
+                    } else if op_array.returns_by_ref {
                         self.read_operand(&op.op1, &op_array.literals)
+                    } else {
+                        self.read_operand_r(vm, &op.op1, &op_array.literals, op.line)
                     };
 
                     let yielded_key = if matches!(op.op2, OperandType::Unused) {
@@ -1183,7 +1186,7 @@ impl PhpGenerator {
                         self.key_counter += 1;
                         key
                     } else {
-                        let key = self.read_operand(&op.op2, &op_array.literals);
+                        let key = self.read_operand_r(vm, &op.op2, &op_array.literals, op.line);
                         // Update key_counter to be after the explicit key
                         if let Value::Long(n) = &key {
                             if *n >= self.key_counter {
@@ -1275,30 +1278,31 @@ impl PhpGenerator {
                             Value::Object(_) => {
                                 let idx = self.yield_from_pos;
                                 self.yield_from_pos += 1;
+                                vm.current_line = op.line;
                                 let had = vm.current_exception.is_some();
                                 let failed = |vm: &Vm| !had && vm.current_exception.is_some();
                                 let mut item = None;
                                 'step: {
                                     if idx > 0 {
-                                        vm.call_object_method(&source, b"next", &[]);
+                                        vm.spl_call_method_at(&source, b"next", &[], false);
                                         if failed(vm) {
                                             break 'step;
                                         }
                                     }
                                     let valid = vm
-                                        .call_object_method(&source, b"valid", &[])
+                                        .spl_call_method_at(&source, b"valid", &[], false)
                                         .unwrap_or(Value::False);
                                     if failed(vm) || !valid.is_truthy() {
                                         break 'step;
                                     }
                                     let value = vm
-                                        .call_object_method(&source, b"current", &[])
+                                        .spl_call_method_at(&source, b"current", &[], false)
                                         .unwrap_or(Value::Null);
                                     if failed(vm) {
                                         break 'step;
                                     }
                                     let key = vm
-                                        .call_object_method(&source, b"key", &[])
+                                        .spl_call_method_at(&source, b"key", &[], false)
                                         .unwrap_or(Value::Null);
                                     if failed(vm) {
                                         break 'step;
@@ -1337,7 +1341,8 @@ impl PhpGenerator {
                     } else {
                         // First time: set up the yield-from source. The
                         // operand is consumed (FREE_OP1).
-                        let iterable = self.read_operand(&op.op1, &op_array.literals);
+                        let iterable =
+                            self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
                         if let OperandType::Tmp(t) = op.op1 {
                             if let Some(slot) = self.tmps.get_mut(t as usize) {
                                 *slot = Value::Undef;
@@ -1444,7 +1449,8 @@ impl PhpGenerator {
                                 if vm.class_implements_interface(&class_lower, b"iterator") {
                                     // Iterated lazily, one element per resume.
                                     let had = vm.current_exception.is_some();
-                                    vm.call_object_method(&iterable, b"rewind", &[]);
+                                    vm.current_line = op.line;
+                                    vm.spl_call_method_at(&iterable, b"rewind", &[], false);
                                     if !had && vm.current_exception.is_some() {
                                         if let Some(t) = self.dispatch_exception() {
                                             ip = t;
@@ -1504,7 +1510,7 @@ impl PhpGenerator {
                 }
 
                 OpCode::GeneratorReturn => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let val = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
@@ -1518,7 +1524,7 @@ impl PhpGenerator {
                     // In a generator, return acts as GeneratorReturn.
                     // An explicit return inside a finally block discards any pending
                     // exception that triggered the finally (matches PHP semantics).
-                    let val = self.read_operand(&op.op1, &op_array.literals);
+                    let val = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
                     self.return_value = val;
                     self.state = GeneratorState::Completed;
                     self.has_returned = true;
@@ -2870,6 +2876,19 @@ impl PhpGenerator {
         vm.call_stack
             .push((func_name, file, line, self.args.clone(), is_instance));
 
+        // An array / iterator `yield from` is abandoned: the exception reaches
+        // the generator now, not after the remaining values
+        // (zend_generator_throw_exception()).
+        if matches!(
+            self.yield_from_source,
+            Some(Value::Array(_)) | Some(Value::Object(_))
+        ) {
+            let src = self.yield_from_source.take();
+            self.yield_from_pos = 0;
+            drop(src);
+            vm.run_pending_destructors_pub();
+        }
+
         // Try to find an exception handler in the generator
         let had_handler = if let Some((catch_target, finally_target, _)) =
             self.exception_handlers.last().copied()
@@ -2929,7 +2948,6 @@ impl PhpGenerator {
         }
         self.is_running = false;
         vm.running_generators.pop();
-        self.release_finished_frame(vm);
 
         vm.call_stack.pop();
         if pushed_called {
@@ -2940,8 +2958,33 @@ impl PhpGenerator {
         }
 
         vm.leave_generator_resume();
+        // The finished frame is freed once the generator's frame is left.
+        self.release_finished_frame(vm);
 
         result
+    }
+
+    /// A read (BP_VAR_R) of an operand: an undefined CV warns and reads null.
+    fn read_operand_r(
+        &self,
+        vm: &mut Vm,
+        operand: &OperandType,
+        literals: &[Value],
+        line: u32,
+    ) -> Value {
+        if let OperandType::Cv(idx) = operand {
+            if matches!(self.cvs.get(*idx as usize), Some(Value::Undef) | None) {
+                let name = self
+                    .op_array
+                    .cv_names
+                    .get(*idx as usize)
+                    .map(|n| String::from_utf8_lossy(n).to_string())
+                    .unwrap_or_default();
+                vm.emit_warning_at(&format!("Undefined variable ${}", name), line);
+                return Value::Null;
+            }
+        }
+        self.read_operand(operand, literals)
     }
 
     fn read_operand(&self, operand: &OperandType, literals: &[Value]) -> Value {
