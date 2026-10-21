@@ -440,6 +440,8 @@ pub struct Vm {
     pub exit_requested: bool,
     /// Status passed to exit() (process exit code for the CLI).
     pub exit_code: i64,
+    /// error_get_last(): (type, message, file, line) of the last reported error.
+    pub last_error: Option<(i64, String, String, u32)>,
     /// Set to true when emit_fatal_at has already written the "Fatal error: ..."
     /// line to vm.output, so the top-level error handler does not re-emit it.
     pub fatal_emitted: bool,
@@ -587,6 +589,7 @@ impl Vm {
             fiber_stack: Vec::new(),
             exit_requested: false,
             exit_code: 0,
+            last_error: None,
             fatal_emitted: false,
             property_hook_stack: Vec::new(),
             include_return_cvs: None,
@@ -2190,11 +2193,20 @@ impl Vm {
     }
 
     /// Emit a PHP warning with line number
+    /// Remember the last error for error_get_last().
+    pub fn record_last_error(&mut self, ty: i64, msg: &str, line: u32) {
+        self.last_error = Some((ty, msg.to_string(), self.current_file.clone(), line));
+    }
+
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 2 == 0 {
+            self.record_last_error(2, msg, line);
+        }
         if self.error_reporting & 2 != 0 {
             if self.call_user_error_handler(2, msg, line) {
                 return;
             }
+            self.record_last_error(2, msg, line);
             let file = self.current_file.clone();
             self.display_error("Warning", msg, &file, line);
         }
@@ -2213,11 +2225,15 @@ impl Vm {
 
     /// Emit a PHP notice
     pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8 == 0 {
+            self.record_last_error(8, msg, line);
+        }
         if self.error_reporting & 8 != 0 {
             // E_NOTICE = 8
             if self.call_user_error_handler(8, msg, line) {
                 return;
             }
+            self.record_last_error(8, msg, line);
             self.emit_notice_raw(msg, line);
         }
     }
@@ -2309,11 +2325,15 @@ impl Vm {
     }
 
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
+        if self.error_reporting & 8192 == 0 {
+            self.record_last_error(8192, msg, line);
+        }
         if self.error_reporting & 8192 != 0 {
             // E_DEPRECATED = 8192
             if self.call_user_error_handler(8192, msg, line) {
                 return;
             }
+            self.record_last_error(8192, msg, line);
             self.emit_deprecated_raw(msg, line);
         }
     }

@@ -808,6 +808,7 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             if !vm.call_user_error_handler(512, &message, call_line) {
                 vm.emit_warning_at(&message, call_line);
+                vm.record_last_error(512, &message, call_line);
             }
         }
         1024 => {
@@ -818,6 +819,7 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(Value::True);
             }
             if !vm.call_user_error_handler(1024, &message, call_line) {
+                vm.record_last_error(1024, &message, call_line);
                 let notice = format!(
                     "\nNotice: {} in {} on line {}\n",
                     message,
@@ -902,6 +904,19 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let const_name = &name_str[pos+2..];
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
         let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
+            vm.try_autoload_class(class_name_stripped.as_bytes());
+            if vm.current_exception.is_some() {
+                return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+            }
+            if !vm.classes.contains_key(&class_lower) {
+                let msg = format!("Class \"{}\" not found", class_name_stripped);
+                let line = vm.current_line;
+                let exc = vm.create_exception(b"Error", &msg, line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line });
+            }
+        }
         if let Some(class) = vm.classes.get(&class_lower).cloned() {
             // Visibility check: constant() honours protected/private the same as
             // the compiler does for direct Class::CONST references. Caller scope
@@ -14180,11 +14195,28 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn error_get_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null) // stub - no last error tracking yet
+fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if !args.is_empty() {
+        let msg = format!("error_get_last() expects exactly 0 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+    }
+    match vm.last_error.clone() {
+        None => Ok(Value::Null),
+        Some((ty, msg, file, line)) => {
+            let mut arr = PhpArray::new();
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(ty));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"message")), Value::String(PhpString::from_string(msg)));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"file")), Value::String(PhpString::from_string(file)));
+            arr.set(ArrayKey::String(PhpString::from_bytes(b"line")), Value::Long(line as i64));
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+    }
 }
 
-fn error_clear_last_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn error_clear_last_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.last_error = None;
     Ok(Value::Null)
 }
 
@@ -16982,8 +17014,18 @@ fn getimagesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn register_tick_function_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn unregister_tick_function_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Null) }
+fn register_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(cb) = args.first() {
+        validate_callback_arg(vm, "register_tick_function", cb)?;
+    }
+    Ok(Value::True)
+}
+fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(cb) = args.first() {
+        validate_callback_arg(vm, "unregister_tick_function", cb)?;
+    }
+    Ok(Value::Null)
+}
 fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
 fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }

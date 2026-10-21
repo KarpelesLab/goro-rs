@@ -614,30 +614,44 @@ fn is_resource(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn is_countable(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    Ok(match val {
+/// `$obj instanceof $target` for user and builtin classes/interfaces.
+fn class_instanceof(vm: &Vm, class_lower: &[u8], target: &[u8]) -> bool {
+    let mut cur = class_lower.to_vec();
+    for _ in 0..64 {
+        if cur == target || vm.class_implements_interface(&cur, target)
+            || goro_core::vm::is_builtin_subclass(&cur, target)
+        {
+            return true;
+        }
+        let next = vm.classes.get(&cur).and_then(|c| c.parent.as_ref())
+            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+        match next {
+            Some(n) => cur = n,
+            None => return false,
+        }
+    }
+    false
+}
+
+fn is_countable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    Ok(match &val {
         Value::Array(_) => Value::True,
+        Value::Object(obj) => {
+            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if class_instanceof(vm, &cl, b"countable") { Value::True } else { Value::False }
+        }
         _ => Value::False,
     })
 }
 
 fn is_iterable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    Ok(match val {
+    let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    Ok(match &val {
         Value::Array(_) | Value::Generator(_) => Value::True,
         Value::Object(obj) => {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Check if object implements Traversable (which includes Iterator, IteratorAggregate)
-            if let Some(class_def) = vm.get_class_def(&class_lower) {
-                let implements_traversable = class_def.interfaces.iter().any(|iface| {
-                    let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    matches!(iface_lower.as_slice(), b"traversable" | b"iterator" | b"iteratoraggregate")
-                });
-                if implements_traversable { Value::True } else { Value::False }
-            } else {
-                Value::False
-            }
+            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if class_instanceof(vm, &cl, b"traversable") { Value::True } else { Value::False }
         }
         _ => Value::False,
     })
@@ -654,7 +668,8 @@ fn get_debug_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(obj) => {
-            let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+            // Anonymous classes: "Parent@anonymous" (the part before the NUL byte).
+            let name = goro_core::value::display_class_name(&obj.borrow().class_name);
             return Ok(Value::String(PhpString::from_string(name)));
         }
         Value::Generator(_) => "Generator",
