@@ -4740,6 +4740,21 @@ fn php_builtin_sort(
     reverse: bool,
     renumber: bool,
 ) -> Result<Value, VmError> {
+    let r = php_builtin_sort_inner(vm, args, fname, by_key, reverse, renumber);
+    // Sorting arrays nested into themselves does not raise the comparison
+    // recursion error (bug63882_2).
+    goro_core::value::COMPARE_RECURSION.store(false, std::sync::atomic::Ordering::Relaxed);
+    r
+}
+
+fn php_builtin_sort_inner(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    by_key: bool,
+    reverse: bool,
+    renumber: bool,
+) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, fname, "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {

@@ -47,6 +47,51 @@ thread_local! {
     static MEMORY_EXHAUSTED: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Set when a comparison ran into a container already being compared
+/// (zend_hash_compare / zend_std_compare_objects recursion protection); the
+/// VM raises "Nesting level too deep - recursive dependency?".
+pub static COMPARE_RECURSION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    /// Arrays/objects (left operands) currently being compared.
+    static CMP_ACTIVE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// GC_PROTECT_RECURSION on the left operand of a container comparison.
+struct CmpGuard(usize);
+
+impl CmpGuard {
+    fn enter(p: usize) -> Option<CmpGuard> {
+        let recursive = CMP_ACTIVE.with(|a| {
+            let mut a = a.borrow_mut();
+            if a.contains(&p) {
+                true
+            } else {
+                a.push(p);
+                false
+            }
+        });
+        if recursive {
+            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
+            None
+        } else {
+            Some(CmpGuard(p))
+        }
+    }
+}
+
+impl Drop for CmpGuard {
+    fn drop(&mut self) {
+        CMP_ACTIVE.with(|a| {
+            let mut a = a.borrow_mut();
+            if let Some(i) = a.iter().rposition(|&x| x == self.0) {
+                a.remove(i);
+            }
+        });
+    }
+}
+
 /// EG(timed_out): set from the SIGPROF handler when max_execution_time
 /// expires; the VM turns it into the "Maximum execution time" fatal.
 pub static TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -834,7 +879,12 @@ impl Value {
             d.set(n + 1);
             n
         });
-        let r = depth > 1000 || self.equals_inner(other);
+        let r = if depth > 1000 {
+            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
+            false
+        } else {
+            self.equals_inner(other)
+        };
         COMPARE_DEPTH.with(|d| d.set(depth));
         r
     }
@@ -923,6 +973,9 @@ impl Value {
                 if std::rc::Rc::ptr_eq(a, b) {
                     return true;
                 }
+                let Some(_guard) = CmpGuard::enter(Rc::as_ptr(a) as *const () as usize) else {
+                    return false;
+                };
                 let a = a.borrow();
                 let b = b.borrow();
                 if a.len() != b.len() {
@@ -948,14 +1001,11 @@ impl Value {
                 if a.borrow().closure.is_some() || b.borrow().closure.is_some() {
                     return crate::closure::closures_equal(&a.borrow(), &b.borrow());
                 }
-                // Depth guard to prevent stack overflow on self-referencing objects
-                thread_local! { static CMP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
-                let depth = CMP_DEPTH.with(|d| d.get());
-                if depth > 20 {
-                    return true; // Assume equal at depth limit
-                }
-                CMP_DEPTH.with(|d| d.set(depth + 1));
-                let result = {
+                // Z_PROTECT_RECURSION on the left object.
+                let Some(_guard) = CmpGuard::enter(a.as_ptr() as *const () as usize) else {
+                    return false;
+                };
+                {
                     let a_b = a.borrow();
                     let b_b = b.borrow();
                     // Built-in DateTime hierarchy: compare by timestamp.
@@ -1006,9 +1056,7 @@ impl Value {
                     } else {
                         false
                     }
-                };
-                CMP_DEPTH.with(|d| d.set(depth));
-                result
+                }
             }
             // Object vs scalar: convert object to int(1) for comparison
             (Value::Object(_), Value::Long(n)) | (Value::Long(n), Value::Object(_)) => *n == 1,
@@ -1062,6 +1110,9 @@ impl Value {
                 if std::rc::Rc::ptr_eq(a, b) {
                     return true;
                 }
+                let Some(_guard) = CmpGuard::enter(Rc::as_ptr(a) as *const () as usize) else {
+                    return false;
+                };
                 let a = a.borrow();
                 let b = b.borrow();
                 if a.len() != b.len() {
@@ -1094,6 +1145,7 @@ impl Value {
             n
         });
         let r = if depth > 1000 {
+            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
             0
         } else {
             self.compare_inner(other)
@@ -1159,6 +1211,9 @@ impl Value {
                 if std::rc::Rc::ptr_eq(a, b) {
                     return 0;
                 }
+                let Some(_guard) = CmpGuard::enter(Rc::as_ptr(a) as *const () as usize) else {
+                    return 0;
+                };
                 let a = a.borrow();
                 let b = b.borrow();
                 // Compare by size first
@@ -1395,6 +1450,12 @@ impl Value {
             }
             // Object vs Object comparison
             (Value::Object(a_obj), Value::Object(b_obj)) => {
+                if Rc::ptr_eq(a_obj, b_obj) {
+                    return 0;
+                }
+                let Some(_guard) = CmpGuard::enter(a_obj.as_ptr() as *const () as usize) else {
+                    return 0;
+                };
                 let a_borrow = a_obj.borrow();
                 let b_borrow = b_obj.borrow();
                 // Enum cases: only equal if same class and same case name

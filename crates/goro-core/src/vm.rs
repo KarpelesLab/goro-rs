@@ -15551,6 +15551,26 @@ impl Vm {
             if crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(self.timeout_fatal());
             }
+            // A comparison of the previous op recursed into a container
+            // already being compared (zend_hash_compare()).
+            if crate::value::COMPARE_RECURSION.load(std::sync::atomic::Ordering::Relaxed)
+                && crate::value::COMPARE_RECURSION.swap(false, std::sync::atomic::Ordering::Relaxed)
+                && self.current_exception.is_none()
+            {
+                let msg = "Nesting level too deep - recursive dependency?";
+                let line = self.current_line;
+                let exc = self.create_exception(b"Error", msg, line);
+                self.current_exception = Some(exc);
+                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                    ip = *catch_target as usize;
+                    continue;
+                }
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", msg),
+                    line,
+                });
+            }
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks
                 return Ok(Value::Undef);
