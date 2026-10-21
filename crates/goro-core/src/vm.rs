@@ -16839,8 +16839,8 @@ impl Vm {
 
                 // Comparisons
                 OpCode::Equal => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -16901,8 +16901,8 @@ impl Vm {
                     );
                 }
                 OpCode::NotEqual => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -17007,8 +17007,8 @@ impl Vm {
                     );
                 }
                 OpCode::Less => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -17061,8 +17061,8 @@ impl Vm {
                     );
                 }
                 OpCode::LessEqual => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -17115,8 +17115,8 @@ impl Vm {
                     );
                 }
                 OpCode::Greater => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -17169,8 +17169,8 @@ impl Vm {
                     );
                 }
                 OpCode::GreaterEqual => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -17223,8 +17223,8 @@ impl Vm {
                     );
                 }
                 OpCode::Spaceship => {
-                    let a_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b_raw = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a_raw = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let b_raw = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let mut vs = self.init_lazy_in(&[&a_raw, &b_raw]);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -23555,7 +23555,7 @@ impl Vm {
 
                 // Casts
                 OpCode::CastInt => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     // Try extension-provided long cast (e.g. GMP).
                     let long_val = if let Some(handler) = self.object_to_long {
                         if let Some(n) = handler(&val) {
@@ -23630,7 +23630,7 @@ impl Vm {
                     );
                 }
                 OpCode::CastString => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if matches!(&val, Value::Array(_)) || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_))) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }

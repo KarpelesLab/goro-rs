@@ -9484,6 +9484,13 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_name = match args.first() {
         Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
         Some(Value::String(s)) => s.as_bytes().to_vec(),
+        None => {
+            vm.emit_deprecated("Calling get_parent_class() without arguments is deprecated");
+            match vm.current_class_scope() {
+                Some(scope) => scope,
+                None => return Ok(Value::False),
+            }
+        }
         _ => return Ok(Value::False),
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -9499,7 +9506,11 @@ fn get_called_class_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     if let Some(class_name) = vm.called_class_stack.last() {
         Ok(Value::String(PhpString::from_vec(class_name.clone())))
     } else {
-        Ok(Value::False)
+        let msg = "get_called_class() must be called from within a class".to_string();
+        let line = vm.current_line;
+        let exc = vm.create_exception(b"Error", &msg, line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line })
     }
 }
 fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
