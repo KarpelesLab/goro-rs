@@ -4137,14 +4137,8 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     format!("Resource id #{}", n).into_bytes(),
                 )),
                 Value::Double(_) => ArrayKey::String(val.to_php_string()),
-                Value::String(s) => {
-                    // Try to parse as integer (PHP normalizes numeric string keys)
-                    if let Ok(n) = s.to_string_lossy().parse::<i64>() {
-                        ArrayKey::Int(n)
-                    } else {
-                        ArrayKey::String(s.clone())
-                    }
-                }
+                // Only canonical integer strings become int keys ("05" stays a string)
+                Value::String(_) => Vm::value_to_array_key(val.clone()),
                 Value::True => ArrayKey::Int(1),
                 Value::False => ArrayKey::String(PhpString::empty()),
                 Value::Null | Value::Undef => ArrayKey::String(PhpString::empty()),
@@ -16157,7 +16151,7 @@ fn zend_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(b"4.5.4")))
 }
 
-fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn extension_loaded_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ext = args
         .first()
         .unwrap_or(&Value::Null)
@@ -16167,7 +16161,7 @@ fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let loaded = matches!(
         ext.as_str(),
         "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
-    );
+    ) || vm.loaded_extensions.contains(ext.as_bytes());
     Ok(if loaded { Value::True } else { Value::False })
 }
 

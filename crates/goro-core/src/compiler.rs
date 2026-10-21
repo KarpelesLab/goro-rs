@@ -250,7 +250,11 @@ impl Compiler {
                     // openssl functions with output params
                     (b"openssl_seal", 1) => true,
                     (b"openssl_seal", 2) => true,
-                    (b"openssl_open", 0) => true,
+                    (b"openssl_seal", 5) => true,
+                    (b"openssl_open", 1) => true,
+                    (b"openssl_encrypt", 5) => true,
+                    (b"openssl_random_pseudo_bytes", 1) => true,
+                    (b"openssl_csr_new", 1) => true,
                     (b"openssl_sign", 1) => true,
                     (b"openssl_private_encrypt", 1) => true,
                     (b"openssl_private_decrypt", 1) => true,

@@ -9,22 +9,16 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-ecb = { version = "0.1", features = ["alloc"] }
-ctr = "0.9"
-cipher = { version = "0.4", features = ["alloc"] }
-md-5 = "0.10"
-sha1 = { version = "0.10", features = ["oid"] }
-sha2 = { version = "0.10", features = ["oid"] }
-digest = "0.10"
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "legacy-ciphers", "kdf", "bignum", "rng", "rsa", "der", "dh", "dsa", "x509", "pkcs12", "ec", "legacy-ec", "whirlpool-table", "ed25519-table", "ed448-table", "p256-table"] }
+# Legacy-provider block ciphers purecrypto does not provide (Blowfish is
+# internal-only there): RustCrypto implementations, with their `cipher` traits.
+cipher = "0.4"
+blowfish = { version = "0.9", features = ["bcrypt"] }
+cast5 = "0.11"
+idea = "0.5"
+rc2 = "0.8"
+# General-purpose big integers (parsing/printing, generic EC/DSA/DH arithmetic)
+num-bigint-dig = { version = "0.8", features = ["rand", "prime"] }
+num-traits = "0.2"
+num-integer = "0.1"
 rand = "0.8"
-rsa = { version = "0.9", features = ["sha1", "sha2"] }
-pkcs1 = { version = "0.7", features = ["pem"] }
-pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
-pem-rfc7468 = "0.7"
-signature = { version = "2", features = ["digest"] }
-x509-cert = { version = "0.2", features = ["builder", "pem"] }
-spki = { version = "0.7", features = ["pem"] }
-const-oid = { version = "0.9", features = ["db"] }
-der = { version = "0.7", features = ["std", "pem"] }

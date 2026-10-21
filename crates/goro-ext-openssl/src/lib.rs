@@ -1,467 +1,253 @@
 use goro_core::array::PhpArray;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::vm::{BuiltinFn, Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-mod aes;
-mod modes;
-mod pkcs7;
-mod rsa;
+mod asn1;
+mod bn;
+mod cert;
+mod cipher;
+mod conf;
+mod digest;
+mod ec;
+mod ec_curves;
+mod ecx;
+mod err;
+mod name;
+mod obj;
+mod objects;
+mod params;
+mod pkcs12;
+mod pkey;
+mod pkey_fns;
+mod req;
+mod smime;
 mod x509;
-
-use modes::CipherMethod;
+mod x509v3;
+mod zpp;
 
 // Option flags
 const OPENSSL_RAW_DATA: i64 = 1;
 const OPENSSL_ZERO_PADDING: i64 = 2;
 
-std::thread_local! {
-    /// FIFO queue of openssl error strings produced by this extension.
-    /// `openssl_error_string()` pops one at a time.
-    pub static OPENSSL_ERROR_QUEUE: std::cell::RefCell<std::collections::VecDeque<String>> =
-        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-}
-
-pub(crate) fn push_openssl_error(msg: impl Into<String>) {
-    OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().push_back(msg.into()));
+/// Wrap a builtin with the stub's argument count check.
+macro_rules! checked {
+    ($name:literal, $f:path) => {{
+        fn w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+            zpp::enter($name, &vm.builtin_named_skipped);
+            params::check_argc(vm, args, $name)?;
+            $f(vm, args)
+        }
+        ($name, w as BuiltinFn)
+    }};
 }
 
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
-    rsa::register_class(vm);
-    // Functions
-    vm.register_function(b"openssl_encrypt", openssl_encrypt);
-    vm.register_function(b"openssl_decrypt", openssl_decrypt);
-    vm.register_function(b"openssl_random_pseudo_bytes", openssl_random_pseudo_bytes);
-    vm.register_function(b"openssl_digest", openssl_digest);
-    vm.register_function(b"openssl_get_cipher_methods", openssl_get_cipher_methods);
-    vm.register_function(b"openssl_cipher_iv_length", openssl_cipher_iv_length);
-    vm.register_function(b"openssl_cipher_key_length", openssl_cipher_key_length);
-    vm.register_function(b"openssl_get_md_methods", openssl_get_md_methods);
-    vm.register_function(b"openssl_error_string", openssl_error_string);
-    // X.509 functions
-    vm.register_function_with_params(
-        b"openssl_x509_read",
-        x509::openssl_x509_read,
-        &[b"certificate"],
-    );
-    vm.register_function_with_params(
-        b"openssl_x509_parse",
-        x509::openssl_x509_parse,
-        &[b"certificate", b"short_names"],
-    );
-    vm.register_function_with_params(
-        b"openssl_x509_export",
-        x509::openssl_x509_export,
-        &[b"certificate", b"output", b"no_text"],
-    );
-    vm.register_function_with_params(
-        b"openssl_x509_export_to_file",
-        x509::openssl_x509_export_to_file,
-        &[b"certificate", b"output_filename", b"no_text"],
-    );
-    vm.register_function_with_params(
-        b"openssl_x509_free",
-        x509::openssl_x509_free,
-        &[b"certificate"],
-    );
-    vm.register_function(b"openssl_x509_checkpurpose", openssl_stub_false);
-    vm.register_function_with_params(
-        b"openssl_x509_check_private_key",
-        x509::openssl_x509_check_private_key,
-        &[b"certificate", b"private_key"],
-    );
-    vm.register_function(b"openssl_x509_verify", openssl_stub_long_neg1);
-    vm.register_function_with_params(
-        b"openssl_x509_fingerprint",
-        x509::openssl_x509_fingerprint,
-        &[b"certificate", b"digest_algo", b"binary"],
-    );
-    vm.register_function_with_params(b"openssl_pkey_new", rsa::openssl_pkey_new, &[b"options"]);
-    vm.register_function_with_params(
-        b"openssl_pkey_get_public",
-        rsa::openssl_pkey_get_public,
-        &[b"public_key"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkey_get_private",
-        rsa::openssl_pkey_get_private,
-        &[b"private_key", b"passphrase"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkey_get_details",
-        rsa::openssl_pkey_get_details,
-        &[b"key"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkey_export",
-        rsa::openssl_pkey_export,
-        &[b"key", b"output", b"passphrase", b"options"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkey_export_to_file",
-        rsa::openssl_pkey_export_to_file,
-        &[b"key", b"output_filename", b"passphrase", b"options"],
-    );
-    vm.register_function_with_params(b"openssl_pkey_free", rsa::openssl_pkey_free, &[b"key"]);
-    vm.register_function_with_params(b"openssl_free_key", rsa::openssl_free_key, &[b"key"]);
-    vm.register_function_with_params(
-        b"openssl_get_publickey",
-        rsa::openssl_pkey_get_public,
-        &[b"public_key"],
-    );
-    vm.register_function_with_params(
-        b"openssl_get_privatekey",
-        rsa::openssl_pkey_get_private,
-        &[b"private_key", b"passphrase"],
-    );
-    vm.register_function(b"openssl_public_encrypt", openssl_stub_false);
-    vm.register_function(b"openssl_private_encrypt", openssl_stub_false);
-    vm.register_function(b"openssl_public_decrypt", openssl_stub_false);
-    vm.register_function(b"openssl_private_decrypt", openssl_stub_false);
-    vm.register_function_with_params(
-        b"openssl_sign",
-        rsa::openssl_sign,
-        &[b"data", b"signature", b"private_key", b"algorithm"],
-    );
-    vm.register_function_with_params(
-        b"openssl_verify",
-        rsa::openssl_verify,
-        &[b"data", b"signature", b"public_key", b"algorithm"],
-    );
-    vm.register_function(b"openssl_seal", openssl_stub_false);
-    vm.register_function(b"openssl_open", openssl_stub_false);
-    // CSR functions
-    vm.register_function_with_params(
-        b"openssl_csr_new",
-        x509::openssl_csr_new,
-        &[
-            b"distinguished_names",
-            b"private_key",
-            b"options",
-            b"extra_attribs",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_csr_export",
-        x509::openssl_csr_export,
-        &[b"csr", b"output", b"no_text"],
-    );
-    vm.register_function_with_params(
-        b"openssl_csr_export_to_file",
-        x509::openssl_csr_export_to_file,
-        &[b"csr", b"output_filename", b"no_text"],
-    );
-    vm.register_function_with_params(
-        b"openssl_csr_sign",
-        x509::openssl_csr_sign,
-        &[
-            b"csr",
-            b"ca_certificate",
-            b"private_key",
-            b"days",
-            b"options",
-            b"serial",
-            b"serial_hex",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_csr_get_subject",
-        x509::openssl_csr_get_subject,
-        &[b"csr", b"short_names"],
-    );
-    vm.register_function_with_params(
-        b"openssl_csr_get_public_key",
-        x509::openssl_csr_get_public_key,
-        &[b"csr", b"short_names"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs7_sign",
-        pkcs7::openssl_pkcs7_sign,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"private_key",
-            b"headers",
-            b"flags",
-            b"untrusted_certificates_filename",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs7_verify",
-        pkcs7::openssl_pkcs7_verify,
-        &[
-            b"input_filename",
-            b"flags",
-            b"signers_certificates_filename",
-            b"ca_info",
-            b"untrusted_certificates_filename",
-            b"content",
-            b"output_filename",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs7_encrypt",
-        pkcs7::openssl_pkcs7_encrypt,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"headers",
-            b"flags",
-            b"cipher_algo",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs7_decrypt",
-        pkcs7::openssl_pkcs7_decrypt,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"private_key",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs7_read",
-        pkcs7::openssl_pkcs7_read,
-        &[b"input_filename", b"certificates"],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs12_export",
-        pkcs7::openssl_pkcs12_export,
-        &[
-            b"certificate",
-            b"output",
-            b"private_key",
-            b"passphrase",
-            b"options",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs12_export_to_file",
-        pkcs7::openssl_pkcs12_export_to_file,
-        &[
-            b"certificate",
-            b"filename",
-            b"private_key",
-            b"passphrase",
-            b"options",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_pkcs12_read",
-        pkcs7::openssl_pkcs12_read,
-        &[b"pkcs12", b"certificates", b"passphrase"],
-    );
-    vm.register_function(b"openssl_dh_compute_key", openssl_stub_false);
-    vm.register_function(b"openssl_spki_new", openssl_stub_false);
-    vm.register_function(b"openssl_spki_verify", openssl_stub_false);
-    vm.register_function(b"openssl_spki_export", openssl_stub_false);
-    vm.register_function(b"openssl_spki_export_challenge", openssl_stub_false);
-    vm.register_function(
-        b"openssl_get_cert_locations",
-        openssl_get_cert_locations_stub,
-    );
-    vm.register_function_with_params(
-        b"openssl_cms_sign",
-        pkcs7::openssl_cms_sign,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"private_key",
-            b"headers",
-            b"flags",
-            b"encoding",
-            b"untrusted_certificates_filename",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_cms_verify",
-        pkcs7::openssl_cms_verify,
-        &[
-            b"input_filename",
-            b"flags",
-            b"signers_certificates_filename",
-            b"ca_info",
-            b"untrusted_certificates_filename",
-            b"content",
-            b"output_filename",
-            b"sigfile",
-            b"encoding",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_cms_encrypt",
-        pkcs7::openssl_cms_encrypt,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"headers",
-            b"flags",
-            b"cipher_algo",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_cms_decrypt",
-        pkcs7::openssl_cms_decrypt,
-        &[
-            b"input_filename",
-            b"output_filename",
-            b"certificate",
-            b"private_key",
-            b"encoding",
-        ],
-    );
-    vm.register_function_with_params(
-        b"openssl_cms_read",
-        pkcs7::openssl_cms_read,
-        &[b"input_filename", b"certificates"],
-    );
+    pkey_fns::register_class(vm);
+    let fns: &[(&str, BuiltinFn)] = &[
+        checked!("openssl_encrypt", openssl_encrypt),
+        checked!("openssl_decrypt", openssl_decrypt),
+        checked!("openssl_random_pseudo_bytes", openssl_random_pseudo_bytes),
+        checked!("openssl_digest", openssl_digest),
+        checked!("openssl_get_cipher_methods", openssl_get_cipher_methods),
+        checked!("openssl_cipher_iv_length", openssl_cipher_iv_length),
+        checked!("openssl_cipher_key_length", openssl_cipher_key_length),
+        checked!("openssl_get_md_methods", openssl_get_md_methods),
+        checked!("openssl_error_string", openssl_error_string),
+        checked!("openssl_get_curve_names", pkey_fns::openssl_get_curve_names),
+        checked!("openssl_pbkdf2", pkey_fns::openssl_pbkdf2),
+        // X.509
+        checked!("openssl_x509_read", x509::openssl_x509_read),
+        checked!("openssl_x509_parse", x509::openssl_x509_parse),
+        checked!("openssl_x509_export", x509::openssl_x509_export),
+        checked!(
+            "openssl_x509_export_to_file",
+            x509::openssl_x509_export_to_file
+        ),
+        checked!("openssl_x509_free", x509::openssl_x509_free),
+        checked!("openssl_x509_checkpurpose", x509::openssl_x509_checkpurpose),
+        checked!(
+            "openssl_x509_check_private_key",
+            x509::openssl_x509_check_private_key
+        ),
+        checked!("openssl_x509_verify", x509::openssl_x509_verify),
+        checked!("openssl_x509_fingerprint", x509::openssl_x509_fingerprint),
+        // Keys
+        checked!("openssl_pkey_new", pkey_fns::openssl_pkey_new),
+        checked!("openssl_pkey_get_public", pkey_fns::openssl_pkey_get_public),
+        checked!("openssl_get_publickey", pkey_fns::openssl_pkey_get_public),
+        checked!(
+            "openssl_pkey_get_private",
+            pkey_fns::openssl_pkey_get_private
+        ),
+        checked!("openssl_get_privatekey", pkey_fns::openssl_pkey_get_private),
+        checked!(
+            "openssl_pkey_get_details",
+            pkey_fns::openssl_pkey_get_details
+        ),
+        checked!("openssl_pkey_export", pkey_fns::openssl_pkey_export),
+        checked!(
+            "openssl_pkey_export_to_file",
+            pkey_fns::openssl_pkey_export_to_file
+        ),
+        checked!("openssl_pkey_free", pkey_fns::openssl_pkey_free),
+        checked!("openssl_free_key", pkey_fns::openssl_free_key),
+        checked!("openssl_public_encrypt", pkey_fns::openssl_public_encrypt),
+        checked!("openssl_private_encrypt", pkey_fns::openssl_private_encrypt),
+        checked!("openssl_public_decrypt", pkey_fns::openssl_public_decrypt),
+        checked!("openssl_private_decrypt", pkey_fns::openssl_private_decrypt),
+        checked!("openssl_sign", pkey_fns::openssl_sign),
+        checked!("openssl_verify", pkey_fns::openssl_verify),
+        checked!("openssl_seal", pkey_fns::openssl_seal),
+        checked!("openssl_open", pkey_fns::openssl_open),
+        checked!("openssl_dh_compute_key", pkey_fns::openssl_dh_compute_key),
+        checked!("openssl_pkey_derive", pkey_fns::openssl_pkey_derive),
+        // CSR
+        checked!("openssl_csr_new", x509::openssl_csr_new),
+        checked!("openssl_csr_export", x509::openssl_csr_export),
+        checked!(
+            "openssl_csr_export_to_file",
+            x509::openssl_csr_export_to_file
+        ),
+        checked!("openssl_csr_sign", x509::openssl_csr_sign),
+        checked!("openssl_csr_get_subject", x509::openssl_csr_get_subject),
+        checked!(
+            "openssl_csr_get_public_key",
+            x509::openssl_csr_get_public_key
+        ),
+        // PKCS#7 / PKCS#12 / CMS
+        checked!("openssl_pkcs7_sign", smime::openssl_pkcs7_sign),
+        checked!("openssl_pkcs7_verify", smime::openssl_pkcs7_verify),
+        checked!("openssl_pkcs7_encrypt", smime::openssl_pkcs7_encrypt),
+        checked!("openssl_pkcs7_decrypt", smime::openssl_pkcs7_decrypt),
+        checked!("openssl_pkcs7_read", smime::openssl_pkcs7_read),
+        checked!("openssl_pkcs12_export", pkcs12::openssl_pkcs12_export),
+        checked!(
+            "openssl_pkcs12_export_to_file",
+            pkcs12::openssl_pkcs12_export_to_file
+        ),
+        checked!("openssl_pkcs12_read", pkcs12::openssl_pkcs12_read),
+        checked!("openssl_cms_sign", smime::openssl_cms_sign),
+        checked!("openssl_cms_verify", smime::openssl_cms_verify),
+        checked!("openssl_cms_encrypt", smime::openssl_cms_encrypt),
+        checked!("openssl_cms_decrypt", smime::openssl_cms_decrypt),
+        checked!("openssl_cms_read", smime::openssl_cms_read),
+        // SPKI
+        checked!("openssl_spki_new", x509::openssl_spki_new),
+        checked!("openssl_spki_verify", x509::openssl_spki_verify),
+        checked!("openssl_spki_export", x509::openssl_spki_export),
+        checked!(
+            "openssl_spki_export_challenge",
+            x509::openssl_spki_export_challenge
+        ),
+        checked!(
+            "openssl_get_cert_locations",
+            openssl_get_cert_locations_stub
+        ),
+    ];
+    for (name, f) in fns {
+        vm.register_function(name.as_bytes(), *f);
+    }
 
-    // Constants
-    vm.constants
-        .insert(b"OPENSSL_RAW_DATA".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_ZERO_PADDING".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_DONT_ZERO_PAD_KEY".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"OPENSSL_NO_PADDING".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"OPENSSL_PKCS1_PADDING".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_VERSION_NUMBER".to_vec(), Value::Long(0x30000000));
+    // Constants (values from OpenSSL 3.0 / php-src)
+    let longs: &[(&str, i64)] = &[
+        ("OPENSSL_VERSION_NUMBER", 0x30000000),
+        ("X509_PURPOSE_SSL_CLIENT", 1),
+        ("X509_PURPOSE_SSL_SERVER", 2),
+        ("X509_PURPOSE_NS_SSL_SERVER", 3),
+        ("X509_PURPOSE_SMIME_SIGN", 4),
+        ("X509_PURPOSE_SMIME_ENCRYPT", 5),
+        ("X509_PURPOSE_CRL_SIGN", 6),
+        ("X509_PURPOSE_ANY", 7),
+        ("X509_PURPOSE_OCSP_HELPER", 8),
+        ("X509_PURPOSE_TIMESTAMP_SIGN", 9),
+        ("OPENSSL_ALGO_SHA1", 1),
+        ("OPENSSL_ALGO_MD5", 2),
+        ("OPENSSL_ALGO_MD4", 3),
+        ("OPENSSL_ALGO_SHA224", 6),
+        ("OPENSSL_ALGO_SHA256", 7),
+        ("OPENSSL_ALGO_SHA384", 8),
+        ("OPENSSL_ALGO_SHA512", 9),
+        ("OPENSSL_ALGO_RMD160", 10),
+        ("PKCS7_DETACHED", 0x40),
+        ("PKCS7_TEXT", 0x1),
+        ("PKCS7_NOINTERN", 0x10),
+        ("PKCS7_NOVERIFY", 0x20),
+        ("PKCS7_NOCHAIN", 0x8),
+        ("PKCS7_NOCERTS", 0x2),
+        ("PKCS7_NOATTR", 0x100),
+        ("PKCS7_BINARY", 0x80),
+        ("PKCS7_NOSIGS", 0x4),
+        ("PKCS7_NOOLDMIMETYPE", 0x400),
+        ("PKCS7_NOSMIMECAP", 0x200),
+        ("PKCS7_CRLFEOL", 0x800),
+        ("PKCS7_NOCRL", 0x2000),
+        ("PKCS7_NO_DUAL_CONTENT", 0x10000),
+        ("OPENSSL_CMS_DETACHED", 0x40),
+        ("OPENSSL_CMS_TEXT", 0x1),
+        ("OPENSSL_CMS_NOINTERN", 0x10),
+        ("OPENSSL_CMS_NOVERIFY", 0x20),
+        ("OPENSSL_CMS_NOCERTS", 0x2),
+        ("OPENSSL_CMS_NOATTR", 0x100),
+        ("OPENSSL_CMS_BINARY", 0x80),
+        ("OPENSSL_CMS_NOSIGS", 0xc),
+        ("OPENSSL_CMS_OLDMIMETYPE", 0x400),
+        ("OPENSSL_PKCS1_PADDING", 1),
+        ("OPENSSL_NO_PADDING", 3),
+        ("OPENSSL_PKCS1_OAEP_PADDING", 4),
+        ("OPENSSL_PKCS1_PSS_PADDING", 6),
+        ("OPENSSL_CIPHER_RC2_40", 0),
+        ("OPENSSL_CIPHER_RC2_128", 1),
+        ("OPENSSL_CIPHER_RC2_64", 2),
+        ("OPENSSL_CIPHER_DES", 3),
+        ("OPENSSL_CIPHER_3DES", 4),
+        ("OPENSSL_CIPHER_AES_128_CBC", 5),
+        ("OPENSSL_CIPHER_AES_192_CBC", 6),
+        ("OPENSSL_CIPHER_AES_256_CBC", 7),
+        ("OPENSSL_KEYTYPE_RSA", 0),
+        ("OPENSSL_KEYTYPE_DSA", 1),
+        ("OPENSSL_KEYTYPE_DH", 2),
+        ("OPENSSL_KEYTYPE_EC", 3),
+        ("OPENSSL_KEYTYPE_X25519", 4),
+        ("OPENSSL_KEYTYPE_ED25519", 5),
+        ("OPENSSL_KEYTYPE_X448", 6),
+        ("OPENSSL_KEYTYPE_ED448", 7),
+        ("OPENSSL_RAW_DATA", 1),
+        ("OPENSSL_ZERO_PADDING", 2),
+        ("OPENSSL_DONT_ZERO_PAD_KEY", 4),
+        ("OPENSSL_TLSEXT_SERVER_NAME", 1),
+        ("OPENSSL_ENCODING_DER", 0),
+        ("OPENSSL_ENCODING_SMIME", 1),
+        ("OPENSSL_ENCODING_PEM", 2),
+    ];
+    for (name, v) in longs {
+        vm.constants
+            .insert(name.as_bytes().to_vec(), Value::Long(*v));
+    }
     vm.constants.insert(
         b"OPENSSL_VERSION_TEXT".to_vec(),
-        Value::String(PhpString::from_bytes(b"OpenSSL 3.0.0 (goro-rs native)")),
+        Value::String(PhpString::from_bytes(b"OpenSSL 3.0.0 7 sep 2021")),
     );
-    vm.constants
-        .insert(b"OPENSSL_ALGO_SHA1".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_ALGO_SHA256".to_vec(), Value::Long(7));
-    vm.constants
-        .insert(b"OPENSSL_ALGO_SHA384".to_vec(), Value::Long(8));
-    vm.constants
-        .insert(b"OPENSSL_ALGO_SHA512".to_vec(), Value::Long(9));
-    vm.constants
-        .insert(b"OPENSSL_ALGO_MD5".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_KEYTYPE_RSA".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"OPENSSL_KEYTYPE_DSA".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_KEYTYPE_DH".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_KEYTYPE_EC".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"OPENSSL_PKCS1_OAEP_PADDING".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"OPENSSL_NO_PADDING".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"OPENSSL_PKCS1_PSS_PADDING".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"OPENSSL_SSLV23_PADDING".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_TLSEXT_SERVER_NAME".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"PKCS7_DETACHED".to_vec(), Value::Long(64));
-    vm.constants.insert(b"PKCS7_TEXT".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"PKCS7_NOINTERN".to_vec(), Value::Long(16));
-    vm.constants
-        .insert(b"PKCS7_NOVERIFY".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"PKCS7_NOCHAIN".to_vec(), Value::Long(8));
-    vm.constants
-        .insert(b"PKCS7_NOCERTS".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"PKCS7_NOATTR".to_vec(), Value::Long(256));
-    vm.constants
-        .insert(b"PKCS7_BINARY".to_vec(), Value::Long(128));
-    vm.constants
-        .insert(b"PKCS7_NOSIGS".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"X509_PURPOSE_SSL_CLIENT".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"X509_PURPOSE_SSL_SERVER".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"X509_PURPOSE_NS_SSL_SERVER".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"X509_PURPOSE_SMIME_SIGN".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"X509_PURPOSE_SMIME_ENCRYPT".to_vec(), Value::Long(5));
-    vm.constants
-        .insert(b"X509_PURPOSE_CRL_SIGN".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"X509_PURPOSE_ANY".to_vec(), Value::Long(7));
-    vm.constants
-        .insert(b"OPENSSL_CMS_DETACHED".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"OPENSSL_CMS_TEXT".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_CMS_NOINTERN".to_vec(), Value::Long(16));
-    vm.constants
-        .insert(b"OPENSSL_CMS_NOVERIFY".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"OPENSSL_CMS_NOCERTS".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_CMS_BINARY".to_vec(), Value::Long(128));
-    vm.constants
-        .insert(b"OPENSSL_CMS_NOSIGS".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"OPENSSL_ENCODING_SMIME".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_ENCODING_DER".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"OPENSSL_ENCODING_PEM".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_CMS_OLDMIMETYPE".to_vec(), Value::Long(0x400));
-    vm.constants
-        .insert(b"PKCS7_NOOLDMIMETYPE".to_vec(), Value::Long(0x4000));
-    vm.constants
-        .insert(b"OPENSSL_CMS_DETACHED".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_RC2_40".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_RC2_128".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_RC2_64".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_DES".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_3DES".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_AES_128_CBC".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_AES_192_CBC".to_vec(), Value::Long(7));
-    vm.constants
-        .insert(b"OPENSSL_CIPHER_AES_256_CBC".to_vec(), Value::Long(8));
+    vm.constants.insert(
+        b"OPENSSL_DEFAULT_STREAM_CIPHERS".to_vec(),
+        Value::String(PhpString::from_bytes(
+            b"ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:\
+ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:\
+DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:\
+ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:\
+ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:\
+DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-SHA256:\
+AES256-GCM-SHA384:AES128:AES256:HIGH:!SSLv2:!aNULL:!eNULL:!EXPORT:!DES:!MD5:!RC4:!ADH",
+        )),
+    );
+    params::apply(vm);
 }
 
-/// Supported cipher method names
-const CIPHER_METHODS: &[&str] = &[
-    "aes-128-cbc",
-    "aes-128-ecb",
-    "aes-128-ctr",
-    "aes-192-cbc",
-    "aes-192-ecb",
-    "aes-192-ctr",
-    "aes-256-cbc",
-    "aes-256-ecb",
-    "aes-256-ctr",
-];
-
-/// Supported digest method names
-const DIGEST_METHODS: &[&str] = &["md5", "sha1", "sha256", "sha384", "sha512"];
-
-// ---- Base64 helpers ----
+// ---- Base64 helpers (php_base64_encode / php_base64_decode) ----
 
 const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -469,27 +255,26 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(B64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(B64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(B64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(B64_CHARS[(n >> 18) as usize & 63] as char);
+        result.push(B64_CHARS[(n >> 12) as usize & 63] as char);
+        result.push(if chunk.len() > 1 {
+            B64_CHARS[(n >> 6) as usize & 63] as char
         } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(B64_CHARS[(triple & 0x3F) as usize] as char);
+            '='
+        });
+        result.push(if chunk.len() > 2 {
+            B64_CHARS[n as usize & 63] as char
         } else {
-            result.push('=');
-        }
+            '='
+        });
     }
     result
 }
 
-fn base64_decode_char(c: u8) -> Option<u8> {
+fn base64_rev(c: u8) -> Option<u8> {
     match c {
         b'A'..=b'Z' => Some(c - b'A'),
         b'a'..=b'z' => Some(c - b'a' + 26),
@@ -500,836 +285,497 @@ fn base64_decode_char(c: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn base64_decode(data: &str) -> Option<Vec<u8>> {
-    // Strip whitespace
-    let clean: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if clean.is_empty() {
-        return Some(Vec::new());
+/// Non-strict php_base64_decode(): unknown characters are skipped, never fails.
+pub(crate) fn base64_decode_lenient(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let mut i = 0usize;
+    let mut cur = 0u8;
+    for &c in data {
+        if c == b'=' {
+            continue;
+        }
+        let Some(ch) = base64_rev(c) else { continue };
+        match i % 4 {
+            0 => cur = ch << 2,
+            1 => {
+                out.push(cur | (ch >> 4));
+                cur = (ch & 0x0f) << 4;
+            }
+            2 => {
+                out.push(cur | (ch >> 2));
+                cur = (ch & 0x03) << 6;
+            }
+            _ => out.push(cur | ch),
+        }
+        i += 1;
     }
-    if !clean.len().is_multiple_of(4) {
+    out
+}
+
+/// Strict-ish decode used for PEM bodies (whitespace skipped, bad chars fail).
+pub(crate) fn base64_decode(data: &str) -> Option<Vec<u8>> {
+    let mut clean = Vec::with_capacity(data.len());
+    for &c in data.as_bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        base64_rev(c)?;
+        clean.push(c);
+    }
+    if clean.len() % 4 == 1 {
         return None;
     }
-
-    let mut result = Vec::with_capacity(clean.len() / 4 * 3);
-    for chunk in clean.chunks(4) {
-        let a = base64_decode_char(chunk[0])?;
-        let b = base64_decode_char(chunk[1])?;
-        let c_val = if chunk[2] == b'=' {
-            None
-        } else {
-            Some(base64_decode_char(chunk[2])?)
-        };
-        let d_val = if chunk[3] == b'=' {
-            None
-        } else {
-            Some(base64_decode_char(chunk[3])?)
-        };
-
-        let triple = ((a as u32) << 18)
-            | ((b as u32) << 12)
-            | ((c_val.unwrap_or(0) as u32) << 6)
-            | (d_val.unwrap_or(0) as u32);
-
-        result.push((triple >> 16) as u8);
-        if c_val.is_some() {
-            result.push((triple >> 8) as u8);
-        }
-        if d_val.is_some() {
-            result.push(triple as u8);
-        }
-    }
-    Some(result)
-}
-
-// ---- Hash/digest implementations ----
-
-fn md5_hash(data: &[u8]) -> [u8; 16] {
-    // MD5 implementation (RFC 1321)
-    let s: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    let k: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    // Pre-processing: padding
-    let orig_len_bits = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&orig_len_bits.to_le_bytes());
-
-    // Process each 512-bit (64-byte) block
-    for chunk in msg.chunks(64) {
-        let mut m = [0u32; 16];
-        for (i, word) in m.iter_mut().enumerate() {
-            *word = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-
-        let mut a = a0;
-        let mut b = b0;
-        let mut c = c0;
-        let mut d = d0;
-
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | ((!b) & d), i),
-                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | (!d)), (7 * i) % 16),
-            };
-
-            let f = f.wrapping_add(a).wrapping_add(k[i]).wrapping_add(m[g]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(f.rotate_left(s[i]));
-        }
-
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
-    }
-
-    let mut result = [0u8; 16];
-    result[0..4].copy_from_slice(&a0.to_le_bytes());
-    result[4..8].copy_from_slice(&b0.to_le_bytes());
-    result[8..12].copy_from_slice(&c0.to_le_bytes());
-    result[12..16].copy_from_slice(&d0.to_le_bytes());
-    result
-}
-
-#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
-fn sha1_hash(data: &[u8]) -> [u8; 20] {
-    let mut h0: u32 = 0x67452301;
-    let mut h1: u32 = 0xEFCDAB89;
-    let mut h2: u32 = 0x98BADCFE;
-    let mut h3: u32 = 0x10325476;
-    let mut h4: u32 = 0xC3D2E1F0;
-
-    let orig_len_bits = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&orig_len_bits.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-
-        let mut a = h0;
-        let mut b = h1;
-        let mut c = h2;
-        let mut d = h3;
-        let mut e = h4;
-
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                _ => (b ^ c ^ d, 0xCA62C1D6u32),
-            };
-
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
-    }
-
-    let mut result = [0u8; 20];
-    result[0..4].copy_from_slice(&h0.to_be_bytes());
-    result[4..8].copy_from_slice(&h1.to_be_bytes());
-    result[8..12].copy_from_slice(&h2.to_be_bytes());
-    result[12..16].copy_from_slice(&h3.to_be_bytes());
-    result[16..20].copy_from_slice(&h4.to_be_bytes());
-    result
-}
-
-fn sha256_hash(data: &[u8]) -> [u8; 32] {
-    let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    let orig_len_bits = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&orig_len_bits.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut hh = h[7];
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut result = [0u8; 32];
-    for i in 0..8 {
-        result[i * 4..i * 4 + 4].copy_from_slice(&h[i].to_be_bytes());
-    }
-    result
-}
-
-fn sha512_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &SHA512_IV, 64)
-}
-
-fn sha384_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &SHA384_IV, 48)
-}
-
-const SHA512_IV: [u64; 8] = [
-    0x6a09e667f3bcc908,
-    0xbb67ae8584caa73b,
-    0x3c6ef372fe94f82b,
-    0xa54ff53a5f1d36f1,
-    0x510e527fade682d1,
-    0x9b05688c2b3e6c1f,
-    0x1f83d9abfb41bd6b,
-    0x5be0cd19137e2179,
-];
-
-const SHA384_IV: [u64; 8] = [
-    0xcbbb9d5dc1059ed8,
-    0x629a292a367cd507,
-    0x9159015a3070dd17,
-    0x152fecd8f70e5939,
-    0x67332667ffc00b31,
-    0x8eb44a8768581511,
-    0xdb0c2e0d64f98fa7,
-    0x47b5481dbefa4fa4,
-];
-
-const SHA512_K: [u64; 80] = [
-    0x428a2f98d728ae22,
-    0x7137449123ef65cd,
-    0xb5c0fbcfec4d3b2f,
-    0xe9b5dba58189dbbc,
-    0x3956c25bf348b538,
-    0x59f111f1b605d019,
-    0x923f82a4af194f9b,
-    0xab1c5ed5da6d8118,
-    0xd807aa98a3030242,
-    0x12835b0145706fbe,
-    0x243185be4ee4b28c,
-    0x550c7dc3d5ffb4e2,
-    0x72be5d74f27b896f,
-    0x80deb1fe3b1696b1,
-    0x9bdc06a725c71235,
-    0xc19bf174cf692694,
-    0xe49b69c19ef14ad2,
-    0xefbe4786384f25e3,
-    0x0fc19dc68b8cd5b5,
-    0x240ca1cc77ac9c65,
-    0x2de92c6f592b0275,
-    0x4a7484aa6ea6e483,
-    0x5cb0a9dcbd41fbd4,
-    0x76f988da831153b5,
-    0x983e5152ee66dfab,
-    0xa831c66d2db43210,
-    0xb00327c898fb213f,
-    0xbf597fc7beef0ee4,
-    0xc6e00bf33da88fc2,
-    0xd5a79147930aa725,
-    0x06ca6351e003826f,
-    0x142929670a0e6e70,
-    0x27b70a8546d22ffc,
-    0x2e1b21385c26c926,
-    0x4d2c6dfc5ac42aed,
-    0x53380d139d95b3df,
-    0x650a73548baf63de,
-    0x766a0abb3c77b2a8,
-    0x81c2c92e47edaee6,
-    0x92722c851482353b,
-    0xa2bfe8a14cf10364,
-    0xa81a664bbc423001,
-    0xc24b8b70d0f89791,
-    0xc76c51a30654be30,
-    0xd192e819d6ef5218,
-    0xd69906245565a910,
-    0xf40e35855771202a,
-    0x106aa07032bbd1b8,
-    0x19a4c116b8d2d0c8,
-    0x1e376c085141ab53,
-    0x2748774cdf8eeb99,
-    0x34b0bcb5e19b48a8,
-    0x391c0cb3c5c95a63,
-    0x4ed8aa4ae3418acb,
-    0x5b9cca4f7763e373,
-    0x682e6ff3d6b2b8a3,
-    0x748f82ee5defb2fc,
-    0x78a5636f43172f60,
-    0x84c87814a1f0ab72,
-    0x8cc702081a6439ec,
-    0x90befffa23631e28,
-    0xa4506cebde82bde9,
-    0xbef9a3f7b2c67915,
-    0xc67178f2e372532b,
-    0xca273eceea26619c,
-    0xd186b8c721c0c207,
-    0xeada7dd6cde0eb1e,
-    0xf57d4f7fee6ed178,
-    0x06f067aa72176fba,
-    0x0a637dc5a2c898a6,
-    0x113f9804bef90dae,
-    0x1b710b35131c471b,
-    0x28db77f523047d84,
-    0x32caab7b40c72493,
-    0x3c9ebe0a15c9bebc,
-    0x431d67c49c100d4c,
-    0x4cc5d4becb3e42b6,
-    0x597f299cfc657e2a,
-    0x5fcb6fab3ad6faec,
-    0x6c44198c4a475817,
-];
-
-fn sha512_core(data: &[u8], iv: &[u64; 8], output_len: usize) -> Vec<u8> {
-    let mut h = *iv;
-
-    let orig_len_bits = (data.len() as u128) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 128 != 112 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&orig_len_bits.to_be_bytes());
-
-    for chunk in msg.chunks(128) {
-        let mut w = [0u64; 80];
-        for i in 0..16 {
-            w[i] = u64::from_be_bytes([
-                chunk[i * 8],
-                chunk[i * 8 + 1],
-                chunk[i * 8 + 2],
-                chunk[i * 8 + 3],
-                chunk[i * 8 + 4],
-                chunk[i * 8 + 5],
-                chunk[i * 8 + 6],
-                chunk[i * 8 + 7],
-            ]);
-        }
-        for i in 16..80 {
-            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
-            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut hh = h[7];
-
-        for i in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA512_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut result = Vec::with_capacity(64);
-    for val in &h {
-        result.extend_from_slice(&val.to_be_bytes());
-    }
-    result.truncate(output_len);
-    result
-}
-
-fn compute_digest(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
-    match algo {
-        "md5" => Some(md5_hash(data).to_vec()),
-        "sha1" => Some(sha1_hash(data).to_vec()),
-        "sha256" => Some(sha256_hash(data).to_vec()),
-        "sha384" => Some(sha384_hash(data)),
-        "sha512" => Some(sha512_hash(data)),
-        _ => None,
-    }
+    Some(base64_decode_lenient(&clean))
 }
 
 // ---- PHP function implementations ----
 
-/// openssl_encrypt(data, cipher_method, key, options=0, iv="", &tag, aad, tag_length)
+const OPENSSL_DONT_ZERO_PAD_KEY: i64 = 4;
+
+/// Valid AEAD IV lengths (EVP_CTRL_AEAD_SET_IVLEN).
+fn aead_ivlen_ok(spec: &cipher::CipherSpec, ivlen: usize) -> bool {
+    use cipher::{Algo, Mode};
+    if spec.algo == Algo::ChaCha20Poly1305 {
+        return (1..=12).contains(&ivlen);
+    }
+    match spec.mode {
+        Mode::Gcm => (1..=128).contains(&ivlen),
+        Mode::Ccm => (7..=13).contains(&ivlen),
+        Mode::Ocb => (1..=15).contains(&ivlen),
+        _ => true,
+    }
+}
+
+/// Shared implementation of php_openssl_encrypt()/php_openssl_decrypt().
+#[allow(clippy::too_many_arguments)]
+fn php_openssl_cipher(
+    vm: &mut Vm,
+    enc: bool,
+    data: &[u8],
+    method: &str,
+    password: &[u8],
+    options: i64,
+    iv: &[u8],
+    tag_wanted: bool,
+    tag_in: Option<&[u8]>,
+    tag_len: i64,
+    aad: &[u8],
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    use cipher::Mode;
+    let fname = if enc {
+        "openssl_encrypt"
+    } else {
+        "openssl_decrypt"
+    };
+    let Some(spec) = cipher::by_name(method) else {
+        vm.emit_warning(&format!("{}(): Unknown cipher algorithm", fname));
+        return None;
+    };
+    let is_aead = spec.is_aead();
+    let is_ccm = spec.mode == Mode::Ccm;
+    let is_ocb = spec.mode == Mode::Ocb;
+
+    let decoded;
+    let data: &[u8] = if !enc && options & OPENSSL_RAW_DATA == 0 {
+        decoded = base64_decode_lenient(data);
+        &decoded
+    } else {
+        data
+    };
+
+    // php_openssl_cipher_init()
+    let max_iv_len = spec.iv_len;
+    if enc && iv.is_empty() && max_iv_len > 0 && !is_aead {
+        vm.emit_warning(&format!(
+            "{}(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended",
+            fname
+        ));
+    }
+    // php_openssl_validate_iv()
+    let iv_vec: Vec<u8> = if is_aead {
+        if !aead_ivlen_ok(spec, iv.len()) {
+            vm.emit_warning(&format!(
+                "{}(): Setting of IV length for AEAD mode failed",
+                fname
+            ));
+            return None;
+        }
+        iv.to_vec()
+    } else if iv.len() == max_iv_len {
+        iv.to_vec()
+    } else if iv.is_empty() {
+        vec![0u8; max_iv_len]
+    } else if iv.len() < max_iv_len {
+        vm.emit_warning(&format!(
+            "{}(): IV passed is only {} bytes long, cipher expects an IV of precisely {} bytes, padding with \\0",
+            fname,
+            iv.len(),
+            max_iv_len
+        ));
+        let mut v = iv.to_vec();
+        v.resize(max_iv_len, 0);
+        v
+    } else {
+        vm.emit_warning(&format!(
+            "{}(): IV passed is {} bytes long which is longer than the {} expected by selected cipher, truncating",
+            fname,
+            iv.len(),
+            max_iv_len
+        ));
+        iv[..max_iv_len].to_vec()
+    };
+    // Tag length: always for OCB, when encrypting for CCM.
+    let mut eff_tag_len: usize = if is_ccm { 12 } else { 16 };
+    if is_ocb || (enc && is_ccm) {
+        let ok = if is_ocb {
+            (0..=16).contains(&tag_len)
+        } else {
+            (4..=16).contains(&tag_len) && tag_len % 2 == 0
+        };
+        if !ok {
+            vm.emit_warning(&format!(
+                "{}(): Setting tag length for AEAD cipher failed",
+                fname
+            ));
+            return None;
+        }
+        eff_tag_len = tag_len as usize;
+    }
+    let mut tag_set: Option<Vec<u8>> = None;
+    if !enc {
+        if let Some(t) = tag_in.filter(|t| !t.is_empty()) {
+            if !is_aead {
+                vm.emit_warning(&format!(
+                    "{}(): The tag cannot be used because the cipher algorithm does not support AEAD",
+                    fname
+                ));
+            } else {
+                let ok = if is_ccm {
+                    t.len() % 2 == 0 && (4..=16).contains(&t.len())
+                } else if is_ocb {
+                    t.len() == eff_tag_len
+                } else {
+                    t.len() <= 16
+                };
+                if !ok {
+                    vm.emit_warning(&format!(
+                        "{}(): Setting tag for AEAD cipher decryption failed",
+                        fname
+                    ));
+                    return None;
+                }
+                if is_ccm {
+                    eff_tag_len = t.len();
+                }
+                tag_set = Some(t.to_vec());
+            }
+        }
+    }
+    // Check and set the key.
+    let key_len = spec.key_len;
+    let dont_pad = options & OPENSSL_DONT_ZERO_PAD_KEY != 0;
+    let key: Vec<u8> = if key_len > password.len() {
+        if dont_pad && !spec.var_key {
+            err::evp_invalid_key_length();
+            vm.emit_warning(&format!(
+                "{}(): Key length cannot be set for the cipher algorithm",
+                fname
+            ));
+            return None;
+        }
+        if dont_pad {
+            password.to_vec()
+        } else {
+            let mut k = password.to_vec();
+            k.resize(key_len, 0);
+            k
+        }
+    } else if password.len() > key_len {
+        if spec.var_key {
+            password.to_vec()
+        } else {
+            err::evp_invalid_key_length();
+            password[..key_len].to_vec()
+        }
+    } else {
+        password.to_vec()
+    };
+    let padding = options & OPENSSL_ZERO_PADDING == 0;
+
+    // AEAD decryption without a tag cannot verify.
+    if !enc && is_aead && tag_set.is_none() {
+        return None;
+    }
+    let op = cipher::Op {
+        spec,
+        key: &key,
+        iv: &iv_vec,
+        enc,
+        padding,
+        aad,
+        tag_len: eff_tag_len,
+        tag: tag_set.as_deref(),
+    };
+    let (out, full_tag) = match cipher::run(&op, data) {
+        Ok(r) => r,
+        Err(cipher::Fail::DataLength) => {
+            vm.emit_warning(&format!("{}(): Setting of data length failed", fname));
+            return None;
+        }
+        Err(cipher::Fail::Silent) => return None,
+    };
+    if !enc {
+        return Some((out, None));
+    }
+    if is_aead && tag_wanted {
+        let ok = if is_ccm || is_ocb {
+            tag_len >= 0 && tag_len as usize == eff_tag_len && eff_tag_len > 0
+        } else {
+            (1..=16).contains(&tag_len)
+        };
+        if !ok {
+            vm.emit_warning(&format!("{}(): Retrieving verification tag failed", fname));
+            return None;
+        }
+        let t = full_tag[..tag_len as usize].to_vec();
+        return Some((out, Some(t)));
+    } else if is_aead && !tag_wanted {
+        vm.emit_warning(&format!(
+            "{}(): A tag should be provided when using AEAD mode",
+            fname
+        ));
+        return None;
+    }
+    Some((out, None))
+}
+
+/// openssl_encrypt(data, cipher_algo, passphrase, options=0, iv="", &tag=null, aad="", tag_length=16)
 fn openssl_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let method_str = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let key = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let options = args.get(3).map(|v| v.to_long()).unwrap_or(0);
-    let iv = args
-        .get(4)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b""));
-
-    let method = match CipherMethod::parse(&method_str) {
-        Some(m) => m,
-        None => {
-            vm.emit_warning(&format!(
-                "openssl_encrypt(): Unknown cipher algorithm \"{}\"",
-                method_str
-            ));
-            return Ok(Value::False);
-        }
+    let f = "openssl_encrypt";
+    let data = zpp::str(vm, args, 0, f, "data")?;
+    let method = zpp::str(vm, args, 1, f, "cipher_algo")?;
+    let password = zpp::str(vm, args, 2, f, "passphrase")?;
+    let options = if zpp::is_passed(args, 3) {
+        zpp::long(vm, args, 3, f, "options")?
+    } else {
+        0
     };
-
-    // Warn if IV is wrong length (but still proceed)
-    let iv_len = method.iv_length();
-    if iv_len > 0 && iv.as_bytes().len() != iv_len {
-        if iv.as_bytes().is_empty() {
-            vm.emit_warning("openssl_encrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended");
-        } else if iv.as_bytes().len() < iv_len {
-            vm.emit_warning(&format!(
-                "openssl_encrypt(): IV passed is only {} bytes long, cipher expects an IV of precisely {} bytes, padding with \\0",
-                iv.as_bytes().len(),
-                iv_len
-            ));
-        } else if iv.as_bytes().len() > iv_len {
-            vm.emit_warning(&format!(
-                "openssl_encrypt(): IV passed is {} bytes long which is longer than the {} expected by selected cipher, truncating",
-                iv.as_bytes().len(),
-                iv_len
-            ));
-        }
-    }
-
-    let raw_data = options & OPENSSL_RAW_DATA != 0;
-    let zero_padding = options & OPENSSL_ZERO_PADDING != 0;
-
-    match modes::encrypt(
-        &method,
+    let iv = if zpp::is_passed(args, 4) {
+        zpp::str(vm, args, 4, f, "iv")?
+    } else {
+        PhpString::empty()
+    };
+    let aad = if zpp::is_passed(args, 6) {
+        zpp::str(vm, args, 6, f, "aad")?
+    } else {
+        PhpString::empty()
+    };
+    let tag_len = if zpp::is_passed(args, 7) {
+        zpp::long(vm, args, 7, f, "tag_length")?
+    } else {
+        16
+    };
+    let tag_given = matches!(args.get(5), Some(Value::Reference(_)));
+    match php_openssl_cipher(
+        vm,
+        true,
         data.as_bytes(),
-        key.as_bytes(),
+        &method.to_string_lossy(),
+        password.as_bytes(),
+        options,
         iv.as_bytes(),
-        zero_padding,
+        tag_given,
+        None,
+        tag_len,
+        aad.as_bytes(),
     ) {
-        Ok(encrypted) => {
-            if raw_data {
-                Ok(Value::String(PhpString::from_vec(encrypted)))
+        Some((out, tag)) => {
+            if tag_given {
+                zpp::set_ref(args, 5, tag.map(zpp::bytes).unwrap_or(Value::Null));
+            }
+            if options & OPENSSL_RAW_DATA != 0 {
+                Ok(zpp::bytes(out))
             } else {
-                Ok(Value::String(PhpString::from_string(base64_encode(
-                    &encrypted,
-                ))))
+                Ok(Value::String(PhpString::from_string(base64_encode(&out))))
             }
         }
-        Err(e) => {
-            vm.emit_warning(&format!("openssl_encrypt(): {}", e));
-            Ok(Value::False)
-        }
+        None => Ok(Value::False),
     }
 }
 
-/// openssl_decrypt(data, cipher_method, key, options=0, iv="", tag, aad)
+/// openssl_decrypt(data, cipher_algo, passphrase, options=0, iv="", tag=null, aad="")
 fn openssl_decrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data_val = args.first().unwrap_or(&Value::Null).to_php_string();
-    let method_str = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let key = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let options = args.get(3).map(|v| v.to_long()).unwrap_or(0);
-    let iv = args
-        .get(4)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b""));
-
-    let method = match CipherMethod::parse(&method_str) {
-        Some(m) => m,
-        None => {
-            vm.emit_warning(&format!(
-                "openssl_decrypt(): Unknown cipher algorithm \"{}\"",
-                method_str
-            ));
-            return Ok(Value::False);
-        }
-    };
-
-    let raw_data = options & OPENSSL_RAW_DATA != 0;
-    let zero_padding = options & OPENSSL_ZERO_PADDING != 0;
-
-    // If not raw data, base64-decode the input first
-    let cipher_bytes = if raw_data {
-        data_val.as_bytes().to_vec()
+    let f = "openssl_decrypt";
+    let data = zpp::str(vm, args, 0, f, "data")?;
+    let method = zpp::str(vm, args, 1, f, "cipher_algo")?;
+    let password = zpp::str(vm, args, 2, f, "passphrase")?;
+    let options = if zpp::is_passed(args, 3) {
+        zpp::long(vm, args, 3, f, "options")?
     } else {
-        match base64_decode(&data_val.to_string_lossy()) {
-            Some(decoded) => decoded,
-            None => {
-                vm.emit_warning("openssl_decrypt(): Failed to base64 decode the input");
-                return Ok(Value::False);
-            }
-        }
+        0
     };
-
-    if cipher_bytes.is_empty() {
-        // PHP returns empty string for empty input in some modes
-        return Ok(Value::String(PhpString::from_bytes(b"")));
+    let iv = if zpp::is_passed(args, 4) {
+        zpp::str(vm, args, 4, f, "iv")?
+    } else {
+        PhpString::empty()
+    };
+    let tag = zpp::str_nullable(vm, args, 5, f, "tag")?;
+    let aad = if zpp::is_passed(args, 6) {
+        zpp::str(vm, args, 6, f, "aad")?
+    } else {
+        PhpString::empty()
+    };
+    if method.is_empty() {
+        return Err(zpp::must_not_be_empty(vm, f, 2, "cipher_algo"));
     }
-
-    // Warn if IV is wrong length
-    let iv_len = method.iv_length();
-    if iv_len > 0 && iv.as_bytes().len() != iv_len {
-        if iv.as_bytes().is_empty() {
-            vm.emit_warning("openssl_decrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended");
-        } else if iv.as_bytes().len() < iv_len {
-            vm.emit_warning(&format!(
-                "openssl_decrypt(): IV passed is only {} bytes long, cipher expects an IV of precisely {} bytes, padding with \\0",
-                iv.as_bytes().len(),
-                iv_len
-            ));
-        } else if iv.as_bytes().len() > iv_len {
-            vm.emit_warning(&format!(
-                "openssl_decrypt(): IV passed is {} bytes long which is longer than the {} expected by selected cipher, truncating",
-                iv.as_bytes().len(),
-                iv_len
-            ));
-        }
-    }
-
-    match modes::decrypt(
-        &method,
-        &cipher_bytes,
-        key.as_bytes(),
+    let tag_len = tag.as_ref().map(|t| t.len() as i64).unwrap_or(0);
+    match php_openssl_cipher(
+        vm,
+        false,
+        data.as_bytes(),
+        &method.to_string_lossy(),
+        password.as_bytes(),
+        options,
         iv.as_bytes(),
-        zero_padding,
+        false,
+        tag.as_ref().map(|t| t.as_bytes()),
+        tag_len,
+        aad.as_bytes(),
     ) {
-        Ok(decrypted) => Ok(Value::String(PhpString::from_vec(decrypted))),
-        Err(e) => {
-            vm.emit_warning(&format!("openssl_decrypt(): {}", e));
-            Ok(Value::False)
-        }
+        Some((out, _)) => Ok(zpp::bytes(out)),
+        None => Ok(Value::False),
     }
 }
 
-/// openssl_random_pseudo_bytes(length, &strong_result)
+/// openssl_random_pseudo_bytes(int $length, &$strong_result = null): string
 fn openssl_random_pseudo_bytes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let length = args.first().map(|v| v.to_long()).unwrap_or(0);
-    if length < 0 {
-        vm.emit_warning("openssl_random_pseudo_bytes(): Length must be greater than or equal to 0");
-        return Ok(Value::False);
+    let f = "openssl_random_pseudo_bytes";
+    let length = zpp::long(vm, args, 0, f, "length")?;
+    if length <= 0 {
+        zpp::set_ref(args, 1, Value::False);
+        return Err(zpp::arg_value_error(
+            vm,
+            f,
+            1,
+            "length",
+            "must be greater than 0",
+        ));
     }
-    if length == 0 {
-        return Ok(Value::String(PhpString::from_bytes(b"")));
+    if length > i32::MAX as i64 {
+        zpp::set_ref(args, 1, Value::False);
+        return Err(zpp::arg_value_error(
+            vm,
+            f,
+            1,
+            "length",
+            &format!("must be less than or equal to {}", i32::MAX),
+        ));
     }
-
-    let len = length as usize;
-    let mut buf = vec![0u8; len];
-
-    // Read from /dev/urandom
-    let success = read_urandom(&mut buf);
-
-    // Note: PHP's openssl_random_pseudo_bytes sets the second arg (&$strong_result)
-    // by reference. Since goro-rs doesn't support by-ref args in builtins yet,
-    // we just return the bytes and ignore the strong_result parameter.
-
-    if success {
-        Ok(Value::String(PhpString::from_vec(buf)))
-    } else {
-        Ok(Value::False)
-    }
+    let mut buf = vec![0u8; length as usize];
+    use purecrypto::rng::RngCore;
+    purecrypto::rng::OsRng.fill_bytes(&mut buf);
+    zpp::set_ref(args, 1, Value::True);
+    Ok(zpp::bytes(buf))
 }
 
-/// Read random bytes from /dev/urandom
-fn read_urandom(buf: &mut [u8]) -> bool {
-    use std::fs::File;
-    use std::io::Read;
-    match File::open("/dev/urandom") {
-        Ok(mut f) => f.read_exact(buf).is_ok(),
-        Err(_) => {
-            // Fallback: use a simple PRNG seeded from time
-            // This is NOT cryptographically secure
-            use std::time::SystemTime;
-            let seed = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let mut state = seed;
-            for byte in buf.iter_mut() {
-                state = state
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                *byte = (state >> 33) as u8;
-            }
-            true
-        }
-    }
-}
-
-/// openssl_digest(data, digest_algo, binary=false)
+/// openssl_digest(string $data, string $digest_algo, bool $binary = false): string|false
 fn openssl_digest(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let algo = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let binary = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-
-    let algo_lower = algo.to_ascii_lowercase();
-    match compute_digest(&algo_lower, data.as_bytes()) {
-        Some(digest) => {
+    let f = "openssl_digest";
+    let data = zpp::str(vm, args, 0, f, "data")?;
+    let algo = zpp::str(vm, args, 1, f, "digest_algo")?;
+    let binary = if zpp::is_passed(args, 2) {
+        zpp::bool(vm, args, 2, f, "binary")?
+    } else {
+        false
+    };
+    match digest::Md::by_name(&algo.to_string_lossy()) {
+        Some(md) => {
+            let d = md.digest(data.as_bytes());
             if binary {
-                Ok(Value::String(PhpString::from_vec(digest)))
+                Ok(zpp::bytes(d))
             } else {
-                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                Ok(Value::String(PhpString::from_string(hex)))
+                Ok(Value::String(PhpString::from_string(hex_lower(&d))))
             }
         }
         None => {
-            vm.emit_warning(&format!(
-                "openssl_digest(): Unknown digest algorithm \"{}\"",
-                algo
-            ));
+            vm.emit_warning(&format!("{}(): Unknown digest algorithm", f));
             Ok(Value::False)
         }
     }
 }
 
-/// openssl_get_cipher_methods(aliases=false)
-fn openssl_get_cipher_methods(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-    for &method in CIPHER_METHODS {
-        arr.push(Value::String(PhpString::from_string(method.to_string())));
-    }
-    // Also add uppercase variants as "aliases"
-    let aliases = _args.first().map(|v| v.is_truthy()).unwrap_or(false);
-    if aliases {
-        for &method in CIPHER_METHODS {
-            arr.push(Value::String(PhpString::from_string(
-                method.to_ascii_uppercase(),
-            )));
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+pub(crate) fn hex_lower(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// openssl_cipher_iv_length(cipher_method)
+pub(crate) fn string_list(items: impl IntoIterator<Item = String>) -> Value {
+    let mut arr = PhpArray::new();
+    for s in items {
+        arr.push(Value::String(PhpString::from_string(s)));
+    }
+    Value::Array(Rc::new(RefCell::new(arr)))
+}
+
+/// openssl_get_cipher_methods(bool $aliases = false): array
+fn openssl_get_cipher_methods(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let f = "openssl_get_cipher_methods";
+    let aliases = if zpp::is_passed(args, 0) {
+        zpp::bool(vm, args, 0, f, "aliases")?
+    } else {
+        false
+    };
+    Ok(string_list(cipher::method_names(aliases)))
+}
+
+fn cipher_len_fn(vm: &mut Vm, args: &[Value], f: &str, key: bool) -> Result<Value, VmError> {
+    let method = zpp::str(vm, args, 0, f, "cipher_algo")?;
+    if method.is_empty() {
+        return Err(zpp::must_not_be_empty(vm, f, 1, "cipher_algo"));
+    }
+    match cipher::by_name(&method.to_string_lossy()) {
+        Some(spec) => Ok(Value::Long(
+            if key { spec.key_len } else { spec.iv_len } as i64
+        )),
+        None => {
+            vm.emit_warning(&format!("{}(): Unknown cipher algorithm", f));
+            Ok(Value::False)
+        }
+    }
+}
+
 fn openssl_cipher_iv_length(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let method_str = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    match CipherMethod::parse(&method_str) {
-        Some(method) => Ok(Value::Long(method.iv_length() as i64)),
-        None => {
-            vm.emit_warning(&format!(
-                "openssl_cipher_iv_length(): Unknown cipher algorithm \"{}\"",
-                method_str
-            ));
-            Ok(Value::False)
-        }
-    }
+    cipher_len_fn(vm, args, "openssl_cipher_iv_length", false)
 }
 
-/// openssl_cipher_key_length(cipher_method)
 fn openssl_cipher_key_length(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let method_str = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    match CipherMethod::parse(&method_str) {
-        Some(method) => Ok(Value::Long(method.key_length() as i64)),
-        None => {
-            vm.emit_warning(&format!(
-                "openssl_cipher_key_length(): Unknown cipher algorithm \"{}\"",
-                method_str
-            ));
-            Ok(Value::False)
-        }
-    }
+    cipher_len_fn(vm, args, "openssl_cipher_key_length", true)
 }
 
-/// openssl_get_md_methods(aliases=false)
-fn openssl_get_md_methods(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-    for &method in DIGEST_METHODS {
-        arr.push(Value::String(PhpString::from_string(method.to_string())));
-    }
-    let aliases = _args.first().map(|v| v.is_truthy()).unwrap_or(false);
-    if aliases {
-        // Add common aliases
-        let alias_list = ["md5", "sha1", "sha256", "sha384", "sha512"];
-        for alias in &alias_list {
-            arr.push(Value::String(PhpString::from_string(
-                alias.to_ascii_uppercase(),
-            )));
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+/// openssl_get_md_methods(bool $aliases = false): array
+fn openssl_get_md_methods(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let f = "openssl_get_md_methods";
+    let aliases = if zpp::is_passed(args, 0) {
+        zpp::bool(vm, args, 0, f, "aliases")?
+    } else {
+        false
+    };
+    let list = if aliases {
+        digest::MD_METHODS_ALIASES
+    } else {
+        digest::MD_METHODS
+    };
+    Ok(string_list(list.iter().map(|s| s.to_string())))
 }
 
-/// openssl_error_string()
+/// openssl_error_string(): string|false
 fn openssl_error_string(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let msg = OPENSSL_ERROR_QUEUE.with(|q| q.borrow_mut().pop_front());
-    match msg {
+    match err::pop() {
         Some(s) => Ok(Value::String(PhpString::from_string(s))),
         None => Ok(Value::False),
     }
 }
 
 // ── Stub implementations for commonly tested but unimplemented openssl functions ──
-
-fn openssl_stub_false(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-
-fn openssl_stub_long_neg1(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(-1))
-}
 
 fn openssl_get_cert_locations_stub(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = goro_core::array::PhpArray::new();
