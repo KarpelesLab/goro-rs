@@ -6344,7 +6344,7 @@ impl Vm {
             let has_destruct = self
                 .classes
                 .get(&class_lower)
-                .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+                .map(|c| c.methods.contains_key(b"__destruct".as_slice()))
                 .unwrap_or(false);
             if has_destruct {
                 // Avoid double-registration: check it's not already tracked.
@@ -7333,7 +7333,7 @@ impl Vm {
         let has_destruct = self
             .classes
             .get(&class_lower)
-            .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+            .map(|c| c.methods.contains_key(b"__destruct".as_slice()))
             .unwrap_or(false);
         if has_destruct
             && !self
@@ -8287,7 +8287,7 @@ impl Vm {
             let mut cur: Vec<u8> = class_name.to_vec();
             for _ in 0..50 {
                 if let Some(ce) = self.classes.get(&cur) {
-                    if ce.methods.contains_key(&b"__tostring".to_vec()) {
+                    if ce.methods.contains_key(b"__tostring".as_slice()) {
                         return true;
                     }
                     match &ce.parent {
@@ -19205,7 +19205,7 @@ impl Vm {
                         let has_invoke = self
                             .classes
                             .get(&class_lower)
-                            .map(|c| c.methods.contains_key(&b"__invoke".to_vec()))
+                            .map(|c| c.methods.contains_key(b"__invoke".as_slice()))
                             .unwrap_or(false);
                         if has_invoke {
                             let mut func_name = class_name_orig;
@@ -35352,7 +35352,7 @@ impl Vm {
                             let has_isset = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__isset".as_slice()))
                                 .unwrap_or(false);
                             let state = obj.borrow().get_property(b"__lazy_state");
                             let is_proxy =
@@ -35410,7 +35410,7 @@ impl Vm {
                                     let has_isset = self
                                         .classes
                                         .get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                        .map(|c| c.methods.contains_key(b"__isset".as_slice()))
                                         .unwrap_or(false);
                                     let prop_declared = self
                                         .classes
@@ -35625,7 +35625,7 @@ impl Vm {
                             let has_isset = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__isset".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__isset".as_slice()))
                                 .unwrap_or(false);
                             let isset_obj_id = obj.borrow().object_id;
                             let isset_guard_key =
@@ -36027,7 +36027,7 @@ impl Vm {
                             let has_unset = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__unset".as_slice()))
                                 .unwrap_or(false);
                             let state = obj.borrow().get_property(b"__lazy_state");
                             let is_proxy =
@@ -36098,7 +36098,7 @@ impl Vm {
                                     let has_unset = self
                                         .classes
                                         .get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                        .map(|c| c.methods.contains_key(b"__unset".as_slice()))
                                         .unwrap_or(false);
                                     let prop_declared = self
                                         .classes
@@ -36167,7 +36167,7 @@ impl Vm {
                                 .collect();
                             self.classes
                                 .get(&cl)
-                                .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__unset".as_slice()))
                                 .unwrap_or(false)
                         } else {
                             false
@@ -36455,7 +36455,7 @@ impl Vm {
                             let has_unset = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__unset".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__unset".as_slice()))
                                 .unwrap_or(false);
                             // If there's an avis error and we're already inside a magic method,
                             // throw the error instead of recursing into __unset again
@@ -43774,18 +43774,27 @@ impl Vm {
                         // (a private property redeclared by a subclass). Such private
                         // slots must be stored under a mangled key so parent and child
                         // versions coexist.
-                        let mut name_counts: crate::fxhash::FxHashMap<&[u8], usize> =
-                            Default::default();
-                        for p in class.properties.iter().filter(|p| !p.is_static) {
-                            *name_counts.entry(p.name.as_slice()).or_insert(0) += 1;
-                        }
-                        let props: Vec<_> = class
-                            .properties
-                            .iter()
-                            .filter(|p| !p.is_static)
+                        // (A pairwise scan for the usual handful of properties;
+                        // a map only for large classes.)
+                        let instance_props = || class.properties.iter().filter(|p| !p.is_static);
+                        let name_counts: Option<crate::fxhash::FxHashMap<&[u8], usize>> =
+                            if class.properties.len() > 32 {
+                                let mut m: crate::fxhash::FxHashMap<&[u8], usize> =
+                                    Default::default();
+                                for p in instance_props() {
+                                    *m.entry(p.name.as_slice()).or_insert(0) += 1;
+                                }
+                                Some(m)
+                            } else {
+                                None
+                            };
+                        let declared_twice = |name: &[u8]| match &name_counts {
+                            Some(m) => m.get(name).copied().unwrap_or(0) > 1,
+                            None => instance_props().filter(|q| q.name == name).nth(1).is_some(),
+                        };
+                        let props: Vec<_> = instance_props()
                             .map(|p| {
-                                let conflicted =
-                                    name_counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
+                                let conflicted = declared_twice(p.name.as_slice());
                                 let key = if conflicted && p.visibility == Visibility::Private {
                                     let decl_lower: Vec<u8> = p
                                         .declaring_class
@@ -43997,14 +44006,14 @@ impl Vm {
                     let has_destruct = self
                         .classes
                         .get(&name_lower)
-                        .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+                        .map(|c| c.methods.contains_key(b"__destruct".as_slice()))
                         .unwrap_or(false);
                     if has_destruct {
                         // Check if there's a constructor - if so, mark as pending
                         let has_ctor = self
                             .classes
                             .get(&name_lower)
-                            .map(|c| c.methods.contains_key(&b"__construct".to_vec()))
+                            .map(|c| c.methods.contains_key(b"__construct".as_slice()))
                             .unwrap_or(false);
                         // Without a constructor the flag is cleared once the
                         // (empty) constructor call completes: `new C(f(), yield)`
@@ -44277,7 +44286,7 @@ impl Vm {
                                 .collect();
                             self.classes
                                 .get(&cl)
-                                .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                 .unwrap_or(false)
                         } else {
                             false
@@ -44339,7 +44348,7 @@ impl Vm {
                                 let has_get = self
                                     .classes
                                     .get(&class_lower)
-                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                     .unwrap_or(false);
                                 let is_declared = self
                                     .classes
@@ -44467,7 +44476,7 @@ impl Vm {
                                     let has_get = self
                                         .classes
                                         .get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                        .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                         .unwrap_or(false);
                                     let prop_declared = self
                                         .classes
@@ -44780,7 +44789,7 @@ impl Vm {
                             let has_get = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                 .unwrap_or(false);
                             // Don't recursively dispatch __get when access is denied from inside
                             // __get itself (PHP raises the Error directly).
@@ -44955,7 +44964,7 @@ impl Vm {
                                 let has_get = self
                                     .classes
                                     .get(&class_lower)
-                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                     .unwrap_or(false);
                                 // UNSET fetches and containers of object writes create
                                 // a missing property as null (no array vivification).
@@ -45216,7 +45225,7 @@ impl Vm {
                                 let has_get = self
                                     .classes
                                     .get(&class_lower)
-                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                     .unwrap_or(false);
                                 let get_obj_id = obj.borrow().object_id;
                                 let get_guard_key =
@@ -45582,7 +45591,7 @@ impl Vm {
                                 .collect();
                             self.classes
                                 .get(&cl)
-                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                 .unwrap_or(false)
                         } else {
                             false
@@ -45670,7 +45679,7 @@ impl Vm {
                             let has_set = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                 .unwrap_or(false);
                             let state = obj.borrow().get_property(b"__lazy_state");
                             let is_proxy = matches!(
@@ -45772,7 +45781,7 @@ impl Vm {
                                     let has_set = self
                                         .classes
                                         .get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                        .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                         .unwrap_or(false);
                                     let prop_declared = self
                                         .classes
@@ -46489,7 +46498,7 @@ impl Vm {
                             let has_set = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                 .unwrap_or(false);
                             let should_try_set = if is_avis_error {
                                 // Asymmetric visibility: fall through to __set only if:
@@ -46600,7 +46609,7 @@ impl Vm {
                             let has_set = self
                                 .classes
                                 .get(&class_lower)
-                                .map(|c| c.methods.contains_key(&b"__set".to_vec()))
+                                .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                 .unwrap_or(false);
                             let obj_id_for_guard = obj.borrow().object_id;
                             let guard_key = (obj_id_for_guard, prop_name.as_bytes().to_vec(), 2u8);
@@ -48384,7 +48393,7 @@ impl Vm {
             let user_tostring = self
                 .classes
                 .get(&cl)
-                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .map(|c| c.methods.contains_key(b"__tostring".as_slice()))
                 .unwrap_or(false);
             if !user_tostring {
                 if let Some(v) = crate::value::native_cast(o, 3) {
@@ -48402,7 +48411,7 @@ impl Vm {
             let has_tostring = self
                 .classes
                 .get(&class_lower)
-                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .map(|c| c.methods.contains_key(b"__tostring".as_slice()))
                 .unwrap_or(false);
             if has_tostring {
                 let method = self
@@ -48743,7 +48752,7 @@ impl Vm {
             let has_tostring = self
                 .classes
                 .get(&class_lower)
-                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .map(|c| c.methods.contains_key(b"__tostring".as_slice()))
                 .unwrap_or(false);
             // Also check built-in toString support (throwable, reflection)
             let is_throwable = class_lower == b"exception"
