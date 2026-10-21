@@ -2139,7 +2139,7 @@ impl Vm {
                 Value::String(s) => {
                     let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                     if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                        let _ = self.execute_fn(&user_fn, call_args);
+                        if let Err(e) = self.execute_fn(&user_fn, call_args) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
                     } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
                         let _ = builtin(self, &call_args);
                     }
@@ -2155,7 +2155,7 @@ impl Vm {
                             let captured: Vec<Value> = vals[1..].to_vec();
                             let mut combined_args = captured;
                             combined_args.extend(call_args);
-                            let _ = self.execute_fn(&user_fn, combined_args);
+                            if let Err(e) = self.execute_fn(&user_fn, combined_args) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
                         }
                     }
                 }
@@ -2168,7 +2168,7 @@ impl Vm {
                     if let Some(class) = self.classes.get(&class_lower_cb).cloned() {
                         if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
                             let op = method.op_array.clone();
-                            let _ = self.execute_fn_with_named_args(&op, call_args, vec![], Some(Value::Object(obj.clone())));
+                            if let Err(e) = self.execute_fn_with_named_args(&op, call_args, vec![], Some(Value::Object(obj.clone()))) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
                         }
                     }
                 }
@@ -4163,6 +4163,11 @@ impl Vm {
     }
 
     pub fn execute_fn(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
+        // Callers often pass just the arguments; make room for all locals.
+        let mut cvs = cvs;
+        if cvs.len() < op_array.cv_names.len() {
+            cvs.resize(op_array.cv_names.len(), Value::Undef);
+        }
         // A function/closure invoked imperatively (autoload, usort/array_map
         // callbacks, __invoke, etc.) runs in its own scope, NOT global scope.
         // If is_global_scope stayed true, an include inside the callback would
@@ -30128,11 +30133,31 @@ impl Vm {
                             // when resolving a parent during class declaration).
                             if !self.classes.contains_key(&parent_lower)
                                 && !self.is_known_builtin_class(&parent_lower)
+                                && !variance::is_linking(&parent_lower)
                             {
+                                variance::push_linking_ex(&class, false);
                                 self.try_autoload_class(parent_name);
+                                variance::pop_linking();
+                                if let Some(e) = variance::take_autoload_fatal() { return Err(e); }
+                                // An exception thrown by the autoloader propagates.
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    let msg = self.current_exception.as_ref().map(|e| {
+                                        if let Value::Object(o) = e {
+                                            let ob = o.borrow();
+                                            format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
+                                        } else { "Uncaught exception".to_string() }
+                                    }).unwrap_or_default();
+                                    return Err(VmError { message: msg, line: op.line });
+                                }
                             }
                             if !self.classes.contains_key(&parent_lower)
                                 && !self.is_known_builtin_class(&parent_lower)
+                                && variance::linking_entry(&parent_lower).is_none()
                             {
                                 // Parent class still missing after autoload attempt:
                                 // PHP raises a fatal "Class \"X\" not found".
@@ -30166,7 +30191,7 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
-                            if let Some(parent) = self.classes.get(&parent_lower).cloned() {
+                            if let Some(parent) = self.classes.get(&parent_lower).cloned().or_else(|| variance::linking_entry(&parent_lower)) {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
                                     let child_display = String::from_utf8_lossy(&class.name).to_string();
@@ -30853,7 +30878,7 @@ impl Vm {
                             if !self.classes.contains_key(&iface_lower)
                                 && !self.is_known_builtin_class(&iface_lower)
                             {
-                                self.try_autoload_class(iface_name);
+                                self.try_autoload_class(iface_name); if let Some(e) = variance::take_autoload_fatal() { return Err(e); }
                             }
                             if let Some(iface) = self.classes.get(&iface_lower).cloned() {
                                 // Check that we're implementing an interface, not a class
@@ -31169,7 +31194,7 @@ impl Vm {
                             }
                             // Try autoloading if trait not found
                             if !self.classes.contains_key(&trait_lower) {
-                                self.try_autoload_class(trait_name);
+                                self.try_autoload_class(trait_name); if let Some(e) = variance::take_autoload_fatal() { return Err(e); }
                             }
                             if let Some(trait_def) = self.classes.get(&trait_lower) {
                                 if !trait_def.is_trait {
@@ -32987,7 +33012,7 @@ impl Vm {
 
                     // Try autoload if class not found
                     if !self.classes.contains_key(&name_lower) {
-                        self.try_autoload_class(class_name.as_bytes());
+                        self.try_autoload_class(class_name.as_bytes()); if let Some(e) = variance::take_autoload_fatal() { return Err(e); }
                     }
                     // After autoload, if the class still doesn't exist (and isn't a
                     // known built-in) PHP throws an Error: `Class "X" not found`.

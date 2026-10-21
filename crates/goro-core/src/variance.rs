@@ -170,7 +170,7 @@ impl LinkClass {
 thread_local! {
     /// Classes whose declaration is in progress (visible to variance checks of
     /// classes loaded while they link, like PHP's unlinked class table entries).
-    static LINKING: RefCell<Vec<LinkClass>> = RefCell::new(Vec::new());
+    static LINKING: RefCell<Vec<(ClassEntry, bool)>> = RefCell::new(Vec::new());
 }
 
 thread_local! {
@@ -200,8 +200,43 @@ pub(crate) fn take_deferred(name_lower: &[u8]) -> bool {
     })
 }
 
+/// Push a class being linked. `nearly_linked`: inheritance is done (only
+/// variance obligations remain), so it can already serve as a parent.
+pub(crate) fn push_linking_ex(ce: &ClassEntry, nearly_linked: bool) {
+    LINKING.with(|l| l.borrow_mut().push((ce.clone(), nearly_linked)));
+}
+
+/// Whether `name_lower` is being linked (registered but unlinked in PHP terms).
+pub(crate) fn is_linking(name_lower: &[u8]) -> bool {
+    LINKING.with(|s| s.borrow().iter().any(|(c, _)| lower(&c.name) == name_lower))
+}
+
 pub(crate) fn push_linking(ce: &ClassEntry) {
-    LINKING.with(|l| l.borrow_mut().push(LinkClass::from_entry(ce)));
+    push_linking_ex(ce, true);
+}
+
+thread_local! {
+    /// A fatal (non-exception) error raised while running an autoloader.
+    static AUTOLOAD_FATAL: RefCell<Option<super::VmError>> = RefCell::new(None);
+}
+
+pub(crate) fn set_autoload_fatal(e: super::VmError) {
+    AUTOLOAD_FATAL.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.is_none() {
+            *f = Some(e);
+        }
+    });
+}
+
+pub(crate) fn take_autoload_fatal() -> Option<super::VmError> {
+    AUTOLOAD_FATAL.with(|f| f.borrow_mut().take())
+}
+
+/// A class whose linking is in progress (PHP's "nearly linked" class-table
+/// entry), usable as a parent by classes loaded meanwhile.
+pub(crate) fn linking_entry(name_lower: &[u8]) -> Option<ClassEntry> {
+    LINKING.with(|s| s.borrow().iter().rev().find(|(c, nl)| *nl && lower(&c.name) == name_lower).map(|(c, _)| c.clone()))
 }
 
 pub(crate) fn pop_linking() {
@@ -245,7 +280,7 @@ impl<'a> Ctx<'a> {
         if lower(&self.cur.name) == l {
             return Some(self.cur.clone());
         }
-        let linking = LINKING.with(|s| s.borrow().iter().rev().find(|c| lower(&c.name) == l).cloned());
+        let linking = LINKING.with(|s| s.borrow().iter().rev().find(|(c, _)| lower(&c.name) == l).map(|(c, _)| LinkClass::from_entry(c)));
         if linking.is_some() {
             return linking;
         }
