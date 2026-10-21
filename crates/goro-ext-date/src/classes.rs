@@ -100,6 +100,15 @@ fn clone_obj(vm: &mut Vm, o: &Obj) -> Obj {
     Rc::new(RefCell::new(n))
 }
 
+/// object_init_ex() refuses abstract classes
+fn check_instantiable(vm: &mut Vm, cls: &[u8]) -> R<()> {
+    let abstract_name = vm.classes.get(&cls.to_ascii_lowercase()).filter(|c| c.is_abstract).map(|c| c.name.clone());
+    if let Some(n) = abstract_name {
+        return Err(throw(vm, b"Error", &format!("Cannot instantiate abstract class {}", String::from_utf8_lossy(&n))));
+    }
+    Ok(())
+}
+
 fn cstr(b: &[u8]) -> String {
     let z = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..z]).into_owned()
@@ -232,10 +241,10 @@ fn initialize_from_ts_double(vm: &mut Vm, fname: &str, ts: f64) -> R<Time> {
 /// C's "%g" formatting
 pub fn fmt_g(v: f64) -> String {
     if v.is_nan() {
-        return "nan".into();
+        return "NAN".into();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "inf".into() } else { "-inf".into() };
+        return if v > 0.0 { "INF".into() } else { "-INF".into() };
     }
     if v == 0.0 {
         return if v.is_sign_negative() { "-0".into() } else { "0".into() };
@@ -456,36 +465,74 @@ fn date_from_hash(vm: &mut Vm, a: &PhpArray) -> R<Option<Time>> {
     }
 }
 
-fn restore_custom_props(o: &Obj, a: &PhpArray, internal: &[&[u8]]) {
+/// Find the declared visibility of a property: (is_private, is_protected, declaring class display name)
+fn prop_visibility(vm: &Vm, class_name: &[u8], prop: &[u8]) -> Option<(bool, bool, Vec<u8>)> {
+    let mut cur = class_name.to_ascii_lowercase();
+    for _ in 0..64 {
+        let ce = vm.classes.get(&cur)?;
+        if let Some(pd) = ce.properties.iter().find(|p| p.name == prop && !p.is_static) {
+            use goro_core::object::Visibility;
+            let decl = vm.classes.get(&pd.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| ce.name.clone());
+            return Some((pd.visibility == Visibility::Private, pd.visibility == Visibility::Protected, decl));
+        }
+        cur = ce.parent.clone()?.to_ascii_lowercase();
+    }
+    None
+}
+
+/// restore_custom_*_properties + update_property
+fn restore_custom_props(vm: &Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) {
     let mut ob = o.borrow_mut();
     for (k, v) in a.iter() {
         if let ArrayKey::String(name) = k {
             if matches!(v, Value::Reference(_)) || internal.contains(&name.as_bytes()) {
                 continue;
             }
-            // Mangled (non-public) names: strip the mangling prefix.
             let nb = name.as_bytes();
-            let key: Vec<u8> = if nb.first() == Some(&0) {
-                match nb[1..].iter().position(|&c| c == 0) {
-                    Some(p) => nb[p + 2..].to_vec(),
-                    None => nb.to_vec(),
+            if nb.first() == Some(&0) {
+                // Mangled (non-public) names
+                let p = match nb[1..].iter().position(|&c| c == 0) {
+                    Some(p) => p + 1,
+                    None => continue,
+                };
+                let cls = &nb[1..p];
+                let prop = nb[p + 1..].to_vec();
+                if cls != b"*" && !vm.classes.contains_key(&cls.to_ascii_lowercase()) {
+                    // update_property: unknown class -> ignored
+                    continue;
                 }
+                ob.set_property(prop, v.clone());
             } else {
-                nb.to_vec()
-            };
-            ob.set_property(key, v.clone());
+                ob.set_property(nb.to_vec(), v.clone());
+            }
         }
     }
 }
 
 /// add_common_properties: user properties of the object appended to an array
-fn add_common_props(o: &Obj, a: &mut PhpArray, internal: &[&[u8]]) {
+/// (with mangled names for non-public declared properties).
+fn add_common_props(vm: &Vm, o: &Obj, a: &mut PhpArray, internal: &[&[u8]]) {
     let ob = o.borrow();
     for (k, v) in &ob.properties {
         if k.starts_with(b"__") || internal.contains(&k.as_slice()) {
             continue;
         }
-        let key = ArrayKey::String(PhpString::from_vec(k.clone()));
+        let mangled = match prop_visibility(vm, &ob.class_name, k) {
+            Some((true, _, decl)) => {
+                let mut m = vec![0u8];
+                m.extend_from_slice(&decl);
+                m.push(0);
+                m.extend_from_slice(k);
+                m
+            }
+            Some((false, true, _)) => {
+                let mut m = b"\0*\0".to_vec();
+                m.extend_from_slice(k);
+                m
+            }
+            _ => k.clone(),
+        };
+        let key = ArrayKey::String(PhpString::from_vec(mangled));
         if a.get(&key).is_none() {
             a.set(key, v.clone());
         }
@@ -1048,7 +1095,7 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             for (k, v) in date_props(&t) {
                 a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
             }
-            add_common_props(o, &mut a, DT_INTERNAL);
+            add_common_props(vm, o, &mut a, DT_INTERNAL);
             Ok(arr_val(a))
         }
         b"__unserialize" => {
@@ -1059,7 +1106,7 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             match date_from_hash(vm, &ab)? {
                 Some(t) => {
                     date_set(o, &t);
-                    restore_custom_props(o, &ab, DT_INTERNAL);
+                    restore_custom_props(vm, o, &ab, DT_INTERNAL);
                     Ok(Value::Null)
                 }
                 None => Err(throw(vm, b"Error", &format!("Invalid serialization data for {} object", if immutable { "DateTimeImmutable" } else { "DateTime" }))),
@@ -1125,6 +1172,7 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
                 None => None,
             };
             let cls = called_or_base(vm);
+            check_instantiable(vm, &cls)?;
             match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
                 Some(t) => {
                     let o = new_object(vm, &cls);
@@ -1151,6 +1199,7 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
                 _ => return Err(type_err_class(vm, &f, 0, "timestamp", "int|float", &v)),
             };
             let cls = called_or_base(vm);
+            check_instantiable(vm, &cls)?;
             let o = new_object(vm, &cls);
             date_set(&o, &t);
             Ok(Value::Object(o))
@@ -1175,6 +1224,7 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
             let src = obj_arg(vm, &f, args, 0, "object", tn, ok, false)?.unwrap();
             let t = need_date(vm, &src)?;
             let cls = called_or_base(vm);
+            check_instantiable(vm, &cls)?;
             let o = new_object(vm, &cls);
             date_set(&o, &t);
             Ok(Value::Object(o))
@@ -1360,7 +1410,7 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             for (k, v) in tz_props(&z) {
                 a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
             }
-            add_common_props(o, &mut a, TZ_INTERNAL);
+            add_common_props(vm, o, &mut a, TZ_INTERNAL);
             Ok(arr_val(a))
         }
         b"__unserialize" => {
@@ -1371,7 +1421,7 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             match tz_from_hash(&ab) {
                 Some(z) => {
                     tz_set(o, &z);
-                    restore_custom_props(o, &ab, TZ_INTERNAL);
+                    restore_custom_props(vm, o, &ab, TZ_INTERNAL);
                     Ok(Value::Null)
                 }
                 None => Err(throw(vm, b"Error", "Invalid serialization data for DateTimeZone object")),
@@ -1524,7 +1574,7 @@ fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             for (k, v) in interval_props(&iv) {
                 a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
             }
-            add_common_props(o, &mut a, IV_INTERNAL);
+            add_common_props(vm, o, &mut a, IV_INTERNAL);
             Ok(arr_val(a))
         }
         b"__unserialize" => {
@@ -1535,7 +1585,7 @@ fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             if let Some(iv) = interval_from_hash(vm, &ab)? {
                 interval_set(o, &iv);
             }
-            restore_custom_props(o, &ab, IV_INTERNAL);
+            restore_custom_props(vm, o, &ab, IV_INTERNAL);
             Ok(Value::Null)
         }
         b"__wakeup" => {
@@ -1666,7 +1716,7 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             for (k, v) in period_props(vm, &p) {
                 a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
             }
-            add_common_props(o, &mut a, DP_INTERNAL);
+            add_common_props(vm, o, &mut a, DP_INTERNAL);
             Ok(arr_val(a))
         }
         b"__unserialize" => {
@@ -1675,11 +1725,13 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             let a = array_arg(vm, f, args, 0, "data")?;
             let ab = a.borrow().clone();
             let mut p = need_period(vm, o);
-            if !period_from_hash(vm, &mut p, &ab) {
+            let ok = period_from_hash(vm, &mut p, &ab);
+            // php_date_period_initialize_from_hash does no rollback on error
+            period_set(vm, o, &p);
+            if !ok {
                 return Err(throw(vm, b"Error", "Invalid serialization data for DatePeriod object"));
             }
-            period_set(vm, o, &p);
-            restore_custom_props(o, &ab, DP_INTERNAL);
+            restore_custom_props(vm, o, &ab, DP_INTERNAL);
             Ok(Value::Null)
         }
         b"__wakeup" => {
@@ -1771,6 +1823,7 @@ fn period_static(vm: &mut Vm, method: &[u8], called: &[u8], args: &[Value]) -> R
             let iso = str_arg(vm, f, args, 0, "specification", false)?.unwrap_or_default();
             let options = long_arg(vm, f, args, 1, "options", false)?.unwrap_or(0);
             let cls: Vec<u8> = if base_of(vm, called) == Some(Base::Period) { called.to_vec() } else { b"DatePeriod".to_vec() };
+            check_instantiable(vm, &cls)?;
             let o = new_object(vm, &cls);
             let mut p = PeriodObj::default();
             let rec = period_init_iso(vm, &mut p, b"DateTimeImmutable", &iso, f)?;

@@ -6128,19 +6128,22 @@ impl Compiler {
                     } => {
                         // $obj->prop op= $val
                         let obj = self.compile_expr(object)?;
-                        let prop_name = match &property.kind {
-                            ExprKind::Identifier(name) => name.clone(),
-                            _ => return Ok(val),
+                        // Dynamic names ($obj->$name op= $val) are evaluated once.
+                        let name_operand = match &property.kind {
+                            ExprKind::Identifier(name) => {
+                                let name_idx = self
+                                    .op_array
+                                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                                OperandType::Const(name_idx)
+                            }
+                            _ => self.compile_expr(property)?,
                         };
-                        let name_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(prop_name)));
 
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertyGetRW,
                             op1: obj,
-                            op2: OperandType::Const(name_idx),
+                            op2: name_operand,
                             result: OperandType::Tmp(read_tmp),
                             line: expr.span.line,
                         });
@@ -6173,7 +6176,7 @@ impl Compiler {
                             opcode: OpCode::PropertySet,
                             op1: obj,
                             op2: OperandType::Tmp(result_tmp),
-                            result: OperandType::Const(name_idx),
+                            result: name_operand,
                             line: expr.span.line,
                         });
                         Ok(OperandType::Tmp(result_tmp))

@@ -408,6 +408,9 @@ pub struct Vm {
         std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: std::collections::HashMap<Vec<u8>, NativeClassHandler>,
+    /// INI on-update validators keyed by directive name: (vm, new value, at_startup) -> accept.
+    /// A rejecting validator is responsible for emitting PHP's warning.
+    pub ini_validators: std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[u8], bool) -> bool>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -1292,6 +1295,7 @@ impl Vm {
             gmp_from_hex: None,
             object_construct_handlers: std::collections::HashMap::new(),
             native_class_handlers: std::collections::HashMap::new(),
+            ini_validators: std::collections::HashMap::new(),
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available

@@ -630,6 +630,12 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
             if let Some(eq) = line.find('=') {
                 let key = line[..eq].trim().to_string();
                 let mut value = line[eq + 1..].trim().to_string();
+                // In INI syntax an unquoted ';' starts a comment.
+                if !value.starts_with('"') && !value.starts_with('\'') {
+                    if let Some(sc) = value.find(';') {
+                        value = value[..sc].trim_end().to_string();
+                    }
+                }
                 // Strip surrounding quotes from INI values (e.g. "ISO-8859-1" -> ISO-8859-1)
                 if (value.starts_with('"') && value.ends_with('"'))
                     || (value.starts_with('\'') && value.ends_with('\''))
@@ -1195,6 +1201,11 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 if *n >= 0 && *n <= 1_000_000 {
                     vm.exception_string_param_max_len = *n as usize;
                 }
+            }
+        }
+        if let Some(validate) = vm.ini_validators.get(key.as_bytes()).copied() {
+            if !validate(&mut vm, value.as_bytes(), true) {
+                continue;
             }
         }
         vm.constants.insert(key.as_bytes().to_vec(), val);

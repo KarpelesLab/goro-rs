@@ -526,6 +526,22 @@ pub fn date_default_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     Ok(Value::True)
 }
 
+/// OnUpdate_date_timezone
+pub fn validate_date_timezone(vm: &mut Vm, value: &[u8], startup: bool) -> bool {
+    let s = String::from_utf8_lossy(value).into_owned();
+    if !value.contains(&0) && timezone_id_is_valid(&s) {
+        return true;
+    }
+    if startup {
+        vm.write_output(format!("\nWarning: PHP Startup: Invalid date.timezone value '{}', using 'UTC' instead in Unknown on line 0\n", s).as_bytes());
+    } else {
+        let current = vm.constants.get(b"date.timezone".as_ref()).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+        let using = if current.is_empty() { "UTC".to_string() } else { current };
+        vm.emit_warning(&format!("ini_set(): Invalid date.timezone value '{}', using '{}' instead", s, using));
+    }
+    false
+}
+
 pub fn date_default_timezone_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     check_count(vm, "date_default_timezone_get", args, 0, 0)?;
     match get_timezone_info(vm) {

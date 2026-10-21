@@ -4078,6 +4078,13 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let value = args.get(1).cloned().unwrap_or(Value::Null);
     let key = name.as_bytes().to_vec();
     let old = vm.constants.get(&key).cloned();
+    // Extension-registered INI validators (e.g. date.timezone)
+    if let Some(validate) = vm.ini_validators.get(&key).copied() {
+        let new_bytes = value.to_php_string().as_bytes().to_vec();
+        if !validate(vm, &new_bytes, false) {
+            return Ok(Value::False);
+        }
+    }
     // Handle precision specially to update thread-local
     if key == b"precision" {
         if let Value::Long(p) = &value {

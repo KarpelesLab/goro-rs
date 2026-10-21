@@ -151,6 +151,7 @@ pub fn register(vm: &mut Vm) {
     for c in [&b"datetime"[..], b"datetimeimmutable", b"datetimezone", b"dateinterval", b"dateperiod", b"internaliterator"] {
         vm.native_class_handlers.insert(c.to_vec(), h);
     }
+    vm.ini_validators.insert(b"date.timezone".to_vec(), funcs::validate_date_timezone);
     vm.object_construct_handlers.insert(b"datetime".to_vec(), construct_datetime);
     vm.object_construct_handlers.insert(b"datetimeimmutable".to_vec(), construct_datetime);
     vm.object_construct_handlers.insert(b"datetimezone".to_vec(), construct_timezone);
