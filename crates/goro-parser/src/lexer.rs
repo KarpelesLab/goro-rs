@@ -727,39 +727,30 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                Some(b'$')
-                    if self.peek_at(1).is_some_and(|c| c == b'{')
-                        && self
-                            .peek_at(2)
-                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
-                {
-                    // ${variable} interpolation (deprecated syntax, equivalent to {$variable})
-                    crate::push_lexer_deprecated(
-                        "Using ${var} in strings is deprecated, use {$var} instead".to_string(),
-                        self.line,
-                    );
+                Some(b'$') if self.peek_at(1) == Some(b'{') => {
+                    // ${var} / ${expr} interpolation (deprecated syntax)
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
                     result.clear();
-                    self.advance(); // consume $
-                    self.advance(); // consume {
-                    let var_name = self.scan_identifier();
-                    self.pending.push(Token::new(
-                        TokenKind::Variable(var_name),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
-                    ));
-                    // Consume closing }
-                    if self.peek() == Some(b'}') {
+                    let (toks, end, msg) =
+                        lex_dollar_brace_interpolation(self.source, self.pos, self.line);
+                    crate::push_lexer_deprecated(msg.to_string(), self.line);
+                    self.pending.extend(toks);
+                    while self.pos < end {
                         self.advance();
                     }
                 }
                 Some(b'{')
                     if self.peek_at(1).is_some_and(|c| c == b'$')
-                        && self
-                            .peek_at(2)
-                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
+                        && self.peek_at(2).is_some_and(|c| {
+                            c.is_ascii_alphabetic()
+                                || c == b'_'
+                                || c >= 0x80
+                                || c == b'$'
+                                || c == b'{'
+                        }) =>
                 {
                     // {$expr} interpolation: the braced part is PHP code.
                     self.pending.push(Token::new(
@@ -1966,47 +1957,25 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                b'$' if i + 2 < len
-                    && content[i + 1] == b'{'
-                    && (content[i + 2].is_ascii_alphabetic()
-                        || content[i + 2] == b'_'
-                        || content[i + 2] >= 0x80) =>
-                {
-                    // ${variable} interpolation (deprecated syntax)
-                    crate::push_lexer_deprecated(
-                        "Using ${var} in strings is deprecated, use {$var} instead".to_string(),
-                        self.line,
-                    );
+                b'$' if i + 1 < len && content[i + 1] == b'{' => {
+                    // ${var} / ${expr} interpolation (deprecated syntax)
                     self.pending.push(Token::new(
                         TokenKind::InterpolatedStringPart(result.clone()),
                         Span::new(self.pos as u32, self.pos as u32, self.line),
                     ));
                     result.clear();
-                    i += 2; // skip $ and {
-
-                    let var_start = i;
-                    while i < len
-                        && (content[i].is_ascii_alphanumeric()
-                            || content[i] == b'_'
-                            || content[i] >= 0x80)
-                    {
-                        i += 1;
-                    }
-                    let var_name = content[var_start..i].to_vec();
-                    self.pending.push(Token::new(
-                        TokenKind::Variable(var_name),
-                        Span::new(self.pos as u32, self.pos as u32, self.line),
-                    ));
-                    // Consume closing }
-                    if i < len && content[i] == b'}' {
-                        i += 1;
-                    }
+                    let (toks, end, msg) = lex_dollar_brace_interpolation(&content, i, self.line);
+                    crate::push_lexer_deprecated(msg.to_string(), self.line);
+                    self.pending.extend(toks);
+                    i = end;
                 }
                 b'{' if i + 2 < len
                     && content[i + 1] == b'$'
                     && (content[i + 2].is_ascii_alphabetic()
                         || content[i + 2] == b'_'
-                        || content[i + 2] >= 0x80) =>
+                        || content[i + 2] >= 0x80
+                        || content[i + 2] == b'$'
+                        || content[i + 2] == b'{') =>
                 {
                     // {$expr} interpolation: the braced part is PHP code.
                     self.pending.push(Token::new(
@@ -2058,6 +2027,56 @@ impl<'a> Lexer<'a> {
 /// braced expression is lexed as PHP code; returns its tokens between
 /// InterpExprStart / InterpExprEnd, and the index after the closing `}`.
 fn lex_braced_interpolation(src: &[u8], start: usize, line: u32) -> (Vec<Token>, usize) {
+    lex_interp_code(src, start, line, b"", b"")
+}
+
+/// `${...}` inside a string (T_DOLLAR_OPEN_CURLY_BRACES): `src[start]` is
+/// the `$`.  `${name}` is the variable `$name`; `${name[...]}` an element
+/// of it (both "${var}", T_STRING_VARNAME); anything else is a variable
+/// variable `${expr}`.  Returns the tokens, the index after the closing
+/// `}`, and the deprecation message.
+fn lex_dollar_brace_interpolation(
+    src: &[u8],
+    start: usize,
+    line: u32,
+) -> (Vec<Token>, usize, &'static str) {
+    let brace = start + 1;
+    let mut j = brace + 1;
+    if j < src.len() && (src[j].is_ascii_alphabetic() || src[j] == b'_' || src[j] >= 0x80) {
+        while j < src.len() && (src[j].is_ascii_alphanumeric() || src[j] == b'_' || src[j] >= 0x80)
+        {
+            j += 1;
+        }
+        if j < src.len() && src[j] == b'}' {
+            let tok = Token::new(
+                TokenKind::Variable(src[brace + 1..j].to_vec()),
+                Span::new(start as u32, start as u32, line),
+            );
+            return (vec![tok], j + 1, DEPRECATED_DOLLAR_BRACE_VAR);
+        }
+        if j < src.len() && src[j] == b'[' {
+            let (toks, end) = lex_interp_code(src, brace, line, b"$", b"");
+            return (toks, end, DEPRECATED_DOLLAR_BRACE_VAR);
+        }
+    }
+    let (toks, end) = lex_interp_code(src, brace, line, b"${", b"}");
+    (toks, end, DEPRECATED_DOLLAR_BRACE_EXPR)
+}
+
+const DEPRECATED_DOLLAR_BRACE_VAR: &str =
+    "Using ${var} in strings is deprecated, use {$var} instead";
+const DEPRECATED_DOLLAR_BRACE_EXPR: &str =
+    "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead";
+
+/// The braced code starting at `src[start]` (a `{`), wrapped in `prefix` /
+/// `suffix`, lexed as PHP code between InterpExprStart / InterpExprEnd.
+fn lex_interp_code(
+    src: &[u8],
+    start: usize,
+    line: u32,
+    prefix: &[u8],
+    suffix: &[u8],
+) -> (Vec<Token>, usize) {
     let mut i = start + 1;
     let mut depth = 1usize;
     while i < src.len() {
@@ -2084,7 +2103,9 @@ fn lex_braced_interpolation(src: &[u8], start: usize, line: u32) -> (Vec<Token>,
     }
     let inner_end = i.min(src.len());
     let mut code = b"<?php ".to_vec();
+    code.extend_from_slice(prefix);
     code.extend_from_slice(&src[start + 1..inner_end]);
+    code.extend_from_slice(suffix);
     // The sub-lexer must not lose (or own) the outer lexer's pending error.
     let outer_err = crate::take_lexer_error();
     let toks = Lexer::new(&code).tokenize();
