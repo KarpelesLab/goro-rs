@@ -4,6 +4,9 @@ use std::process;
 
 mod cli_server;
 
+/// Script path and its arguments, as given on the command line.
+static SCRIPT_ARGV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
 fn main() {
     // HARD memory limit: 2GB virtual address space.
     // This MUST be set before anything else to prevent OOM kills.
@@ -122,6 +125,7 @@ fn main() {
                 }
                 // First bare argument is the script path.
                 script = Some(args[i].clone());
+                let _ = SCRIPT_ARGV.set(args[i..].to_vec());
                 break;
             }
         }
@@ -260,6 +264,21 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
     // Register compiled classes
     for class in compiled_classes {
         vm.register_class(class);
+    }
+
+    // Request startup (CLI): superglobals and $argv/$argc.
+    {
+        let mut info = goro_ext_standard::request::RequestInfo::default();
+        info.script_filename = filename.as_bytes().to_vec();
+        info.argv = match SCRIPT_ARGV.get() {
+            Some(a) => a.iter().map(|s| s.as_bytes().to_vec()).collect(),
+            None => vec![b"Standard input code".to_vec()],
+        };
+        info.env = std::env::vars_os()
+            .map(|(k, v)| (k.to_string_lossy().as_bytes().to_vec(), v.to_string_lossy().as_bytes().to_vec()))
+            .collect();
+        let ini = |_k: &str| -> Option<String> { None };
+        goro_ext_standard::request::startup(&mut vm, &info, &ini);
     }
 
     match vm.execute(&op_array) {
