@@ -893,7 +893,12 @@ impl Compiler {
                     });
                 }
                 // Check if this argument position is by-ref for known builtins
-                let is_byref = Self::is_builtin_byref_param(func_name, i);
+                let mut is_byref = Self::is_builtin_byref_param(func_name, i);
+                // array_multisort() takes its arguments by "prefer-ref": variables
+                // are passed by reference, other expressions (sort flags) by value.
+                if func_name.map(|n| n.eq_ignore_ascii_case(b"array_multisort")).unwrap_or(false) {
+                    is_byref = Self::is_writable_lvalue(&arg.value);
+                }
                 // If by-ref, check that the arg is a variable/writable expression
                 // (not a function call, method call, constant, etc.)
                 if is_byref && !Self::is_writable_lvalue(&arg.value) {

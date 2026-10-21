@@ -8882,120 +8882,116 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
 }
 
-fn array_multisort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
-        return Ok(Value::False);
+        let msg = "array_multisort() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
     }
-
-    // Parse arguments: arrays interleaved with sort flags
-    // SORT_ASC = 4, SORT_DESC = 3, SORT_REGULAR = 0, SORT_NUMERIC = 1, SORT_STRING = 2, SORT_NATURAL = 6
-    // SORT_FLAG_CASE = 8, SORT_LOCALE_STRING = 5
-    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
-    let mut sort_orders: Vec<bool> = Vec::new(); // true = ascending
-    let mut sort_types: Vec<i64> = Vec::new();
-
-    // Sort flags follow the array they apply to. Collect arrays and
-    // subsequent flags, then assign order/type based on position.
-    for arg in args {
-        match arg {
+    let throw = |vm: &mut Vm, class: &[u8], msg: String| -> Result<Value, VmError> {
+        let exc = vm.create_exception(class, &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Ok(Value::Null)
+    };
+    // (array, sort_type, descending)
+    let mut arrays: Vec<(Rc<RefCell<PhpArray>>, i64, bool)> = Vec::new();
+    let mut order_allowed = false;
+    let mut type_allowed = false;
+    let mut sort_order_desc = false;
+    let mut sort_type: i64 = SORT_REGULAR;
+    for (i, arg) in args.iter().enumerate() {
+        let v = arg.deref();
+        match &v {
             Value::Array(arr) => {
-                arrays.push(arr.clone());
-                sort_orders.push(true); // Default ascending
-                sort_types.push(0);      // Default SORT_REGULAR
-            }
-            Value::Reference(r) => {
-                let val = r.borrow().clone();
-                if let Value::Array(arr) = val {
-                    arrays.push(arr.clone());
-                    sort_orders.push(true);
-                    sort_types.push(0);
+                if let Some(last) = arrays.last_mut() {
+                    last.1 = sort_type;
+                    last.2 = sort_order_desc;
+                    sort_order_desc = false;
+                    sort_type = SORT_REGULAR;
                 }
+                arrays.push((arr.clone(), SORT_REGULAR, false));
+                order_allowed = true;
+                type_allowed = true;
             }
             Value::Long(n) => {
-                if let Some(last) = sort_orders.last_mut() {
-                    match *n {
-                        4 => *last = true,   // SORT_ASC
-                        3 => *last = false,  // SORT_DESC
-                        _ => {
-                            if let Some(st) = sort_types.last_mut() {
-                                *st = *n;
-                            }
+                let fname = if i == 0 { "Argument #1 ($array)".to_string() } else { format!("Argument #{}", i + 1) };
+                match n & !SORT_FLAG_CASE {
+                    3 | 4 => {
+                        if order_allowed {
+                            sort_order_desc = *n == 3;
+                            order_allowed = false;
+                        } else {
+                            return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag that has not already been specified", fname));
                         }
                     }
+                    0 | 1 | 2 | 5 | 6 => {
+                        if type_allowed {
+                            sort_type = *n;
+                            type_allowed = false;
+                        } else {
+                            return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag that has not already been specified", fname));
+                        }
+                    }
+                    _ => {
+                        return throw(vm, b"ValueError", format!("array_multisort(): {} must be a valid sort flag", fname));
+                    }
                 }
             }
-            _ => {}
+            _ => {
+                let fname = if i == 0 { "Argument #1 ($array)".to_string() } else { format!("Argument #{}", i + 1) };
+                return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag", fname));
+            }
         }
     }
-
-    if arrays.is_empty() {
-        return Ok(Value::False);
-    }
-
-    // Check all arrays have the same length
-    let len = arrays[0].borrow().len();
-    for arr in &arrays[1..] {
-        if arr.borrow().len() != len {
-            return Ok(Value::False);
+    let size = arrays[0].0.borrow().len();
+    for a in &arrays[1..] {
+        if a.0.borrow().len() != size {
+            return throw(vm, b"ValueError", "Array sizes are inconsistent".to_string());
         }
     }
-
-    if len == 0 {
+    if size < 1 {
         return Ok(Value::True);
     }
-
-    // Extract values from each array (to use as sort keys)
-    let all_values: Vec<Vec<Value>> = arrays
-        .iter()
-        .map(|a| a.borrow().values().cloned().collect())
-        .collect();
-
-    // Sort indices: primary by arrays[0], tiebreak with arrays[1], etc.
-    let mut indices: Vec<usize> = (0..len).collect();
-    indices.sort_by(|&a, &b| {
-        for i in 0..arrays.len() {
-            let result = php_compare_for_sort(&all_values[i][a], &all_values[i][b], sort_types[i]);
-            let result = if sort_orders[i] { result } else { result.reverse() };
-            if result != std::cmp::Ordering::Equal {
-                return result;
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
-
-    // Apply the sorted indices to all arrays
-    for arr_rc in &arrays {
-        let old_entries: Vec<(ArrayKey, Value)> = {
-            let arr = arr_rc.borrow();
-            arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-        };
-        let mut new_arr = PhpArray::new();
-        // Check if original was using string keys
-        let has_string_keys = old_entries.iter().any(|(k, _)| matches!(k, ArrayKey::String(_)));
-        if has_string_keys {
-            // Preserve (key, value) pairs together and reorder by sorted indices.
-            // Integer keys get renumbered from 0 but string keys are preserved.
-            for &sorted_idx in &indices {
-                let (ref k, ref v) = old_entries[sorted_idx];
-                match k {
-                    ArrayKey::String(_) => {
-                        new_arr.set(k.clone(), v.clone());
-                    }
-                    ArrayKey::Int(_) => {
-                        new_arr.push(v.clone());
-                    }
-                }
-            }
-        } else {
-            // Rebuild with sequential integer keys
-            let old_vals: Vec<Value> = old_entries.iter().map(|(_, v)| v.clone()).collect();
-            for &sorted_idx in &indices {
-                new_arr.push(old_vals[sorted_idx].clone());
-            }
-        }
-        *arr_rc.borrow_mut() = new_arr;
+    if let Some(last) = arrays.last_mut() {
+        last.1 = sort_type;
+        last.2 = sort_order_desc;
     }
-
+    // Rows: one (key, value) per array.
+    let cols: Vec<Vec<(ArrayKey, Value)>> = arrays.iter()
+        .map(|a| a.0.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .collect();
+    let rows: Vec<Vec<(ArrayKey, Value)>> = (0..size)
+        .map(|k| cols.iter().map(|c| c[k].clone()).collect())
+        .collect();
+    let flags: Vec<(i64, bool)> = arrays.iter().map(|a| (a.1, a.2)).collect();
+    let sorted = crate::zsort::zend_sort_stable(rows, |x, y| {
+        for (r, (ty, desc)) in flags.iter().enumerate() {
+            if vm.current_exception.is_some() {
+                return 0;
+            }
+            let mut c = php_data_cmp(vm, &x[r].1, &y[r].1, *ty);
+            if *desc { c = -c; }
+            if c != 0 {
+                return if c > 0 { 1 } else { -1 };
+            }
+        }
+        0
+    });
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    for (i, a) in arrays.iter().enumerate() {
+        let mut new_arr = PhpArray::new();
+        for row in &sorted {
+            let (k, v) = &row[i];
+            match k {
+                ArrayKey::String(_) => new_arr.set(k.clone(), v.clone()),
+                ArrayKey::Int(_) => new_arr.push(v.clone()),
+            }
+        }
+        *a.0.borrow_mut() = new_arr;
+    }
     Ok(Value::True)
 }
 
@@ -13092,202 +13088,93 @@ fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn array_product_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let arr = match args.first() {
-        Some(Value::Array(arr)) => arr.borrow(),
+/// php_array_binop() (array_sum / array_product).
+fn php_array_binop(vm: &mut Vm, args: &[Value], fname: &str, op_name: &str, mul: bool) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null).deref();
+    require_array_arg(vm, &first, fname, "array", 1)?;
+    let entries: Vec<Value> = match &first {
+        Value::Array(a) => a.borrow().values().cloned().collect(),
         _ => return Ok(Value::Long(0)),
     };
-    let mut product_int: i64 = 1;
-    let mut is_float = false;
-    let mut product_float: f64 = 1.0;
-    for (_, value) in arr.iter() {
-        let v = value.deref();
-        match &v {
-            Value::Double(f) => {
-                if !is_float {
-                    is_float = true;
-                    product_float = product_int as f64;
-                }
-                product_float *= f;
-            }
-            Value::Long(n) => {
-                if is_float {
-                    product_float *= *n as f64;
-                } else {
-                    match product_int.checked_mul(*n) {
-                        Some(r) => product_int = r,
-                        None => {
-                            is_float = true;
-                            product_float = product_int as f64 * *n as f64;
-                        }
-                    }
+    let mut acc = Value::Long(if mul { 1 } else { 0 });
+    let apply = |acc: &Value, n: &Value| -> Value {
+        match (acc, n) {
+            (Value::Long(x), Value::Long(y)) => {
+                let r = if mul { x.checked_mul(*y) } else { x.checked_add(*y) };
+                match r {
+                    Some(v) => Value::Long(v),
+                    None => Value::Double(if mul { *x as f64 * *y as f64 } else { *x as f64 + *y as f64 }),
                 }
             }
-            Value::True => {
-                // 1 * x => no change
+            _ => {
+                let (x, y) = (acc.to_double(), n.to_double());
+                Value::Double(if mul { x * y } else { x + y })
             }
-            Value::False | Value::Null => {
-                if is_float {
-                    product_float = 0.0;
-                } else {
-                    product_int = 0;
-                }
-            }
+        }
+    };
+    for entry in entries {
+        let v = entry.deref();
+        let num: Option<Value> = match &v {
+            Value::Long(_) | Value::Double(_) => Some(v.clone()),
+            Value::Null | Value::Undef | Value::False => Some(Value::Long(0)),
+            Value::True => Some(Value::Long(1)),
             Value::String(s) => {
-                // PHP tries to parse as number; if not numeric, warns.
-                let bytes = s.as_bytes();
-                // Lean on Value's numeric parsing.
-                let as_str = String::from_utf8_lossy(bytes);
-                let trimmed = as_str.trim();
-                let as_int = trimmed.parse::<i64>().ok();
-                let as_flt = trimmed.parse::<f64>().ok();
-                if as_int.is_none() && as_flt.is_none() {
-                    vm.emit_warning(
-                        "array_product(): Multiplication is not supported on type string",
-                    );
-                    if is_float {
-                        product_float = 0.0;
-                    } else {
-                        product_int = 0;
-                    }
-                    continue;
-                }
-                if let Some(n) = as_int {
-                    if is_float {
-                        product_float *= n as f64;
-                    } else {
-                        match product_int.checked_mul(n) {
-                            Some(r) => product_int = r,
-                            None => {
-                                is_float = true;
-                                product_float = product_int as f64 * n as f64;
-                            }
+                let st = s.to_string_lossy();
+                match goro_core::value::parse_leading_numeric_string(s.as_bytes()) {
+                    Some((f, fully)) => {
+                        if !fully {
+                            vm.emit_warning("A non-numeric value encountered");
+                        }
+                        let t = st.trim_start();
+                        let numpart: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
+                        let is_int = !t[numpart.len()..].starts_with(['.', 'e', 'E']);
+                        match (is_int, numpart.parse::<i64>()) {
+                            (true, Ok(n)) => Some(Value::Long(n)),
+                            _ => Some(Value::Double(f)),
                         }
                     }
-                } else if let Some(f) = as_flt {
-                    if !is_float {
-                        is_float = true;
-                        product_float = product_int as f64;
+                    None => {
+                        acc = apply(&acc, &Value::Long(0));
+                        vm.emit_warning(&format!("{}(): {} is not supported on type string", fname, op_name));
+                        None
                     }
-                    product_float *= f;
                 }
             }
-            Value::Array(_) => {
-                vm.emit_warning(
-                    "array_product(): Multiplication is not supported on type array",
-                );
+            Value::Resource(id) => {
+                acc = apply(&acc, &Value::Long(*id));
+                vm.emit_warning(&format!("{}(): {} is not supported on type resource", fname, op_name));
+                None
             }
             Value::Object(o) => {
-                let class = o.borrow().class_name.clone();
-                let name = goro_core::value::display_class_name(&class);
-                vm.emit_warning(&format!(
-                    "array_product(): Multiplication is not supported on type {}",
-                    name
-                ));
+                let cast = vm.object_to_long.and_then(|f| f(&v));
+                match cast {
+                    Some(n) if vm.object_is_operator_type.map(|f| f(&v)).unwrap_or(false) => Some(Value::Long(n)),
+                    _ => {
+                        let name = goro_core::value::display_class_name(&o.borrow().class_name);
+                        vm.emit_warning(&format!("{}(): {} is not supported on type {}", fname, op_name, name));
+                        None
+                    }
+                }
             }
             _ => {
-                // fallback for unhandled types
-                let n = v.to_long();
-                if is_float {
-                    product_float *= n as f64;
-                } else {
-                    match product_int.checked_mul(n) {
-                        Some(r) => product_int = r,
-                        None => {
-                            is_float = true;
-                            product_float = product_int as f64 * n as f64;
-                        }
-                    }
-                }
+                vm.emit_warning(&format!("{}(): {} is not supported on type {}", fname, op_name, Vm::value_type_name(&v)));
+                None
             }
+        };
+        if let Some(n) = num {
+            acc = apply(&acc, &n);
         }
     }
-    if is_float {
-        Ok(Value::Double(product_float))
-    } else {
-        Ok(Value::Long(product_int))
-    }
+    Ok(acc)
 }
 
-fn array_sum_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let arr = match args.first() {
-        Some(Value::Array(arr)) => arr.borrow(),
-        Some(Value::Reference(r)) => {
-            let inner = r.borrow();
-            if let Value::Array(arr) = &*inner {
-                let cloned = arr.borrow().clone();
-                drop(inner);
-                // Work with clone
-                let mut sum_int: i64 = 0;
-                let mut is_float = false;
-                let mut sum_float: f64 = 0.0;
-                for (_, value) in cloned.iter() {
-                    match value {
-                        Value::Double(f) => {
-                            if !is_float {
-                                is_float = true;
-                                sum_float = sum_int as f64;
-                            }
-                            sum_float += f;
-                        }
-                        _ => {
-                            let n = value.to_long();
-                            if is_float {
-                                sum_float += n as f64;
-                            } else {
-                                match sum_int.checked_add(n) {
-                                    Some(v) => sum_int = v,
-                                    None => {
-                                        is_float = true;
-                                        sum_float = sum_int as f64 + n as f64;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                return if is_float { Ok(Value::Double(sum_float)) } else { Ok(Value::Long(sum_int)) };
-            }
-            return Ok(Value::Long(0));
-        }
-        _ => return Ok(Value::Long(0)),
-    };
-    let mut sum_int: i64 = 0;
-    let mut is_float = false;
-    let mut sum_float: f64 = 0.0;
-    for (_, value) in arr.iter() {
-        match value {
-            Value::Double(f) => {
-                if !is_float {
-                    is_float = true;
-                    sum_float = sum_int as f64;
-                }
-                sum_float += f;
-            }
-            _ => {
-                let n = value.to_long();
-                if is_float {
-                    sum_float += n as f64;
-                } else {
-                    match sum_int.checked_add(n) {
-                        Some(v) => sum_int = v,
-                        None => {
-                            is_float = true;
-                            sum_float = sum_int as f64 + n as f64;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if is_float {
-        Ok(Value::Double(sum_float))
-    } else {
-        Ok(Value::Long(sum_int))
-    }
+fn array_product_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_array_binop(vm, args, "array_product", "Multiplication", true)
 }
 
-// User-callback comparison functions
+fn array_sum_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_array_binop(vm, args, "array_sum", "Addition", false)
+}
 fn array_intersect_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     array_u_op(vm, args, true, true, false, "array_intersect_ukey", 1)
 }
