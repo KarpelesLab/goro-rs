@@ -6085,107 +6085,21 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn parse_str_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s_str = s.to_string_lossy();
-    let mut result = PhpArray::new();
-    for pair in s_str.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (raw_key, raw_val) = if let Some(eq_pos) = pair.find('=') {
-            (&pair[..eq_pos], &pair[eq_pos + 1..])
-        } else {
-            (pair, "")
-        };
-        let key = php_urldecode(raw_key);
-        let val = php_urldecode(raw_val);
-        let val_value = Value::String(PhpString::from_string(val));
-
-        // Handle array bracket syntax: key[subkey], key[], key[a][b]
-        if let Some(bracket_pos) = key.find('[') {
-            let base_key = &key[..bracket_pos];
-            let brackets = &key[bracket_pos..];
-            // Parse bracket keys
-            let mut keys: Vec<Option<String>> = Vec::new();
-            let mut rest = brackets;
-            while rest.starts_with('[') {
-                if let Some(close) = rest.find(']') {
-                    let inner = &rest[1..close];
-                    keys.push(if inner.is_empty() { None } else { Some(inner.to_string()) });
-                    rest = &rest[close + 1..];
-                } else {
-                    break;
-                }
-            }
-            // Navigate/create nested arrays
-            let base_arr_key = if let Ok(n) = base_key.parse::<i64>() {
-                goro_core::array::ArrayKey::Int(n)
-            } else {
-                goro_core::array::ArrayKey::String(PhpString::from_string(base_key.to_string()))
-            };
-            if !matches!(result.get(&base_arr_key), Some(Value::Array(_))) {
-                result.set(base_arr_key.clone(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-            }
-            let mut current = result.get(&base_arr_key).unwrap().clone();
-            for (i, sub_key) in keys.iter().enumerate() {
-                let is_last = i == keys.len() - 1;
-                if is_last {
-                    if let Value::Array(arr) = &current {
-                        let mut arr_borrow = arr.borrow_mut();
-                        match sub_key {
-                            None => { arr_borrow.push(val_value.clone()); }
-                            Some(k) => {
-                                if let Ok(n) = k.parse::<i64>() {
-                                    arr_borrow.set(goro_core::array::ArrayKey::Int(n), val_value.clone());
-                                } else {
-                                    arr_borrow.set(goro_core::array::ArrayKey::String(PhpString::from_string(k.clone())), val_value.clone());
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if let Value::Array(arr) = &current {
-                        let sub_arr_key = match sub_key {
-                            None => {
-                                let mut arr_borrow = arr.borrow_mut();
-                                let next_idx = arr_borrow.len() as i64;
-                                arr_borrow.push(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                                goro_core::array::ArrayKey::Int(next_idx)
-                            }
-                            Some(k) => {
-                                let key = if let Ok(n) = k.parse::<i64>() {
-                                    goro_core::array::ArrayKey::Int(n)
-                                } else {
-                                    goro_core::array::ArrayKey::String(PhpString::from_string(k.clone()))
-                                };
-                                if !matches!(arr.borrow().get(&key), Some(Value::Array(_))) {
-                                    arr.borrow_mut().set(key.clone(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                                }
-                                key
-                            }
-                        };
-                        let next = arr.borrow().get(&sub_arr_key).unwrap().clone();
-                        current = next;
-                    }
-                }
-            }
-        } else {
-            result.set(
-                goro_core::array::ArrayKey::String(PhpString::from_string(key)),
-                val_value,
-            );
-        }
+/// PHP_FUNCTION(parse_str)
+fn parse_str_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() < 2 {
+        let msg = format!("parse_str() expects exactly 2 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
-    // PHP 8: parse_str($string, &$result) sets $result and returns null
-    let result_val = Value::Array(Rc::new(RefCell::new(result)));
-    if let Some(Value::Reference(r)) = args.get(1) {
-        *r.borrow_mut() = result_val;
-        Ok(Value::Null)
-    } else {
-        // If no second parameter, return the array (non-standard but compatible with our VM)
-        Ok(result_val)
+    let s = crate::strings::zpp_str(vm, args, 0, "parse_str", "string")?;
+    let arr = Rc::new(RefCell::new(PhpArray::new()));
+    crate::request::parse_str_into(vm, s.as_bytes(), &arr);
+    if let Value::Reference(r) = &args[1] {
+        *r.borrow_mut() = Value::Array(arr);
     }
+    Ok(Value::Null)
 }
 
 fn php_urldecode(s: &str) -> String {

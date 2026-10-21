@@ -177,6 +177,12 @@ fn register_variable(ctx: &mut Ctx, var_name: &[u8], val: Value, track: &Rc<RefC
                 pos = p;
             } else {
                 match rest[p.min(rest.len())..].iter().position(|&c| c == b']') {
+                    None if nest_level > 1 => {
+                        // Inside a nested index the previous index was already
+                        // NUL-terminated, so the remainder is dropped.
+                        plain_var(&cur, index.clone(), val, orig, is_cookie, track);
+                        return;
+                    }
                     None => {
                         // not an index; un-terminate the var name
                         let mut name = index.clone().unwrap_or_default();
@@ -1051,6 +1057,17 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 
 /// Request startup (php_request_startup → sapi_activate + php_hash_environment).
 /// Registers all superglobals into `vm`, and sets the php://input body.
+/// sapi_module.treat_data(PARSE_STRING, ...) as used by parse_str().
+pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
+    let ini = |k: &str| vm.constants.get(k.as_bytes()).map(|v| v.to_php_string().to_string_lossy());
+    let max_vars = ini("max_input_vars").map(|v| parse_quantity(&v)).unwrap_or(1000);
+    let max_nesting = ini("max_input_nesting_level").map(|v| parse_quantity(&v)).unwrap_or(64);
+    let display_errors = ini_bool(ini("display_errors"), true);
+    let arg_sep: Vec<u8> = ini("arg_separator.input").filter(|s| !s.is_empty()).unwrap_or_else(|| "&".into()).into_bytes();
+    let mut ctx = Ctx { max_nesting, display_errors, vm };
+    treat_data(&mut ctx, data, false, &arg_sep, max_vars, arr);
+}
+
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     let variables_order = ini("variables_order").unwrap_or_else(|| "EGPCS".to_string());
     let has = |c: char| variables_order.chars().any(|x| x.eq_ignore_ascii_case(&c));
