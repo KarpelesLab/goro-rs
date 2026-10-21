@@ -129,6 +129,71 @@ pub(crate) fn require_string_arg(
 }
 
 
+
+/// Whether `lower` names an internal class/interface the VM implements.
+pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
+    vm.is_known_builtin_class(lower)
+        || vm.builtin_is_interface(lower)
+        || vm.native_class_handlers.contains_key(lower)
+}
+
+/// Reflection's view of a class: the user class, or for an internal class a
+/// `ClassEntry` synthesized from php-src's stubs (see `crate::stubs`).
+pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::ClassEntry> {
+    if let Some(c) = vm.classes.get(lower) {
+        return Some(c);
+    }
+    let l = if lower.iter().any(|b| b.is_ascii_uppercase()) { lower.to_ascii_lowercase() } else { lower.to_vec() };
+    if let Some(c) = vm.classes.get(&l) {
+        return Some(c);
+    }
+    if internal_class_known(vm, &l) {
+        crate::stubs::class_entry(vm, &l)
+    } else {
+        None
+    }
+}
+
+/// Whether the class is an internal one (no user declaration).
+pub(crate) fn is_internal_class(vm: &Vm, lower: &[u8]) -> bool {
+    !vm.classes.contains_key(lower) && rcls(vm, lower).is_some()
+}
+
+/// Find a method of a class, including methods inherited from internal
+/// parent classes and interfaces (which user `ClassEntry`s don't copy).
+pub(crate) fn rmethod<'a>(vm: &'a Vm, lower: &[u8], method: &[u8]) -> Option<&'a crate::object::MethodDef> {
+    let ml = method.to_ascii_lowercase();
+    let mut cur = lower.to_ascii_lowercase();
+    let mut ifaces: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..64 {
+        let c = rcls(vm, &cur)?;
+        if let Some(m) = c.methods.get(&ml) {
+            return Some(m);
+        }
+        for i in &c.interfaces {
+            ifaces.push(i.to_ascii_lowercase());
+        }
+        match &c.parent {
+            Some(p) => cur = p.to_ascii_lowercase(),
+            None => break,
+        }
+    }
+    let mut seen = 0;
+    while let Some(i) = ifaces.pop() {
+        seen += 1;
+        if seen > 64 { break; }
+        if let Some(c) = rcls(vm, &i) {
+            if let Some(m) = c.methods.get(&ml) {
+                return Some(m);
+            }
+            for j in &c.interfaces {
+                ifaces.push(j.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
 /// ReflectionClass constructor: sets up __reflection_target and name properties
 pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
@@ -229,9 +294,9 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
 
     // ReflectionEnum requires the target class actually be an enum.
     if reflector_class_name.eq_ignore_ascii_case("ReflectionEnum") {
-        let is_enum = vm.classes.get(&class_lower).map(|c| c.is_enum).unwrap_or(false);
+        let is_enum = rcls(vm, &class_lower).map(|c| c.is_enum).unwrap_or(false);
         if !is_enum {
-            let canonical = vm.classes.get(&class_lower)
+            let canonical = rcls(vm, &class_lower)
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or(class_name.clone());
             let err_msg = format!("Class \"{}\" is not an enum", canonical);
@@ -242,7 +307,7 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
     }
 
     // Get canonical name
-    let canonical = if let Some(ce) = vm.classes.get(&class_lower) {
+    let canonical = if let Some(ce) = rcls(vm, &class_lower) {
         String::from_utf8_lossy(&ce.name).to_string()
     } else {
         // Built-in class - use proper casing
@@ -401,12 +466,12 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
 
     if is_user_class {
         // Check method exists in user class
-        let method_exists = vm.classes.get(&class_lower)
+        let method_exists = rcls(vm, &class_lower)
             .map(|c| c.get_method(&method_lower).is_some())
             .unwrap_or(false);
 
         if !method_exists {
-            let canonical_class = vm.classes.get(&class_lower)
+            let canonical_class = rcls(vm, &class_lower)
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or(class_name.clone());
             let err_msg = format!("Method {}::{}() does not exist", canonical_class, method_name);
@@ -418,7 +483,7 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
     // For built-in classes, we accept all method names without checking
 
     let canonical_class = if is_user_class {
-        vm.classes.get(&class_lower)
+        rcls(vm, &class_lower)
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
             .unwrap_or(class_name.clone())
     } else {
@@ -426,7 +491,7 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
     };
 
     let canonical_method = if is_user_class {
-        vm.classes.get(&class_lower)
+        rcls(vm, &class_lower)
             .and_then(|c| c.get_method(&method_lower).map(|m| String::from_utf8_lossy(&m.name).to_string()))
             .unwrap_or(method_name.clone())
     } else {
@@ -613,7 +678,7 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
     }
 
     let canonical_class = if is_user_class {
-        vm.classes.get(&class_lower)
+        rcls(vm, &class_lower)
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
             .unwrap_or(class_name.clone())
     } else {
@@ -625,7 +690,7 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
     // doesn't declare them (matches PHP behavior for #[AllowDynamicProperties] and stdClass).
     let mut is_dynamic_prop = false;
     if is_user_class {
-        let prop_exists_decl = vm.classes.get(&class_lower)
+        let prop_exists_decl = rcls(vm, &class_lower)
             .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
             .unwrap_or(false);
 
@@ -733,7 +798,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
                 }
 
                 if class_known {
-                    let method_exists = vm.classes.get(class_lower.as_slice())
+                    let method_exists = rcls(vm, class_lower.as_slice())
                         .map(|c| c.methods.contains_key(method_lower.as_slice()))
                         .unwrap_or(false);
                     if !method_exists {
@@ -824,7 +889,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
 
     let method_def = match (&method_class_lower, &method_name_lower) {
         (Some(cl), Some(mn)) => {
-            vm.classes.get(cl).and_then(|c| c.methods.get(mn).cloned())
+            rcls(vm, cl).and_then(|c| c.methods.get(mn).cloned())
         }
         _ => None,
     };
@@ -986,7 +1051,7 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
         return false;
     }
 
-    let canonical_class = vm.classes.get(&class_lower)
+    let canonical_class = rcls(vm, &class_lower)
         .map(|c| String::from_utf8_lossy(&c.name).to_string())
         .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
 
@@ -1008,7 +1073,7 @@ pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u3
     if reflector_name.eq_ignore_ascii_case("ReflectionEnumUnitCase")
         || reflector_name.eq_ignore_ascii_case("ReflectionEnumBackedCase")
     {
-        let is_declared_case = vm.classes.get(&class_lower)
+        let is_declared_case = rcls(vm, &class_lower)
             .map(|c| c.enum_cases.iter().any(|(n, _)| n.eq_ignore_ascii_case(const_name.as_bytes())))
             .unwrap_or(false);
         if !is_declared_case {
@@ -1068,7 +1133,7 @@ pub fn reflection_class_method(
             Some(ob.get_property(b"name"))
         }
         b"getparentclass" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if let Some(ref parent) = ce.parent {
                     // Create a ReflectionClass for the parent
                     let parent_name = String::from_utf8_lossy(parent).to_string();
@@ -1088,43 +1153,43 @@ pub fn reflection_class_method(
             }
         }
         b"isabstract" => {
-            let is_abstract = vm.classes.get(&class_lower)
+            let is_abstract = rcls(vm, &class_lower)
                 .map(|c| c.is_abstract)
                 .unwrap_or(false);
             Some(if is_abstract { Value::True } else { Value::False })
         }
         b"isfinal" => {
-            let is_final = vm.classes.get(&class_lower)
+            let is_final = rcls(vm, &class_lower)
                 .map(|c| c.is_final || c.is_enum) // Enums are implicitly final
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
         b"isinterface" => {
-            let is_interface = vm.classes.get(&class_lower)
+            let is_interface = rcls(vm, &class_lower)
                 .map(|c| c.is_interface)
                 .unwrap_or(false);
             Some(if is_interface { Value::True } else { Value::False })
         }
         b"istrait" => {
-            let is_trait = vm.classes.get(&class_lower)
+            let is_trait = rcls(vm, &class_lower)
                 .map(|c| c.is_trait)
                 .unwrap_or(false);
             Some(if is_trait { Value::True } else { Value::False })
         }
         b"isenum" => {
-            let is_enum = vm.classes.get(&class_lower)
+            let is_enum = rcls(vm, &class_lower)
                 .map(|c| c.is_enum)
                 .unwrap_or(false);
             Some(if is_enum { Value::True } else { Value::False })
         }
         b"isreadonly" => {
-            let is_readonly = vm.classes.get(&class_lower)
+            let is_readonly = rcls(vm, &class_lower)
                 .map(|c| c.is_readonly)
                 .unwrap_or(false);
             Some(if is_readonly { Value::True } else { Value::False })
         }
         b"isinstantiable" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 let mut instantiable = !ce.is_abstract && !ce.is_interface && !ce.is_trait && !ce.is_enum;
                 // A class with a non-public constructor isn't instantiable
                 // from outside, so isInstantiable() reports false.
@@ -1143,7 +1208,7 @@ pub fn reflection_class_method(
         }
         b"iscloneable" => {
             // Traits, interfaces, abstract classes, and enums are not cloneable.
-            let cloneable = if let Some(ce) = vm.classes.get(&class_lower) {
+            let cloneable = if let Some(ce) = rcls(vm, &class_lower) {
                 !ce.is_interface && !ce.is_trait && !ce.is_abstract && !ce.is_enum
             } else {
                 true
@@ -1161,7 +1226,7 @@ pub fn reflection_class_method(
         }
         b"isanonymous" => {
             // Anonymous class names contain a NUL byte separator
-            let is_anon = if let Some(ce) = vm.classes.get(&class_lower) {
+            let is_anon = if let Some(ce) = rcls(vm, &class_lower) {
                 ce.name.contains(&b'\x00')
             } else {
                 false
@@ -1172,7 +1237,7 @@ pub fn reflection_class_method(
             // Per PHP: interfaces themselves and abstract classes are not iterable
             // even if they extend Iterator. Only concrete (or non-interface,
             // non-abstract) classes that implement Iterator/IteratorAggregate are.
-            let (is_interface, is_abstract) = vm.classes.get(&class_lower)
+            let (is_interface, is_abstract) = rcls(vm, &class_lower)
                 .map(|c| (c.is_interface, c.is_abstract))
                 .unwrap_or((vm.builtin_is_interface(&class_lower), false));
             if is_interface || is_abstract {
@@ -1216,7 +1281,7 @@ pub fn reflection_class_method(
         }
         b"gettraitnames" => {
             let mut names = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 for t in &ce.traits {
                     names.push(Value::String(PhpString::from_vec(t.clone())));
                 }
@@ -1225,7 +1290,7 @@ pub fn reflection_class_method(
         }
         b"gettraits" => {
             let mut result = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 for t in ce.traits.clone() {
                     let trait_name = String::from_utf8_lossy(&t).to_string();
                     let rc = create_reflection_class(vm, &trait_name);
@@ -1236,7 +1301,7 @@ pub fn reflection_class_method(
         }
         b"gettraitaliases" => {
             let mut result = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 for adapt in &ce.trait_adaptations {
                     if let crate::object::TraitAdaptation::Alias { trait_name, method, new_name, .. } = adapt {
                         if let Some(alias) = new_name {
@@ -1261,7 +1326,7 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getconstructor" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if ce.get_method(b"__construct").is_some() {
                     Some(create_reflection_method(vm, &target, "__construct"))
                 } else {
@@ -1273,7 +1338,7 @@ pub fn reflection_class_method(
         }
         b"getmodifiers" => {
             let mut mods = 0i64;
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if ce.is_abstract { mods |= 0x40; } // IS_EXPLICIT_ABSTRACT
                 if ce.is_final { mods |= 0x20; } // IS_FINAL
                 if ce.is_readonly { mods |= 0x10000; } // IS_READONLY
@@ -1287,12 +1352,12 @@ pub fn reflection_class_method(
             // Build the chain from this class up to root.
             let mut chain: Vec<Vec<u8>> = Vec::new();
             chain.push(class_lower.clone());
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 let mut parent = ce.parent.clone();
                 while let Some(ref p) = parent {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                     chain.push(p_lower.clone());
-                    if let Some(pce) = vm.classes.get(&p_lower) {
+                    if let Some(pce) = rcls(vm, &p_lower) {
                         parent = pce.parent.clone();
                     } else {
                         break;
@@ -1304,7 +1369,7 @@ pub fn reflection_class_method(
             // Skip props whose declaring_class is an ancestor *and* are private —
             // those are not visible to subclasses.
             for (idx, link) in chain.iter().enumerate() {
-                if let Some(lce) = vm.classes.get(link) {
+                if let Some(lce) = rcls(vm, link) {
                     for prop in &lce.properties {
                         if !prop.is_static { continue; }
                         // For the runtime class entry, properties[] also includes
@@ -1329,7 +1394,7 @@ pub fn reflection_class_method(
 
             // Instance properties pass
             for (idx, link) in chain.iter().enumerate() {
-                if let Some(lce) = vm.classes.get(link) {
+                if let Some(lce) = rcls(vm, link) {
                     for prop in &lce.properties {
                         if prop.is_static { continue; }
                         // Skip inherited private props (declaring_class != link).
@@ -1363,7 +1428,7 @@ pub fn reflection_class_method(
             // declaring_class != self are inherited; private inherited ones
             // must be excluded.
             let mut result = PhpArray::new();
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 for prop in &ce.properties {
                     if !prop.is_static { continue; }
                     let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -1373,7 +1438,7 @@ pub fn reflection_class_method(
                     if result.get(&key).is_none() {
                         // Static value is stored on the declaring class
                         let val = if is_inherited {
-                            vm.classes.get(&decl_lower)
+                            rcls(vm, &decl_lower)
                                 .and_then(|d| d.static_properties.get(&prop.name).cloned())
                                 .unwrap_or_else(|| prop.default.clone())
                         } else {
@@ -1398,7 +1463,7 @@ pub fn reflection_class_method(
             }
         }
         b"getstartline" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if ce.start_line > 0 {
                     Some(Value::Long(ce.start_line as i64))
                 } else {
@@ -1409,7 +1474,7 @@ pub fn reflection_class_method(
             }
         }
         b"getendline" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if ce.end_line > 0 {
                     Some(Value::Long(ce.end_line as i64))
                 } else {
@@ -1420,7 +1485,7 @@ pub fn reflection_class_method(
             }
         }
         b"getdoccomment" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if let Some(ref doc) = ce.doc_comment {
                     Some(Value::String(PhpString::from_string(doc.clone())))
                 } else {
@@ -1436,7 +1501,7 @@ pub fn reflection_class_method(
                 b"generator", b"fiber", b"closure",
             ];
             if no_ctorless.contains(&class_lower.as_slice()) {
-                let canonical = vm.classes.get(&class_lower)
+                let canonical = rcls(vm, &class_lower)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
                 let err_msg = format!(
@@ -1449,12 +1514,12 @@ pub fn reflection_class_method(
             }
             // Create an instance without calling the constructor
             let obj_id = vm.alloc_object_id();
-            let canonical = vm.classes.get(&class_lower)
+            let canonical = rcls(vm, &class_lower)
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
             let mut new_obj = PhpObject::new(canonical, obj_id);
             // Set default property values
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 let props: Vec<_> = ce.properties.iter()
                     .filter(|p| !p.is_static)
                     .map(|p| (p.name.clone(), p.default.clone()))
@@ -1491,13 +1556,13 @@ pub fn reflection_class_method(
         }
         // ReflectionEnum-specific methods
         b"isbacked" => {
-            let is_backed = vm.classes.get(&class_lower)
+            let is_backed = rcls(vm, &class_lower)
                 .map(|c| c.is_enum && c.enum_backing_type.is_some())
                 .unwrap_or(false);
             Some(if is_backed { Value::True } else { Value::False })
         }
         b"getbackingtype" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if let Some(ce) = rcls(vm, &class_lower) {
                 if let Some(ref bt) = ce.enum_backing_type {
                     Some(create_reflection_type(vm, &crate::opcode::ParamType::Simple(bt.clone())))
                 } else {
@@ -1510,7 +1575,7 @@ pub fn reflection_class_method(
         b"getcases" => {
             let mut result = PhpArray::new();
             // Collect case info first, then create objects
-            let case_info: Vec<(String, bool, String)> = if let Some(ce) = vm.classes.get(&class_lower) {
+            let case_info: Vec<(String, bool, String)> = if let Some(ce) = rcls(vm, &class_lower) {
                 let canonical = String::from_utf8_lossy(&ce.name).to_string();
                 let is_backed = ce.enum_backing_type.is_some();
                 ce.enum_cases.iter().map(|(case_name, _)| {
@@ -1587,7 +1652,7 @@ pub fn reflection_class_docall(
                     None => return Some(Value::Null),
                 };
                 let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                let has = vm.classes.get(&class_lower)
+                let has = rcls(vm, &class_lower)
                     .map(|c| c.get_method(&method_lower).is_some())
                     .unwrap_or(false);
                 // Closure::__invoke is implicitly defined.
@@ -1604,7 +1669,7 @@ pub fn reflection_class_docall(
                     None => return Some(Value::Null),
                 };
                 let prop_name = PhpString::from_string(prop_name_s);
-                let has = vm.classes.get(&class_lower)
+                let has = rcls(vm, &class_lower)
                     .map(|c| c.properties.iter().any(|p| {
                         if p.name != prop_name.as_bytes() { return false; }
                         // Inherited private (instance) props are not visible.
@@ -1631,7 +1696,7 @@ pub fn reflection_class_docall(
                             let mut declared_anywhere = false;
                             let mut current = Some(class_lower.clone());
                             while let Some(cl) = current {
-                                if let Some(ce) = vm.classes.get(&cl) {
+                                if let Some(ce) = rcls(vm, &cl) {
                                     if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
                                         declared_anywhere = true;
                                         break;
@@ -1686,7 +1751,7 @@ pub fn reflection_class_docall(
                 // Filter: IS_PUBLIC=1, IS_PROTECTED=2, IS_PRIVATE=4, IS_FINAL=0x20
                 let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     for (name, val) in &ce.constants {
                         if filter != -1 {
                             let vis_flag = ce.constants_meta.get(name)
@@ -1724,18 +1789,18 @@ pub fn reflection_class_docall(
                 let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                 // Look up the method definition and, if found, use its
                 // `declaring_class` for the ReflectionMethod->$class field.
-                let method_meta = vm.classes.get(&class_lower)
+                let method_meta = rcls(vm, &class_lower)
                     .and_then(|c| c.get_method(&method_lower))
                     .map(|m| (String::from_utf8_lossy(&m.name).to_string(),
                               m.declaring_class.clone()));
                 if let Some((canonical_method, declaring_lower)) = method_meta {
-                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
+                    let declaring_canonical = rcls(vm, declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
                     // Pass the lookup class so __toString can show
                     // "<user, inherits Parent>" when the method was fetched
                     // from a child class but is declared on a parent.
-                    let lookup_canonical = vm.classes.get(&class_lower)
+                    let lookup_canonical = rcls(vm, &class_lower)
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or_else(|| target.clone());
                     Some(create_reflection_method_with_lookup(vm, &declaring_canonical, &canonical_method, Some(&lookup_canonical)))
@@ -1763,7 +1828,7 @@ pub fn reflection_class_docall(
                     }
                     Some(Value::Object(Rc::new(RefCell::new(rm_obj))))
                 } else {
-                    let canonical_class = vm.classes.get(&class_lower)
+                    let canonical_class = rcls(vm, &class_lower)
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or(target.clone());
                     let err_msg = format!("Method {}::{}() does not exist", canonical_class, method_name);
@@ -1776,7 +1841,7 @@ pub fn reflection_class_docall(
                 let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
                 // Collect method info first to avoid borrow issues
-                let method_info: Vec<(String, String)> = if let Some(ce) = vm.classes.get(&class_lower) {
+                let method_info: Vec<(String, String)> = if let Some(ce) = rcls(vm, &class_lower) {
                     ce.methods.values().filter_map(|method_def| {
                         if filter != -1 {
                             let method_mod = reflection_method_modifiers_static(method_def);
@@ -1806,7 +1871,7 @@ pub fn reflection_class_docall(
                 };
                 for (declaring, method_name) in method_info {
                     let declaring_lower: Vec<u8> = declaring.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let declaring_canonical = vm.classes.get(&declaring_lower)
+                    let declaring_canonical = rcls(vm, &declaring_lower)
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or(declaring);
                     result.push(create_reflection_method(
@@ -1875,7 +1940,7 @@ pub fn reflection_class_docall(
                             vm.current_exception = Some(exc);
                             return Some(Value::Null);
                         }
-                        let qc_canonical = vm.classes.get(qc_lower)
+                        let qc_canonical = rcls(vm, qc_lower)
                             .map(|c| String::from_utf8_lossy(&c.name).to_string())
                             .unwrap_or_else(|| String::from_utf8_lossy(qc_lower).to_string());
                         let err = format!(
@@ -1893,7 +1958,7 @@ pub fn reflection_class_docall(
                 // Inherited private (instance) props are NOT visible via
                 // getProperty without an explicit qualifier; static private
                 // props remain accessible.
-                let prop_info = vm.classes.get(&lookup_lower)
+                let prop_info = rcls(vm, &lookup_lower)
                     .and_then(|c| c.properties.iter().find(|p| {
                         if p.name != prop_name.as_bytes() { return false; }
                         if qualified_class_lower.is_none()
@@ -1923,7 +1988,7 @@ pub fn reflection_class_docall(
                             let mut declared_anywhere = false;
                             let mut current = Some(class_lower.clone());
                             while let Some(cl) = current {
-                                if let Some(ce) = vm.classes.get(&cl) {
+                                if let Some(ce) = rcls(vm, &cl) {
                                     if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
                                         declared_anywhere = true;
                                         break;
@@ -1940,7 +2005,7 @@ pub fn reflection_class_docall(
                     false
                 };
                 if let Some(declaring_lower) = prop_info {
-                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
+                    let declaring_canonical = rcls(vm, declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
                     Some(create_reflection_property(vm, &declaring_canonical, &prop_name))
@@ -1960,7 +2025,7 @@ pub fn reflection_class_docall(
                 // Collect declared properties (both static and instance) along
                 // with their declaring class. Private props from a parent are
                 // not visible on subclasses.
-                let declared: Vec<(String, Vec<u8>)> = if let Some(ce) = vm.classes.get(&class_lower) {
+                let declared: Vec<(String, Vec<u8>)> = if let Some(ce) = rcls(vm, &class_lower) {
                     let mut v = Vec::new();
                     for prop in ce.properties.iter() {
                         if filter != -1 {
@@ -1977,7 +2042,7 @@ pub fn reflection_class_docall(
                     v
                 } else { Vec::new() };
                 for (name_str, declaring_lower) in declared {
-                    let declaring_canonical = vm.classes.get(declaring_lower.as_slice())
+                    let declaring_canonical = rcls(vm, declaring_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
                     result.push(create_reflection_property(vm, &declaring_canonical, &name_str));
@@ -1991,7 +2056,7 @@ pub fn reflection_class_docall(
                     // list will already include them — so we filter them by name AND by
                     // checking if there's a *visible* (non-private-from-parent) declared
                     // prop with that name.
-                    let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = vm.classes.get(&class_lower) {
+                    let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = rcls(vm, &class_lower) {
                         ce.properties.iter()
                             .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
                             .map(|p| p.name.clone())
@@ -2129,7 +2194,7 @@ pub fn reflection_class_docall(
                 }
 
                 // Check if the target is actually an interface
-                let is_interface = vm.classes.get(&iface_lower)
+                let is_interface = rcls(vm, &iface_lower)
                     .map(|c| c.is_interface)
                     .unwrap_or_else(|| vm.builtin_is_interface(&iface_lower));
 
@@ -2185,12 +2250,12 @@ pub fn reflection_class_docall(
                 }
                 // Create instance and call constructor with remaining args
                 let obj_id = vm.alloc_object_id();
-                let canonical = vm.classes.get(&class_lower)
+                let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
 
                 // Validate abstract/interface
-                let (is_abstract, is_interface, is_trait) = vm.classes.get(&class_lower)
+                let (is_abstract, is_interface, is_trait) = rcls(vm, &class_lower)
                     .map(|c| (c.is_abstract, c.is_interface, c.is_trait))
                     .unwrap_or((false, false, false));
                 if is_interface || is_abstract || is_trait {
@@ -2205,7 +2270,7 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
 
-                let has_constructor = vm.classes.get(&class_lower)
+                let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
                     .unwrap_or(false);
 
@@ -2220,7 +2285,7 @@ pub fn reflection_class_docall(
 
                 // Check constructor visibility
                 if has_constructor {
-                    let ctor_visibility = vm.classes.get(&class_lower)
+                    let ctor_visibility = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
                         .map(|m| m.visibility);
                     if matches!(ctor_visibility, Some(Visibility::Protected) | Some(Visibility::Private)) {
@@ -2234,7 +2299,7 @@ pub fn reflection_class_docall(
 
                 let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
                 // Set default property values
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     let props: Vec<_> = ce.properties.iter()
                         .filter(|p| !p.is_static)
                         .map(|p| (p.name.clone(), p.default.clone()))
@@ -2248,7 +2313,7 @@ pub fn reflection_class_docall(
 
                 // Call constructor if it exists
                 if has_constructor {
-                    let ctor = vm.classes.get(&class_lower)
+                    let ctor = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
                         .cloned();
                     if let Some(ctor_method) = ctor {
@@ -2328,12 +2393,12 @@ pub fn reflection_class_docall(
                 };
 
                 let obj_id = vm.alloc_object_id();
-                let canonical = vm.classes.get(&class_lower)
+                let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
 
                 // Validate abstract/interface
-                let (is_abstract, is_interface, is_trait) = vm.classes.get(&class_lower)
+                let (is_abstract, is_interface, is_trait) = rcls(vm, &class_lower)
                     .map(|c| (c.is_abstract, c.is_interface, c.is_trait))
                     .unwrap_or((false, false, false));
                 if is_interface || is_abstract || is_trait {
@@ -2348,7 +2413,7 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
 
-                let has_constructor = vm.classes.get(&class_lower)
+                let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
                     .unwrap_or(false);
 
@@ -2363,7 +2428,7 @@ pub fn reflection_class_docall(
 
                 // Check constructor visibility
                 if has_constructor {
-                    let ctor_visibility = vm.classes.get(&class_lower)
+                    let ctor_visibility = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
                         .map(|m| m.visibility);
                     if matches!(ctor_visibility, Some(Visibility::Protected) | Some(Visibility::Private)) {
@@ -2376,7 +2441,7 @@ pub fn reflection_class_docall(
                 }
 
                 let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     let props: Vec<_> = ce.properties.iter()
                         .filter(|p| !p.is_static)
                         .map(|p| (p.name.clone(), p.default.clone()))
@@ -2389,7 +2454,7 @@ pub fn reflection_class_docall(
                 let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
 
                 if has_constructor {
-                    let ctor = vm.classes.get(&class_lower)
+                    let ctor = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
                         .cloned();
                     if let Some(ctor_method) = ctor {
@@ -2566,12 +2631,12 @@ pub fn reflection_class_docall(
                 // be initialized lazily either.
                 {
                     let mut cur = class_lower.clone();
-                    let canonical_self = vm.classes.get(&class_lower)
+                    let canonical_self = rcls(vm, &class_lower)
                         .map(|c| c.name.clone())
                         .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
                     let self_disp = String::from_utf8_lossy(&canonical_self).to_string();
                     let mut bad_internal_ancestor: Option<String> = None;
-                    while let Some(ce) = vm.classes.get(&cur) {
+                    while let Some(ce) = rcls(vm, &cur) {
                         if let Some(parent_lower) = &ce.parent {
                             let pl: Vec<u8> = parent_lower.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if pl == b"stdclass" {
@@ -2619,13 +2684,13 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
                 let obj_id = vm.alloc_object_id();
-                let canonical = vm.classes.get(&class_lower)
+                let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
                 let mut new_obj = PhpObject::new(canonical, obj_id);
                 // PHP: classes with no declared instance properties are never lazy
                 // — they are returned as already-initialized objects (no initializer).
-                let decl_prop_count = vm.classes.get(&class_lower)
+                let decl_prop_count = rcls(vm, &class_lower)
                     .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
                     .unwrap_or(0);
                 if decl_prop_count == 0 {
@@ -2635,7 +2700,7 @@ pub fn reflection_class_docall(
                 // in declaration order so later assignments preserve that order.
                 // Typed properties will render as uninitialized() in var_dump
                 // until the initializer runs.
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     let decl_props: Vec<_> = ce.properties.iter()
                         .filter(|p| !p.is_static)
                         .map(|p| p.name.clone())
@@ -2677,7 +2742,7 @@ pub fn reflection_class_docall(
                 if let Value::Object(inner) = &target {
                     // Initialize properties to their default values from the class
                     // definition, skipping the initializer.
-                    let defaults: Vec<(Vec<u8>, Value)> = vm.classes.get(&class_lower)
+                    let defaults: Vec<(Vec<u8>, Value)> = rcls(vm, &class_lower)
                         .map(|ce| ce.properties.iter()
                             .filter(|p| !p.is_static && !matches!(p.default, Value::Undef))
                             .map(|p| (p.name.clone(), p.default.clone()))
@@ -2750,10 +2815,10 @@ pub fn reflection_class_docall(
                 let default = args.get(2);
                 // First check if the property is declared as a static prop
                 // on this class (or an ancestor).
-                let declared_static = vm.classes.get(&class_lower)
+                let declared_static = rcls(vm, &class_lower)
                     .map(|ce| ce.properties.iter().any(|p| p.is_static && p.name == prop_name.as_bytes()))
                     .unwrap_or(false);
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     if let Some(val) = ce.static_properties.get(prop_name.as_bytes()) {
                         return Some(val.clone());
                     }
@@ -2783,11 +2848,11 @@ pub fn reflection_class_docall(
                 let prop_name = PhpString::from_string(prop_name_s.clone());
                 let value = args.get(2).cloned().unwrap_or(Value::Null);
                 // Validate that this static prop exists on the class (or an ancestor)
-                let declared = vm.classes.get(&class_lower)
+                let declared = rcls(vm, &class_lower)
                     .map(|ce| ce.properties.iter().any(|p| p.is_static && p.name == prop_name.as_bytes()))
                     .unwrap_or(false);
                 if !declared {
-                    let canonical = vm.classes.get(&class_lower)
+                    let canonical = rcls(vm, &class_lower)
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or(target.clone());
                     let err_msg = format!("Class {} does not have a property named {}", canonical, prop_name_s);
@@ -2796,7 +2861,7 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
                 // Enforce property type if declared
-                let prop_type = vm.classes.get(&class_lower)
+                let prop_type = rcls(vm, &class_lower)
                     .and_then(|ce| ce.properties.iter().find(|p| p.is_static && p.name == prop_name.as_bytes()))
                     .and_then(|p| p.property_type.clone());
                 let mut coerced = value;
@@ -2805,7 +2870,7 @@ pub fn reflection_class_docall(
                     let original = coerced.clone();
                     crate::vm::Vm::coerce_value_to_type(&mut coerced, pt, strict);
                     if !vm.value_matches_type(&coerced, pt) {
-                        let canonical = vm.classes.get(&class_lower)
+                        let canonical = rcls(vm, &class_lower)
                             .map(|c| String::from_utf8_lossy(&c.name).to_string())
                             .unwrap_or(target.clone());
                         let type_str = param_type_name(pt);
@@ -2848,7 +2913,7 @@ pub fn reflection_class_docall(
                     }
                 }
                 // getReflectionConstants
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     for (name, val) in ce.constants.clone() {
                         let const_name = String::from_utf8_lossy(&name).to_string();
                         result.push(create_reflection_class_constant(vm, &target, &const_name, val));
@@ -2858,14 +2923,14 @@ pub fn reflection_class_docall(
             }
             b"hascase" => {
                 let case_name = args.get(1)?.to_php_string();
-                let has = vm.classes.get(&class_lower)
+                let has = rcls(vm, &class_lower)
                     .map(|ce| ce.enum_cases.iter().any(|(cn, _)| cn == case_name.as_bytes()))
                     .unwrap_or(false);
                 Some(if has { Value::True } else { Value::False })
             }
             b"getcase" => {
                 let case_name = args.get(1)?.to_php_string().to_string_lossy();
-                if let Some(ce) = vm.classes.get(&class_lower) {
+                if let Some(ce) = rcls(vm, &class_lower) {
                     let is_case = ce.enum_cases.iter().any(|(cn, _)| cn == case_name.as_bytes());
                     if is_case {
                         let canonical = String::from_utf8_lossy(&ce.name).to_string();
@@ -2900,7 +2965,7 @@ pub fn reflection_class_docall(
                 }
             }
             b"getattributes" => {
-                let attrs = vm.classes.get(&class_lower)
+                let attrs = rcls(vm, &class_lower)
                     .map(|c| c.attributes.clone())
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
@@ -2997,47 +3062,47 @@ pub fn reflection_method_method(
             Some(ob.get_property(b"name"))
         }
         b"getdeclaringclass" => {
-            let class = vm.classes.get(&class_lower)
+            let class = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes())
                     .map(|m| String::from_utf8_lossy(&m.declaring_class).to_string()))
                 .unwrap_or(class_name.clone());
-            let declaring_canonical = vm.classes.get(class.as_bytes())
+            let declaring_canonical = rcls(vm, class.as_bytes())
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or(class.clone());
             Some(create_reflection_class(vm, &declaring_canonical))
         }
         b"ispublic" => {
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Public { Value::True } else { Value::False })
         }
         b"isprotected" => {
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Protected { Value::True } else { Value::False })
         }
         b"isprivate" => {
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Private { Value::True } else { Value::False })
         }
         b"isstatic" => {
-            let is_static = vm.classes.get(&class_lower)
+            let is_static = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_static))
                 .unwrap_or(false);
             Some(if is_static { Value::True } else { Value::False })
         }
         b"isabstract" => {
-            let is_abstract = vm.classes.get(&class_lower)
+            let is_abstract = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_abstract))
                 .unwrap_or(false);
             Some(if is_abstract { Value::True } else { Value::False })
         }
         b"isfinal" => {
-            let is_final = vm.classes.get(&class_lower)
+            let is_final = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_final))
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
@@ -3049,13 +3114,13 @@ pub fn reflection_method_method(
             Some(if method_lower.as_bytes() == b"__destruct" { Value::True } else { Value::False })
         }
         b"getmodifiers" => {
-            let mods = vm.classes.get(&class_lower)
+            let mods = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(reflection_method_modifiers))
                 .unwrap_or(1); // default public
             Some(Value::Long(mods))
         }
         b"getnumberofparameters" => {
-            let method_def = vm.classes.get(&class_lower)
+            let method_def = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()));
             let count = method_def.map(|m| {
                 let skip = if !m.is_static { 1u32 } else { 0u32 };
@@ -3064,7 +3129,7 @@ pub fn reflection_method_method(
             Some(Value::Long(count as i64))
         }
         b"getnumberofrequiredparameters" => {
-            let method_def = vm.classes.get(&class_lower)
+            let method_def = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()));
             // The compiler stores `required_param_count` as the count of
             // user-declared parameters without defaults — it does NOT include
@@ -3074,7 +3139,7 @@ pub fn reflection_method_method(
             Some(Value::Long(count as i64))
         }
         b"getparameters" => {
-            let method_data = vm.classes.get(&class_lower)
+            let method_data = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| (m.op_array.clone(), m.is_static));
             let params = if let Some((oa, is_static)) = method_data {
@@ -3085,21 +3150,21 @@ pub fn reflection_method_method(
             Some(params)
         }
         b"getreturntype" => {
-            let ret = vm.classes.get(&class_lower)
+            let ret = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .and_then(|m| m.op_array.return_type.as_ref())
                 .cloned();
             // Resolve `self` to the declaring class of the method, falling
             // back to the lookup class if declaring info is unavailable.
-            let scope: Vec<u8> = vm.classes.get(&class_lower)
+            let scope: Vec<u8> = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| {
                     let decl_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    vm.classes.get(&decl_lower)
+                    rcls(vm, &decl_lower)
                         .map(|dc| dc.name.clone())
                         .unwrap_or_else(|| m.declaring_class.clone())
                 })
-                .or_else(|| vm.classes.get(&class_lower).map(|c| c.name.clone()))
+                .or_else(|| rcls(vm, &class_lower).map(|c| c.name.clone()))
                 .unwrap_or_else(|| class_lower.clone());
             if let Some(rt) = ret {
                 Some(create_reflection_type_scoped(vm, &rt, Some(&scope)))
@@ -3108,7 +3173,7 @@ pub fn reflection_method_method(
             }
         }
         b"hasreturntype" => {
-            let has = vm.classes.get(&class_lower)
+            let has = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .and_then(|m| m.op_array.return_type.as_ref())
                 .is_some();
@@ -3126,7 +3191,7 @@ pub fn reflection_method_method(
             Some(if !is_user && is_builtin { Value::True } else { Value::False })
         }
         b"returnsreference" => {
-            let by_ref = vm.classes.get(&class_lower)
+            let by_ref = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| m.op_array.returns_by_ref)
                 .unwrap_or(false);
@@ -3139,7 +3204,7 @@ pub fn reflection_method_method(
                 return Some(Value::False);
             }
             // Use the class's filename if available
-            let filename = vm.classes.get(&class_lower)
+            let filename = rcls(vm, &class_lower)
                 .and_then(|c| c.filename.clone())
                 .unwrap_or_else(|| vm.current_file.clone());
             Some(Value::String(PhpString::from_string(filename)))
@@ -3149,7 +3214,7 @@ pub fn reflection_method_method(
             if !is_user {
                 return Some(Value::False);
             }
-            let line = vm.classes.get(&class_lower)
+            let line = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.op_array.decl_line))
                 .unwrap_or(0);
             Some(Value::Long(line as i64))
@@ -3159,14 +3224,14 @@ pub fn reflection_method_method(
             if !is_user {
                 return Some(Value::False);
             }
-            let line = vm.classes.get(&class_lower)
+            let line = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| if m.op_array.end_line > 0 { m.op_array.end_line as i64 } else { m.op_array.decl_line as i64 })
                 .unwrap_or(0);
             if line > 0 { Some(Value::Long(line)) } else { Some(Value::False) }
         }
         b"getdoccomment" => {
-            let doc = vm.classes.get(&class_lower)
+            let doc = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .and_then(|m| m.doc_comment.as_ref())
                 .cloned();
@@ -3177,7 +3242,7 @@ pub fn reflection_method_method(
             }
         }
         b"isvariadic" => {
-            let is_variadic = vm.classes.get(&class_lower)
+            let is_variadic = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .and_then(|m| m.op_array.variadic_param)
                 .is_some();
@@ -3185,7 +3250,7 @@ pub fn reflection_method_method(
         }
         b"isdeprecated" => {
             // Check for the #[\Deprecated] attribute on the method.
-            let has_dep = vm.classes.get(&class_lower)
+            let has_dep = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| {
                     m.attributes.iter().any(|a| {
@@ -3202,7 +3267,7 @@ pub fn reflection_method_method(
             let mut result = PhpArray::new();
             // Build the lookup prefix using the method's op_array name. We need
             // the op_array's name to match what `StaticVarInit` keyed against.
-            let prefix_opt = vm.classes.get(&class_lower)
+            let prefix_opt = rcls(vm, &class_lower)
                 .and_then(|ce| ce.methods.get(method_lower.as_bytes()))
                 .map(|m| {
                     let mut k = m.op_array.name.clone();
@@ -3212,7 +3277,7 @@ pub fn reflection_method_method(
             // Also extract declared static variable names in source order by
             // scanning the op_array for `StaticVarInit` opcodes.
             if let Some(prefix) = prefix_opt {
-                if let Some(m) = vm.classes.get(&class_lower).and_then(|ce| ce.methods.get(method_lower.as_bytes())) {
+                if let Some(m) = rcls(vm, &class_lower).and_then(|ce| ce.methods.get(method_lower.as_bytes())) {
                     use crate::opcode::{OpCode, OperandType};
                     let op_array = m.op_array.clone();
                     for op in op_array.ops.iter() {
@@ -3255,12 +3320,12 @@ pub fn reflection_method_method(
         }
         b"hasprototype" => {
             let method_lower_bytes = method_lower.as_bytes();
-            let proto_exists = vm.classes.get(&class_lower)
+            let proto_exists = rcls(vm, &class_lower)
                 .map(|ce| {
                     let mut check = ce.parent.clone();
                     while let Some(ref p) = check {
                         let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(pce) = vm.classes.get(&p_lower) {
+                        if let Some(pce) = rcls(vm, &p_lower) {
                             if pce.get_method(method_lower_bytes).is_some() {
                                 return true;
                             }
@@ -3271,7 +3336,7 @@ pub fn reflection_method_method(
                     }
                     for iface in &ce.interfaces {
                         let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(ice) = vm.classes.get(&iface_lower) {
+                        if let Some(ice) = rcls(vm, &iface_lower) {
                             if ice.get_method(method_lower_bytes).is_some() {
                                 return true;
                             }
@@ -3283,7 +3348,7 @@ pub fn reflection_method_method(
             Some(if proto_exists { Value::True } else { Value::False })
         }
         b"isgenerator" => {
-            let is_gen = vm.classes.get(&class_lower)
+            let is_gen = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes()))
                 .map(|m| m.op_array.is_generator)
                 .unwrap_or(false);
@@ -3292,13 +3357,13 @@ pub fn reflection_method_method(
         b"getprototype" => {
             // Look for the method in parent classes/interfaces
             let method_lower_bytes = method_lower.as_bytes();
-            let proto_class = vm.classes.get(&class_lower)
+            let proto_class = rcls(vm, &class_lower)
                 .and_then(|ce| {
                     // Walk parent chain
                     let mut check = ce.parent.clone();
                     while let Some(ref p) = check {
                         let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(pce) = vm.classes.get(&p_lower) {
+                        if let Some(pce) = rcls(vm, &p_lower) {
                             if pce.get_method(method_lower_bytes).is_some() {
                                 return Some(String::from_utf8_lossy(&pce.name).to_string());
                             }
@@ -3310,7 +3375,7 @@ pub fn reflection_method_method(
                     // Check interfaces
                     for iface in &ce.interfaces {
                         let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(ice) = vm.classes.get(&iface_lower) {
+                        if let Some(ice) = rcls(vm, &iface_lower) {
                             if ice.get_method(method_lower_bytes).is_some() {
                                 return Some(String::from_utf8_lossy(&ice.name).to_string());
                             }
@@ -3319,7 +3384,7 @@ pub fn reflection_method_method(
                     None
                 });
             if let Some(proto) = proto_class {
-                let method_name = vm.classes.get(&class_lower)
+                let method_name = rcls(vm, &class_lower)
                     .and_then(|c| c.get_method(method_lower_bytes).map(|m| String::from_utf8_lossy(&m.name).to_string()))
                     .unwrap_or_default();
                 Some(create_reflection_method(vm, &proto, &method_name))
@@ -3347,121 +3412,26 @@ pub fn reflection_method_method(
             };
             drop(ob);
 
-            let method_def = vm.classes.get(&class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
-                .cloned();
+            let method_def = rmethod(vm, &class_lower, method_lower.as_bytes()).cloned();
 
             if let Some(m) = method_def {
-                let vis = match m.visibility {
-                    Visibility::Public => "public",
-                    Visibility::Protected => "protected",
-                    Visibility::Private => "private",
-                };
-                let static_str = if m.is_static { "static " } else { "" };
-                let modifiers = format!("{}{}{}{}",
-                    if m.is_abstract { "abstract " } else { "" },
-                    if m.is_final { "final " } else { "" },
-                    static_str,
-                    vis,
-                );
-                // Determine if this method is inherited from a different
-                // declaring class — for "<user, inherits Parent>" header.
-                let declaring_lower = &m.declaring_class;
-                let owner_display = if declaring_lower != &effective_class_lower {
-                    vm.classes.get(declaring_lower.as_slice())
-                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                } else {
-                    None
-                };
-                // Find prototype: walk parent chain looking for a method with
-                // the same name. The first ancestor that has it is the
-                // "overwrites" target, the deepest one is the "prototype".
-                // Private methods are not inherited, so don't report
-                // overwrites/prototype for them.
-                let mut overwrites_name: Option<String> = None;
-                let mut prototype_name: Option<String> = None;
-                if owner_display.is_none() && m.visibility != Visibility::Private {
-                    if let Some(ce) = vm.classes.get(&class_lower) {
-                        let method_bytes = method_lower.as_bytes();
-                        let mut cur_parent = ce.parent.clone();
-                        while let Some(ref p) = cur_parent {
-                            let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(pce) = vm.classes.get(&p_lower) {
-                                if let Some(pm) = pce.get_method(method_bytes) {
-                                    // Skip ancestor private methods — they
-                                    // aren't part of the visible chain.
-                                    if pm.visibility != Visibility::Private {
-                                        let canonical = String::from_utf8_lossy(&pce.name).to_string();
-                                        if overwrites_name.is_none() {
-                                            overwrites_name = Some(canonical.clone());
-                                        }
-                                        prototype_name = Some(canonical);
-                                    }
-                                }
-                                cur_parent = pce.parent.clone();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                let scope_str = if let Some(owner) = &owner_display {
-                    format!("<user, inherits {}>", owner)
-                } else if let (Some(ow), Some(pt)) = (&overwrites_name, &prototype_name) {
-                    format!("<user, overwrites {}, prototype {}>", ow, pt)
-                } else {
-                    "<user>".to_string()
-                };
-                let mut s = format!("Method [ {} {} method {} ] {{\n", scope_str, modifiers, name);
-                let m_end = if m.op_array.end_line > 0 { m.op_array.end_line } else { m.op_array.decl_line };
-                let filename_str = if m.op_array.filename.is_empty() {
-                    String::from_utf8_lossy(vm.current_file.as_bytes()).into_owned()
+                let filename = if m.op_array.filename.is_empty() {
+                    vm.current_file.clone()
                 } else {
                     String::from_utf8_lossy(&m.op_array.filename).into_owned()
                 };
-                s.push_str(&format!("  @@ {} {} - {}\n", filename_str, m.op_array.decl_line, m_end));
-                // Skip the implicit `$this` parameter for instance methods —
-                // when counting visible parameters (param_count includes $this).
-                let skip = if !m.is_static { 1usize } else { 0usize };
-                let pcount_total = m.op_array.param_count as usize;
-                let pcount = pcount_total.saturating_sub(skip);
-                // required_param_count does NOT include $this (compiler stores
-                // raw user-declared count), so do not subtract `skip` here.
-                let rcount = m.op_array.required_param_count as usize;
-                if pcount > 0 {
-                    s.push_str(&format!("\n  - Parameters [{}] {{\n", pcount));
-                    let variadic_cv = m.op_array.variadic_param;
-                    for i in 0..pcount {
-                        let cv_idx = i + skip;
-                        if cv_idx < m.op_array.cv_names.len() {
-                            let pname = String::from_utf8_lossy(&m.op_array.cv_names[cv_idx]);
-                            let is_variadic = variadic_cv.map(|v| v as usize == cv_idx).unwrap_or(false);
-                            let required = !is_variadic && i < rcount;
-                            let default_suffix = if !required && !is_variadic {
-                                if let Some(const_ref) = extract_param_default_constant(&m.op_array, cv_idx as u32) {
-                                    let display = if let Some(rest) = const_ref.strip_prefix("global:") {
-                                        rest.trim_start_matches('\\').to_string()
-                                    } else if let Some(rest) = const_ref.strip_prefix("class:") {
-                                        rest.to_string()
-                                    } else {
-                                        const_ref
-                                    };
-                                    format!(" = {}", display)
-                                } else if let Some(v) = extract_param_default(&m.op_array, cv_idx as u32) {
-                                    format!(" = {}", format_reflection_default(&v))
-                                } else {
-                                    String::new()
-                                }
-                            } else { String::new() };
-                            let variadic_prefix = if is_variadic { "..." } else { "" };
-                            s.push_str(&format!("    Parameter #{} [ <{}> {}${}{} ]\n", i,
-                                if required { "required" } else { "optional" }, variadic_prefix, pname, default_suffix));
-                        }
-                    }
-                    s.push_str("  }\n");
-                }
-                s.push_str("}\n");
-                Some(Value::String(PhpString::from_string(s)))
+                let display = String::from_utf8_lossy(&m.name).to_string();
+                let ctx = FnStrCtx {
+                    op: &m.op_array,
+                    method: Some(&m),
+                    scope: Some(&effective_class_lower),
+                    is_closure: false,
+                    internal_fn_ext: None,
+                    display_name: &display,
+                    filename: &filename,
+                };
+                let _ = &name;
+                Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))))
             } else {
                 Some(Value::String(PhpString::from_string(format!("Method [ {} {} ]", class, name))))
             }
@@ -3519,15 +3489,14 @@ pub fn reflection_method_docall(
                     }
                 }
 
-                let method_def = vm.classes.get(&class_lower)
-                    .and_then(|c| c.get_method(method_lower_bytes.as_bytes()))
+                let method_def = rmethod(vm, &class_lower, method_lower_bytes.as_bytes())
                     .cloned();
 
                 if let Some(m) = method_def {
                     // Abstract methods cannot be invoked. Check this before
                     // the ?object type validation to match PHP's ordering.
                     if m.is_abstract {
-                        let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                        let canonical = rcls(vm, &class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
                         let method_disp = String::from_utf8_lossy(&m.name).to_string();
                         let msg = format!("Trying to invoke abstract method {}::{}()", canonical, method_disp);
                         let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
@@ -3566,7 +3535,7 @@ pub fn reflection_method_docall(
                                 }
                             }
                             Value::Null => {
-                                let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                                let canonical = rcls(vm, &class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
                                 let method_disp = String::from_utf8_lossy(&m.name).to_string();
                                 let msg = format!("Trying to invoke non static method {}::{}() without an object", canonical, method_disp);
                                 let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
@@ -3580,6 +3549,9 @@ pub fn reflection_method_docall(
                                 return Some(Value::Null);
                             }
                         }
+                    }
+                    if m.op_array.internal_sig.is_some() {
+                        return Some(invoke_internal_method(vm, &m, &class_lower, target_obj, &invoke_args));
                     }
                     let mut func_key = class_lower.clone();
                     func_key.extend_from_slice(b"::");
@@ -3638,14 +3610,13 @@ pub fn reflection_method_docall(
                     vec![]
                 };
 
-                let method_def = vm.classes.get(&class_lower)
-                    .and_then(|c| c.get_method(method_lower_bytes.as_bytes()))
+                let method_def = rmethod(vm, &class_lower, method_lower_bytes.as_bytes())
                     .cloned();
 
                 if let Some(m) = method_def {
                     // Abstract methods cannot be invoked.
                     if m.is_abstract {
-                        let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                        let canonical = rcls(vm, &class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
                         let method_disp = String::from_utf8_lossy(&m.name).to_string();
                         let msg = format!("Trying to invoke abstract method {}::{}()", canonical, method_disp);
                         let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
@@ -3675,12 +3646,15 @@ pub fn reflection_method_docall(
                             }
                         }
                     }
+                    if m.op_array.internal_sig.is_some() {
+                        return Some(invoke_internal_method(vm, &m, &class_lower, target_obj, &invoke_args));
+                    }
                     // Check that enough args were provided (ArgumentCountError).
                     // `required_param_count` is the user-declared count
                     // (no $this), so it works for both static and non-static.
                     let req = m.op_array.required_param_count as usize;
                     if invoke_args.len() < req {
-                        let canonical = vm.classes.get(&class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                        let canonical = rcls(vm, &class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
                         let method_disp = String::from_utf8_lossy(&m.name).to_string();
                         // Determine `exactly` vs `at least`.
                         let skip = if !m.is_static { 1usize } else { 0usize };
@@ -3729,7 +3703,7 @@ pub fn reflection_method_docall(
                 }
             }
             b"getattributes" => {
-                let attrs = vm.classes.get(&class_lower)
+                let attrs = rcls(vm, &class_lower)
                     .and_then(|c| c.get_method(method_lower_bytes.as_bytes()).map(|m| m.attributes.clone()))
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
@@ -3741,16 +3715,16 @@ pub fn reflection_method_docall(
                 // closures are represented as strings ("Class::method") or
                 // arrays ([callable, $this]). For static methods return the
                 // callable name; for instance methods bind to the given $obj.
-                let is_static = vm.classes.get(&class_lower)
+                let is_static = rcls(vm, &class_lower)
                     .and_then(|c| c.get_method(method_lower_bytes.as_bytes()))
                     .map(|m| m.is_static)
                     .unwrap_or(false);
                 // Canonicalize name and class for display
-                let method_name = vm.classes.get(&class_lower)
+                let method_name = rcls(vm, &class_lower)
                     .and_then(|c| c.get_method(method_lower_bytes.as_bytes())
                         .map(|m| String::from_utf8_lossy(&m.name).to_string()))
                     .unwrap_or_else(|| method_lower_bytes.to_string_lossy());
-                let class_canonical = vm.classes.get(&class_lower)
+                let class_canonical = rcls(vm, &class_lower)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or(class_name.clone());
                 let callable = format!("{}::{}", class_canonical, method_name);
@@ -3773,6 +3747,39 @@ pub fn reflection_method_docall(
         }
     } else {
         None
+    }
+}
+
+
+/// Invoke an internal (natively implemented) method through the VM's
+/// regular callable dispatch.
+fn invoke_internal_method(
+    vm: &mut Vm,
+    m: &crate::object::MethodDef,
+    class_lower: &[u8],
+    target_obj: Value,
+    args: &[Value],
+) -> Value {
+    let callable = if m.is_static || !matches!(target_obj, Value::Object(_)) {
+        let cname = rcls(vm, class_lower)
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string());
+        Value::String(PhpString::from_string(format!("{}::{}", cname, String::from_utf8_lossy(&m.name))))
+    } else {
+        let mut arr = PhpArray::new();
+        arr.push(target_obj);
+        arr.push(Value::String(PhpString::from_vec(m.name.clone())));
+        Value::Array(Rc::new(RefCell::new(arr)))
+    };
+    match vm.call_callback(&callable, args) {
+        Ok(v) => v,
+        Err(e) => {
+            if vm.current_exception.is_none() {
+                let exc = vm.create_exception(b"Error", &e.message, vm.current_line);
+                vm.current_exception = Some(exc);
+            }
+            Value::Null
+        }
     }
 }
 
@@ -4293,61 +4300,61 @@ pub fn reflection_property_method(
         b"getdeclaringclass" => {
             if is_dynamic {
                 // Dynamic props are owned by the runtime class.
-                let canonical = vm.classes.get(&class_lower)
+                let canonical = rcls(vm, &class_lower)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or(class_name.clone());
                 return Some(create_reflection_class(vm, &canonical));
             }
-            let declaring = vm.classes.get(&class_lower)
+            let declaring = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes())
                     .map(|p| String::from_utf8_lossy(&p.declaring_class).to_string()))
                 .unwrap_or(class_name.clone());
-            let declaring_canonical = vm.classes.get(declaring.as_bytes().to_ascii_lowercase().as_slice())
+            let declaring_canonical = rcls(vm, declaring.as_bytes().to_ascii_lowercase().as_slice())
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or(declaring.clone());
             Some(create_reflection_class(vm, &declaring_canonical))
         }
         b"ispublic" => {
             if is_dynamic { return Some(Value::True); }
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Public { Value::True } else { Value::False })
         }
         b"isprotected" => {
             if is_dynamic { return Some(Value::False); }
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Protected { Value::True } else { Value::False })
         }
         b"isprivate" => {
             if is_dynamic { return Some(Value::False); }
-            let vis = vm.classes.get(&class_lower)
+            let vis = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.visibility))
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Private { Value::True } else { Value::False })
         }
         b"isstatic" => {
-            let is_static = vm.classes.get(&class_lower)
+            let is_static = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_static))
                 .unwrap_or(false);
             Some(if is_static { Value::True } else { Value::False })
         }
         b"isreadonly" => {
-            let is_readonly = vm.classes.get(&class_lower)
+            let is_readonly = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_readonly))
                 .unwrap_or(false);
             Some(if is_readonly { Value::True } else { Value::False })
         }
         b"isvirtual" => {
-            let is_virtual = vm.classes.get(&class_lower)
+            let is_virtual = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_virtual))
                 .unwrap_or(false);
             Some(if is_virtual { Value::True } else { Value::False })
         }
         b"isabstract" => {
-            let is_abstract = vm.classes.get(&class_lower)
+            let is_abstract = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_abstract))
                 .unwrap_or(false);
             Some(if is_abstract { Value::True } else { Value::False })
@@ -4355,21 +4362,21 @@ pub fn reflection_property_method(
         b"isfinal" => {
             // Either explicitly final OR `private(set)` (implicit final
             // because the setter cannot be overridden).
-            let is_final = vm.classes.get(&class_lower)
+            let is_final = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .map(|p| p.is_final || p.set_visibility == Some(Visibility::Private))
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
         b"hashooks" => {
-            let has_hooks = vm.classes.get(&class_lower)
+            let has_hooks = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .map(|p| p.has_get_hook || p.has_set_hook)
                 .unwrap_or(false);
             Some(if has_hooks { Value::True } else { Value::False })
         }
         b"isdefault" => {
-            let is_default = vm.classes.get(&class_lower)
+            let is_default = rcls(vm, &class_lower)
                 .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
                 .unwrap_or(false);
             Some(if is_default { Value::True } else { Value::False })
@@ -4379,7 +4386,7 @@ pub fn reflection_property_method(
             // has no default (Undef) — but only for *typed* properties.
             // Untyped properties implicitly default to NULL, so no deprecation.
             // Dynamic properties (looked up by object) also trigger the warning.
-            let prop_info = vm.classes.get(&class_lower)
+            let prop_info = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).cloned());
             let (default_val, has_default, has_type) = match &prop_info {
                 Some(p) => {
@@ -4404,20 +4411,20 @@ pub fn reflection_property_method(
             Some(result)
         }
         b"hasdefaultvalue" => {
-            let has = vm.classes.get(&class_lower)
+            let has = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .map(|p| !matches!(p.default, Value::Undef))
                 .unwrap_or(false);
             Some(if has { Value::True } else { Value::False })
         }
         b"getmodifiers" => {
-            let mods = vm.classes.get(&class_lower)
+            let mods = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(reflection_property_modifiers))
                 .unwrap_or(1);
             Some(Value::Long(mods))
         }
         b"getdoccomment" => {
-            let doc = vm.classes.get(&class_lower)
+            let doc = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .and_then(|p| p.doc_comment.as_ref())
                 .cloned();
@@ -4428,14 +4435,14 @@ pub fn reflection_property_method(
             }
         }
         b"hastype" => {
-            let has = vm.classes.get(&class_lower)
+            let has = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .map(|p| p.property_type.is_some())
                 .unwrap_or(false);
             Some(if has { Value::True } else { Value::False })
         }
         b"gettype" => {
-            let pt = vm.classes.get(&class_lower)
+            let pt = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .and_then(|p| p.property_type.as_ref())
                 .cloned();
@@ -4457,11 +4464,11 @@ pub fn reflection_property_method(
         b"getmangledname" => {
             // PHP: private properties -> "\0ClassName\0name",
             // protected properties -> "\0*\0name", public -> "name".
-            let (vis, declaring_lower) = vm.classes.get(&class_lower)
+            let (vis, declaring_lower) = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .map(|p| (p.visibility, p.declaring_class.clone()))
                 .unwrap_or((Visibility::Public, class_lower.clone()));
-            let declaring_canonical = vm.classes.get(&declaring_lower)
+            let declaring_canonical = rcls(vm, &declaring_lower)
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or_else(|| String::from_utf8_lossy(&declaring_lower).to_string());
             let mangled = match vis {
@@ -4473,13 +4480,13 @@ pub fn reflection_property_method(
         }
         b"isdynamic" => {
             // Dynamic properties are those not declared on the class.
-            let is_declared = vm.classes.get(&class_lower)
+            let is_declared = rcls(vm, &class_lower)
                 .map(|c| c.properties.iter().any(|p| p.name == prop_name.as_bytes()))
                 .unwrap_or(false);
             Some(if is_declared { Value::False } else { Value::True })
         }
         b"isprivateset" => {
-            let is_priv_set = vm.classes.get(&class_lower)
+            let is_priv_set = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .and_then(|p| p.set_visibility)
                 .map(|v| v == Visibility::Private)
@@ -4487,7 +4494,7 @@ pub fn reflection_property_method(
             Some(if is_priv_set { Value::True } else { Value::False })
         }
         b"isprotectedset" => {
-            let is_prot_set = vm.classes.get(&class_lower)
+            let is_prot_set = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .and_then(|p| p.set_visibility)
                 .map(|v| v == Visibility::Protected)
@@ -4506,7 +4513,7 @@ pub fn reflection_property_method(
         b"getsettabletype" => {
             // Default behavior: same as getType(); asymmetric setter types
             // aren't modeled yet.
-            let pt = vm.classes.get(&class_lower)
+            let pt = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .and_then(|p| p.property_type.as_ref())
                 .cloned();
@@ -4517,7 +4524,7 @@ pub fn reflection_property_method(
             }
         }
         b"__tostring" => {
-            let prop = vm.classes.get(&class_lower)
+            let prop = rcls(vm, &class_lower)
                 .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                 .cloned();
             if let Some(p) = prop {
@@ -4637,7 +4644,7 @@ pub fn reflection_property_docall(
         drop(ob);
 
         // Check if this is a static property
-        let is_static = vm.classes.get(&class_lower)
+        let is_static = rcls(vm, &class_lower)
             .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.is_static))
             .unwrap_or(false);
 
@@ -4705,7 +4712,7 @@ pub fn reflection_property_docall(
                         // satisfy the declared type when possible. In particular
                         // an object that is __toString()-able coerces to string
                         // when assigned to a string-typed property — bug #79683.
-                        let prop_type = vm.classes.get(&class_lower)
+                        let prop_type = rcls(vm, &class_lower)
                             .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
                             .and_then(|p| p.property_type.clone());
                         let mut coerced = value.clone();
@@ -4733,7 +4740,7 @@ pub fn reflection_property_docall(
                 Some(Value::Null)
             }
             b"getattributes" => {
-                let attrs = vm.classes.get(&class_lower)
+                let attrs = rcls(vm, &class_lower)
                     .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| p.attributes.clone()))
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
@@ -4821,7 +4828,7 @@ pub fn reflection_property_docall(
                 // assigned a value (or has a default) on the object.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if is_static {
-                    let initialized = vm.classes.get(&class_lower)
+                    let initialized = rcls(vm, &class_lower)
                         .map(|c| c.static_properties.contains_key(prop_name.as_bytes()))
                         .unwrap_or(false);
                     Some(if initialized { Value::True } else { Value::False })
@@ -5078,7 +5085,7 @@ fn reflection_parameter_op_array(vm: &Vm, obj: &Rc<RefCell<PhpObject>>) -> Optio
     if !class_bytes.is_empty() && !method_bytes.is_empty() {
         let class_lower: Vec<u8> = class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
         let method_lower: Vec<u8> = method_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if let Some(ce) = vm.classes.get(&class_lower) {
+        if let Some(ce) = rcls(vm, &class_lower) {
             if let Some(m) = ce.methods.get(&method_lower) {
                 return Some(m.op_array.clone());
             }
@@ -5166,7 +5173,7 @@ pub fn reflection_parameter_method(
                                         let pc = ob.get_property(b"__reflection_param_class").to_php_string();
                                         drop(ob);
                                         let pcl: Vec<u8> = pc.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        vm.classes.get(&pcl).and_then(|c| c.parent.clone()).unwrap_or_else(|| cls.as_bytes().to_vec())
+                                        rcls(vm, &pcl).and_then(|c| c.parent.clone()).unwrap_or_else(|| cls.as_bytes().to_vec())
                                     }
                                     _ => cls.as_bytes().to_vec(),
                                 };
@@ -5174,7 +5181,7 @@ pub fn reflection_parameter_method(
                                 // Walk class hierarchy for constant
                                 let mut current = Some(cl);
                                 while let Some(cl) = current {
-                                    if let Some(ce) = vm.classes.get(&cl) {
+                                    if let Some(ce) = rcls(vm, &cl) {
                                         if let Some(c) = ce.constants.get(const_name.as_bytes()) {
                                             return Some(c.clone());
                                         }
@@ -5271,7 +5278,7 @@ pub fn reflection_parameter_method(
                     None
                 } else {
                     let cl: Vec<u8> = cb.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    Some(vm.classes.get(&cl).map(|c| c.name.clone()).unwrap_or_else(|| cb.to_vec()))
+                    Some(rcls(vm, &cl).map(|c| c.name.clone()).unwrap_or_else(|| cb.to_vec()))
                 }
             };
             if let Some(pt) = param_type {
@@ -5298,7 +5305,7 @@ pub fn reflection_parameter_method(
                 // Build a ReflectionMethod
                 let class_str = String::from_utf8_lossy(class_bytes).to_string();
                 let method_str = String::from_utf8_lossy(method_bytes).to_string();
-                let canonical_class = vm.classes.get(class_bytes)
+                let canonical_class = rcls(vm, class_bytes)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or_else(|| class_str.clone());
                 let obj_id = vm.alloc_object_id();
@@ -5334,7 +5341,7 @@ pub fn reflection_parameter_method(
             drop(ob);
             let bytes = class_lower.as_bytes();
             if !bytes.is_empty() {
-                if let Some(ce) = vm.classes.get(bytes) {
+                if let Some(ce) = rcls(vm, bytes) {
                     let name_str = String::from_utf8_lossy(&ce.name).to_string();
                     return Some(create_reflection_class(vm, &name_str));
                 }
@@ -5381,11 +5388,11 @@ pub fn reflection_parameter_method(
                 let decl_lower: Vec<u8> = decl_class_bytes.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                 let resolved_lower: Vec<u8> = match lower.as_slice() {
                     b"self" | b"static" => decl_lower.clone(),
-                    b"parent" => vm.classes.get(&decl_lower).and_then(|c| c.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())).unwrap_or_default(),
+                    b"parent" => rcls(vm, &decl_lower).and_then(|c| c.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())).unwrap_or_default(),
                     _ => lower,
                 };
                 if vm.classes.contains_key(&resolved_lower) {
-                    let name_str = String::from_utf8_lossy(&vm.classes.get(&resolved_lower).map(|c| c.name.clone()).unwrap_or_else(|| resolved_lower.clone())).to_string();
+                    let name_str = String::from_utf8_lossy(&rcls(vm, &resolved_lower).map(|c| c.name.clone()).unwrap_or_else(|| resolved_lower.clone())).to_string();
                     return Some(create_reflection_class(vm, &name_str));
                 }
             }
@@ -6118,7 +6125,7 @@ pub fn reflection_class_constant_method(
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
     // Look up constant metadata
-    let meta = vm.classes.get(&class_lower)
+    let meta = rcls(vm, &class_lower)
         .and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
 
     let visibility = meta.as_ref().map(|m| m.visibility).unwrap_or(Visibility::Public);
@@ -6131,7 +6138,7 @@ pub fn reflection_class_constant_method(
             let declaring = meta.as_ref()
                 .map(|m| {
                     let dc_lower = &m.declaring_class;
-                    vm.classes.get(dc_lower.as_slice())
+                    rcls(vm, dc_lower.as_slice())
                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
                         .unwrap_or(class_name.clone())
                 })
@@ -6165,7 +6172,7 @@ pub fn reflection_class_constant_method(
             // constant was declared as `case Foo;` on an enum — not when
             // it's a regular constant that *happens* to reference an enum
             // case value (e.g. `const Baz = self::Bar;`).
-            let is_case = vm.classes.get(&class_lower)
+            let is_case = rcls(vm, &class_lower)
                 .map(|ce| ce.enum_cases.iter().any(|(cn, _)| cn == const_name.as_bytes()))
                 .unwrap_or(false);
             drop(ob);
@@ -6268,7 +6275,7 @@ pub fn reflection_parameter_docall(
                 if !matches!(&param_class, Value::Null) {
                     let class_lower = param_class.to_php_string().as_bytes().to_vec();
                     let method_lower = param_method.to_php_string().as_bytes().to_vec();
-                    let attrs = vm.classes.get(&class_lower)
+                    let attrs = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(&method_lower))
                         .and_then(|m| m.op_array.param_attributes.get(position))
                         .cloned()
@@ -6305,7 +6312,7 @@ pub fn reflection_class_constant_docall(
 
         match method {
             b"getattributes" => {
-                let meta = vm.classes.get(&class_lower)
+                let meta = rcls(vm, &class_lower)
                     .and_then(|ce| ce.constants_meta.get(const_name.as_bytes()).cloned());
                 let attrs = meta.as_ref().map(|m| m.attributes.clone()).unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_php_string().as_bytes().to_vec()) });
@@ -6492,12 +6499,12 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
                         }
 
                         // Check method exists
-                        let method_exists = vm.classes.get(&class_lower_bytes)
+                        let method_exists = rcls(vm, &class_lower_bytes)
                             .map(|c| c.get_method(&method_lower_bytes).is_some())
                             .unwrap_or(false);
 
                         if !method_exists {
-                            let canonical_class = vm.classes.get(&class_lower_bytes)
+                            let canonical_class = rcls(vm, &class_lower_bytes)
                                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                                 .unwrap_or(class_name.to_string());
                             let err_msg = format!("Method {}::{}() does not exist", canonical_class, method_name);
@@ -6506,7 +6513,7 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
                             return Some(Value::Null);
                         }
 
-                        let canonical_class = vm.classes.get(&class_lower_bytes)
+                        let canonical_class = rcls(vm, &class_lower_bytes)
                             .map(|c| String::from_utf8_lossy(&c.name).to_string())
                             .unwrap_or(class_name.to_string());
                         Some(create_reflection_method(vm, &canonical_class, method_name))
@@ -6545,7 +6552,7 @@ pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     // If the target class is an enum, materialize a ReflectionEnum so that
     // callers like `getDeclaringClass()::class` see the right runtime type.
-    let is_enum = vm.classes.get(&class_lower).map(|c| c.is_enum).unwrap_or(false);
+    let is_enum = rcls(vm, &class_lower).map(|c| c.is_enum).unwrap_or(false);
     let reflector = if is_enum { b"ReflectionEnum".to_vec() } else { b"ReflectionClass".to_vec() };
     let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(reflector, obj_id);
@@ -6571,11 +6578,11 @@ pub fn create_reflection_method_with_lookup(vm: &mut Vm, class_name: &str, metho
     let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
 
-    let canonical_method = vm.classes.get(&class_lower)
+    let canonical_method = rcls(vm, &class_lower)
         .and_then(|c| c.get_method(&method_lower).map(|m| String::from_utf8_lossy(&m.name).to_string()))
         .unwrap_or_else(|| method_name.to_string());
 
-    let canonical_class = vm.classes.get(&class_lower)
+    let canonical_class = rcls(vm, &class_lower)
         .map(|c| String::from_utf8_lossy(&c.name).to_string())
         .unwrap_or_else(|| class_name.to_string());
 
@@ -6586,7 +6593,7 @@ pub fn create_reflection_method_with_lookup(vm: &mut Vm, class_name: &str, metho
     if let Some(lookup) = lookup_class {
         let lookup_canonical = {
             let lookup_lower: Vec<u8> = lookup.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-            vm.classes.get(&lookup_lower)
+            rcls(vm, &lookup_lower)
                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                 .unwrap_or_else(|| lookup.to_string())
         };
@@ -6650,7 +6657,7 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
     while let Some(c) = cur {
         if visited.contains(&c) { break; }
         visited.push(c.clone());
-        if let Some(ce) = vm.classes.get(c.as_slice()) {
+        if let Some(ce) = rcls(vm, c.as_slice()) {
             if ce.properties.iter().any(|p| p.is_static && p.name == prop_name) {
                 owner = Some(c.clone());
             }
@@ -6666,7 +6673,7 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
 /// Walk a class's parent chain to find a static property's current value.
 fn find_static_property_value(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> Option<Value> {
     let owner = find_static_property_owner(vm, class_lower, prop_name)?;
-    vm.classes.get(owner.as_slice())
+    rcls(vm, owner.as_slice())
         .and_then(|c| c.static_properties.get(prop_name).cloned())
 }
 
@@ -6681,7 +6688,7 @@ fn find_constant_declaring_class(vm: &Vm, class_lower: &[u8], const_name: &[u8])
     while let Some(c) = cur {
         if visited.contains(&c) { break; }
         visited.push(c.clone());
-        if let Some(ce) = vm.classes.get(c.as_slice()) {
+        if let Some(ce) = rcls(vm, c.as_slice()) {
             if ce.constants.contains_key(const_name) {
                 owner = Some(String::from_utf8_lossy(&ce.name).to_string());
             }
@@ -6780,11 +6787,11 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
         if name == b"parent" {
             if let Some(s) = scope {
                 let scope_lower: Vec<u8> = s.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if let Some(ce) = vm.classes.get(&scope_lower) {
+                if let Some(ce) = rcls(vm, &scope_lower) {
                     if let Some(parent) = ce.parent.as_ref() {
                         // Try canonical name from class entry
                         let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(parent_ce) = vm.classes.get(&parent_lower) {
+                        if let Some(parent_ce) = rcls(vm, &parent_lower) {
                             return parent_ce.name.clone();
                         }
                         return parent.clone();
@@ -6914,7 +6921,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
 
 /// Helper to check if a class has a constant (walks parent chain)
 fn reflection_class_has_constant(vm: &Vm, class_lower: &[u8], const_name: &[u8]) -> bool {
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         if ce.constants.contains_key(const_name) {
             return true;
         }
@@ -6932,7 +6939,7 @@ fn reflection_class_has_constant(vm: &Vm, class_lower: &[u8], const_name: &[u8])
 /// enum case object.
 fn reflection_class_get_constant(vm: &mut Vm, class_lower: &[u8], const_name: &[u8]) -> Option<Value> {
     let raw = {
-        let ce = vm.classes.get(class_lower)?;
+        let ce = rcls(vm, class_lower)?;
         if let Some(val) = ce.constants.get(const_name) {
             Some(val.clone())
         } else if let Some(ref parent) = ce.parent {
@@ -6968,11 +6975,11 @@ fn reflection_class_get_constant(vm: &mut Vm, class_lower: &[u8], const_name: &[
 /// when the target IS an interface.
 fn collect_all_interfaces(vm: &Vm, class_lower: &[u8], out: &mut Vec<Vec<u8>>) {
     let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    let starts_as_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
+    let starts_as_interface = rcls(vm, class_lower).map(|c| c.is_interface).unwrap_or(false);
     // Walk class -> parents collecting their `implements` list.
     let mut cur: Vec<u8> = class_lower.to_vec();
     for _ in 0..50 {
-        if let Some(ce) = vm.classes.get(&cur) {
+        if let Some(ce) = rcls(vm, &cur) {
             for iface in &ce.interfaces {
                 let iface_canonical = iface.clone();
                 let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -6983,7 +6990,7 @@ fn collect_all_interfaces(vm: &Vm, class_lower: &[u8], out: &mut Vec<Vec<u8>>) {
                     // represented with parent = extended interface).
                     let mut pcur = iface_lower.clone();
                     for _ in 0..50 {
-                        let parent = vm.classes.get(&pcur).and_then(|c| c.parent.clone());
+                        let parent = rcls(vm, &pcur).and_then(|c| c.parent.clone());
                         match parent {
                             Some(p) => {
                                 let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -7024,10 +7031,10 @@ fn collect_all_interfaces(vm: &Vm, class_lower: &[u8], out: &mut Vec<Vec<u8>>) {
 
 /// Collect parent constants into the result array
 fn reflection_collect_parent_constants(vm: &Vm, class_lower: &[u8], result: &mut PhpArray) {
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         if let Some(ref parent) = ce.parent {
             let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(pce) = vm.classes.get(&parent_lower) {
+            if let Some(pce) = rcls(vm, &parent_lower) {
                 for (name, val) in &pce.constants {
                     let key = ArrayKey::String(PhpString::from_vec(name.clone()));
                     if result.get(&key).is_none() {
@@ -7100,15 +7107,15 @@ fn reflection_class_to_string(
 ) -> String {
     let mut s = String::new();
 
-    let is_interface = vm.classes.get(class_lower).map(|c| c.is_interface).unwrap_or(false);
-    let is_trait = vm.classes.get(class_lower).map(|c| c.is_trait).unwrap_or(false);
-    let is_enum = vm.classes.get(class_lower).map(|c| c.is_enum).unwrap_or(false);
-    let is_abstract = vm.classes.get(class_lower).map(|c| c.is_abstract).unwrap_or(false);
-    let is_final = vm.classes.get(class_lower).map(|c| c.is_final).unwrap_or(false);
-    let is_readonly = vm.classes.get(class_lower).map(|c| c.is_readonly).unwrap_or(false);
+    let is_interface = rcls(vm, class_lower).map(|c| c.is_interface).unwrap_or(false);
+    let is_trait = rcls(vm, class_lower).map(|c| c.is_trait).unwrap_or(false);
+    let is_enum = rcls(vm, class_lower).map(|c| c.is_enum).unwrap_or(false);
+    let is_abstract = rcls(vm, class_lower).map(|c| c.is_abstract).unwrap_or(false);
+    let is_final = rcls(vm, class_lower).map(|c| c.is_final).unwrap_or(false);
+    let is_readonly = rcls(vm, class_lower).map(|c| c.is_readonly).unwrap_or(false);
     // A class is "user-defined" when it has a source filename recorded; built-in
     // classes loaded synthetically into vm.classes have no filename.
-    let is_user = vm.classes.get(class_lower).map(|c| c.filename.is_some()).unwrap_or(false);
+    let is_user = rcls(vm, class_lower).map(|c| c.filename.is_some()).unwrap_or(false);
     let user_or_internal = if is_user { "user" } else { "internal" };
 
     // Header line
@@ -7133,7 +7140,7 @@ fn reflection_class_to_string(
     }
 
     // Parent and interfaces
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         if let Some(ref parent) = ce.parent {
             s.push_str(&format!("extends {} ", String::from_utf8_lossy(parent)));
         }
@@ -7148,7 +7155,7 @@ fn reflection_class_to_string(
     s.push_str("] {\n");
 
     // File info
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         if let Some(ref filename) = ce.filename {
             if ce.start_line > 0 {
                 let end = if ce.end_line > 0 { ce.end_line } else { ce.start_line };
@@ -7159,7 +7166,7 @@ fn reflection_class_to_string(
 
     // Enum cases section (for enums)
     if is_enum {
-        if let Some(ce) = vm.classes.get(class_lower) {
+        if let Some(ce) = rcls(vm, class_lower) {
             s.push_str(&format!("\n  - Enum cases [{}] {{\n", ce.enum_cases.len()));
             for (case_name, _) in &ce.enum_cases {
                 s.push_str(&format!("    Case {}\n", String::from_utf8_lossy(case_name)));
@@ -7170,7 +7177,7 @@ fn reflection_class_to_string(
 
     // Constants section. Enum cases are constants in the class table but should
     // not appear in the - Constants - section for an enum.
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         let case_names: std::collections::HashSet<&[u8]> = ce.enum_cases.iter().map(|(n, _)| n.as_slice()).collect();
         let regular_consts: Vec<_> = ce.constants.iter().filter(|(n, _)| !case_names.contains(n.as_slice())).collect();
         s.push_str(&format!("\n  - Constants [{}] {{\n", regular_consts.len()));
@@ -7197,7 +7204,7 @@ fn reflection_class_to_string(
     }
 
     // Static properties. Inherited private static props are not listed on subclasses.
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         let static_props: Vec<_> = ce.properties.iter()
             .filter(|p| p.is_static)
             .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
@@ -7226,7 +7233,7 @@ fn reflection_class_to_string(
 
     // Static methods. Hide property hook synthetic methods. Inherited private
     // methods are not exposed on subclasses.
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         let static_methods: Vec<_> = ce.methods.values()
             .filter(|m| m.is_static)
             .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
@@ -7245,7 +7252,7 @@ fn reflection_class_to_string(
 
     // Properties (non-static). Inherited private (instance) props are not
     // listed on subclasses.
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         let is_readonly_class = ce.is_readonly;
         let inst_props: Vec<_> = ce.properties.iter()
             .filter(|p| !p.is_static)
@@ -7284,7 +7291,7 @@ fn reflection_class_to_string(
     // declared on the class) in a separate "Dynamic properties" section.
     if kind == ReflectionStringKind::Object {
         if let Some(inst_rc) = wrapped_obj {
-            let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = vm.classes.get(class_lower) {
+            let visible_declared_names: Vec<Vec<u8>> = if let Some(ce) = rcls(vm, class_lower) {
                 ce.properties.iter()
                     .filter(|p| !(p.visibility == Visibility::Private && p.declaring_class != class_lower))
                     .map(|p| p.name.clone())
@@ -7309,7 +7316,7 @@ fn reflection_class_to_string(
 
     // Methods (non-static). Hide property hook synthetic methods and
     // inherited private methods.
-    if let Some(ce) = vm.classes.get(class_lower) {
+    if let Some(ce) = rcls(vm, class_lower) {
         let inst_methods: Vec<_> = ce.methods.values()
             .filter(|m| !m.is_static)
             .filter(|m| !m.name.starts_with(b"__property_get_") && !m.name.starts_with(b"__property_set_"))
@@ -7360,13 +7367,13 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
         let mut prototype: Option<String> = None;
         let mut visited: Vec<Vec<u8>> = Vec::new();
         // Walk parent chain first (depth-first)
-        if let Some(ce) = vm.classes.get(start_class_lower) {
+        if let Some(ce) = rcls(vm, start_class_lower) {
             let mut cur_parent = ce.parent.clone();
             while let Some(ref p) = cur_parent {
                 let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if visited.contains(&p_lower) { break; }
                 visited.push(p_lower.clone());
-                if let Some(pce) = vm.classes.get(&p_lower) {
+                if let Some(pce) = rcls(vm, &p_lower) {
                     if let Some(pm) = pce.get_method(method_bytes) {
                         if pm.visibility != Visibility::Private {
                             // Use the method's declaring class so an inherited
@@ -7374,7 +7381,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                             // definition site, not the inheriting class.
                             let decl_lower: Vec<u8> = pm.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let canonical = if !decl_lower.is_empty() {
-                                vm.classes.get(decl_lower.as_slice())
+                                rcls(vm, decl_lower.as_slice())
                                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                                     .unwrap_or_else(|| String::from_utf8_lossy(&pce.name).to_string())
                             } else {
@@ -7397,7 +7404,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
                 .collect();
             // Add interfaces from each ancestor we visited
             for p_lower in &visited {
-                if let Some(pce) = vm.classes.get(p_lower.as_slice()) {
+                if let Some(pce) = rcls(vm, p_lower.as_slice()) {
                     for i in &pce.interfaces {
                         let il: Vec<u8> = i.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if !iface_stack.contains(&il) { iface_stack.push(il); }
@@ -7408,7 +7415,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
             while let Some(iface_lower) = iface_stack.pop() {
                 if iface_seen.contains(&iface_lower) { continue; }
                 iface_seen.push(iface_lower.clone());
-                if let Some(ice) = vm.classes.get(&iface_lower) {
+                if let Some(ice) = rcls(vm, &iface_lower) {
                     if let Some(im) = ice.get_method(method_bytes) {
                         if im.visibility != Visibility::Private {
                             let canonical = String::from_utf8_lossy(&ice.name).to_string();
@@ -7432,7 +7439,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     // ", prototype <Ancestor>". If the method is declared on this class
     // and overrides an ancestor, it renders ", overwrites X, prototype Y".
     let inherits_str = if m.declaring_class.as_slice() != owner_lower {
-        let decl_name = vm.classes.get(m.declaring_class.as_slice())
+        let decl_name = rcls(vm, m.declaring_class.as_slice())
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
             .unwrap_or_default();
         // Walk from the declaring class to find a prototype.
@@ -7716,7 +7723,7 @@ pub fn create_reflection_attributes(
                     while let Some(cur) = queue.pop() {
                         if !visited.insert(cur.clone()) { continue; }
                         if cur == filter_lower { is_subclass = true; break; }
-                        if let Some(ce) = vm.classes.get(&cur) {
+                        if let Some(ce) = rcls(vm, &cur) {
                             if let Some(p) = &ce.parent {
                                 let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 queue.push(pl);
@@ -7855,7 +7862,7 @@ pub fn reflection_attribute_method(
                 return Some(Value::Null);
             }
             // Check if the class has #[Attribute] -- only attribute classes can be instantiated via newInstance
-            let attribute_args_op = vm.classes.get(&class_lower)
+            let attribute_args_op = rcls(vm, &class_lower)
                 .and_then(|ce| ce.attributes.iter().find(|a| a.name.eq_ignore_ascii_case(b"attribute")))
                 .map(|a| a.args_op_array.clone());
             let is_attribute_class = attribute_args_op.is_some();
@@ -7968,7 +7975,7 @@ pub fn reflection_attribute_method(
             }
             // Create the object and call its constructor
             let obj_id = vm.alloc_object_id();
-            let ce = vm.classes.get(&class_lower).unwrap().clone();
+            let ce = rcls(vm, &class_lower).unwrap().clone();
             // Pre-flight: validate constructor visibility and argument count.
             let construct_lower = b"__construct".to_vec();
             if let Some(constructor) = ce.get_method(&construct_lower) {
@@ -8181,4 +8188,416 @@ fn get_function_extension(func_name: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Faithful ports of php_reflection.c's string builders.
+// ---------------------------------------------------------------------------
+
+/// Port of `zend_type_to_string()`: class names first (in declaration
+/// order, intersections bracketed inside unions), then builtin types in
+/// the engine's canonical order, `?T` for a single nullable type.
+pub(crate) fn zend_type_string(pt: &ParamType) -> String {
+    let mut classes: Vec<String> = Vec::new();
+    let mut mask: u32 = 0;
+    const STATIC: u32 = 1 << 0;
+    const CALLABLE: u32 = 1 << 1;
+    const OBJECT: u32 = 1 << 2;
+    const ARRAY: u32 = 1 << 3;
+    const STRING: u32 = 1 << 4;
+    const INT: u32 = 1 << 5;
+    const FLOAT: u32 = 1 << 6;
+    const FALSE: u32 = 1 << 7;
+    const TRUE: u32 = 1 << 8;
+    const VOID: u32 = 1 << 9;
+    const NEVER: u32 = 1 << 10;
+    const NULL: u32 = 1 << 11;
+    const MIXED: u32 = 1 << 12;
+    fn walk(pt: &ParamType, classes: &mut Vec<String>, mask: &mut u32, in_union: bool) {
+        match pt {
+            ParamType::Simple(n) => {
+                let l = n.to_ascii_lowercase();
+                *mask |= match l.as_slice() {
+                    b"static" => STATIC,
+                    b"callable" => CALLABLE,
+                    b"object" => OBJECT,
+                    b"array" => ARRAY,
+                    b"string" => STRING,
+                    b"int" => INT,
+                    b"float" => FLOAT,
+                    b"bool" => FALSE | TRUE,
+                    b"false" => FALSE,
+                    b"true" => TRUE,
+                    b"void" => VOID,
+                    b"never" => NEVER,
+                    b"null" => NULL,
+                    b"mixed" => MIXED,
+                    b"iterable" => {
+                        if !classes.iter().any(|c| c == "Traversable") {
+                            classes.push("Traversable".to_string());
+                        }
+                        ARRAY
+                    }
+                    _ => {
+                        let s = String::from_utf8_lossy(n).to_string();
+                        let s = s.strip_prefix('\\').map(|x| x.to_string()).unwrap_or(s);
+                        classes.push(s);
+                        0
+                    }
+                };
+            }
+            ParamType::Nullable(inner) => {
+                *mask |= NULL;
+                walk(inner, classes, mask, in_union);
+            }
+            ParamType::Union(items) => {
+                for t in items {
+                    walk(t, classes, mask, true);
+                }
+            }
+            ParamType::Intersection(items) => {
+                let parts: Vec<String> = items.iter().map(zend_type_string).collect();
+                let s = parts.join("&");
+                classes.push(if in_union { format!("({})", s) } else { s });
+            }
+        }
+    }
+    walk(pt, &mut classes, &mut mask, false);
+    if mask & MIXED != 0 {
+        classes.push("mixed".to_string());
+        return classes.join("|");
+    }
+    let mut parts = classes;
+    let order: [(u32, &str); 9] = [
+        (STATIC, "static"),
+        (CALLABLE, "callable"),
+        (OBJECT, "object"),
+        (ARRAY, "array"),
+        (STRING, "string"),
+        (INT, "int"),
+        (FLOAT, "float"),
+        (0, ""),
+        (VOID, "void"),
+    ];
+    for (bit, name) in order.iter() {
+        if *bit == 0 {
+            if mask & (FALSE | TRUE) == (FALSE | TRUE) {
+                parts.push("bool".to_string());
+            } else if mask & FALSE != 0 {
+                parts.push("false".to_string());
+            } else if mask & TRUE != 0 {
+                parts.push("true".to_string());
+            }
+            continue;
+        }
+        if mask & bit != 0 {
+            parts.push(name.to_string());
+        }
+    }
+    if mask & NEVER != 0 {
+        parts.push("never".to_string());
+    }
+    if mask & NULL != 0 {
+        if parts.len() == 1 && !parts[0].contains('&') {
+            return format!("?{}", parts[0]);
+        }
+        parts.push("null".to_string());
+    }
+    parts.join("|")
+}
+
+/// Extension name of an internal method's class (from its stub).
+fn internal_method_ext(m: &crate::object::MethodDef) -> Option<&'static str> {
+    crate::stubs::find_class(&m.declaring_class).map(|c| c.ext)
+}
+
+fn op_array_is_deprecated(op: &OpArray, attrs: &[RuntimeAttribute]) -> bool {
+    if let Some(sig) = op.internal_sig {
+        return sig.flags & crate::stubs::F_DEPRECATED != 0;
+    }
+    op.attributes.iter().chain(attrs.iter()).any(|a| {
+        let n = String::from_utf8_lossy(&a.name);
+        n.eq_ignore_ascii_case("deprecated") || n.eq_ignore_ascii_case("\\deprecated")
+    })
+}
+
+/// Find the prototype class of a method (Zend's `fptr->common.prototype`):
+/// the root-most ancestor declaration it overrides, with interface methods
+/// taking precedence. Constructors only get one from abstract/interface
+/// declarations.
+fn method_prototype(vm: &Vm, m: &crate::object::MethodDef) -> Option<String> {
+    if m.visibility == Visibility::Private {
+        return None;
+    }
+    let decl = m.declaring_class.to_ascii_lowercase();
+    let ml = m.name.to_ascii_lowercase();
+    let is_ctor = ml == b"__construct";
+    let ce = rcls(vm, &decl)?;
+    let mut proto: Option<(String, bool)> = None;
+    // Parent chain.
+    let mut visited: Vec<Vec<u8>> = vec![decl.clone()];
+    let mut cur = ce.parent.clone();
+    let mut chain_classes: Vec<Vec<u8>> = vec![decl.clone()];
+    while let Some(p) = cur {
+        let pl = p.to_ascii_lowercase();
+        if visited.contains(&pl) {
+            break;
+        }
+        visited.push(pl.clone());
+        chain_classes.push(pl.clone());
+        let pce = match rcls(vm, &pl) {
+            Some(c) => c,
+            None => break,
+        };
+        if let Some(pm) = rmethod(vm, &pl, &ml) {
+            if pm.visibility != Visibility::Private {
+                let dl = pm.declaring_class.to_ascii_lowercase();
+                let name = rcls(vm, &dl).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(&pce.name).to_string());
+                proto = Some((name, pm.is_abstract));
+            }
+        }
+        cur = pce.parent.clone();
+    }
+    // Interfaces of the declaring class and its ancestors.
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    for c in &chain_classes {
+        if let Some(cc) = rcls(vm, c) {
+            for i in &cc.interfaces {
+                stack.push(i.to_ascii_lowercase());
+            }
+        }
+    }
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut iface_proto: Option<String> = None;
+    while let Some(i) = stack.pop() {
+        if seen.contains(&i) || seen.len() > 64 {
+            continue;
+        }
+        seen.push(i.clone());
+        if let Some(ice) = rcls(vm, &i) {
+            if let Some(im) = ice.methods.get(&ml) {
+                let dl = im.declaring_class.to_ascii_lowercase();
+                let name = rcls(vm, &dl).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(&ice.name).to_string());
+                if dl != decl {
+                    iface_proto = Some(name);
+                }
+            }
+            for j in &ice.interfaces {
+                stack.push(j.to_ascii_lowercase());
+            }
+        }
+    }
+    if let Some(ip) = iface_proto {
+        return Some(ip);
+    }
+    match proto {
+        Some((name, is_abstract)) => {
+            if is_ctor && !is_abstract {
+                None
+            } else {
+                Some(name)
+            }
+        }
+        None => None,
+    }
+}
+
+/// Default-value suffix for a parameter of a user function (` = ...`).
+fn user_param_default_suffix(op: &OpArray, cv_idx: usize) -> String {
+    if let Some(const_ref) = extract_param_default_constant(op, cv_idx as u32) {
+        let display = if let Some(rest) = const_ref.strip_prefix("global:") {
+            rest.trim_start_matches('\\').to_string()
+        } else if let Some(rest) = const_ref.strip_prefix("class:") {
+            rest.to_string()
+        } else {
+            const_ref
+        };
+        format!(" = {}", display)
+    } else if let Some(v) = extract_param_default(op, cv_idx as u32) {
+        format!(" = {}", format_reflection_default(&v))
+    } else {
+        String::new()
+    }
+}
+
+/// Port of `_parameter_string()`.
+pub(crate) fn parameter_string(op: &OpArray, idx: usize, skip: usize, required: bool) -> String {
+    let cv_idx = idx + skip;
+    let mut s = format!("Parameter #{} [ ", idx);
+    s.push_str(if required { "<required> " } else { "<optional> " });
+    if let Some(Some(pti)) = op.param_types.get(cv_idx) {
+        s.push_str(&zend_type_string(&pti.param_type));
+        s.push(' ');
+    }
+    let by_ref = op.by_ref_params.get(cv_idx).copied().unwrap_or(false);
+    if by_ref {
+        s.push('&');
+    }
+    let is_variadic = op.variadic_param.map(|v| v as usize == cv_idx).unwrap_or(false);
+    if is_variadic {
+        s.push_str("...");
+    }
+    let pname = op.cv_names.get(cv_idx).map(|n| String::from_utf8_lossy(n).to_string()).unwrap_or_default();
+    s.push('$');
+    s.push_str(&pname);
+    if !required && !is_variadic {
+        if let Some(sig) = op.internal_sig {
+            s.push_str(" = ");
+            match sig.args.get(idx).and_then(|a| a.default) {
+                Some(d) => s.push_str(d),
+                None => s.push_str("<default>"),
+            }
+        } else {
+            s.push_str(&user_param_default_suffix(op, cv_idx));
+        }
+    }
+    s.push_str(" ]");
+    s
+}
+
+/// What kind of function `function_string` renders.
+pub(crate) struct FnStrCtx<'a> {
+    pub op: &'a OpArray,
+    pub method: Option<&'a crate::object::MethodDef>,
+    /// Lowercase name of the class the method was looked up on.
+    pub scope: Option<&'a [u8]>,
+    pub is_closure: bool,
+    /// Internal function without stub info (no arginfo available).
+    pub internal_fn_ext: Option<&'a str>,
+    pub display_name: &'a str,
+    pub filename: &'a str,
+}
+
+/// Port of `_function_string()`.
+pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
+    let op = ctx.op;
+    let is_internal = op.internal_sig.is_some() || ctx.internal_fn_ext.is_some();
+    let mut s = String::new();
+    if !is_internal {
+        let doc = ctx.method.and_then(|m| m.doc_comment.clone())
+            .or_else(|| op.doc_comment.as_ref().map(|d| String::from_utf8_lossy(d).to_string()));
+        if let Some(d) = doc {
+            s.push_str(indent);
+            s.push_str(&d);
+            s.push('\n');
+        }
+    }
+    s.push_str(indent);
+    s.push_str(if ctx.is_closure {
+        "Closure [ "
+    } else if ctx.method.is_some() {
+        "Method [ "
+    } else {
+        "Function [ "
+    });
+    s.push_str(if is_internal { "<internal" } else { "<user" });
+    let attrs: &[RuntimeAttribute] = ctx.method.map(|m| m.attributes.as_slice()).unwrap_or(&[]);
+    if op_array_is_deprecated(op, attrs) {
+        s.push_str(", deprecated");
+    }
+    if is_internal {
+        let ext = match ctx.method {
+            Some(m) => internal_method_ext(m),
+            None => op.internal_sig.map(|f| f.ext),
+        };
+        if let Some(e) = ext.or(ctx.internal_fn_ext) {
+            if !e.is_empty() {
+                s.push(':');
+                s.push_str(e);
+            }
+        }
+    }
+    if let (Some(m), Some(scope)) = (ctx.method, ctx.scope) {
+        let decl = m.declaring_class.to_ascii_lowercase();
+        if decl != scope.to_ascii_lowercase() {
+            let dn = rcls(vm, &decl).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(&m.declaring_class).to_string());
+            s.push_str(&format!(", inherits {}", dn));
+        } else if let Some(parent) = rcls(vm, &decl).and_then(|c| c.parent.clone()) {
+            let pl = parent.to_ascii_lowercase();
+            if let Some(ow) = rmethod(vm, &pl, &m.name) {
+                let ow_decl = ow.declaring_class.to_ascii_lowercase();
+                if ow_decl != decl && ow.visibility != Visibility::Private {
+                    let on = rcls(vm, &ow_decl).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&ow.declaring_class).to_string());
+                    s.push_str(&format!(", overwrites {}", on));
+                }
+            }
+        }
+    }
+    if let Some(m) = ctx.method {
+        if let Some(p) = method_prototype(vm, m) {
+            s.push_str(&format!(", prototype {}", p));
+        }
+        if m.name.eq_ignore_ascii_case(b"__construct") {
+            s.push_str(", ctor");
+        }
+    }
+    s.push_str("> ");
+    if let Some(m) = ctx.method {
+        if m.is_abstract {
+            s.push_str("abstract ");
+        }
+        if m.is_final {
+            s.push_str("final ");
+        }
+        if m.is_static {
+            s.push_str("static ");
+        }
+        s.push_str(match m.visibility {
+            Visibility::Public => "public ",
+            Visibility::Protected => "protected ",
+            Visibility::Private => "private ",
+        });
+        s.push_str("method ");
+    } else if ctx.is_closure && op.scope_class.is_some() {
+        if op.is_static_closure {
+            s.push_str("static ");
+        }
+        s.push_str("public method ");
+    } else {
+        if ctx.is_closure && op.is_static_closure {
+            s.push_str("static ");
+        }
+        s.push_str("function ");
+    }
+    if op.returns_by_ref {
+        s.push('&');
+    }
+    s.push_str(ctx.display_name);
+    s.push_str(" ] {\n");
+    if !is_internal {
+        let end = if op.end_line > 0 { op.end_line } else { op.decl_line };
+        s.push_str(&format!("{}  @@ {} {} - {}\n", indent, ctx.filename, op.decl_line, end));
+    }
+    let param_indent = format!("{}  ", indent);
+    let skip = if ctx.method.map(|m| !m.is_static).unwrap_or(false)
+        || (op.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) && ctx.method.is_some())
+    {
+        1
+    } else {
+        0
+    };
+    let num_args = (op.param_count as usize).saturating_sub(skip);
+    let has_arg_info = is_internal || num_args > 0 || op.return_type.is_some();
+    if has_arg_info {
+        s.push('\n');
+        s.push_str(&format!("{}- Parameters [{}] {{\n", param_indent, num_args));
+        let req = op.required_param_count as usize;
+        for i in 0..num_args {
+            s.push_str(&format!("{}  ", param_indent));
+            s.push_str(&parameter_string(op, i, skip, i < req));
+            s.push('\n');
+        }
+        s.push_str(&format!("{}}}\n", param_indent));
+    }
+    if let Some(rt) = &op.return_type {
+        let tentative = op.internal_sig.map(|f| f.flags & crate::stubs::F_TENTATIVE != 0).unwrap_or(false);
+        s.push_str(&format!("  {}- {} [ {} ]\n", indent, if tentative { "Tentative return" } else { "Return" }, zend_type_string(rt)));
+    }
+    s.push_str(indent);
+    s.push_str("}\n");
+    s
 }

@@ -414,6 +414,9 @@ pub struct OpArray {
     pub const_attribute_table: Vec<(Vec<u8>, Vec<crate::object::RuntimeAttribute>)>,
     /// Classes declared inside this function body (DeclareClass with a negative index).
     pub local_classes: Vec<crate::object::ClassEntry>,
+    /// Set on signature-only OpArrays synthesized for internal functions and
+    /// methods from php-src stubs (see `crate::stubs`).
+    pub internal_sig: Option<&'static crate::stubs::StubFunc>,
 }
 
 impl OpArray {
@@ -448,6 +451,7 @@ impl OpArray {
             display_name: Vec::new(),
             const_attribute_table: Vec::new(),
             local_classes: Vec::new(),
+            internal_sig: None,
         }
     }
 

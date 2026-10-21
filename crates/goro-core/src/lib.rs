@@ -26,6 +26,8 @@ pub mod spl_storage;
 pub mod spl_stubs;
 pub mod string;
 pub mod uncaught;
+pub mod stub_sigs;
+pub mod stubs;
 pub mod uri;
 pub mod value;
 pub mod vm;
