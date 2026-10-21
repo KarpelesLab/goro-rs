@@ -20320,6 +20320,30 @@ impl Vm {
                                 _ => None,
                             }
                         };
+                        // $GLOBALS['name'] = v inside a function writes the global
+                        // symbol table (the $GLOBALS CV is a snapshot array).
+                        if !self.is_global_scope {
+                            if let (OperandType::Cv(ci), ArrayKey::String(name)) = (&op.op1, &key) {
+                                if op_array.cv_names.get(*ci as usize).map(|n| n.as_slice()) == Some(b"GLOBALS".as_slice()) {
+                                    let plain = match &val {
+                                        Value::Reference(vr) => vr.borrow().clone(),
+                                        v => v.clone(),
+                                    };
+                                    let gname = name.as_bytes().to_vec();
+                                    let target_ref = match self.globals.get(&gname) {
+                                        Some(Value::Reference(r)) => Some(r.clone()),
+                                        _ => None,
+                                    };
+                                    match target_ref {
+                                        Some(r) => *r.borrow_mut() = plain.clone(),
+                                        None => {
+                                            self.globals.insert(gname.clone(), plain.clone());
+                                        }
+                                    }
+                                    self.global_stash_set(&gname, &plain);
+                                }
+                            }
+                        }
                         match existing_ref {
                             Some(r) => {
                                 *r.borrow_mut() = val;
