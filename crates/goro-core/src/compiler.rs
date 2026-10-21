@@ -155,6 +155,15 @@ pub struct Compiler {
     use_const_map: HashMap<Vec<u8>, Vec<u8>>,
     /// Label offsets for goto: maps label name -> instruction offset
     label_offsets: HashMap<Vec<u8>, u32>,
+    /// Ids of the try-with-finally regions (try and catch bodies) enclosing
+    /// the code being compiled, parallel to `finally_targets`.
+    try_finally_ids: Vec<u32>,
+    try_finally_counter: u32,
+    /// label -> enclosing try-with-finally regions
+    label_try_finally: HashMap<Vec<u8>, Vec<u32>>,
+    /// Forward gotos leaving try-with-finally regions:
+    /// (label, SaveJump offset, Jmp offset, regions at the goto)
+    pending_finally_gotos: Vec<(Vec<u8>, u32, u32, Vec<u32>)>,
     /// Pending gotos for forward references: maps label name -> list of (jmp instruction offset, source line)
     pending_gotos: HashMap<Vec<u8>, Vec<(u32, u32)>>,
     /// Source file path (for __FILE__, __DIR__)
@@ -382,6 +391,10 @@ impl Compiler {
             use_function_map: HashMap::new(),
             use_const_map: HashMap::new(),
             label_offsets: HashMap::new(),
+            try_finally_ids: Vec::new(),
+            try_finally_counter: 0,
+            label_try_finally: HashMap::new(),
+            pending_finally_gotos: Vec::new(),
             pending_gotos: HashMap::new(),
             source_file: Vec::new(),
             has_never_return: false,
@@ -410,6 +423,17 @@ impl Compiler {
             label_finally_paths: HashMap::new(),
             goto_finally_paths: Vec::new(),
         }
+    }
+
+    /// How many of the try/finally regions `from` (innermost last) a jump
+    /// to a place inside `to` leaves.
+    fn regions_left(from: &[u32], to: &[u32]) -> usize {
+        let common = from
+            .iter()
+            .zip(to.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        from.len() - common
     }
 
     /// Reject any unresolved gotos in this compiler scope. Called at the end of
@@ -4130,6 +4154,8 @@ impl Compiler {
                 let has_finally = finally_body.is_some();
                 if has_finally {
                     self.finally_targets.push(0); // placeholder, patched below
+                    self.try_finally_counter += 1;
+                    self.try_finally_ids.push(self.try_finally_counter);
                 }
 
                 // Compile try body
@@ -4383,6 +4409,7 @@ impl Compiler {
                     // Pop the finally target BEFORE compiling finally body
                     // so that returns inside finally don't loop back to finally
                     self.finally_targets.pop();
+                    self.try_finally_ids.pop();
 
                     self.finally_id_counter += 1;
                     self.finally_path.push(self.finally_id_counter);
@@ -8873,10 +8900,35 @@ impl Compiler {
                 self.label_offsets.insert(name.clone(), offset);
                 self.label_finally_paths
                     .insert(name.clone(), self.finally_path.clone());
+                self.label_try_finally
+                    .insert(name.clone(), self.try_finally_ids.clone());
+                // Forward gotos that may leave try/finally regions.
+                let mut fin_jmps = Vec::new();
+                let pending = std::mem::take(&mut self.pending_finally_gotos);
+                for (label, save_at, jmp_at, regions) in pending {
+                    if &label != name {
+                        self.pending_finally_gotos
+                            .push((label, save_at, jmp_at, regions));
+                        continue;
+                    }
+                    fin_jmps.push(jmp_at);
+                    let levels = Self::regions_left(&regions, &self.try_finally_ids);
+                    if levels == 0 {
+                        // Stays inside its try/finally: a plain jump.
+                        self.op_array.ops[save_at as usize].opcode = OpCode::Nop;
+                        self.op_array.patch_jump(jmp_at, offset);
+                    } else {
+                        let lv = self.op_array.add_literal(Value::Long(levels as i64));
+                        self.op_array.ops[save_at as usize].op1 = OperandType::JmpTarget(offset);
+                        self.op_array.ops[save_at as usize].op2 = OperandType::Const(lv);
+                    }
+                }
                 // Patch any pending gotos that reference this label
                 if let Some(gotos) = self.pending_gotos.remove(name) {
                     for (goto_offset, _line) in gotos {
-                        self.op_array.patch_jump(goto_offset, offset);
+                        if !fin_jmps.contains(&goto_offset) {
+                            self.op_array.patch_jump(goto_offset, offset);
+                        }
                     }
                 }
                 Ok(())
@@ -8887,7 +8939,47 @@ impl Compiler {
                     self.finally_path.clone(),
                     stmt.span.line,
                 ));
-                if let Some(&target) = self.label_offsets.get(name) {
+                // A goto leaving try/finally regions runs their finally
+                // blocks first (like break/continue).
+                let levels_known = self
+                    .label_try_finally
+                    .get(name)
+                    .map(|l| Self::regions_left(&self.try_finally_ids, l));
+                let backward = self.label_offsets.get(name).copied();
+                if !self.try_finally_ids.is_empty()
+                    && (backward.is_none() || levels_known.unwrap_or(0) > 0)
+                {
+                    let lv = self
+                        .op_array
+                        .add_literal(Value::Long(levels_known.unwrap_or(0) as i64));
+                    let save_at = self.op_array.emit(Op {
+                        opcode: OpCode::SaveJump,
+                        op1: OperandType::JmpTarget(backward.unwrap_or(0)),
+                        op2: OperandType::Const(lv),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    // Patched to the innermost finally block when it is compiled.
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    if backward.is_none() {
+                        self.pending_finally_gotos.push((
+                            name.clone(),
+                            save_at,
+                            jmp,
+                            self.try_finally_ids.clone(),
+                        ));
+                        self.pending_gotos
+                            .entry(name.clone())
+                            .or_default()
+                            .push((jmp, stmt.span.line));
+                    }
+                } else if let Some(target) = backward {
                     // Label already seen - emit jump
                     self.op_array.emit(Op {
                         opcode: OpCode::Jmp,
