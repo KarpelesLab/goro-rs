@@ -1610,7 +1610,8 @@ impl Vm {
 
 impl Vm {
     /// zend_enum_build_backed_enum_table: validates the (lazily evaluated)
-    /// backing values of a backed enum. Returns (exception class, message).
+    /// backing values of a backed enum. Returns (exception class, message);
+    /// an empty class when evaluating a value threw (left pending).
     pub(crate) fn enum_backed_table_error(
         &mut self,
         class_lower: &[u8],
@@ -1620,6 +1621,9 @@ impl Vm {
         let mut seen: Vec<(Vec<u8>, Value)> = Vec::new();
         for (case_name, raw) in &class.enum_cases {
             let v = self.resolve_deferred_value(raw);
+            if self.current_exception.is_some() {
+                return Some((b"", String::from("Uncaught exception")));
+            }
             let ok = if bt.eq_ignore_ascii_case(b"int") {
                 matches!(v, Value::Long(_))
             } else {

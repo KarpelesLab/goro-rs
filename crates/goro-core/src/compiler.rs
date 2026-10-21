@@ -1084,6 +1084,28 @@ impl Compiler {
     /// evaluated with the class scope on first use, like
     /// zend_update_class_constants(). The thunk is stored with the class's
     /// constant closures; the returned marker takes the value's place.
+    /// The backing value of an enum case naming a constant: magic
+    /// constants fold, others are evaluated (in a "[constant expression]"
+    /// frame, like ZEND_AST_CONST_ENUM_INIT) when the case is first used.
+    fn enum_case_const_value(
+        &mut self,
+        expr: &Expr,
+        name_lower: &[u8],
+        closures: &mut Vec<OpArray>,
+        qualified_name: &[u8],
+        extends: Option<&[u8]>,
+    ) -> CompileResult<Value> {
+        let v = self.resolve_class_const_magic(name_lower, qualified_name, expr.span.line);
+        if !matches!(v, Value::Null) || name_lower == b"null" || name_lower == b"\\null" {
+            return Ok(v);
+        }
+        let marker = self.compile_const_thunk(expr, closures, qualified_name, extends)?;
+        if let Some(op) = closures.last_mut() {
+            op.decl_line = expr.span.line;
+        }
+        Ok(marker)
+    }
+
     fn compile_const_thunk(
         &mut self,
         expr: &Expr,
@@ -9085,22 +9107,26 @@ impl Compiler {
                                                 .iter()
                                                 .map(|c| c.to_ascii_lowercase())
                                                 .collect();
-                                            self.resolve_class_const_magic(
+                                            self.enum_case_const_value(
+                                                val_expr,
                                                 &name_lower_lc,
+                                                &mut class.const_closures,
                                                 &qualified_name,
-                                                val_expr.span.line,
-                                            )
+                                                extends.as_deref(),
+                                            )?
                                         }
                                         ExprKind::Identifier(ident_name) => {
                                             let name_lower_lc: Vec<u8> = ident_name
                                                 .iter()
                                                 .map(|c| c.to_ascii_lowercase())
                                                 .collect();
-                                            self.resolve_class_const_magic(
+                                            self.enum_case_const_value(
+                                                val_expr,
                                                 &name_lower_lc,
+                                                &mut class.const_closures,
                                                 &qualified_name,
-                                                val_expr.span.line,
-                                            )
+                                                extends.as_deref(),
+                                            )?
                                         }
                                         ExprKind::BinaryOp {
                                             op, left, right, ..

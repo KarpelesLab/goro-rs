@@ -24421,9 +24421,12 @@ impl Vm {
                                     if let Some((exc_class, err_msg)) =
                                         self.enum_backed_table_error(&class_part)
                                     {
-                                        let exc =
-                                            self.create_exception(exc_class, &err_msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        // An empty class: the value expression's exception is pending.
+                                        if !exc_class.is_empty() {
+                                            let exc =
+                                                self.create_exception(exc_class, &err_msg, op.line);
+                                            self.current_exception = Some(exc);
+                                        }
                                         if let Some((catch_target, _, _, _, saved_pc)) =
                                             exception_handlers.pop()
                                         {
@@ -24446,7 +24449,10 @@ impl Vm {
                                     };
                                     let mut found = None;
                                     for (case_name, case_val) in &class.enum_cases {
-                                        if case_val.identical(&lookup_arg) {
+                                        if self
+                                            .resolve_deferred_value(case_val)
+                                            .identical(&lookup_arg)
+                                        {
                                             found = Some(case_name.clone());
                                             break;
                                         }
@@ -24541,9 +24547,12 @@ impl Vm {
                                     if let Some((exc_class, err_msg)) =
                                         self.enum_backed_table_error(&class_part)
                                     {
-                                        let exc =
-                                            self.create_exception(exc_class, &err_msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        // An empty class: the value expression's exception is pending.
+                                        if !exc_class.is_empty() {
+                                            let exc =
+                                                self.create_exception(exc_class, &err_msg, op.line);
+                                            self.current_exception = Some(exc);
+                                        }
                                         if let Some((catch_target, _, _, _, saved_pc)) =
                                             exception_handlers.pop()
                                         {
@@ -24570,7 +24579,10 @@ impl Vm {
                                     };
                                     let mut found = None;
                                     for (case_name, case_val) in &class.enum_cases {
-                                        if case_val.identical(&lookup_arg) {
+                                        if self
+                                            .resolve_deferred_value(case_val)
+                                            .identical(&lookup_arg)
+                                        {
                                             found = Some(case_name.clone());
                                             break;
                                         }
@@ -35873,9 +35885,11 @@ impl Vm {
                                         None
                                     };
                                     if let Some((exc_class, err_msg)) = table_error {
-                                        let exc =
-                                            self.create_exception(exc_class, &err_msg, op.line);
-                                        self.current_exception = Some(exc);
+                                        if !exc_class.is_empty() {
+                                            let exc =
+                                                self.create_exception(exc_class, &err_msg, op.line);
+                                            self.current_exception = Some(exc);
+                                        }
                                         if let Some((catch_target, _, _, _, saved_pc)) =
                                             exception_handlers.pop()
                                         {
@@ -35891,7 +35905,11 @@ impl Vm {
                                     let type_error = if let Some((bt, case_val)) = type_check_info {
                                         // Resolve deferred constants before type checking
                                         let resolved_val = self.resolve_deferred_value(&case_val);
-                                        let ok = if bt.eq_ignore_ascii_case(b"int") {
+                                        // The value expression threw (an undefined
+                                        // constant, ...): that error propagates.
+                                        let ok = if self.current_exception.is_some() {
+                                            true
+                                        } else if bt.eq_ignore_ascii_case(b"int") {
                                             matches!(resolved_val, Value::Long(_))
                                         } else if bt.eq_ignore_ascii_case(b"string") {
                                             matches!(resolved_val, Value::String(_))
@@ -35923,6 +35941,19 @@ impl Vm {
                                         }
                                         return Err(VmError {
                                             message: err_msg,
+                                            line: op.line,
+                                        });
+                                    }
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            return Ok(Flow::Continue);
+                                        }
+                                        return Err(VmError {
+                                            message: "Uncaught exception".to_string(),
                                             line: op.line,
                                         });
                                     }
