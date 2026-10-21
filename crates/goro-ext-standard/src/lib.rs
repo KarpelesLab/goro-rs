@@ -29,6 +29,14 @@ pub mod zsort;
 // matches anything starting with "stream").
 pub use filters as stream_filters;
 
+/// Stream services for ext/sockets (SCM_RIGHTS, socket_set_block() on
+/// imported/exported streams); see also `Vm::socket_stream_hooks`.
+pub mod sockets_streams {
+    pub use crate::misc::xp_socket::{
+        ext_is_stream, ext_set_blocking, ext_stream_fd, ext_stream_from_fd,
+    };
+}
+
 use goro_core::vm::Vm;
 
 /// Register all standard extension functions

@@ -2868,3 +2868,61 @@ pub(crate) fn tls_roundtrip(
     goro_core::value::close_resource(fid);
     out
 }
+
+// ---------------------------------------------------------------------------
+// More stream services for ext/sockets (see crate::sockets_streams)
+// ---------------------------------------------------------------------------
+
+/// php_stream_set_option(PHP_STREAM_OPTION_BLOCKING) on stream `fid`: None
+/// when it is not an open stream, Some(false) when the option failed.
+pub fn ext_set_blocking(fid: i64, block: bool) -> Option<bool> {
+    if !FILE_HANDLES.with(|h| h.borrow().contains_key(&fid)) {
+        return None;
+    }
+    Some(set_blocking(fid, block))
+}
+
+/// php_stream_cast(PHP_STREAM_AS_FD, REPORT_ERRORS) of a stream resource
+/// (None after a warning, or when it is not a stream).
+pub fn ext_stream_fd(vm: &mut Vm, id: i64, func: &str) -> Option<i32> {
+    if (1..=3).contains(&id) && !FILE_HANDLES.with(|h| h.borrow().contains_key(&id)) {
+        return Some((id - 1) as i32);
+    }
+    let info = FILE_HANDLES.with(|h| {
+        h.borrow().get(&id).map(|fh| {
+            (
+                fh.special,
+                fh.file.as_raw_fd(),
+                fh.user_wrapper.is_some(),
+                fh.stream_type.clone(),
+            )
+        })
+    })?;
+    match info {
+        (SpecialStream::Stdin, _, _, _) => Some(0),
+        (SpecialStream::Stdout, _, _, _) | (SpecialStream::Output, _, _, _) => Some(1),
+        (SpecialStream::Stderr, _, _, _) => Some(2),
+        (SpecialStream::Memory | SpecialStream::Temp, _, _, ty) | (_, _, true, ty) => {
+            vm.emit_warning(&format!(
+                "{}(): Cannot represent a stream of type {} as a File Descriptor",
+                func, ty
+            ));
+            None
+        }
+        (_, fd, false, _) => Some(fd),
+    }
+}
+
+/// Whether `id` is an open stream resource.
+pub fn ext_is_stream(id: i64) -> bool {
+    (1..=3).contains(&id) || FILE_HANDLES.with(|h| h.borrow().contains_key(&id))
+}
+
+/// php_stream_fopen_from_fd(fd, mode, NULL): a plain-file stream owning
+/// descriptor `fd`.
+pub fn ext_stream_from_fd(fd: i32, mode: &str) -> i64 {
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let fid = alloc_file_handle(file, mode);
+    goro_core::value::register_resource(fid, b"stream");
+    fid
+}
