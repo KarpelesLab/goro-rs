@@ -123,32 +123,57 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 
 pub fn register(vm: &mut Vm) {
     vm.unserialize_value_hook = Some(crate::serialize::unserialize_value_hook);
-    // Built-in php_user_filter base class. User filters extend this class
-    // and override filter(); the property `filtername`, `params`, and
-    // `stream` are set by the runtime before onCreate() is invoked.
+    // Built-in php_user_filter base class (user_filters.stub.php). Compiled
+    // from its PHP declaration so methods carry real signatures for
+    // inheritance checks and reflection.
     {
-        let mut pufc = ClassEntry::new(b"php_user_filter".to_vec());
-        let props: &[&[u8]] = &[b"filtername", b"params", b"stream"];
-        for p in props {
-            pufc.properties.push(PropertyDef {
-                name: p.to_vec(),
-                default: Value::Null,
-                is_static: false,
-                is_readonly: false,
-                visibility: Visibility::Public,
-                set_visibility: None,
-                declaring_class: b"php_user_filter".to_vec(),
-                property_type: None,
-                has_get_hook: false,
-                has_set_hook: false,
-                is_virtual: false,
-                is_abstract: false,
-                is_final: false,
-                attributes: Vec::new(),
-                doc_comment: None,
-            });
+        let src: &[u8] = b"<?php class php_user_filter {
+    public string $filtername = \"\";
+    public mixed $params = \"\";
+    public $stream = null;
+    public function filter($in, $out, &$consumed, bool $closing): int { return 0; }
+    public function onCreate(): bool { return true; }
+    public function onClose(): void {}
+}";
+        let mut lexer = goro_parser::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = goro_parser::Parser::new(tokens);
+        let mut done = false;
+        if let Ok(program) = parser.parse() {
+            let compiler = goro_core::compiler::Compiler::new();
+            if let Ok((_, classes, _)) = compiler.compile(&program) {
+                for mut cls in classes {
+                    if cls.name.eq_ignore_ascii_case(b"php_user_filter") {
+                        cls.filename = None;
+                        vm.classes.insert(b"php_user_filter".to_vec(), cls);
+                        done = true;
+                    }
+                }
+            }
         }
-        vm.classes.insert(b"php_user_filter".to_vec(), pufc);
+        if !done {
+            let mut pufc = ClassEntry::new(b"php_user_filter".to_vec());
+            for p in [&b"filtername"[..], b"params", b"stream"] {
+                pufc.properties.push(PropertyDef {
+                    name: p.to_vec(),
+                    default: Value::Null,
+                    is_static: false,
+                    is_readonly: false,
+                    visibility: Visibility::Public,
+                    set_visibility: None,
+                    declaring_class: b"php_user_filter".to_vec(),
+                    property_type: None,
+                    has_get_hook: false,
+                    has_set_hook: false,
+                    is_virtual: false,
+                    is_abstract: false,
+                    is_final: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                });
+            }
+            vm.classes.insert(b"php_user_filter".to_vec(), pufc);
+        }
     }
     // RequestParseBodyException extends \Exception
     {
