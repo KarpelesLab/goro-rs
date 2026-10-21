@@ -36753,9 +36753,12 @@ impl Vm {
 
                 OpCode::PropertySetRef => {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let prop_name = self
-                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    let name_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    let prop_name = match name_val.deref() {
+                        // A dynamic name object is converted with __toString().
+                        o @ Value::Object(_) => self.value_to_string(&o),
+                        v => v.to_php_string(),
+                    };
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val {
                         if let Err(e) = self.static_as_instance_check(
@@ -45518,6 +45521,32 @@ impl Vm {
                                         );
                                         coerced_for_result =
                                             before != std::mem::discriminant(&value);
+                                    }
+                                    // Weak mode: a Stringable object for a type with
+                                    // string that does not take the object as is.
+                                    if !op_array.strict_types
+                                        && matches!(value, Value::Object(_))
+                                        && variance::TypeView::from_param_type(pt).mask
+                                            & variance::T_STRING
+                                            != 0
+                                        && !self.object_matches_class_part(&value, pt)
+                                    {
+                                        let has_tostring = match &value {
+                                            Value::Object(o) => {
+                                                let cl = o.borrow().class_name.to_ascii_lowercase();
+                                                self.classes.get(&cl).is_some_and(|c| {
+                                                    c.get_method(b"__tostring").is_some()
+                                                })
+                                            }
+                                            _ => false,
+                                        };
+                                        if has_tostring {
+                                            let o = value.clone();
+                                            if let Ok(s) = self.value_to_string_checked(&o) {
+                                                value = Value::String(s);
+                                                coerced_for_result = true;
+                                            }
+                                        }
                                     }
                                     if !continue_to_ref_check
                                         && (incdec_overflow
