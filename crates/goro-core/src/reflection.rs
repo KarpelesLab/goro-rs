@@ -3423,7 +3423,17 @@ pub fn reflection_method_method(
             }
             b"getparameters" => {
                 if let Some(op_array) = vm.user_functions.get(fn_lower.as_slice()).cloned() {
-                    return Some(create_reflection_parameters(vm, &op_array));
+                    let params = create_reflection_parameters(vm, &op_array);
+                    // Closure::__invoke is an internal trampoline with
+                    // userland arginfo: defaults are not retrievable.
+                    if let Value::Array(a) = &params {
+                        for (_, p) in a.borrow().iter() {
+                            if let Value::Object(po) = p {
+                                po.borrow_mut().set_property(b"__reflection_param_trampoline".to_vec(), Value::True);
+                            }
+                        }
+                    }
+                    return Some(params);
                 }
                 return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
             }
@@ -3827,7 +3837,7 @@ pub fn reflection_method_method(
                 let ob2 = obj.borrow();
                 let method_display = ob2.get_property(b"name").to_php_string().to_string_lossy();
                 drop(ob2);
-                let err_msg = format!("Method {}::{}() does not have a prototype", class_name, method_display);
+                let err_msg = format!("Method {}::{} does not have a prototype", class_name, method_display);
                 let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                 vm.current_exception = Some(exc);
                 Some(Value::Null)
@@ -3846,6 +3856,34 @@ pub fn reflection_method_method(
             };
             drop(ob);
 
+            if let Some(ref fn_lower) = closure_fn {
+                if let Some(op) = vm.user_functions.get(fn_lower.as_slice()).cloned() {
+                    let m = crate::object::MethodDef {
+                        name: b"__invoke".to_vec(),
+                        param_count: op.param_count as usize,
+                        op_array: op,
+                        is_static: false,
+                        is_abstract: false,
+                        is_final: false,
+                        visibility: Visibility::Public,
+                        declaring_class: b"closure".to_vec(),
+                        doc_comment: None,
+                        attributes: Vec::new(),
+                    };
+                    let ctx = FnStrCtx {
+                        op: &m.op_array,
+                        method: Some(&m),
+                        scope: None,
+                        is_closure: false,
+                        internal_fn_ext: None,
+                        display_name: "__invoke",
+                        filename: "",
+                        internal_user_arginfo: true,
+                        params_skip: Some(0),
+                    };
+                    return Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))));
+                }
+            }
             let method_def = rmethod(vm, &class_lower, method_lower.as_bytes()).cloned();
 
             if let Some(m) = method_def {
@@ -3863,6 +3901,8 @@ pub fn reflection_method_method(
                     internal_fn_ext: None,
                     display_name: &display,
                     filename: &filename,
+                    internal_user_arginfo: false,
+                    params_skip: None,
                 };
                 let _ = &name;
                 Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))))
@@ -4763,6 +4803,8 @@ pub fn reflection_function_method(
                 internal_fn_ext: None,
                 display_name: &name,
                 filename: "",
+                internal_user_arginfo: false,
+                params_skip: None,
             };
             Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))))
         }
@@ -4797,6 +4839,8 @@ pub fn reflection_function_method(
                 internal_fn_ext: None,
                 display_name: &display,
                 filename: &filename,
+                internal_user_arginfo: false,
+                params_skip: None,
             };
             let mut out = function_string(vm, &ctx, "");
             // Bound variables (closure `use` vars) go right after the @@ line.
@@ -5785,6 +5829,25 @@ pub fn reflection_parameter_method(
     // methods we shift past the synthetic `$this` slot at index 0.
     let type_idx = param_idx + cv_offset;
 
+    // Internal trampolines with userland arginfo (Closure::__invoke).
+    if obj.borrow().has_property(b"__reflection_param_trampoline") {
+        match method {
+            b"hasdefaultvalue" | b"isdefaultvalueavailable" => return Some(Value::False),
+            b"getdefaultvalue" | b"isdefaultvalueconstant" | b"getdefaultvalueconstantname" => {
+                let exc = vm.create_exception(b"ReflectionException", "Internal error: Failed to retrieve the default value", vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+            b"__tostring" => {
+                if let Some(op) = resolved_op_array.as_ref() {
+                    let is_variadic = op.variadic_param.map(|v| v as usize == type_idx).unwrap_or(false);
+                    let required = !is_variadic && param_idx < op.required_param_count as usize;
+                    return Some(Value::String(PhpString::from_string(parameter_string_user_arginfo(op, param_idx, cv_offset, required))));
+                }
+            }
+            _ => {}
+        }
+    }
     // Internal functions: defaults come from the stub's arginfo text.
     let internal_default: Option<Option<&'static str>> = resolved_op_array
         .as_ref()
@@ -9023,6 +9086,22 @@ pub(crate) fn parameter_string(op: &OpArray, idx: usize, skip: usize, required: 
     s
 }
 
+/// `_parameter_string()` for an internal function with userland arginfo
+/// (Closure::__invoke): defaults can't be fetched and print `<default>`.
+pub(crate) fn parameter_string_user_arginfo(op: &OpArray, idx: usize, skip: usize, required: bool) -> String {
+    let cv_idx = idx + skip;
+    let mut s = parameter_string(op, idx, skip, true);
+    let is_variadic = op.variadic_param.map(|v| v as usize == cv_idx).unwrap_or(false);
+    if !required {
+        s = s.replacen("<required> ", "<optional> ", 1);
+        if !is_variadic {
+            let end = s.len() - 2;
+            s.insert_str(end, " = <default>");
+        }
+    }
+    s
+}
+
 /// What kind of function `function_string` renders.
 pub(crate) struct FnStrCtx<'a> {
     pub op: &'a OpArray,
@@ -9034,12 +9113,17 @@ pub(crate) struct FnStrCtx<'a> {
     pub internal_fn_ext: Option<&'a str>,
     pub display_name: &'a str,
     pub filename: &'a str,
+    /// Internal function with userland arginfo (e.g. Closure::__invoke):
+    /// defaults render as `<default>`.
+    pub internal_user_arginfo: bool,
+    /// Override for the number of leading CVs that aren't parameters.
+    pub params_skip: Option<usize>,
 }
 
 /// Port of `_function_string()`.
 pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
     let op = ctx.op;
-    let is_internal = op.internal_sig.is_some() || ctx.internal_fn_ext.is_some();
+    let is_internal = op.internal_sig.is_some() || ctx.internal_fn_ext.is_some() || ctx.internal_user_arginfo;
     let mut s = String::new();
     if !is_internal {
         let doc = ctx.method.and_then(|m| m.doc_comment.clone())
@@ -9063,7 +9147,7 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
     if op_array_is_deprecated(op, attrs) {
         s.push_str(", deprecated");
     }
-    if is_internal {
+    if is_internal && !ctx.internal_user_arginfo {
         let ext = match ctx.method {
             Some(m) => internal_method_ext(m),
             None => op.internal_sig.map(|f| f.ext),
@@ -9139,7 +9223,9 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
         s.push_str(&format!("{}  @@ {} {} - {}\n", indent, ctx.filename, op.decl_line, end));
     }
     let param_indent = format!("{}  ", indent);
-    let skip = if ctx.method.map(|m| !m.is_static).unwrap_or(false)
+    let skip = if let Some(k) = ctx.params_skip {
+        k
+    } else if ctx.method.map(|m| !m.is_static).unwrap_or(false)
         || (op.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) && ctx.method.is_some())
     {
         1
@@ -9147,14 +9233,18 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
         0
     };
     let num_args = (op.param_count as usize).saturating_sub(skip);
-    let has_arg_info = is_internal || num_args > 0 || op.return_type.is_some();
+    let has_arg_info = (is_internal && !ctx.internal_user_arginfo) || num_args > 0 || op.return_type.is_some();
     if has_arg_info {
         s.push('\n');
         s.push_str(&format!("{}- Parameters [{}] {{\n", param_indent, num_args));
         let req = op.required_param_count as usize;
         for i in 0..num_args {
             s.push_str(&format!("{}  ", param_indent));
-            s.push_str(&parameter_string(op, i, skip, i < req));
+            if ctx.internal_user_arginfo {
+                s.push_str(&parameter_string_user_arginfo(op, i, skip, i < req));
+            } else {
+                s.push_str(&parameter_string(op, i, skip, i < req));
+            }
             s.push('\n');
         }
         s.push_str(&format!("{}}}\n", param_indent));
@@ -9631,6 +9721,8 @@ fn method_section_string(vm: &Vm, m: &crate::object::MethodDef, scope_lower: &[u
         internal_fn_ext: None,
         display_name: &display,
         filename: &filename,
+        internal_user_arginfo: false,
+        params_skip: None,
     };
     function_string(vm, &ctx, indent)
 }
