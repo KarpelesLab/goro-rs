@@ -10334,6 +10334,10 @@ impl Compiler {
                         let name_idx = self
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(func_name)));
+                        if self.is_in_trait && class_name.eq_ignore_ascii_case(b"self") {
+                            // "Trait::method" is re-targeted to the using class on import.
+                            self.op_array.class_const_literals.push(name_idx);
+                        }
                         let arg_count = self.op_array.add_literal(Value::Long(args.len() as i64));
                         self.op_array.emit(Op {
                             opcode: OpCode::InitFCall,

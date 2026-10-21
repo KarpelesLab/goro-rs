@@ -18235,6 +18235,17 @@ impl Vm {
                         }
                     } else {
                         let name = name_val.to_php_string();
+                        // Direct static call on a trait (deprecated since 8.1)
+                        if let Some(pos) = name.as_bytes().windows(2).position(|w| w == b"::") {
+                            let cls = &name.as_bytes()[..pos];
+                            let cls_lower: Vec<u8> = cls.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if self.classes.get(&cls_lower).map(|c| c.is_trait).unwrap_or(false) {
+                                let tn = self.classes.get(&cls_lower).map(|c| c.name.clone()).unwrap_or_default();
+                                self.emit_deprecated_at(&format!(
+                                    "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
+                                    String::from_utf8_lossy(&tn), String::from_utf8_lossy(&name.as_bytes()[pos + 2..])), op.line);
+                            }
+                        }
                         self.pending_calls.push(PendingCall {
                             name,
                             args: Vec::new(),
@@ -26928,6 +26939,12 @@ impl Vm {
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
 
+                    if self.classes.get(&class_lower).map(|c| c.is_trait).unwrap_or(false) {
+                        let tn = self.classes.get(&class_lower).map(|c| c.name.clone()).unwrap_or_default();
+                        self.emit_deprecated_at(&format!(
+                            "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
+                            String::from_utf8_lossy(&tn), prop_name.to_string_lossy()), op.line);
+                    }
                     // Check the property is declared on the class or its
                     // ancestors. Writing to an undeclared static raises
                     // an Error in PHP.
@@ -27074,6 +27091,12 @@ impl Vm {
                         });
                     }
 
+                    if self.classes.get(&class_lower).map(|c| c.is_trait).unwrap_or(false) {
+                        let tn = self.classes.get(&class_lower).map(|c| c.name.clone()).unwrap_or_default();
+                        self.emit_deprecated_at(&format!(
+                            "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
+                            String::from_utf8_lossy(&tn), prop_name.to_string_lossy()), op.line);
+                    }
                     let mut value_opt: Option<Value> = None;
                     if let Some(class) = self.classes.get(&class_lower) {
                         if let Some(v) = class.static_properties.get(prop_name.as_bytes()) {
@@ -31302,6 +31325,14 @@ impl Vm {
                                 if let Some(Value::String(s)) = m.op_array.literals.get(lit_idx as usize) {
                                     if s.as_bytes() == trait_name_original {
                                         m.op_array.literals[lit_idx as usize] = Value::String(PhpString::from_vec(class_name.to_vec()));
+                                    } else if s.as_bytes().len() > trait_name_original.len() + 2
+                                        && s.as_bytes()[..trait_name_original.len()].eq_ignore_ascii_case(trait_name_original)
+                                        && &s.as_bytes()[trait_name_original.len()..trait_name_original.len() + 2] == b"::"
+                                    {
+                                        // self::method() call literal inside a trait method
+                                        let mut nv = class_name.to_vec();
+                                        nv.extend_from_slice(&s.as_bytes()[trait_name_original.len()..]);
+                                        m.op_array.literals[lit_idx as usize] = Value::String(PhpString::from_vec(nv));
                                     }
                                 }
                             }
