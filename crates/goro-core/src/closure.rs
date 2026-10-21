@@ -1044,7 +1044,7 @@ impl Vm {
 
     /// Resolve `self`/`parent`/`static` in a callable class name relative to
     /// `scope` (lowercase), emitting the PHP 8.2 deprecation.
-    fn callable_class_relative(
+    pub fn callable_class_relative(
         &mut self,
         cls: &[u8],
         scope: Option<&[u8]>,

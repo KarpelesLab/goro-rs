@@ -2866,15 +2866,40 @@ impl Vm {
             return true;
         }
         // Clone autoload functions to avoid borrow issues
-        let autoloaders = self.autoload_functions.clone();
         let class_str = Value::String(PhpString::from_vec(class_name.to_vec()));
         // Never autoload the same class recursively.
         if !crate::spl::autoload_enter(&class_lower) {
             return false;
         }
         let mut found = false;
-        for callback in &autoloaders {
-            if let Some(e) = self.spl_call_autoloader(callback, &class_str) {
+        // The live list is walked, like php-src's hash iteration: loaders
+        // registered meanwhile are called, unregistered ones are not.
+        let same = |a: &Value, b: &Value| match (a, b) {
+            (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
+            (Value::Array(x), Value::Array(y)) => {
+                Rc::ptr_eq(x, y) || {
+                    let (x, y) = (x.borrow(), y.borrow());
+                    x.len() == y.len()
+                        && x.values().zip(y.values()).all(|(p, q)| match (p, q) {
+                            (Value::Object(p), Value::Object(q)) => Rc::ptr_eq(p, q),
+                            (p, q) => p.to_php_string() == q.to_php_string(),
+                        })
+                }
+            }
+            (a, b) => a.to_php_string() == b.to_php_string(),
+        };
+        let mut i = 0;
+        while let Some(callback) = self.autoload_functions.get(i).cloned() {
+            let r = self.spl_call_autoloader(&callback, &class_str);
+            i = match self
+                .autoload_functions
+                .iter()
+                .position(|c| same(c, &callback))
+            {
+                Some(j) => j + 1,
+                None => i,
+            };
+            if let Some(e) = r {
                 if self.current_exception.is_none() {
                     variance::set_autoload_fatal(e);
                     crate::spl::autoload_leave(&class_lower);

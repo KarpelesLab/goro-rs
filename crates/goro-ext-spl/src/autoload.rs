@@ -78,7 +78,10 @@ fn check_access(vm: &Vm, ce_name: &[u8], m: &goro_core::object::MethodDef) -> Re
 
 /// Resolve a static "Class::method" / ["Class", "method"] callable.
 fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, String> {
-    let class = class.strip_prefix(b"\\").unwrap_or(class);
+    // self/parent/static resolve against the caller's scope (deprecated).
+    let scope = vm.current_class_scope().map(|s| lower(&s));
+    let class = vm.callable_class_relative(class, scope.as_deref())?;
+    let class = class.as_slice();
     let cl = lower(class);
     if !vm.classes.contains_key(&cl) {
         vm.try_autoload_class(class);
