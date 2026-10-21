@@ -1945,28 +1945,168 @@ fn array_values(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mut result = PhpArray::new();
+/// Copy an array element value for merging: rc=1 references become values,
+/// nested arrays get their own storage.
+fn merge_copy_entry(v: &Value) -> Value {
+    match v {
+        Value::Reference(r) if Rc::strong_count(r) == 1 => {
+            let inner = r.borrow().clone();
+            merge_copy_entry(&inner)
+        }
+        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+        other => other.clone(),
+    }
+}
+
+/// php_array_merge_wrapper()
+fn php_array_merge_wrapper(vm: &mut Vm, args: &[Value], fname: &str, recursive: bool) -> Result<Value, VmError> {
+    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
+    let mut count: u64 = 0;
     for (i, arg) in args.iter().enumerate() {
-        require_array_arg_variadic(vm, arg, "array_merge", (i + 1) as u32)?;
-        let arg = match arg {
-            Value::Reference(r) => r.borrow().clone(),
-            v => v.clone(),
-        };
-        if let Value::Array(arr) = arg {
-            let arr = arr.borrow();
-            for (key, val) in arr.iter() {
-                let cloned = deep_clone_value(val);
-                match key {
-                    goro_core::array::ArrayKey::Int(_) => result.push(cloned),
-                    goro_core::array::ArrayKey::String(s) => {
-                        result.set(goro_core::array::ArrayKey::String(s.clone()), cloned);
-                    }
+        match arg.deref() {
+            Value::Array(a) => {
+                count += a.borrow().len() as u64;
+                arrays.push(a);
+            }
+            _ => {
+                require_array_arg_variadic(vm, arg, fname, (i + 1) as u32)?;
+                return Ok(Value::Null);
+            }
+        }
+    }
+    if arrays.is_empty() {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    if count >= 0x40000000 {
+        let msg = format!("The total number of elements must be lower than {}", 0x40000000u32);
+        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let mut dest = PhpArray::new();
+    for (k, v) in arrays[0].borrow().iter() {
+        let v = merge_copy_entry(v);
+        match k {
+            ArrayKey::String(_) => dest.set(k.clone(), v),
+            ArrayKey::Int(_) => dest.push(v),
+        }
+    }
+    let dest = Rc::new(RefCell::new(dest));
+    for src in &arrays[1..] {
+        if recursive {
+            let mut stack = Vec::new();
+            if !php_array_merge_recursive(vm, &dest, src, &mut stack) {
+                return Ok(Value::Null);
+            }
+        } else {
+            let entries: Vec<(ArrayKey, Value)> = src.borrow().iter().map(|(k, v)| (k.clone(), merge_copy_entry(v))).collect();
+            let mut d = dest.borrow_mut();
+            for (k, v) in entries {
+                match k {
+                    ArrayKey::String(_) => d.set(k, v),
+                    ArrayKey::Int(_) => d.push(v),
                 }
             }
         }
     }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    let out = Rc::try_unwrap(dest).map(|c| c.into_inner()).unwrap_or_else(|rc| rc.borrow().clone());
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
+}
+
+fn merge_to_array(v: &Value) -> PhpArray {
+    match v {
+        Value::Array(a) => a.borrow().clone(),
+        Value::Null | Value::Undef => PhpArray::new(),
+        Value::Object(o) => {
+            let mut arr = PhpArray::new();
+            for (k, val) in o.borrow().properties.iter() {
+                arr.set(Vm::value_to_array_key(Value::String(PhpString::from_vec(k.clone()))), val.clone());
+            }
+            arr
+        }
+        other => {
+            let mut arr = PhpArray::new();
+            arr.push(other.clone());
+            arr
+        }
+    }
+}
+
+/// php_array_merge_recursive()
+fn php_array_merge_recursive(vm: &mut Vm, dest: &Rc<RefCell<PhpArray>>, src: &Rc<RefCell<PhpArray>>, stack: &mut Vec<usize>) -> bool {
+    let entries: Vec<(ArrayKey, Value)> = src.borrow().iter().map(|(k, v)| (k.clone(), merge_copy_entry(v))).collect();
+    for (k, src_entry) in entries {
+        match &k {
+            ArrayKey::String(_) => {
+                let dest_entry = dest.borrow().get(&k).cloned();
+                match dest_entry {
+                    Some(de) => {
+                        let src_val = src_entry.deref();
+                        // Resolve the destination slot (writing through references).
+                        let dref = match &de {
+                            Value::Reference(r) => Some(r.clone()),
+                            _ => None,
+                        };
+                        let dval = de.deref();
+                        if let Value::Array(t) = &dval {
+                            if stack.contains(&(Rc::as_ptr(t) as usize)) {
+                                let exc = vm.create_exception(b"Error", "Recursion detected", vm.current_line);
+                                vm.current_exception = Some(exc);
+                                return false;
+                            }
+                        }
+                        let thash_ptr = if let Value::Array(t) = &dval { Some(Rc::as_ptr(t) as usize) } else { None };
+                        let mut darr = if matches!(dval, Value::Null | Value::Undef) {
+                            let mut a = PhpArray::new();
+                            a.push(Value::Null);
+                            a
+                        } else {
+                            merge_to_array(&dval)
+                        };
+                        let src_val = if let Value::Object(_) = &src_val {
+                            Value::Array(Rc::new(RefCell::new(merge_to_array(&src_val))))
+                        } else {
+                            src_val
+                        };
+                        if let Value::Array(sa) = &src_val {
+                            if let Some(p) = thash_ptr {
+                                stack.push(p);
+                            }
+                            let drc = Rc::new(RefCell::new(darr));
+                            let ok = php_array_merge_recursive(vm, &drc, sa, stack);
+                            if thash_ptr.is_some() {
+                                stack.pop();
+                            }
+                            if !ok {
+                                return false;
+                            }
+                            darr = Rc::try_unwrap(drc).map(|c| c.into_inner()).unwrap_or_else(|rc| rc.borrow().clone());
+                        } else {
+                            darr.push(src_val.clone());
+                        }
+                        let newv = Value::Array(Rc::new(RefCell::new(darr)));
+                        match dref {
+                            Some(r) => { *r.borrow_mut() = newv; }
+                            None => dest.borrow_mut().set(k.clone(), newv),
+                        }
+                    }
+                    None => {
+                        let v = merge_copy_entry(&src_entry);
+                        dest.borrow_mut().set(k.clone(), v);
+                    }
+                }
+            }
+            ArrayKey::Int(_) => {
+                let v = merge_copy_entry(&src_entry);
+                dest.borrow_mut().push(v);
+            }
+        }
+    }
+    true
+}
+
+fn array_merge(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_array_merge_wrapper(vm, args, "array_merge", false)
 }
 
 fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3297,34 +3437,7 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mut result = PhpArray::new();
-    for (i, arg) in args.iter().enumerate() {
-        require_array_arg_variadic(vm, arg, "array_merge_recursive", (i + 1) as u32)?;
-        if let Value::Array(arr) = arg {
-            let arr = arr.borrow();
-            for (key, val) in arr.iter() {
-                match key {
-                    goro_core::array::ArrayKey::Int(_) => {
-                        if let Err(msg) = result.try_push(unwrap_rc1_ref(val)) {
-                            // PHP throws an Error when next int key overflows.
-                            let exc = vm.create_exception(b"Error", msg, vm.current_line);
-                            vm.current_exception = Some(exc);
-                            return Err(VmError { message: msg.to_string(), line: vm.current_line });
-                        }
-                    }
-                    goro_core::array::ArrayKey::String(s) => {
-                        if let Some(existing) = result.get_str(s.as_bytes()) {
-                            let merged = merge_recursive_values(vm, &existing, val, 0)?;
-                            result.set(key.clone(), merged);
-                        } else {
-                            result.set(key.clone(), unwrap_rc1_ref(val));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    php_array_merge_wrapper(vm, args, "array_merge_recursive", true)
 }
 
 fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth: usize) -> Result<Value, VmError> {
