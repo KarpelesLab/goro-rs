@@ -4448,13 +4448,25 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-                Some(create_reflection_attributes(
+                let list = create_reflection_attributes(
                     vm,
                     &attrs,
                     filter_name.as_deref(),
                     filter_flags,
                     1,
-                ))
+                );
+                // newInstance() runs the class validators of delayed attributes.
+                if let Value::Array(a) = &list {
+                    for (_, v) in a.borrow().iter() {
+                        if let Value::Object(o) = v {
+                            o.borrow_mut().set_property(
+                                b"__reflection_attr_class".to_vec(),
+                                Value::String(PhpString::from_vec(class_lower.clone())),
+                            );
+                        }
+                    }
+                }
+                Some(list)
             }
             _ => None,
         }
@@ -11198,6 +11210,32 @@ pub fn reflection_attribute_method(
             // Capture the call-site line before any inner op-array execution
             // (e.g. evaluating #[Attribute(...)] args) overwrites self.current_line.
             let call_site_line = vm.current_line;
+            // Validators of internal attributes whose validation was delayed
+            // (#[\DelayedTargetValidation]) run now.
+            if obj
+                .borrow()
+                .get_property(b"__reflection_attr_target")
+                .to_long()
+                == 1
+            {
+                let target_class = obj
+                    .borrow()
+                    .get_property(b"__reflection_attr_class")
+                    .to_php_string()
+                    .as_bytes()
+                    .to_vec();
+                let msg = rcls(vm, &target_class).and_then(|ce| {
+                    Vm::class_attribute_validation_error(
+                        ce,
+                        &attr_name.to_ascii_lowercase().into_bytes(),
+                    )
+                });
+                if let Some(msg) = msg {
+                    let exc = vm.create_exception(b"Error", &msg, call_site_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+            }
             // Create a new instance of the attribute class
             let class_lower: Vec<u8> = attr_name
                 .as_bytes()

@@ -3511,6 +3511,61 @@ impl Vm {
         self.emit_warning_at(&msg, line);
     }
 
+    /// The validators of internal attributes applied to a class
+    /// (zend_attribute_validate_attribute, validate_allow_dynamic_properties,
+    /// validate_deprecated): the error message, if `attr_lower` cannot apply.
+    pub fn class_attribute_validation_error(
+        class: &crate::object::ClassEntry,
+        attr_lower: &[u8],
+    ) -> Option<String> {
+        let name = String::from_utf8_lossy(&class.name);
+        let attr = attr_lower.strip_prefix(b"\\").unwrap_or(attr_lower);
+        match attr {
+            b"attribute" => {
+                let what = if class.is_trait {
+                    "trait"
+                } else if class.is_interface {
+                    "interface"
+                } else if class.is_abstract && !class.is_enum {
+                    "abstract class"
+                } else if class.is_enum {
+                    "enum"
+                } else {
+                    return None;
+                };
+                Some(format!("Cannot apply #[\\Attribute] to {} {}", what, name))
+            }
+            b"allowdynamicproperties" => {
+                let what = if class.is_trait {
+                    "trait"
+                } else if class.is_interface {
+                    "interface"
+                } else if class.is_readonly {
+                    "readonly class"
+                } else if class.is_enum {
+                    "enum"
+                } else {
+                    return None;
+                };
+                Some(format!(
+                    "Cannot apply #[\\AllowDynamicProperties] to {} {}",
+                    what, name
+                ))
+            }
+            b"deprecated" if !class.is_trait => {
+                let what = if class.is_interface {
+                    "interface"
+                } else if class.is_enum {
+                    "enum"
+                } else {
+                    "class"
+                };
+                Some(format!("Cannot apply #[\\Deprecated] to {} {}", what, name))
+            }
+            _ => None,
+        }
+    }
+
     /// zend_nodiscard_function(): warn that the result of a #[\NoDiscard]
     /// function is unused. `display` is "name" for functions and
     /// "Class::name" for methods. User functions raise E_USER_WARNING,
@@ -42847,7 +42902,6 @@ impl Vm {
                             ));
                         }
                         // Validate #[Attribute] usage
-                        let class_display = String::from_utf8_lossy(&class.name).to_string();
                         // PHP 8.5 #[DelayedTargetValidation] suppresses runtime
                         // target-mismatch errors so reflection can introspect
                         // misapplied attributes.
@@ -42858,115 +42912,20 @@ impl Vm {
                         for attr in &class.attributes {
                             let attr_lower: Vec<u8> =
                                 attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if attr_lower == b"attribute" && !has_delayed_validation {
-                                if class.is_abstract {
+                            if !has_delayed_validation {
+                                if let Some(message) =
+                                    Self::class_attribute_validation_error(&class, &attr_lower)
+                                {
                                     return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Attribute] to abstract class {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
-                                if class.is_interface {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Attribute] to interface {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
-                                if class.is_enum {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Attribute] to enum {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
-                                if class.is_trait {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Attribute] to trait {}",
-                                            class_display
-                                        ),
+                                        message,
                                         line: op.line,
                                     });
                                 }
                             }
                             if attr_lower == b"allowdynamicproperties" {
-                                if !has_delayed_validation {
-                                    if class.is_enum {
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Cannot apply #[\\AllowDynamicProperties] to enum {}",
-                                                class_display
-                                            ),
-                                            line: op.line,
-                                        });
-                                    }
-                                    if class.is_interface {
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Cannot apply #[\\AllowDynamicProperties] to interface {}",
-                                                class_display
-                                            ),
-                                            line: op.line,
-                                        });
-                                    }
-                                    if class.is_trait {
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Cannot apply #[\\AllowDynamicProperties] to trait {}",
-                                                class_display
-                                            ),
-                                            line: op.line,
-                                        });
-                                    }
-                                }
-                                // Mark the class as allowing dynamic properties only
-                                // if validation passed (or if delayed validation skips
-                                // the error). When delayed, also enable the flag so
-                                // dynamic-prop assignment doesn't warn at runtime.
+                                // When delayed, the flag is still set so dynamic
+                                // property assignment doesn't warn at runtime.
                                 class.allow_dynamic_properties = true;
-                            }
-                            // #[\Deprecated] is only allowed on functions/methods,
-                            // class constants, top-level constants, and traits.
-                            // Applying it directly to a class, enum, or interface
-                            // is a fatal error.
-                            if (attr_lower == b"deprecated" || attr_lower == b"\\deprecated")
-                                && !has_delayed_validation
-                            {
-                                if class.is_enum {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Deprecated] to enum {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
-                                if class.is_interface {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Deprecated] to interface {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
-                                // Plain classes (non-trait, non-enum, non-interface) reject Deprecated.
-                                if !class.is_trait {
-                                    return Err(VmError {
-                                        message: format!(
-                                            "Cannot apply #[\\Deprecated] to class {}",
-                                            class_display
-                                        ),
-                                        line: op.line,
-                                    });
-                                }
                             }
                         }
                         // Validate #[\Override] attribute on methods
