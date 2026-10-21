@@ -4009,11 +4009,41 @@ impl Vm {
         any
     }
 
-    pub fn trace_frame_args(&mut self, func_name: &str, args: &[Value]) -> Vec<Value> {
-        if !self.any_sensitive_params() {
-            return args.to_vec();
+    /// #[\SensitiveParameter] flags of an internal function's parameters
+    /// (from its stub) for a frame named `func_name`.
+    fn internal_sensitive_param_flags(
+        &self,
+        func_name: &str,
+    ) -> Option<(Vec<bool>, Option<usize>)> {
+        if func_name.contains("::") || func_name.contains("->") || func_name.starts_with('{') {
+            return None;
         }
-        let Some((flags, variadic)) = self.sensitive_param_flags(func_name) else {
+        let lower = func_name.to_ascii_lowercase();
+        if self.user_functions.contains_key(lower.as_bytes()) {
+            return None;
+        }
+        let info = crate::arginfo::lookup(lower.as_bytes())?;
+        if !info.params.iter().any(|p| p.sensitive) {
+            return None;
+        }
+        let flags: Vec<bool> = info.params.iter().map(|p| p.sensitive).collect();
+        let variadic = if info.is_variadic() && flags.last() == Some(&true) {
+            Some(flags.len() - 1)
+        } else {
+            None
+        };
+        Some((flags, variadic))
+    }
+
+    pub fn trace_frame_args(&mut self, func_name: &str, args: &[Value]) -> Vec<Value> {
+        let user = if self.any_sensitive_params() {
+            self.sensitive_param_flags(func_name)
+        } else {
+            None
+        };
+        let Some((flags, variadic)) =
+            user.or_else(|| self.internal_sensitive_param_flags(func_name))
+        else {
             return args.to_vec();
         };
         let mut out = Vec::with_capacity(args.len());
@@ -4042,7 +4072,9 @@ impl Vm {
             self.call_stack.iter().rev().cloned().collect();
         for (idx, (func_name, file, line, args, is_method)) in frame_list.iter().enumerate() {
             let wrapped;
-            let args: &Vec<Value> = if sensitive {
+            let args: &Vec<Value> = if sensitive
+                || (!args.is_empty() && self.internal_sensitive_param_flags(func_name).is_some())
+            {
                 wrapped = self.trace_frame_args(func_name, args);
                 &wrapped
             } else {
