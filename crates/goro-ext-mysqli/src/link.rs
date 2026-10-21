@@ -719,12 +719,14 @@ pub fn common_connect(
         };
         set_connect_error(no, &er);
         let allow = ini_bool(vm, "mysqli.allow_local_infile", false);
+        // MyG(local_infile_directory) && !php_check_open_basedir(...)
+        let dir = ini_str(vm, "mysqli.local_infile_directory")
+            .filter(|d| !d.is_empty())
+            .filter(|d| vm.check_open_basedir(&f.name, &String::from_utf8_lossy(d)));
         let mut c = conn.borrow_mut();
         c.set_client_option(MYSQL_OPT_LOCAL_INFILE, OptValue::Int(allow as i64));
-        if let Some(d) = ini_str(vm, "mysqli.local_infile_directory") {
-            if !d.is_empty() {
-                c.set_client_option(MYSQL_OPT_LOAD_DATA_LOCAL_DIR, OptValue::Str(d));
-            }
+        if let Some(d) = dir {
+            c.set_client_option(MYSQL_OPT_LOAD_DATA_LOCAL_DIR, OptValue::Str(d));
         }
     }
     // end:
