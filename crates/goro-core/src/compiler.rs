@@ -18,6 +18,19 @@ thread_local! {
     /// e.g. "Warning" or "Deprecated".
     static PENDING_COMPILE_DIAGNOSTICS: std::cell::RefCell<Vec<(&'static str, String, u32)>>
         = const { std::cell::RefCell::new(Vec::new()) };
+    /// Compile-time warnings raised by this compile and the nested compilers
+    /// it spawns (function, method, closure and hook bodies); drained by the
+    /// top-level `compile()` so none are lost.
+    static COMPILE_WARNINGS: std::cell::RefCell<Vec<(String, u32)>>
+        = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn push_compile_warning_tuple(w: (String, u32)) {
+    push_compile_warning(w.0, w.1);
+}
+
+fn push_compile_warning(msg: String, line: u32) {
+    COMPILE_WARNINGS.with(|w| w.borrow_mut().push((msg, line)));
 }
 
 /// Drain compile-time diagnostics collected during the most recent compile pass.
@@ -75,7 +88,6 @@ struct LoopContext {
     /// The offset to jump to for continue (set when known)
     continue_target: Option<u32>,
     /// Whether this is a switch statement (for "continue targeting switch" warning)
-    #[allow(dead_code)]
     is_switch: bool,
     /// Number of enclosing finally blocks when the loop started
     finally_depth: usize,
@@ -1448,6 +1460,7 @@ impl Compiler {
         program: &Program,
     ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         self.is_top_level = true;
+        let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
         // Reject yield/yield-from at script top level (must appear inside a function).
@@ -1667,7 +1680,13 @@ impl Compiler {
                 line: 0,
             });
         }
-        Ok((self.op_array, self.compiled_classes, self.warnings))
+        let mut warnings = std::mem::take(&mut self.warnings);
+        COMPILE_WARNINGS.with(|w| {
+            let mut w = w.borrow_mut();
+            let base = warnings_base.min(w.len());
+            warnings.extend(w.drain(base..));
+        });
+        Ok((self.op_array, self.compiled_classes, warnings))
     }
 
     /// First pass: process only namespace/use/function/class declarations for hoisting.
@@ -2581,7 +2600,8 @@ impl Compiler {
                 }
 
                 let ctx = self.loop_stack.pop().unwrap();
-                for jmp in ctx.break_jumps {
+                // `continue` targeting the switch itself behaves like `break`.
+                for jmp in ctx.break_jumps.into_iter().chain(ctx.continue_jumps) {
                     self.op_array.patch_jump(jmp, after_switch);
                 }
 
@@ -2712,6 +2732,31 @@ impl Compiler {
                     });
                 }
                 let target_index = stack_len - level;
+                // `continue` targeting a switch acts like `break` (zend_compile_break_continue).
+                if self.loop_stack[target_index].is_switch {
+                    let has_parent = target_index > 0;
+                    let msg = match (level == 1, has_parent) {
+                        (true, false) => {
+                            "\"continue\" targeting switch is equivalent to \"break\"".to_string()
+                        }
+                        (true, true) => format!(
+                            "\"continue\" targeting switch is equivalent to \"break\". Did you mean to use \"continue {}\"?",
+                            level + 1
+                        ),
+                        (false, false) => format!(
+                            "\"continue {}\" targeting switch is equivalent to \"break {}\"",
+                            level, level
+                        ),
+                        (false, true) => format!(
+                            "\"continue {}\" targeting switch is equivalent to \"break {}\". Did you mean to use \"continue {}\"?",
+                            level,
+                            level,
+                            level + 1
+                        ),
+                    };
+                    push_compile_warning_tuple((msg.clone(), stmt.span.line));
+                    push_pending_compile_warning(msg, stmt.span.line);
+                }
                 if self.finally_path.len() > self.loop_stack[target_index].finally_depth {
                     return Err(CompileError {
                         message: "jump out of a finally block is disallowed".into(),
@@ -3191,23 +3236,23 @@ impl Compiler {
                             ExprKind::String(_) => { /* OK - not validated further */ }
                             ExprKind::Int(n) => {
                                 let msg = format!("Unsupported encoding [{}]", n);
-                                self.warnings.push((msg.clone(), line));
+                                push_compile_warning_tuple((msg.clone(), line));
                                 push_pending_compile_warning(msg, line);
                             }
                             ExprKind::Float(f) => {
                                 let s = crate::value::format_php_float(*f);
                                 let msg = format!("Unsupported encoding [{}]", s);
-                                self.warnings.push((msg.clone(), line));
+                                push_compile_warning_tuple((msg.clone(), line));
                                 push_pending_compile_warning(msg, line);
                             }
                             ExprKind::True => {
                                 let msg = "Unsupported encoding [1]".to_string();
-                                self.warnings.push((msg.clone(), line));
+                                push_compile_warning_tuple((msg.clone(), line));
                                 push_pending_compile_warning(msg, line);
                             }
                             ExprKind::False | ExprKind::Null => {
                                 let msg = "Unsupported encoding []".to_string();
-                                self.warnings.push((msg.clone(), line));
+                                push_compile_warning_tuple((msg.clone(), line));
                                 push_pending_compile_warning(msg, line);
                             }
                             _ => {
@@ -5953,7 +5998,13 @@ impl Compiler {
                                         | b"__set_state"
                                 ) {
                                     if *visibility != Visibility::Public {
-                                        self.warnings.push((format!("The magic method {}::{}() must have public visibility", class_display, method_display), *method_line));
+                                        push_compile_warning_tuple((
+                                            format!(
+                                                "The magic method {}::{}() must have public visibility",
+                                                class_display, method_display
+                                            ),
+                                            *method_line,
+                                        ));
                                     }
                                 }
                             }
@@ -8072,7 +8123,7 @@ impl Compiler {
                             && item.name.len() == 1
                             && self.current_namespace.is_empty()
                         {
-                            self.warnings.push((
+                            push_compile_warning_tuple((
                                 format!(
                                     "The use statement with non-compound name '{}' has no effect",
                                     String::from_utf8_lossy(&alias)
