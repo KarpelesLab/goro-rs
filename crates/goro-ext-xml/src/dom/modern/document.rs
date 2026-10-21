@@ -652,7 +652,12 @@ pub fn xml_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
         crate::dom::document::validate_doc(vm, d, &fname);
     }
     if options & XML_PARSE_XINCLUDE != 0 {
-        crate::xinclude::process(vm, d, options);
+        crate::xinclude::process(
+            vm,
+            &fname,
+            d,
+            options | crate::xinclude::XML_PARSE_NOXINCNODE,
+        );
     }
     convert_to_modern(d);
     Ok(node_obj(vm, d))
@@ -1111,7 +1116,7 @@ fn m_xinclude(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         return Err(());
     }
     let d = doc_node(vm, o)?;
-    let n = crate::xinclude::process(vm, d, flags);
+    let n = crate::xinclude::process(vm, &a.f, d, flags | crate::xinclude::XML_PARSE_NOXINCNODE);
     if n < 0 {
         dom_err(vm, INVALID_MODIFICATION_ERR);
         return Err(());
