@@ -8353,6 +8353,10 @@ impl Compiler {
                             // Resolve self at compile time
                             is_self_new = true;
                             self.current_class.clone().unwrap_or(name.clone())
+                        } else if name.eq_ignore_ascii_case(b"parent") {
+                            self.current_parent_class.clone().unwrap_or_else(|| b"parent".to_vec())
+                        } else if name.eq_ignore_ascii_case(b"static") {
+                            b"static".to_vec()
                         } else if name.starts_with(b"__anonymous_class_") {
                             // Anonymous class: look up the NUL-byte PHP name from the map
                             self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| name.clone())
