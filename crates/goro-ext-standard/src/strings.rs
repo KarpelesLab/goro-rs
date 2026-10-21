@@ -58,6 +58,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"str_split", str_split_fn);
     vm.register_function(b"strrchr", strrchr);
     vm.register_function(b"strstr", strstr_fn);
+    vm.register_function(b"strchr", strstr_fn);
     vm.register_function(b"stristr", stristr);
     vm.register_function(b"strpbrk", strpbrk_fn);
     vm.register_function(b"strnatcmp", strnatcmp_fn);
