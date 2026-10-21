@@ -1194,14 +1194,40 @@ impl Compiler {
                 // If by-ref, check that the arg is a variable/writable expression
                 // (not a function call, method call, constant, etc.)
                 if is_byref && !Self::is_writable_lvalue(&arg.value) {
-                    // Emit a NoticeAt opcode with the warning message
-                    let msg_idx = self.op_array.add_literal(Value::String(
-                        crate::string::PhpString::from_bytes(
-                            b"Only variables should be passed by reference",
+                    // A function result gets the notice (ZEND_SEND_VAR_NO_REF);
+                    // any other expression cannot be passed by reference at
+                    // all (ZEND_SEND_VAL_EX throws).
+                    let is_call = matches!(
+                        &arg.value.kind,
+                        ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
+                    );
+                    let info = func_name.and_then(|f| {
+                        crate::arginfo::lookup(&f.to_ascii_lowercase())
+                            .and_then(|fi| fi.params.get(i).map(|p| (fi.name, p.name)))
+                    });
+                    let (opcode, msg) = match (is_call, info) {
+                        (false, Some((f, p))) => (
+                            OpCode::ThrowErrorMsg,
+                            format!(
+                                "{}(): Argument #{} (${}) could not be passed by reference",
+                                f,
+                                i + 1,
+                                p
+                            )
+                            .into_bytes(),
                         ),
-                    ));
+                        _ => (
+                            OpCode::EmitNotice,
+                            b"Only variables should be passed by reference".to_vec(),
+                        ),
+                    };
+                    let msg_idx = self
+                        .op_array
+                        .add_literal(Value::String(crate::string::PhpString::from_vec(msg)));
                     self.op_array.emit(Op {
-                        opcode: OpCode::EmitNotice,
+                        opcode,
                         op1: OperandType::Const(msg_idx),
                         op2: OperandType::Unused,
                         result: OperandType::Unused,
