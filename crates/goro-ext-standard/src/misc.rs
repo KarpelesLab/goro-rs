@@ -4485,6 +4485,16 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // Extension-provided built-in classes
+    if let Some((native, h)) = vm.find_native_class_handler(&class_lower) {
+        if (h.has_method)(&native, &method_lower, false)
+            || (h.has_method)(&native, &method_lower, true)
+            || (method_lower == b"__construct" && vm.object_construct_handlers.contains_key(&native))
+        {
+            return Ok(Value::True);
+        }
+    }
+
     // Check built-in class methods
     let has_builtin_method = match class_lower.as_slice() {
         b"closure" => matches!(method_lower.as_slice(),
@@ -15977,6 +15987,12 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         false
     }
 
+    // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)
+    if let Value::Object(obj) = obj_or_class {
+        if let Some(r) = vm.native_prop_read(obj, prop_bytes) {
+            return Ok(if r.is_some() { Value::True } else { Value::False });
+        }
+    }
     match obj_or_class {
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();

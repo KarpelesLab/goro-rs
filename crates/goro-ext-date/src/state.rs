@@ -584,6 +584,60 @@ pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8
     false
 }
 
+/// Property reads: date fields of DateTime/DateTimeZone are not real
+/// properties; DateInterval fields map onto the interval; DatePeriod fields
+/// return fresh copies.
+pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Option<Value>> {
+    let cn = o.borrow().class_name.clone();
+    match base_of(vm, &cn)? {
+        Base::DateTime | Base::Immutable => {
+            if matches!(name, b"date" | b"timezone_type" | b"timezone") && o.borrow().has_property(P_STATE) {
+                return Some(None);
+            }
+            None
+        }
+        Base::TimeZone => {
+            if matches!(name, b"timezone_type" | b"timezone") && o.borrow().has_property(P_TZ) {
+                return Some(None);
+            }
+            None
+        }
+        Base::Interval => {
+            let iv = interval_get(o)?;
+            let d = &iv.diff;
+            Some(Some(match name {
+                b"y" => Value::Long(d.y),
+                b"m" => Value::Long(d.m),
+                b"d" => Value::Long(d.d),
+                b"h" => Value::Long(d.h),
+                b"i" => Value::Long(d.i),
+                b"s" => Value::Long(d.s),
+                b"f" => Value::Double(d.us as f64 / 1000000.0),
+                b"invert" => Value::Long(d.invert as i64),
+                b"days" => {
+                    if d.days != UNSET {
+                        Value::Long(d.days)
+                    } else {
+                        Value::False
+                    }
+                }
+                _ => return None,
+            }))
+        }
+        Base::Period => {
+            if !PERIOD_PROPS.contains(&name) {
+                return None;
+            }
+            let p = match period_get(o) {
+                Some(p) if p.initialized => p,
+                _ => return Some(Some(Value::Null)),
+            };
+            let props = period_props(vm, &p);
+            props.into_iter().find(|(k, _)| *k == name).map(|(_, v)| Some(v))
+        }
+    }
+}
+
 /// Side effects of the date classes' compare handlers.
 pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
     let (oa, ob) = match (a, b) {

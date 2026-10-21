@@ -381,6 +381,12 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                     } else { break; }
                 } else { break; }
             }
+            // Extension-provided aggregates (e.g. DatePeriod)
+            if !is_aggregate {
+                if let Some((native, _)) = vm.find_native_class_handler(&cls_lower) {
+                    is_aggregate = vm.builtin_implements_interface(&native, b"iteratoraggregate");
+                }
+            }
             if is_aggregate {
                 let iter_val = vm.call_object_method(val, b"getIterator", &[]).unwrap_or(Value::Null);
                 return iterator_to_array_impl(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);

@@ -51,9 +51,61 @@ pub struct NativeClassHandler {
     /// Called before comparing two objects (one of them of this class); may
     /// emit warnings or set `current_exception`.
     pub compare_check: Option<fn(&mut Vm, &Value, &Value)>,
+    /// Property read handler: Some(Some(v)) = value, Some(None) = undefined
+    /// property, None = default handling.
+    pub prop_read: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8]) -> Option<Option<Value>>>,
+    /// Parameter names of a method (`__construct` included), for named arguments.
+    pub param_names: Option<fn(&[u8], &[u8]) -> Option<&'static [&'static str]>>,
 }
 
 impl Vm {
+    /// Place named arguments of a native method call at their positions.
+    /// `args[offset..]` are the positional arguments. Returns Err(name) for an
+    /// unknown parameter name.
+    pub fn merge_native_named_args(
+        &self,
+        native_class: &[u8],
+        method: &[u8],
+        args: &mut Vec<Value>,
+        offset: usize,
+        named: &[(Vec<u8>, Value)],
+    ) -> Result<(), Vec<u8>> {
+        if named.is_empty() {
+            return Ok(());
+        }
+        let names = match self
+            .native_class_handlers
+            .get(native_class)
+            .and_then(|h| h.param_names)
+            .and_then(|f| f(native_class, method))
+        {
+            Some(n) => n,
+            None => return Err(named[0].0.clone()),
+        };
+        for (n, v) in named {
+            let idx = match names.iter().position(|p| p.as_bytes() == n.as_slice()) {
+                Some(i) => offset + i,
+                None => return Err(n.clone()),
+            };
+            while args.len() <= idx {
+                args.push(Value::Undef);
+            }
+            args[idx] = v.clone();
+        }
+        Ok(())
+    }
+
+    /// Run the native property read handler for `obj`, if any.
+    pub fn native_prop_read(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Option<Value>> {
+        if self.native_class_handlers.is_empty() {
+            return None;
+        }
+        let cl = obj.borrow().class_name.to_ascii_lowercase();
+        let (_, h) = self.find_native_class_handler(&cl)?;
+        let f = h.prop_read?;
+        f(self, obj, name)
+    }
+
     /// Run the native property write/unset guard for `obj`, if any.
     /// Returns false when the operation must be aborted (exception set).
     pub fn native_prop_write_allowed(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8) -> bool {
@@ -17951,8 +18003,16 @@ impl Vm {
                                     };
                                     let frame_name = format!("{}::{}", self.builtin_canonical_name(&native), String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..]));
                                     self.call_stack.push((frame_name, self.current_file.clone(), op.line, call.args.clone(), false));
-                                    let args = call.args.clone();
-                                    let result = (h.call)(self, &native, &method_part, &called, None, &args);
+                                    let mut args = call.args.clone();
+                                    let result = match self.merge_native_named_args(&native, &method_part, &mut args, 0, &call.named_args) {
+                                        Ok(()) => (h.call)(self, &native, &method_part, &called, None, &args),
+                                        Err(n) => {
+                                            let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                                            let exc = self.create_exception(b"Error", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            Value::Null
+                                        }
+                                    };
                                     self.call_stack.pop();
                                     if let Some(exc_val) = self.current_exception.take() {
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
@@ -18907,9 +18967,23 @@ impl Vm {
                                     extra_args,
                                     true,
                                 ));
-                                let result = self
-                                    .handle_spl_docall(spl_class, spl_method, &call.args)
-                                    .unwrap_or(Value::Null);
+                                let mut spl_args = call.args.clone();
+                                let mut named_err = None;
+                                if !call.named_args.is_empty() && self.native_class_handlers.contains_key(spl_class) {
+                                    if let Err(n) = self.merge_native_named_args(spl_class, spl_method, &mut spl_args, 1, &call.named_args) {
+                                        named_err = Some(n);
+                                    }
+                                }
+                                let result = if let Some(n) = named_err {
+                                    let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    Value::Null
+                                } else {
+                                    self
+                                        .handle_spl_docall(spl_class, spl_method, &spl_args)
+                                        .unwrap_or(Value::Null)
+                                };
                                 // Pop the call-stack frame we just pushed.
                                 self.call_stack.pop();
                                 // Check if the SPL method set an exception
@@ -20622,6 +20696,18 @@ impl Vm {
                             if is_forwarding_call || !matches!(call.args.first(), Some(Value::Object(_))) {
                                 if let Some(this_val @ Value::Object(_)) = cvs.first() {
                                     call.args.insert(0, this_val.clone());
+                                }
+                            }
+                            // Named arguments for extension-provided constructors.
+                            if !call.named_args.is_empty() && !self.native_class_handlers.is_empty() {
+                                if let Some(Value::Object(o)) = call.args.first() {
+                                    let cl = o.borrow().class_name.to_ascii_lowercase();
+                                    if let Some((native, _)) = self.find_native_class_handler(&cl) {
+                                        let named = std::mem::take(&mut call.named_args);
+                                        if let Err(n) = self.merge_native_named_args(&native, b"__construct", &mut call.args, 1, &named) {
+                                            call.named_args = vec![(n, Value::Null)];
+                                        }
+                                    }
                                 }
                             }
                             // Check for unknown named parameters on classes without __construct
@@ -26813,6 +26899,14 @@ impl Vm {
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).to_php_string();
 
+                    if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
+                            let set = matches!(r, Some(ref v) if !matches!(v, Value::Null | Value::Undef));
+                            self.write_operand(&op.result, if set { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
+                    }
+
                     // Lazy object handling: if uninitialized and class has __isset
                     // for an undeclared prop, defer init so __isset runs on the
                     // proxy. Otherwise run init now. Also track guard propagation
@@ -31396,6 +31490,21 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // Extension property read handlers (e.g. DateInterval's fields).
+                    if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
+                            let v = match r {
+                                Some(v) => v,
+                                None => {
+                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
+                                    self.emit_warning(&format!("Undefined property: {}::${}", class_display, prop_name.to_string_lossy()));
+                                    Value::Null
+                                }
+                            };
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
+                    }
                     // PropertyGetRW is the read side of $obj->prop op= $val.
                     // For non-object scalar LHS, PHP throws the same Error
                     // the matching PropertySet would (FETCH_OBJ_RW), so we

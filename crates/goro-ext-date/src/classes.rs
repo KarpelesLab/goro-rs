@@ -575,7 +575,7 @@ pub fn construct_datetime(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
         let time_str = str_arg(vm, &fname, &uargs, 0, "datetime", false)?.unwrap_or_default();
         let tz = obj_arg(vm, &fname, &uargs, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
         let tzobj = match &tz {
-            Some(o) => Some(need_tz(vm, o)?),
+            Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
             None => None,
         };
         if let Some(t) = date_initialize(vm, &time_str, None, tzobj.as_ref(), INIT_CTOR)? {
@@ -797,6 +797,58 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
 // ---------------------------------------------------------------------------
 // Method dispatch
 
+/// Parameter names (for named arguments), from php_date.stub.php
+pub fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str]> {
+    Some(match (class, method) {
+        (b"datetime" | b"datetimeimmutable", b"__construct") => &["datetime", "timezone"],
+        (b"datetime" | b"datetimeimmutable", m) => match m {
+            b"format" => &["format"],
+            b"modify" => &["modifier"],
+            b"add" | b"sub" => &["interval"],
+            b"settimezone" => &["timezone"],
+            b"settime" => &["hour", "minute", "second", "microsecond"],
+            b"setdate" => &["year", "month", "day"],
+            b"setisodate" => &["year", "week", "dayOfWeek"],
+            b"settimestamp" => &["timestamp"],
+            b"setmicrosecond" => &["microsecond"],
+            b"diff" => &["targetObject", "absolute"],
+            b"__unserialize" => &["data"],
+            b"__set_state" => &["array"],
+            b"createfromformat" => &["format", "datetime", "timezone"],
+            b"createfromtimestamp" => &["timestamp"],
+            b"createfromimmutable" | b"createfrommutable" | b"createfrominterface" => &["object"],
+            b"gettimezone" | b"getoffset" | b"getmicrosecond" | b"gettimestamp" | b"getlasterrors" | b"__serialize" | b"__wakeup" => &[],
+            _ => return None,
+        },
+        (b"datetimezone", m) => match m {
+            b"__construct" => &["timezone"],
+            b"getoffset" => &["datetime"],
+            b"gettransitions" => &["timestampBegin", "timestampEnd"],
+            b"listidentifiers" => &["timezoneGroup", "countryCode"],
+            b"__unserialize" => &["data"],
+            b"__set_state" => &["array"],
+            b"getname" | b"getlocation" | b"listabbreviations" | b"__serialize" | b"__wakeup" => &[],
+            _ => return None,
+        },
+        (b"dateinterval", m) => match m {
+            b"__construct" => &["duration"],
+            b"createfromdatestring" => &["datetime"],
+            b"format" => &["format"],
+            b"__unserialize" => &["data"],
+            b"__set_state" => &["array"],
+            b"__serialize" | b"__wakeup" => &[],
+            _ => return None,
+        },
+        (b"dateperiod", m) => match m {
+            b"createfromiso8601string" => &["specification", "options"],
+            b"__unserialize" => &["data"],
+            b"__set_state" => &["array"],
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 pub fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
     match class {
         b"datetime" | b"datetimeimmutable" => {
@@ -883,7 +935,8 @@ pub fn call_method(vm: &mut Vm, class: &[u8], method: &[u8], called: &[u8], this
     // When invoked from the engine (e.g. unserialize() calling __unserialize),
     // there is no call frame yet: add an "[internal function]" one.
     let mut pushed = false;
-    if this.is_some() {
+    // Iterator methods driven by foreach run without a frame, as in PHP.
+    if this.is_some() && class != b"internaliterator" {
         let frame = format!("{}->{}", class_canonical(class), canonical_method(method));
         let has = vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&frame)).unwrap_or(false);
         if !has {
@@ -1168,7 +1221,7 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
             let ts = path_arg(vm, &f, args, 1, "datetime")?.unwrap_or_default();
             let tz = obj_arg(vm, &f, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
             let tzobj = match &tz {
-                Some(o) => Some(need_tz(vm, o)?),
+                Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
                 None => None,
             };
             let cls = called_or_base(vm);
@@ -1937,7 +1990,7 @@ fn date_create_common(vm: &mut Vm, args: &[Value], fname: &str, cls: &[u8]) -> R
     let time_str = str_arg(vm, fname, args, 0, "datetime", false)?.unwrap_or_default();
     let tz = obj_arg(vm, fname, args, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
     let tzobj = match &tz {
-        Some(o) => Some(need_tz(vm, o)?),
+        Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
         None => None,
     };
     match date_initialize(vm, &time_str, None, tzobj.as_ref(), 0)? {
@@ -1964,7 +2017,7 @@ fn date_create_from_format_common(vm: &mut Vm, args: &[Value], fname: &str, cls:
     let ts = path_arg(vm, fname, args, 1, "datetime")?.unwrap_or_default();
     let tz = obj_arg(vm, fname, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
     let tzobj = match &tz {
-        Some(o) => Some(need_tz(vm, o)?),
+        Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
         None => None,
     };
     match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
