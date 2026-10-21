@@ -1031,22 +1031,7 @@ fn get_parser(vm: &mut Vm, f: &str, args: &[Value]) -> Result<(Obj, Rc<State>), 
 }
 
 fn is_callable(vm: &mut Vm, v: &Value) -> bool {
-    match v {
-        Value::String(_) | Value::Array(_) | Value::Object(_) => {}
-        _ => return false,
-    }
-    if let Value::Object(o) = v {
-        let cl = o.borrow().class_name.to_ascii_lowercase();
-        if cl == b"closure" {
-            return true;
-        }
-    }
-    match vm.functions.get(&b"is_callable"[..]).copied() {
-        Some(f) => f(vm, std::slice::from_ref(v))
-            .map(|r| r.is_truthy())
-            .unwrap_or(false),
-        None => false,
-    }
+    vm.zend_is_callable_ex(v, 0).ok
 }
 
 /// php_xml_check_string_method_arg; `arg_num` 0 means "don't report".

@@ -959,36 +959,10 @@ impl Vm {
             }
             DIT_CALLBACK | DIT_RCALLBACK => {
                 let cb = args[1].deref();
-                let detail: Option<String> = match &cb {
-                    Value::Null
-                    | Value::True
-                    | Value::False
-                    | Value::Long(_)
-                    | Value::Double(_) => Some("no array or string given".to_string()),
-                    Value::Array(a) if a.borrow().len() != 2 => {
-                        Some("array callback must have exactly two members".to_string())
-                    }
-                    Value::String(s) => {
-                        let b = s.as_bytes();
-                        let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                        let is_closure_name = b.starts_with(b"__closure_")
-                            || b.starts_with(b"__arrow_")
-                            || b.starts_with(b"__bound_closure_");
-                        if is_closure_name
-                            || b.windows(2).any(|w| w == b"::")
-                            || self.functions.contains_key(&lower)
-                            || self.user_functions_contains(&lower)
-                        {
-                            None
-                        } else {
-                            Some(format!(
-                                "function \"{}\" not found or invalid function name",
-                                s.to_string_lossy()
-                            ))
-                        }
-                    }
-                    _ => None,
-                };
+                let detail: Option<String> = self.callable_error(&cb);
+                if self.current_exception.is_some() {
+                    return false;
+                }
                 if let Some(d) = detail {
                     let msg = format!(
                         "{}(): Argument #2 ($callback) must be a valid callback, {}",
@@ -1006,10 +980,6 @@ impl Vm {
         set_prop(obj, b"__spl_pos", Value::Long(0));
         Self::dit_free(obj);
         true
-    }
-
-    fn user_functions_contains(&self, lower: &[u8]) -> bool {
-        self.user_functions.contains_key(lower)
     }
 
     // ------------------------------------------------------------------

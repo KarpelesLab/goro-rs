@@ -814,143 +814,13 @@ fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
 /// Validate a callback argument for set_exception_handler. Returns Some(error message)
 /// if the callback is invalid (PHP throws TypeError); None if it looks OK.
-fn validate_exception_handler_callback(vm: &Vm, callback: &Value) -> Option<String> {
-    let base =
-        "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, ";
-    if callback.is_closure_obj() {
-        return None;
-    }
-    match callback {
-        Value::String(s) => {
-            let name = s.as_bytes();
-            if name.is_empty() {
-                return Some(format!(
-                    "{}function \"\" not found or invalid function name",
-                    base
-                ));
-            }
-            // Class::method form
-            if let Some(pos) = name.windows(2).position(|w| w == b"::") {
-                let class_part = &name[..pos];
-                let method_part = &name[pos + 2..];
-                let class_lower: Vec<u8> =
-                    class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let method_lower: Vec<u8> =
-                    method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if let Some(class) = vm.classes.get(&class_lower) {
-                    if class.get_method(&method_lower).is_some() {
-                        return None;
-                    }
-                    return Some(format!(
-                        "{}class {} does not have a method \"{}\"",
-                        base,
-                        String::from_utf8_lossy(class_part),
-                        String::from_utf8_lossy(method_part)
-                    ));
-                }
-                return Some(format!(
-                    "{}class \"{}\" not found",
-                    base,
-                    String::from_utf8_lossy(class_part)
-                ));
-            }
-            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if name_lower.starts_with(b"__closure_")
-                || name_lower.starts_with(b"__arrow_")
-                || name_lower.starts_with(b"__bound_closure_")
-                || name_lower.starts_with(b"__closure_fcc_")
-            {
-                return None;
-            }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
-            {
-                return None;
-            }
-            Some(format!(
-                "{}function \"{}\" not found or invalid function name",
-                base,
-                String::from_utf8_lossy(name)
-            ))
-        }
-        Value::Array(arr) => {
-            let arr_borrow = arr.borrow();
-            if arr_borrow.len() != 2 {
-                return Some(format!("{}array must have exactly two members", base));
-            }
-            let vals: Vec<Value> = arr_borrow.values().cloned().collect();
-            drop(arr_borrow);
-            // First member: object or class name
-            let class_lower = match &vals[0] {
-                Value::Object(o) => {
-                    let cn: Vec<u8> = o
-                        .borrow()
-                        .class_name
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    cn
-                }
-                Value::String(s) => {
-                    let cn: Vec<u8> = s
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    if cn.is_empty() {
-                        return Some(format!("{}class \"\" not found", base));
-                    }
-                    if !vm.classes.contains_key(&cn) {
-                        return Some(format!(
-                            "{}class \"{}\" not found",
-                            base,
-                            s.to_string_lossy()
-                        ));
-                    }
-                    cn
-                }
-                _ => {
-                    return Some(format!(
-                        "{}first array member is not a valid class name or object",
-                        base
-                    ));
-                }
-            };
-            // Second member: method name
-            match &vals[1] {
-                Value::String(s) => {
-                    let method_lower: Vec<u8> = s
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    if let Some(cd) = vm.classes.get(&class_lower) {
-                        if cd.get_method(&method_lower).is_some() {
-                            return None;
-                        }
-                        // __call/__callStatic act as catch-alls — method is callable.
-                        if cd.get_method(b"__call").is_some()
-                            || cd.get_method(b"__callstatic").is_some()
-                        {
-                            return None;
-                        }
-                    }
-                    Some(format!(
-                        "{}class {} does not have a method \"{}\"",
-                        base,
-                        String::from_utf8_lossy(&class_lower),
-                        s.to_string_lossy()
-                    ))
-                }
-                _ => Some(format!("{}second array member is not a valid method", base)),
-            }
-        }
-        Value::Object(_) => None, // closures and __invoke objects are callable
-        _ => Some(format!(
-            "{}must be of type ?callable, {} given",
-            base,
-            Vm::value_type_name(callback)
-        )),
-    }
+fn validate_exception_handler_callback(vm: &mut Vm, callback: &Value) -> Option<String> {
+    callable_error(vm, callback).map(|e| {
+        format!(
+            "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, {}",
+            e
+        )
+    })
 }
 
 fn restore_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -1380,310 +1250,19 @@ fn callable_check_class(vm: &mut Vm, name: &[u8], quiet: bool) -> Result<Vec<u8>
     ))
 }
 
-/// Check a method of `class_lower` for callability (zend_is_callable_check_func).
-fn callable_check_method(
-    vm: &mut Vm,
-    class_lower: &[u8],
-    method: &[u8],
-    has_object: bool,
-) -> Result<(), String> {
-    let mlower = lower_bytes(method);
-    let display = vm
-        .classes
-        .get(class_lower)
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| vm.builtin_canonical_name(class_lower).into_bytes());
-    let disp = goro_core::value::display_class_name(&display);
-    let mname = String::from_utf8_lossy(method).to_string();
-    let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
-    let info = vm.classes.get(class_lower).and_then(|c| {
-        c.get_method(&mlower).map(|m| {
-            (
-                m.visibility,
-                lower_bytes(&m.declaring_class),
-                m.is_static,
-                m.is_abstract,
-            )
-        })
-    });
-    let has_magic = |vm: &Vm, name: &[u8]| {
-        vm.classes
-            .get(class_lower)
-            .map(|c| c.get_method(name).is_some())
-            .unwrap_or(false)
-    };
-    match info {
-        Some((vis, decl, is_static, is_abstract)) => {
-            let accessible = match vis {
-                Visibility::Public => true,
-                Visibility::Private => scope.as_ref() == Some(&decl),
-                Visibility::Protected => {
-                    let root = vm.find_root_declaring_class_for_method(&decl, &mlower);
-                    scope
-                        .as_ref()
-                        .map(|sc| {
-                            *sc == root
-                                || vm.class_extends(sc, &root)
-                                || vm.class_extends(&root, sc)
-                        })
-                        .unwrap_or(false)
-                }
-            };
-            if !accessible {
-                if has_object && has_magic(vm, b"__call") {
-                    return Ok(());
-                }
-                if !has_object && has_magic(vm, b"__callstatic") {
-                    return Ok(());
-                }
-                let v = if vis == Visibility::Private {
-                    "private"
-                } else {
-                    "protected"
-                };
-                return Err(format!("cannot access {} method {}::{}()", v, disp, mname));
-            }
-            if is_abstract {
-                return Err(format!("cannot call abstract method {}::{}()", disp, mname));
-            }
-            if !is_static && !has_object {
-                // Allowed only with a compatible $this in the calling scope.
-                let compatible = scope
-                    .as_ref()
-                    .map(|sc| sc.as_slice() == class_lower || vm.class_extends(sc, class_lower))
-                    .unwrap_or(false);
-                if !compatible {
-                    return Err(format!(
-                        "non-static method {}::{}() cannot be called statically",
-                        disp, mname
-                    ));
-                }
-            }
-            Ok(())
-        }
-        None => {
-            if !vm.classes.contains_key(class_lower) {
-                // Builtin class: consult the builtin method table.
-                let exists = method_exists(
-                    vm,
-                    &[
-                        Value::String(PhpString::from_vec(display.clone())),
-                        Value::String(PhpString::from_bytes(method)),
-                    ],
-                )
-                .map(|v| v.is_truthy())
-                .unwrap_or(false);
-                if exists {
-                    let throwable = class_lower == b"exception"
-                        || class_lower == b"error"
-                        || goro_core::vm::is_builtin_subclass(class_lower, b"exception")
-                        || goro_core::vm::is_builtin_subclass(class_lower, b"error");
-                    if !has_object && throwable {
-                        return Err(format!(
-                            "non-static method {}::{}() cannot be called statically",
-                            disp, mname
-                        ));
-                    }
-                    return Ok(());
-                }
-            }
-            if has_object && has_magic(vm, b"__call") {
-                return Ok(());
-            }
-            if has_magic(vm, b"__callstatic") {
-                return Ok(());
-            }
-            Err(format!(
-                "class {} does not have a method \"{}\"",
-                disp, mname
-            ))
-        }
-    }
-}
-
 /// zend_is_callable_ex(): returns (callable, callable_name, error).
 pub(crate) fn check_callable(
     vm: &mut Vm,
     val: &Value,
     syntax_only: bool,
 ) -> (bool, Vec<u8>, Option<String>) {
-    let val = val.deref();
-    match &val {
-        Value::String(s) => {
-            let raw = s.as_bytes().to_vec();
-            if is_closure_bytes(&raw) {
-                return (true, b"Closure::__invoke".to_vec(), None);
-            }
-            if syntax_only {
-                return (true, raw, None);
-            }
-            let stripped: Vec<u8> = raw
-                .strip_prefix(b"\\")
-                .map(|r| r.to_vec())
-                .unwrap_or_else(|| raw.clone());
-            if let Some(pos) = stripped.windows(2).rposition(|w| w == b"::") {
-                let (cls, m) = (&stripped[..pos], &stripped[pos + 2..]);
-                let res = callable_check_class(vm, cls, false)
-                    .and_then(|cl| callable_check_method(vm, &cl, m, false));
-                return match res {
-                    Ok(()) => (true, raw, None),
-                    Err(e) => (false, raw, Some(e)),
-                };
-            }
-            let lower = lower_bytes(&stripped);
-            if vm.functions.contains_key(&lower) || vm.user_functions.contains_key(&lower) {
-                (true, raw, None)
-            } else {
-                let e = format!(
-                    "function \"{}\" not found or invalid function name",
-                    String::from_utf8_lossy(&raw)
-                );
-                (false, raw, Some(e))
-            }
-        }
-        Value::Array(arr) => {
-            let (first, second, len) = {
-                let a = arr.borrow();
-                (
-                    a.get(&ArrayKey::Int(0)).map(|v| v.deref()),
-                    a.get(&ArrayKey::Int(1)).map(|v| v.deref()),
-                    a.len(),
-                )
-            };
-            // Closure-with-captures representation.
-            if let Some(Value::String(f)) = arr.borrow().values().next().map(|v| v.deref()) {
-                if is_closure_bytes(f.as_bytes()) {
-                    return (true, b"Closure::__invoke".to_vec(), None);
-                }
-            }
-            if len != 2 {
-                return (
-                    false,
-                    b"Array".to_vec(),
-                    Some("array callback must have exactly two members".to_string()),
-                );
-            }
-            let (Some(first), Some(second)) = (first, second) else {
-                return (
-                    false,
-                    b"Array".to_vec(),
-                    Some("array callback has to contain indices 0 and 1".to_string()),
-                );
-            };
-            let method = match &second {
-                Value::String(m) => m.as_bytes().to_vec(),
-                _ => {
-                    // zend_get_callable_name_ex() names it "Array"; the
-                    // first member is checked first.
-                    let err = if matches!(first, Value::Object(_) | Value::String(_)) {
-                        "second array member is not a valid method"
-                    } else {
-                        "first array member is not a valid class name or object"
-                    };
-                    return (false, b"Array".to_vec(), Some(err.to_string()));
-                }
-            };
-            let (class_bytes, has_object) = match &first {
-                Value::Object(o) => (o.borrow().class_name.clone(), true),
-                Value::String(c) => (c.as_bytes().to_vec(), false),
-                _ => {
-                    return (
-                        false,
-                        b"Array".to_vec(),
-                        Some("first array member is not a valid class name or object".to_string()),
-                    );
-                }
-            };
-            let mut name = goro_core::value::display_class_name(&class_bytes).into_bytes();
-            if has_object {
-                name = class_bytes.clone();
-            }
-            name.extend_from_slice(b"::");
-            name.extend_from_slice(&method);
-            if syntax_only {
-                return (true, name, None);
-            }
-            let cl = match callable_check_class(vm, &class_bytes, has_object) {
-                Ok(c) => c,
-                Err(e) => return (false, name, Some(e)),
-            };
-            // "Class::method" inside the method string (deprecated form)
-            let (cl, method) = match method.windows(2).position(|w| w == b"::") {
-                // Relative names are resolved from the first member's class.
-                Some(pos) => match match lower_bytes(&method[..pos]).as_slice() {
-                    b"self" | b"static" => Ok(cl.clone()),
-                    b"parent" => vm
-                        .classes
-                        .get(&cl)
-                        .and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
-                        .ok_or_else(|| {
-                            "cannot access \"parent\" when current class scope has no parent"
-                                .to_string()
-                        }),
-                    _ => callable_check_class(vm, &method[..pos], true),
-                } {
-                    Ok(c2) => {
-                        let org_name = vm
-                            .classes
-                            .get(&cl)
-                            .map(|c| goro_core::value::display_class_name(&c.name))
-                            .unwrap_or_else(|| vm.builtin_canonical_name(&cl));
-                        if cl != c2 && !vm.class_extends(&cl, &c2) {
-                            let target = vm
-                                .classes
-                                .get(&c2)
-                                .map(|c| goro_core::value::display_class_name(&c.name))
-                                .unwrap_or_else(|| vm.builtin_canonical_name(&c2));
-                            let e = format!("class {} is not a subclass of {}", org_name, target);
-                            return (false, name, Some(e));
-                        }
-                        let line = vm.current_line;
-                        vm.emit_deprecated_at(
-                            &format!(
-                                "Callables of the form [\"{}\", \"{}\"] are deprecated",
-                                org_name,
-                                String::from_utf8_lossy(&method)
-                            ),
-                            line,
-                        );
-                        (c2, method[pos + 2..].to_vec())
-                    }
-                    Err(e) => return (false, name, Some(e)),
-                },
-                None => (cl, method),
-            };
-            match callable_check_method(vm, &cl, &method, has_object) {
-                Ok(()) => (true, name, None),
-                Err(e) => (false, name, Some(e)),
-            }
-        }
-        Value::Object(obj) => {
-            let cn = obj.borrow().class_name.clone();
-            let cl = lower_bytes(&cn);
-            let mut name = cn.clone();
-            name.extend_from_slice(b"::__invoke");
-            if cl == b"closure" {
-                return (true, vm.closure_function_name(&val), None);
-            }
-            let has_invoke = vm
-                .classes
-                .get(&cl)
-                .map(|c| c.get_method(b"__invoke").is_some())
-                .unwrap_or(false);
-            if has_invoke || syntax_only && false {
-                (true, name, None)
-            } else {
-                (false, name, Some("no array or string given".to_string()))
-            }
-        }
-        other => {
-            let name = match other {
-                Value::Null | Value::Undef => Vec::new(),
-                v => v.to_php_string().as_bytes().to_vec(),
-            };
-            (false, name, Some("no array or string given".to_string()))
-        }
-    }
+    let flags = if syntax_only {
+        goro_core::callable::IS_CALLABLE_CHECK_SYNTAX_ONLY
+    } else {
+        0
+    };
+    let r = vm.zend_is_callable_ex(val, flags);
+    (r.ok, r.name, r.error)
 }
 
 /// Reject callbacks that cannot possibly be resolved (zend_fcall_info_init errors).
@@ -1696,24 +1275,12 @@ fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmEr
         });
     }
     if !ok {
-        if let Some(e) = err {
-            let definite = e.starts_with("class \"")
-                || e.starts_with("first array member")
-                || e.starts_with("second array member")
-                || e.starts_with("function \"")
-                || e.starts_with("array callback")
-                || e.starts_with("non-static method ")
-                || e.starts_with("cannot call abstract method ")
-                || e.starts_with("cannot access ")
-                || e.contains(" is not a subclass of ");
-            if definite {
-                let msg = format!(
-                    "{}(): Argument #1 ($callback) must be a valid callback, {}",
-                    func, e
-                );
-                return Err(throw_type_error_msg(vm, msg));
-            }
-        }
+        let msg = format!(
+            "{}(): Argument #1 ($callback) must be a valid callback, {}",
+            func,
+            err.unwrap_or_default()
+        );
+        return Err(throw_type_error_msg(vm, msg));
     }
     Ok(())
 }
@@ -3215,219 +2782,47 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
+/// zend_fcall_info_init() failure of a zpp `f` parameter: TypeError
+/// "<func>(): <label> must be a valid callback[ or null], <error>".
+pub(crate) fn require_callable(
+    vm: &mut Vm,
+    callback: &Value,
+    fn_name: &str,
+    arg_label: &str,
+    or_null: bool,
+) -> Result<(), VmError> {
+    let err = callable_error(vm, callback);
+    if vm.current_exception.is_some() {
+        return Err(VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        });
+    }
+    match err {
+        None => Ok(()),
+        Some(e) => {
+            let msg = format!(
+                "{}(): {} must be a valid callback{}, {}",
+                fn_name,
+                arg_label,
+                if or_null { " or null" } else { "" },
+                e
+            );
+            Err(throw_type_error_msg(vm, msg))
+        }
+    }
+}
+
 fn validate_callback_generic(
     vm: &mut Vm,
     callback: &Value,
     fn_name: &str,
     arg_label: &str,
 ) -> Result<(), VmError> {
-    if callback.is_closure_obj() {
-        return Ok(());
+    if matches!(callback, Value::Null) {
+        return Ok(()); // null is valid (identity/zip)
     }
-    match callback {
-        Value::Null => Ok(()), // null is valid (identity/zip)
-        Value::String(s) => {
-            let name = s.as_bytes();
-            if name.is_empty() {
-                let msg = format!(
-                    "{}(): {} must be a valid callback or null, function \"\" not found or invalid function name",
-                    fn_name, arg_label
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            // Check for "Class::method" syntax
-            if let Some(pos) = name.iter().position(|&b| b == b':') {
-                if pos + 1 < name.len() && name[pos + 1] == b':' {
-                    let class_name = &name[..pos];
-                    let method_name = &name[pos + 2..];
-                    let class_lower: Vec<u8> =
-                        class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let method_lower: Vec<u8> =
-                        method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(class) = vm.classes.get(&class_lower) {
-                        if class.get_method(&method_lower).is_some() {
-                            return Ok(());
-                        }
-                        let msg = format!(
-                            "{}(): {} must be a valid callback or null, class '{}' does not have a method '{}'",
-                            fn_name,
-                            arg_label,
-                            String::from_utf8_lossy(class_name),
-                            String::from_utf8_lossy(method_name)
-                        );
-                        let exc = vm.throw_type_error(msg.clone());
-                        vm.current_exception = Some(exc);
-                        return Err(VmError {
-                            message: msg,
-                            line: vm.current_line,
-                        });
-                    }
-                    let msg = format!(
-                        "{}(): {} must be a valid callback or null, class \"{}\" not found",
-                        fn_name,
-                        arg_label,
-                        String::from_utf8_lossy(class_name)
-                    );
-                    let exc = vm.throw_type_error(msg.clone());
-                    vm.current_exception = Some(exc);
-                    return Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    });
-                }
-            }
-            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Check if it's a closure name
-            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
-                return Ok(());
-            }
-            // PHP language constructs cannot be used as callbacks
-            const LANG_CONSTRUCTS: &[&[u8]] = &[
-                b"echo",
-                b"print",
-                b"isset",
-                b"unset",
-                b"empty",
-                b"include",
-                b"include_once",
-                b"require",
-                b"require_once",
-                b"eval",
-                b"exit",
-                b"die",
-                b"list",
-                b"array",
-            ];
-            if LANG_CONSTRUCTS.contains(&name_lower.as_slice()) {
-                let msg = format!(
-                    "{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
-                    fn_name,
-                    arg_label,
-                    String::from_utf8_lossy(name)
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
-            {
-                return Ok(());
-            }
-            let msg = format!(
-                "{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
-                fn_name,
-                arg_label,
-                String::from_utf8_lossy(name)
-            );
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-        Value::Array(arr) => {
-            let arr_borrow = arr.borrow();
-            let len = arr_borrow.len();
-            if len != 2 {
-                let msg = format!(
-                    "{}(): {} must be a valid callback or null, array callback must have exactly two members",
-                    fn_name, arg_label
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            let vals: Vec<Value> = arr_borrow.values().cloned().collect();
-            drop(arr_borrow);
-            match &vals[0] {
-                Value::String(s) => {
-                    let class_lower: Vec<u8> = s
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    if class_lower.starts_with(b"__closure_")
-                        || class_lower.starts_with(b"__arrow_")
-                    {
-                        return Ok(());
-                    }
-                    if vm.classes.contains_key(&class_lower) {
-                        return Ok(());
-                    }
-                    let msg = format!(
-                        "{}(): {} must be a valid callback or null, first array member is not a valid class name or object",
-                        fn_name, arg_label
-                    );
-                    let exc = vm.throw_type_error(msg.clone());
-                    vm.current_exception = Some(exc);
-                    Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    })
-                }
-                Value::Object(_) => Ok(()),
-                _ => {
-                    let msg = format!(
-                        "{}(): {} must be a valid callback or null, first array member is not a valid class name or object",
-                        fn_name, arg_label
-                    );
-                    let exc = vm.throw_type_error(msg.clone());
-                    vm.current_exception = Some(exc);
-                    Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    })
-                }
-            }
-        }
-        Value::Object(obj) => {
-            let class_lower: Vec<u8> = obj
-                .borrow()
-                .class_name
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
-            if let Some(class) = vm.classes.get(&class_lower) {
-                if class.get_method(b"__invoke").is_some() {
-                    return Ok(());
-                }
-            }
-            let msg = format!(
-                "{}(): {} must be a valid callback or null, no array or string given",
-                fn_name, arg_label
-            );
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-        _ => {
-            let msg = format!(
-                "{}(): {} must be a valid callback or null, no array or string given",
-                fn_name, arg_label
-            );
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-    }
+    require_callable(vm, callback, fn_name, arg_label, true)
 }
 
 /// PHP_FUNCTION(array_map)
@@ -3648,188 +3043,8 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// zend_is_callable_error(): None if `cb` is callable from the current scope,
 /// otherwise the reason PHP reports after "must be a valid callback, ".
-pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
-    let cb = cb.deref();
-    let check_method =
-        |vm: &Vm, class_lower: &[u8], method: &[u8], is_static_call: bool| -> Option<String> {
-            let class = match vm.classes.get(class_lower) {
-                Some(c) => c,
-                None => {
-                    return Some(format!(
-                        "class \"{}\" not found",
-                        String::from_utf8_lossy(class_lower)
-                    ));
-                }
-            };
-            let cname = String::from_utf8_lossy(&class.name).to_string();
-            let mlower = method.to_ascii_lowercase();
-            match class.get_method(&mlower) {
-                Some(m) => {
-                    let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
-                    let ok = match m.visibility {
-                        goro_core::object::Visibility::Public => true,
-                        goro_core::object::Visibility::Private => {
-                            scope.as_deref() == Some(m.declaring_class.as_slice())
-                        }
-                        goro_core::object::Visibility::Protected => scope
-                            .as_ref()
-                            .map(|sc| {
-                                sc.as_slice() == class_lower
-                                    || vm.class_extends(sc, class_lower)
-                                    || vm.class_extends(class_lower, sc)
-                                    || sc.as_slice() == m.declaring_class.as_slice()
-                                    || vm.class_extends(sc, &m.declaring_class)
-                            })
-                            .unwrap_or(false),
-                    };
-                    if !ok {
-                        let vis = if matches!(m.visibility, goro_core::object::Visibility::Private)
-                        {
-                            "private"
-                        } else {
-                            "protected"
-                        };
-                        return Some(format!(
-                            "cannot access {} method {}::{}()",
-                            vis,
-                            cname,
-                            String::from_utf8_lossy(&m.name)
-                        ));
-                    }
-                    if is_static_call && !m.is_static {
-                        return Some(format!(
-                            "non-static method {}::{}() cannot be called statically",
-                            cname,
-                            String::from_utf8_lossy(&m.name)
-                        ));
-                    }
-                    None
-                }
-                None => {
-                    if class.get_method(b"__call").is_some()
-                        || (is_static_call && class.get_method(b"__callstatic").is_some())
-                    {
-                        return None;
-                    }
-                    Some(format!(
-                        "class {} does not have a method \"{}\"",
-                        cname,
-                        String::from_utf8_lossy(method)
-                    ))
-                }
-            }
-        };
-    match &cb {
-        Value::String(s) => {
-            let name = s.as_bytes();
-            let lower = name.to_ascii_lowercase();
-            if lower.starts_with(b"__closure_")
-                || lower.starts_with(b"__arrow_")
-                || lower.starts_with(b"__bound_closure_")
-            {
-                return None;
-            }
-            if let Some(pos) = name.windows(2).position(|w| w == b"::") {
-                let class_lower = name[..pos].to_ascii_lowercase();
-                let class_lower = class_lower
-                    .strip_prefix(b"\\")
-                    .map(|c| c.to_vec())
-                    .unwrap_or(class_lower);
-                if !vm.classes.contains_key(&class_lower) {
-                    return Some(format!(
-                        "class \"{}\" not found",
-                        String::from_utf8_lossy(&name[..pos])
-                    ));
-                }
-                return check_method(vm, &class_lower, &name[pos + 2..], true);
-            }
-            let l = lower.strip_prefix(b"\\").unwrap_or(&lower);
-            let construct = matches!(
-                l,
-                b"isset"
-                    | b"empty"
-                    | b"eval"
-                    | b"exit"
-                    | b"die"
-                    | b"echo"
-                    | b"print"
-                    | b"unset"
-                    | b"list"
-                    | b"array"
-                    | b"include"
-                    | b"include_once"
-                    | b"require"
-                    | b"require_once"
-            );
-            if !construct && (vm.functions.contains_key(l) || vm.user_functions.contains_key(l)) {
-                return None;
-            }
-            Some(format!(
-                "function \"{}\" not found or invalid function name",
-                String::from_utf8_lossy(name)
-            ))
-        }
-        Value::Array(arr) => {
-            let a = arr.borrow();
-            if a.len() != 2 {
-                return Some("array callback must have exactly two members".to_string());
-            }
-            let vals: Vec<Value> = a.values().cloned().collect();
-            drop(a);
-            if let Value::String(first) = &vals[0] {
-                let fl = first.as_bytes().to_ascii_lowercase();
-                if fl.starts_with(b"__closure_") || fl.starts_with(b"__arrow_") {
-                    return None;
-                }
-            }
-            if !matches!(vals[0].deref(), Value::Object(_) | Value::String(_)) {
-                return Some("first array member is not a valid class name or object".to_string());
-            }
-            let method = match vals[1].deref() {
-                Value::String(m) => m.as_bytes().to_vec(),
-                _ => return Some("second array member is not a valid method".to_string()),
-            };
-            match vals[0].deref() {
-                Value::Object(o) => {
-                    let cl = o.borrow().class_name.to_ascii_lowercase();
-                    if cl == b"closure" {
-                        return None;
-                    }
-                    let method = match method.windows(2).position(|w| w == b"::") {
-                        Some(p) if method[..p].eq_ignore_ascii_case(b"parent") => {
-                            method[p + 2..].to_vec()
-                        }
-                        _ => method,
-                    };
-                    check_method(vm, &cl, &method, false)
-                }
-                Value::String(c) => {
-                    let cl = c.as_bytes().to_ascii_lowercase();
-                    let cl = cl.strip_prefix(b"\\").map(|x| x.to_vec()).unwrap_or(cl);
-                    if !vm.classes.contains_key(&cl) {
-                        return Some(format!("class \"{}\" not found", c.to_string_lossy()));
-                    }
-                    check_method(vm, &cl, &method, true)
-                }
-                _ => Some("first array member is not a valid class name or object".to_string()),
-            }
-        }
-        Value::Object(o) => {
-            let cl = o.borrow().class_name.to_ascii_lowercase();
-            if cl == b"closure"
-                || vm
-                    .classes
-                    .get(&cl)
-                    .map(|c| c.get_method(b"__invoke").is_some())
-                    .unwrap_or(false)
-            {
-                None
-            } else {
-                Some("no array or string given".to_string())
-            }
-        }
-        _ => Some("no array or string given".to_string()),
-    }
+pub(crate) fn callable_error(vm: &mut Vm, cb: &Value) -> Option<String> {
+    vm.callable_error(cb)
 }
 
 fn walk_key_value(k: &ArrayKey) -> Value {
@@ -15687,100 +14902,13 @@ fn validate_array_callback(
     func_name: &str,
     arg_num: usize,
 ) -> Result<(), VmError> {
-    if callback.is_closure_obj() {
-        return Ok(());
-    }
-    match callback {
-        Value::String(s) => {
-            let name = s.as_bytes();
-            if name.is_empty() {
-                let msg = format!(
-                    "{}(): Argument #{} must be a valid callback, function \"\" not found or invalid function name",
-                    func_name, arg_num
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
-                return Ok(());
-            }
-            // Check for Class::method syntax
-            if let Some(pos) = name_lower.iter().position(|&b| b == b':') {
-                if pos + 1 < name_lower.len() && name_lower[pos + 1] == b':' {
-                    let class = &name_lower[..pos];
-                    let method = &name_lower[pos + 2..];
-                    if let Some(cls) = vm.classes.get(class) {
-                        if cls.get_method(method).is_some() {
-                            return Ok(());
-                        }
-                    }
-                    let msg = format!(
-                        "{}(): Argument #{} must be a valid callback, class \"{}\" not found",
-                        func_name,
-                        arg_num,
-                        String::from_utf8_lossy(&name[..pos])
-                    );
-                    let exc = vm.throw_type_error(msg.clone());
-                    vm.current_exception = Some(exc);
-                    return Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    });
-                }
-            }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
-            {
-                return Ok(());
-            }
-            let msg = format!(
-                "{}(): Argument #{} must be a valid callback, function \"{}\" not found or invalid function name",
-                func_name,
-                arg_num,
-                String::from_utf8_lossy(name)
-            );
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-        Value::Array(arr) => {
-            let arr_borrow = arr.borrow();
-            let len = arr_borrow.len();
-            if len != 2 {
-                let msg = format!(
-                    "{}(): Argument #{} must be a valid callback, array callback must have exactly two members",
-                    func_name, arg_num
-                );
-                let exc = vm.throw_type_error(msg.clone());
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            Ok(())
-        }
-        Value::Object(_) => Ok(()),
-        _ => {
-            let msg = format!(
-                "{}(): Argument #{} must be a valid callback, no array or string given",
-                func_name, arg_num
-            );
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-    }
+    require_callable(
+        vm,
+        callback,
+        func_name,
+        &format!("Argument #{}", arg_num),
+        false,
+    )
 }
 
 /// Generic user-callback array operation

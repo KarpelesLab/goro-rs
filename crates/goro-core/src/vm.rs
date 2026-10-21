@@ -709,6 +709,9 @@ pub struct Vm {
     pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
     /// Locals of the running user functions (see gc::GcFrame).
     pub(crate) gc_frames: Vec<crate::gc::GcFrame>,
+    /// Deprecations of `callable` type checks (see callable.rs), raised by
+    /// flush_callable_deprecations() after the check.
+    pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub(crate) ucf_call_line: Option<u32>,
     /// INI on-modify handlers registered by extensions (key -> handler).
@@ -1802,6 +1805,7 @@ impl Vm {
             builtin_frames: Vec::new(),
             cv_frames: Vec::new(),
             gc_frames: Vec::new(),
+            pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
             phpinfo_hooks: Vec::new(),
@@ -4520,21 +4524,18 @@ impl Vm {
                     b"array" => matches!(value, Value::Array(_)),
                     b"object" => matches!(value, Value::Object(_)),
                     b"callable" => {
-                        // Callable: string (function name), array [obj/class, method], or closure
-                        match value {
-                            Value::String(_) => true,
-                            Value::Array(_) => true,
-                            Value::Object(obj) => {
-                                let obj_borrow = obj.borrow();
-                                let class_lower: Vec<u8> = obj_borrow
-                                    .class_name
-                                    .iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect();
-                                class_lower == b"closure"
+                        // zend_is_callable(arg, 0): its deprecations are raised
+                        // once the check returns (flush_callable_deprecations).
+                        let r = self.is_callable_pure(value, 0);
+                        if r.ok && !r.deprecations.is_empty() {
+                            let mut q = self.pending_callable_deprecations.borrow_mut();
+                            for d in r.deprecations {
+                                if !q.contains(&d) {
+                                    q.push(d);
+                                }
                             }
-                            _ => false,
                         }
+                        r.ok
                     }
                     b"iterable" => match value {
                         Value::Array(_) | Value::Generator(_) => true,
@@ -5043,6 +5044,7 @@ impl Vm {
         if scope_pushed {
             self.class_scope_stack.pop();
         }
+        self.flush_callable_deprecations();
         err
     }
 
@@ -5081,9 +5083,10 @@ impl Vm {
             String::from_utf8_lossy(&user_fn.name).into_owned()
         };
         let line = self.current_line;
-        if let Some(msg) =
-            self.check_param_types_with_strict(&user_fn, args, &display, 0, line, false)
-        {
+        let param_err =
+            self.check_param_types_with_strict(&user_fn, args, &display, 0, line, false);
+        self.flush_callable_deprecations();
+        if let Some(msg) = param_err {
             let msg = match msg.find(", called in ") {
                 Some(p) => msg[..p].to_string(),
                 None => msg,
@@ -15296,9 +15299,10 @@ impl Vm {
                 let mixed_implicit_mismatch = implicit_return
                     && !op_array.is_generator
                     && !matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
-                if mixed_implicit_mismatch
-                    || !self.value_matches_return_type(val, ret_type, op_array.strict_types)
-                {
+                let ret_mismatch = mixed_implicit_mismatch
+                    || !self.value_matches_return_type(val, ret_type, op_array.strict_types);
+                self.flush_callable_deprecations();
+                if ret_mismatch {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
                     // Include class name in the function display name for methods.
                     // For closures, prefer the canonical PHP display name.
@@ -15366,7 +15370,9 @@ impl Vm {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
         let mut fin = Vec::new();
-        self.gc_frames.push(crate::gc::GcFrame::new(&cvs, &tmps));
+        let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        self.gc_frames
+            .push(crate::gc::GcFrame::new(&cvs, &tmps, has_this));
         let r = self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin);
         self.gc_frames.pop();
         // i_free_compiled_variables: locals still shared elsewhere become
@@ -19229,6 +19235,39 @@ impl Vm {
                                     String::from_utf8_lossy(name)
                                 );
                                 self.emit_warning_at(&msg, op.line);
+                            }
+                        }
+                    }
+                    // A static `A::m()` call (constant "A::m" name) autoloads A.
+                    if let (OperandType::Const(_), Value::String(s)) = (&op.op1, &name_val) {
+                        let b = s.as_bytes();
+                        if let Some(p) = b.windows(2).position(|w| w == b"::") {
+                            let cls = b[..p].strip_prefix(b"\\").unwrap_or(&b[..p]);
+                            let cl = cls.to_ascii_lowercase();
+                            if !cl.is_empty()
+                                && !matches!(cl.as_slice(), b"self" | b"parent" | b"static")
+                                && !self.classes.contains_key(&cl)
+                                && !self.class_aliases.contains_key(&cl)
+                                && !self.is_known_builtin_class(&cl)
+                                && !self.native_class_handlers.contains_key(&cl)
+                            {
+                                let cls = cls.to_vec();
+                                self.try_autoload_class(&cls);
+                                if self.current_exception.is_some()
+                                    && !self.classes.contains_key(&cl)
+                                {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
                             }
                         }
                     }
@@ -23296,6 +23335,17 @@ impl Vm {
                                 );
                             }
                             Err(e) => {
+                                // The arguments are released before the exception
+                                // unwinds (a destructor's exception chains to it).
+                                if self.current_exception.is_some()
+                                    && self.has_release_work()
+                                    && !call.args.is_empty()
+                                    && !is_assert_call
+                                {
+                                    call.args.clear();
+                                    self.current_line = op.line;
+                                    self.run_pending_destructors();
+                                }
                                 // For assert, keep the stack frame so it appears in stack traces
                                 // Check if there's a pending exception to catch
                                 if self.current_exception.is_some() {
@@ -24009,6 +24059,7 @@ impl Vm {
                                 if scope_pushed {
                                     self.class_scope_stack.pop();
                                 }
+                                self.flush_callable_deprecations();
                                 let (exc_class, err_msg, exc_line): (&[u8], String, u32) =
                                     match type_err {
                                         Some(m) => (
@@ -24204,6 +24255,7 @@ impl Vm {
                             if temp_scope_pushed {
                                 self.class_scope_stack.pop();
                             }
+                            self.flush_callable_deprecations();
                             if let Some(err_msg) = param_err {
                                 // Use the function definition line for the exception, not the call site
                                 let def_line = if user_fn.decl_line > 0 {
@@ -28672,6 +28724,18 @@ impl Vm {
                                         format!(
                                             "Class \"{}\" not found",
                                             cls.trim_start_matches('\\')
+                                        )
+                                    } else if let Some((decl, mname)) = self
+                                        .callable_nonstatic_method(
+                                            cl.as_bytes(),
+                                            &func_display.as_bytes()[pos + 2..],
+                                        )
+                                        .filter(|_| !is_instance_call)
+                                    {
+                                        // zend_non_static_method_call()
+                                        format!(
+                                            "Non-static method {}::{}() cannot be called statically",
+                                            decl, mname
                                         )
                                     } else {
                                         format!("Call to undefined method {}()", func_display)
@@ -34606,12 +34670,21 @@ impl Vm {
                                 let mut compiler = crate::compiler::Compiler::new();
                                 let eval_file =
                                     format!("{}({}) : eval()'d code", self.current_file, op.line);
+                                let compiler_file = eval_file.clone().into_bytes();
                                 compiler.source_file = eval_file.into_bytes();
                                 match compiler.compile(&program) {
                                     Ok((eval_op_array, eval_classes, eval_warnings)) => {
-                                        // Emit compile warnings
-                                        for (msg, wline) in &eval_warnings {
-                                            self.emit_warning_at(msg, *wline);
+                                        // Emit compile warnings (in the eval()'d code)
+                                        if !eval_warnings.is_empty() {
+                                            let saved = std::mem::replace(
+                                                &mut self.current_file,
+                                                String::from_utf8_lossy(&compiler_file)
+                                                    .into_owned(),
+                                            );
+                                            for (msg, wline) in &eval_warnings {
+                                                self.emit_warning_at(msg, *wline);
+                                            }
+                                            self.current_file = saved;
                                         }
                                         // Swap pending_classes so DeclareClass indices are relative to 0
                                         let eval_saved_pending = std::mem::replace(

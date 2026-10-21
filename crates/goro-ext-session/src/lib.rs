@@ -2871,68 +2871,14 @@ fn class_has_method(vm: &Vm, cl: &[u8], m: &[u8]) -> bool {
 }
 
 fn callable_ok(vm: &mut Vm, v: &Value) -> bool {
-    match vm.functions.get(b"is_callable".as_slice()).copied() {
-        Some(f) => {
-            let er = vm.error_reporting;
-            let r = f(vm, std::slice::from_ref(v));
-            vm.error_reporting = er;
-            matches!(r, Ok(Value::True))
-        }
-        None => true,
-    }
+    vm.zend_is_callable_ex(v, 0).ok
 }
 
 fn callback_error(vm: &mut Vm, fname: &str, n: usize, pname: &str, v: &Value, nullable: bool) {
-    let detail = match v.deref() {
-        Value::String(s) => {
-            let sb = s.as_bytes();
-            if let Some(p) = sb.windows(2).position(|w| w == b"::") {
-                let cls = &sb[..p];
-                if vm.classes.contains_key(&cls.to_ascii_lowercase()) {
-                    format!(
-                        "class {} does not have a method \"{}\"",
-                        lossy(cls),
-                        lossy(&sb[p + 2..])
-                    )
-                } else {
-                    format!("class \"{}\" not found", lossy(cls))
-                }
-            } else {
-                format!(
-                    "function \"{}\" not found or invalid function name",
-                    lossy(sb)
-                )
-            }
-        }
-        Value::Array(a) => {
-            let a = a.borrow();
-            if a.len() != 2 {
-                "array callback must have exactly two members".to_string()
-            } else {
-                let vals: Vec<Value> = a.values().cloned().collect();
-                match (&vals[0].deref(), &vals[1].deref()) {
-                    (Value::Object(o), Value::String(m)) => format!(
-                        "class {} does not have a method \"{}\"",
-                        goro_core::value::display_class_name(&o.borrow().class_name),
-                        lossy(m.as_bytes())
-                    ),
-                    (Value::String(c), Value::String(m)) => {
-                        if vm.classes.contains_key(&c.as_bytes().to_ascii_lowercase()) {
-                            format!(
-                                "class {} does not have a method \"{}\"",
-                                lossy(c.as_bytes()),
-                                lossy(m.as_bytes())
-                            )
-                        } else {
-                            format!("class \"{}\" not found", lossy(c.as_bytes()))
-                        }
-                    }
-                    _ => "first array member is not a valid class name or object".to_string(),
-                }
-            }
-        }
-        _ => "no array or string given".to_string(),
-    };
+    let detail = vm
+        .is_callable_pure(v, goro_core::callable::IS_CALLABLE_SUPPRESS_DEPRECATIONS)
+        .error
+        .unwrap_or_default();
     let msg = format!(
         "{}(): Argument #{} (${}) must be a valid callback{}, {}",
         fname,

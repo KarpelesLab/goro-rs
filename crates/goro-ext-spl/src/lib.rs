@@ -525,21 +525,17 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // Validate callback before iterating.
-    if let Value::String(s) = &callback {
-        let cb_name = s.as_bytes().to_vec();
-        let cb_lower: Vec<u8> = cb_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let exists = vm.functions.contains_key(cb_lower.as_slice())
-            || vm.user_functions.contains_key(cb_lower.as_slice());
-        if !exists {
+    if let Some(e) = vm.callable_error(&callback) {
+        if vm.current_exception.is_none() {
             let msg = format!(
-                "iterator_apply(): Argument #2 ($callback) must be a valid callback, function \"{}\" not found or invalid function name",
-                String::from_utf8_lossy(s.as_bytes())
+                "iterator_apply(): Argument #2 ($callback) must be a valid callback, {}",
+                e
             );
             let line = vm.current_line;
             let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
-            return Ok(Value::Null);
         }
+        return Ok(Value::Null);
     }
 
     // Iterate over the iterator and call the callback for each element

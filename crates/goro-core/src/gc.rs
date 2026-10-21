@@ -1040,11 +1040,33 @@ fn analyze<'a>(
 pub struct GcFrame {
     cvs: *const Vec<Value>,
     tmps: *const Vec<Value>,
+    /// CV 0 is `$this`
+    has_this: bool,
 }
 
 impl GcFrame {
-    pub(crate) fn new(cvs: &Vec<Value>, tmps: &Vec<Value>) -> Self {
-        GcFrame { cvs, tmps }
+    pub(crate) fn new(cvs: &Vec<Value>, tmps: &Vec<Value>, has_this: bool) -> Self {
+        GcFrame {
+            cvs,
+            tmps,
+            has_this,
+        }
+    }
+    /// `$this` of the frame (zend_get_this_object), if it has one.
+    ///
+    /// # Safety
+    /// The frame must still be running (it is unregistered before its
+    /// function returns), so its CV vector is alive.
+    pub(crate) unsafe fn this_object(&self) -> Option<Value> {
+        if !self.has_this {
+            return None;
+        }
+        // SAFETY: see above.
+        let cvs = unsafe { &*self.cvs };
+        match cvs.first().map(|v| v.deref()) {
+            Some(v @ Value::Object(_)) => Some(v),
+            _ => None,
+        }
     }
     /// Visit the frame's values.
     ///

@@ -954,6 +954,37 @@ impl Vm {
             if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
                 continue;
             }
+            // (Closure::fromCallable() takes its callable as a plain zval.)
+            if p.by_ref == 0
+                && m & T_CALLABLE != 0
+                && m & !(T_CALLABLE | T_NULL) == 0
+                && info.name != "Closure::fromCallable"
+            {
+                // Z_PARAM_FUNC / Z_PARAM_FUNC_OR_NULL (zend_fcall_info_init).
+                // Deprecations are left to the function's own check.
+                let v = args[i].deref();
+                if !(m & T_NULL != 0 && matches!(v, Value::Null | Value::Undef)) {
+                    let r = self.zend_is_callable_ex(
+                        &v,
+                        crate::callable::IS_CALLABLE_SUPPRESS_DEPRECATIONS,
+                    );
+                    if self.current_exception.is_some() {
+                        return Err(ZppError::Pending);
+                    }
+                    if !r.ok {
+                        let msg = format!(
+                            "{}(): Argument #{} (${}) must be a valid callback{}, {}",
+                            info.name,
+                            i + 1,
+                            p.name,
+                            if m & T_NULL != 0 { " or null" } else { "" },
+                            r.error.unwrap_or_default()
+                        );
+                        return Err(ZppError::Throw(b"TypeError", msg));
+                    }
+                }
+                break;
+            }
             if p.by_ref != 0 || m == 0 || m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0 {
                 // Validated by the function itself; leave the rest to it too
                 // so errors keep zpp's left-to-right order.

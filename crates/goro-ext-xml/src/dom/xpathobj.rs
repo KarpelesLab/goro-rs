@@ -369,25 +369,13 @@ fn m_evaluate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 }
 
 fn is_callable(vm: &mut Vm, v: &Value) -> bool {
-    match vm.functions.get(&b"is_callable"[..]).copied() {
-        Some(f) => matches!(f(vm, std::slice::from_ref(v)), Ok(Value::True)),
-        None => true,
-    }
+    vm.zend_is_callable_ex(v, 0).ok
 }
 
-fn callable_error(v: &Value) -> String {
-    match v {
-        Value::String(s) => {
-            let st = s.to_string_lossy();
-            if let Some(i) = st.find("::") {
-                format!("class \"{}\" not found", &st[..i])
-            } else {
-                format!("function \"{}\" not found or invalid function name", st)
-            }
-        }
-        Value::Array(_) => "array callback must have exactly two members".to_string(),
-        _ => "no array or string given".to_string(),
-    }
+fn callable_error(vm: &Vm, v: &Value) -> String {
+    vm.is_callable_pure(v, goro_core::callable::IS_CALLABLE_SUPPRESS_DEPRECATIONS)
+        .error
+        .unwrap_or_default()
 }
 
 fn valid_cb_name(name: &str, ncname: bool) -> bool {
@@ -430,7 +418,7 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                         &format!(
                             "{}(): Argument #1 ($restrict) must be an array with valid callbacks as values, {}",
                             a.f,
-                            callable_error(&v)
+                            callable_error(vm, &v)
                         ),
                     );
                     return Err(());
@@ -509,7 +497,7 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                     &format!(
                         "{}(): Argument #1 ($restrict) must be a callable, {}",
                         a.f,
-                        callable_error(&cb)
+                        callable_error(vm, &cb)
                     ),
                 );
                 return Err(());
@@ -560,7 +548,7 @@ fn m_register_php_function_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
             &format!(
                 "{}(): Argument #3 ($callable) must be a valid callback, {}",
                 a.f,
-                callable_error(&cb)
+                callable_error(vm, &cb)
             ),
         );
         return Err(());

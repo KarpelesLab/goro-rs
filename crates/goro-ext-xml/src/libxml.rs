@@ -356,19 +356,12 @@ fn libxml_disable_entity_loader(vm: &mut Vm, _args: &[Value]) -> Result<Value, V
 fn libxml_set_external_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     if !matches!(v, Value::Null | Value::Undef) {
-        let ok = match vm.functions.get(&b"is_callable"[..]).copied() {
-            Some(f) => matches!(f(vm, std::slice::from_ref(&v)), Ok(Value::True)),
-            None => true,
-        };
-        if !ok {
-            let why = match &v {
-                Value::String(s) => format!(
-                    "function \"{}\" not found or invalid function name",
-                    s.to_string_lossy()
-                ),
-                Value::Array(_) => "array callback must have exactly two members".to_string(),
-                _ => "no array or string given".to_string(),
-            };
+        let r = vm.zend_is_callable_ex(&v, 0);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+        if !r.ok {
+            let why = r.error.unwrap_or_default();
             let msg = format!(
                 "libxml_set_external_entity_loader(): Argument #1 ($resolver_function) must be a valid callback or null, {}",
                 why

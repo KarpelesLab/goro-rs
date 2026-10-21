@@ -127,6 +127,10 @@ fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, Str
 /// zend_is_callable() for autoload registration: the normalized callable,
 /// or the error detail.
 fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
+    let r = vm.zend_is_callable_ex(cb, 0);
+    if !r.ok && vm.current_exception.is_none() {
+        return Err(r.error.unwrap_or_default());
+    }
     match cb {
         Value::String(s) => {
             let b = s.as_bytes();
