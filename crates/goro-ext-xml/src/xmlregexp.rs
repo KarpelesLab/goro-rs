@@ -2342,6 +2342,12 @@ struct Rollback {
     counts: Vec<i32>,
 }
 
+impl std::fmt::Debug for Regexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Regexp({:?})", self.string)
+    }
+}
+
 impl Regexp {
     pub fn is_determinist(&self) -> bool {
         self.determinist == 1
