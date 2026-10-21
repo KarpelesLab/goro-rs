@@ -644,6 +644,9 @@ pub struct Vm {
     /// `$this` of the generator frame whose DoFCall is being dispatched
     /// (for `parent::m()` / `self::m()` calls made from a generator).
     pub(crate) gen_call_this: Option<Value>,
+    /// File each userland global constant was defined in (define() and
+    /// `const`), keyed like `constants`.
+    pub constant_files: HashMap<Vec<u8>, String>,
     /// Shutdown functions registered via register_shutdown_function
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     /// Object operator overloading handler (e.g., GMP)
@@ -900,6 +903,7 @@ impl Vm {
             ini_originals: HashMap::new(),
             autoload_functions: Vec::new(),
             gen_call_this: None,
+            constant_files: HashMap::new(),
             shutdown_functions: Vec::new(),
             constants: {
                 let mut c = crate::fxhash::FxHashMap::default();
@@ -12606,7 +12610,7 @@ impl Vm {
                 b"IS_READONLY" => Some(Value::Long(0x10000)),
                 b"IS_ABSTRACT" => Some(Value::Long(0x40)),
                 b"IS_FINAL" => Some(Value::Long(0x20)),
-                b"IS_VIRTUAL" => Some(Value::Long(0x200000)),
+                b"IS_VIRTUAL" => Some(Value::Long(0x200)),
                 _ => None,
             },
             b"reflectionclass" => match const_name {
@@ -34773,6 +34777,7 @@ impl Vm {
                                 || class_lower == b"inflatecontext"
                                 || class_lower == b"socket"
                                 || class_lower == b"addressinfo"
+                                || class_lower == b"xmlwriter"
                                 || class_lower == b"fiber"
                                 || class_lower == b"random\\engine\\secure"
                                 || class_lower == b"random\\randomizer"

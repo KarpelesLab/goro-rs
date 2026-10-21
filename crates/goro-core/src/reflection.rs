@@ -1456,14 +1456,20 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     // doesn't declare them (matches PHP behavior for #[AllowDynamicProperties] and stdClass).
     let mut is_dynamic_prop = false;
     if is_user_class {
+        // A parent's private property is not a property of the class.
         let prop_exists_decl = rcls(vm, &class_lower)
-            .map(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).is_some())
+            .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
+            .map(|p| {
+                p.visibility != Visibility::Private
+                    || p.declaring_class.eq_ignore_ascii_case(&class_lower)
+            })
             .unwrap_or(false);
 
         if !prop_exists_decl {
             // Check if it exists as a dynamic property on the passed-in object.
             let dyn_exists = if let Value::Object(o) = &class_arg {
                 o.borrow().has_property(prop_name.as_bytes())
+                    && rprop(vm, &class_lower, prop_name.as_bytes()).is_none()
             } else {
                 false
             };
@@ -2120,11 +2126,56 @@ pub fn reflection_class_method(
         }
         b"iscloneable" => {
             // Traits, interfaces, abstract classes, and enums are not cloneable.
-            let cloneable = if let Some(ce) = rcls(vm, &class_lower) {
+            let mut cloneable = if let Some(ce) = rcls(vm, &class_lower) {
                 !ce.is_interface && !ce.is_trait && !ce.is_abstract && !ce.is_enum
             } else {
-                true
+                !vm.builtin_is_interface(&class_lower)
             };
+            // Objects whose handlers have no clone_obj.
+            const UNCLONEABLE: &[&[u8]] = &[
+                b"reflectionclass",
+                b"reflectionfunctionabstract",
+                b"reflectionproperty",
+                b"reflectionparameter",
+                b"reflectionclassconstant",
+                b"reflectiontype",
+                b"reflectionattribute",
+                b"reflectionextension",
+                b"reflectionzendextension",
+                b"reflectionconstant",
+                b"reflectiongenerator",
+                b"reflectionfiber",
+                b"reflectionreference",
+                b"generator",
+                b"fiber",
+                b"weakreference",
+                b"xmlwriter",
+                b"xmlparser",
+                b"splfileobject",
+                b"globiterator",
+                b"iteratoriterator",
+                b"recursiveiteratoriterator",
+                b"random\\engine\\secure",
+                b"random\\randomizer",
+                b"directory",
+                b"finfo",
+                b"mysqli",
+                b"mysqli_result",
+                b"mysqli_stmt",
+            ];
+            if cloneable
+                && UNCLONEABLE
+                    .iter()
+                    .any(|b| class_lower == *b || vm.class_extends(&class_lower, b))
+            {
+                cloneable = false;
+            }
+            // A non-public __clone().
+            if cloneable {
+                if let Some(m) = rcls(vm, &class_lower).and_then(|c| c.get_method(b"__clone")) {
+                    cloneable = m.visibility == Visibility::Public;
+                }
+            }
             Some(if cloneable { Value::True } else { Value::False })
         }
         b"isinternal" => {
@@ -2525,8 +2576,19 @@ pub fn reflection_class_method(
             vm.run_object_create_hook(&rc);
             Some(Value::Object(rc))
         }
-        b"getextension" => Some(Value::Null),
-        b"getextensionname" => Some(Value::False),
+        b"getextension" | b"getextensionname" => {
+            let ext = if is_internal_class(vm, &class_lower) {
+                crate::stubs::find_class(&class_lower).map(|c| c.ext)
+            } else {
+                None
+            };
+            Some(match (ext, method) {
+                (Some(e), b"getextension") => make_reflection_extension(vm, e),
+                (Some(e), _) => Value::String(PhpString::from_string(e.to_string())),
+                (None, b"getextension") => Value::Null,
+                (None, _) => Value::False,
+            })
+        }
         b"innamespace" => Some(if target.contains('\\') {
             Value::True
         } else {
@@ -2603,10 +2665,8 @@ pub fn reflection_class_method(
                     b"class".to_vec(),
                     Value::String(PhpString::from_string(canonical)),
                 );
-                let case_val = reflection_class_get_constant(vm, &class_lower, case_str.as_bytes());
-                if let Some(cv) = case_val {
-                    case_obj.set_property(b"__reflection_value".to_vec(), cv);
-                }
+                // The case value is evaluated on demand (getValue() /
+                // getBackingValue()), as php-src does.
                 result.push(Value::Object(Rc::new(RefCell::new(case_obj))));
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
@@ -4350,17 +4410,41 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         return Some(Value::False);
                     }
                 }
-                // getReflectionConstants
-                if let Some(ce) = rcls(vm, &class_lower) {
-                    for (name, val) in ce.constants.clone() {
-                        let const_name = String::from_utf8_lossy(&name).to_string();
-                        result.push(create_reflection_class_constant(
-                            vm,
-                            &target,
-                            &const_name,
-                            val,
-                        ));
+                // getReflectionConstants(?int $filter)
+                let filter = match args.get(1) {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.to_long()),
+                };
+                let entries: Vec<(Vec<u8>, Value, i64)> = rcls(vm, &class_lower)
+                    .map(|ce| {
+                        ce.constants
+                            .iter()
+                            .map(|(name, val)| {
+                                let meta = ce.constants_meta.get(name);
+                                let mut flags = match meta.map(|m| m.visibility) {
+                                    Some(Visibility::Protected) => 2,
+                                    Some(Visibility::Private) => 4,
+                                    _ => 1,
+                                };
+                                if meta.is_some_and(|m| m.is_final) {
+                                    flags |= 0x20;
+                                }
+                                (name.clone(), val.clone(), flags)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (name, val, flags) in entries {
+                    if filter.is_some_and(|f| flags & f == 0) {
+                        continue;
                     }
+                    let const_name = String::from_utf8_lossy(&name).to_string();
+                    result.push(create_reflection_class_constant(
+                        vm,
+                        &target,
+                        &const_name,
+                        val,
+                    ));
                 }
                 Some(Value::Array(Rc::new(RefCell::new(result))))
             }
@@ -6977,7 +7061,20 @@ pub fn reflection_property_method(
                 Some(Value::Null)
             }
         }
-        b"ispromoted" => Some(Value::False),
+        b"ispromoted" => {
+            let decl = rprop(vm, &class_lower, prop_name.as_bytes())
+                .filter(|p| !p.is_static)
+                .map(|p| p.declaring_class.to_ascii_lowercase());
+            let promoted = decl
+                .and_then(|d| {
+                    let m = rcls(vm, &d)?.get_method(b"__construct")?;
+                    m.declaring_class
+                        .eq_ignore_ascii_case(&d)
+                        .then(|| op_array_promotes(&m.op_array, prop_name.as_bytes()))
+                })
+                .unwrap_or(false);
+            Some(if promoted { Value::True } else { Value::False })
+        }
         b"setaccessible" => {
             vm.emit_deprecated(
                 "Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1",
@@ -7051,12 +7148,30 @@ pub fn reflection_property_method(
             Some(Value::Array(Rc::new(RefCell::new(arr))))
         }
         b"getsettabletype" => {
-            // Default behavior: same as getType(); asymmetric setter types
-            // aren't modeled yet.
-            let pt = rcls(vm, &class_lower)
+            // The set hook's parameter type; never for a virtual property
+            // without a set hook; else the property type.
+            let decl = rcls(vm, &class_lower)
                 .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                .and_then(|p| p.property_type.as_ref())
                 .cloned();
+            let mut pt = decl.as_ref().and_then(|p| p.property_type.clone());
+            if let Some(d) = &decl {
+                let mut m = b"__property_set_".to_vec();
+                m.extend(prop_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()));
+                let set_hook = rcls(vm, &class_lower).and_then(|c| c.get_method(&m));
+                match set_hook {
+                    Some(h) => {
+                        let op = &h.op_array;
+                        let off = usize::from(op.cv_names.first().is_some_and(|n| n == b"this"));
+                        if let Some(Some(pti)) = op.param_types.get(off) {
+                            pt = Some(pti.param_type.clone());
+                        }
+                    }
+                    None if d.is_virtual => {
+                        pt = Some(ParamType::Simple(b"never".to_vec()));
+                    }
+                    None => {}
+                }
+            }
             if let Some(pt) = pt {
                 Some(create_reflection_type(vm, &pt))
             } else {
@@ -7078,6 +7193,23 @@ pub fn reflection_property_method(
         }
         _ => None,
     }
+}
+
+/// Whether constructor `op` promotes its parameter `name` to a property:
+/// the compiler emits the promotion as `$this->name = $name` on line 0.
+fn op_array_promotes(op: &OpArray, name: &[u8]) -> bool {
+    use crate::opcode::{OpCode, OperandType};
+    let Some(cv) = op.cv_names.iter().position(|n| n == name) else {
+        return false;
+    };
+    op.ops.iter().any(|o| {
+        matches!(o.opcode, OpCode::PropertySet | OpCode::PropertySetRef)
+            && o.line == 0
+            && o.op1 == OperandType::Cv(0)
+            && o.op2 == OperandType::Cv(cv as u32)
+            && matches!(o.result, OperandType::Const(l)
+                if matches!(op.literals.get(l as usize), Some(Value::String(s)) if s.as_bytes() == name))
+    })
 }
 
 /// Find a property declaration (static or not) on `class_lower` or its
@@ -7239,6 +7371,44 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
 
         match method {
             b"getvalue" => {
+                if args.len() > 2 {
+                    let msg = format!(
+                        "ReflectionProperty::getValue() expects at most 1 argument, {} given",
+                        args.len() - 1
+                    );
+                    let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if !is_static {
+                    match args.get(1) {
+                        Some(Value::Object(o)) => {
+                            let ol = o.borrow().class_name.to_ascii_lowercase();
+                            let decl = rprop(vm, &class_lower, prop_name.as_bytes())
+                                .map(|p| p.declaring_class.to_ascii_lowercase())
+                                .unwrap_or_else(|| class_lower.clone());
+                            if ol != decl && !vm.class_extends(&ol, &decl) {
+                                let exc = vm.create_exception(
+                                    b"ReflectionException",
+                                    "Given object is not an instance of the class this property was declared in",
+                                    vm.current_line,
+                                );
+                                vm.current_exception = Some(exc);
+                                return Some(Value::Null);
+                            }
+                        }
+                        None | Some(Value::Null) => {
+                            let exc = vm.create_exception(
+                                b"TypeError",
+                                "ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties",
+                                vm.current_line,
+                            );
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                        _ => {}
+                    }
+                }
                 if is_static {
                     // Static properties are stored on the class that declared
                     // them, even when reflected via a subclass. Walk up the
@@ -7529,12 +7699,31 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         Value::False
                     })
                 } else if let Value::Object(target_obj) = &target {
+                    let pn = prop_name.as_bytes();
+                    let decl = find_prop_decl(vm, &class_lower, pn)
+                        .map(|d| d.declaring_class.to_ascii_lowercase())
+                        .unwrap_or_else(|| class_lower.clone());
+                    let ol = target_obj.borrow().class_name.to_ascii_lowercase();
+                    if ol != decl && !vm.class_extends(&ol, &decl) {
+                        let exc = vm.create_exception(
+                            b"ReflectionException",
+                            "Given object is not an instance of the class this property was declared in",
+                            vm.current_line,
+                        );
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
                     let ob = target_obj.borrow();
-                    let val = ob.get_property(prop_name.as_bytes());
-                    let has = !matches!(val, Value::Undef);
+                    let has = ob.has_property(pn) && !matches!(ob.get_property(pn), Value::Undef);
                     Some(if has { Value::True } else { Value::False })
                 } else {
-                    Some(Value::False)
+                    let exc = vm.create_exception(
+                        b"TypeError",
+                        "ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties",
+                        vm.current_line,
+                    );
+                    vm.current_exception = Some(exc);
+                    Some(Value::Null)
                 }
             }
             b"setrawvalue" => {
@@ -8552,7 +8741,16 @@ pub fn reflection_parameter_method(
             }
             Some(Value::Null)
         }
-        b"ispromoted" => Some(Value::False),
+        b"ispromoted" => {
+            let promoted = resolved_op_array.as_ref().is_some_and(|op| {
+                op.name.to_ascii_lowercase().ends_with(b"__construct")
+                    && op
+                        .cv_names
+                        .get(type_idx)
+                        .is_some_and(|n| op_array_promotes(op, n))
+            });
+            Some(if promoted { Value::True } else { Value::False })
+        }
         b"canbepassedbyvalue" => {
             if let Some(f) = resolved_op_array.as_ref().and_then(|op| op.internal_sig) {
                 let by_ref_only = f
@@ -8684,12 +8882,49 @@ pub fn reflection_constant_method(
                 Some(Value::Null)
             }
         }
-        b"isdefault" | b"isdeprecated" => Some(Value::False),
-        b"getfilename" => Some(Value::False),
-        b"getextension" => Some(Value::Null),
-        b"getextensionname" => Some(Value::False),
+        b"isdefault" => Some(Value::False),
+        b"isdeprecated" => {
+            let user = constant_attrs_lookup(vm, name.as_bytes())
+                .unwrap_or_default()
+                .iter()
+                .any(|a| attr_is_deprecated(&a.name));
+            Some(
+                if user || internal_constant_deprecated(vm, name.as_bytes()) {
+                    Value::True
+                } else {
+                    Value::False
+                },
+            )
+        }
+        b"getfilename" => Some(
+            match vm
+                .constant_files
+                .get(normalize_const_key(name.as_bytes()).as_slice())
+            {
+                Some(f) => Value::String(PhpString::from_string(f.clone())),
+                None => Value::False,
+            },
+        ),
+        b"getextension" | b"getextensionname" => {
+            let key = normalize_const_key(name.as_bytes());
+            let ext = if vm.constant_files.contains_key(key.as_slice()) {
+                None
+            } else if let Some(c) = crate::stubs::find_constant(name.as_bytes()) {
+                Some(c.ext)
+            } else if vm.constants.contains_key(key.as_slice()) {
+                Some("Core")
+            } else {
+                None
+            };
+            Some(match (ext, method) {
+                (Some(e), b"getextension") => make_reflection_extension(vm, e),
+                (Some(e), _) => Value::String(PhpString::from_string(e.to_string())),
+                (None, b"getextension") => Value::Null,
+                (None, _) => Value::False,
+            })
+        }
         b"getattributes" => {
-            let attrs = constant_attrs_lookup(vm, name.as_bytes()).unwrap_or_default();
+            let attrs = constant_attrs_or_internal(vm, name.as_bytes());
             Some(create_reflection_attributes(vm, &attrs, None, 0, 64))
         }
         b"__tostring" => Some(Value::String(PhpString::from_string(format!(
@@ -8698,6 +8933,70 @@ pub fn reflection_constant_method(
         )))),
         _ => None,
     }
+}
+
+/// A `ReflectionExtension` object for extension `name`.
+fn make_reflection_extension(vm: &mut Vm, name: &str) -> Value {
+    let obj_id = vm.alloc_object_id();
+    let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
+    ext_obj.set_property(
+        b"name".to_vec(),
+        Value::String(PhpString::from_string(name.to_string())),
+    );
+    Value::Object(Rc::new(RefCell::new(ext_obj)))
+}
+
+/// Constant table key: the namespace part is case-insensitive.
+fn normalize_const_key(name: &[u8]) -> Vec<u8> {
+    let n = name.strip_prefix(b"\\").unwrap_or(name);
+    match n.iter().rposition(|&b| b == b'\\') {
+        Some(p) => {
+            let mut k = n[..p].to_ascii_lowercase();
+            k.extend_from_slice(&n[p..]);
+            k
+        }
+        None => n.to_vec(),
+    }
+}
+
+fn attr_is_deprecated(name: &[u8]) -> bool {
+    name.strip_prefix(b"\\")
+        .unwrap_or(name)
+        .eq_ignore_ascii_case(b"Deprecated")
+}
+
+/// Internal constants flagged #[\Deprecated] in the stubs (or deprecated
+/// by an extension at runtime).
+fn internal_constant_deprecated(vm: &Vm, name: &[u8]) -> bool {
+    if vm.internal_deprecated_constants.contains_key(name) {
+        return true;
+    }
+    matches!(
+        name,
+        b"E_STRICT"
+            | b"MT_RAND_PHP"
+            | b"SUNFUNCS_RET_TIMESTAMP"
+            | b"SUNFUNCS_RET_STRING"
+            | b"SUNFUNCS_RET_DOUBLE"
+            | b"DATE_RFC7231"
+            | b"FILE_BINARY"
+            | b"FILE_TEXT"
+    )
+}
+
+/// The attributes of a global constant; internal deprecated constants
+/// carry #[\Deprecated].
+fn constant_attrs_or_internal(vm: &Vm, name: &[u8]) -> Vec<crate::object::RuntimeAttribute> {
+    if let Some(a) = constant_attrs_lookup(vm, name) {
+        return a;
+    }
+    if internal_constant_deprecated(vm, name) {
+        return vec![crate::object::RuntimeAttribute {
+            name: b"Deprecated".to_vec(),
+            args_op_array: OpArray::new(),
+        }];
+    }
+    Vec::new()
 }
 
 fn constant_attrs_lookup(vm: &Vm, name: &[u8]) -> Option<Vec<crate::object::RuntimeAttribute>> {
@@ -8720,7 +9019,7 @@ pub fn reflection_constant_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
         drop(ob);
         match method {
             b"getattributes" => {
-                let attrs = constant_attrs_lookup(vm, name.as_bytes()).unwrap_or_default();
+                let attrs = constant_attrs_or_internal(vm, name.as_bytes());
                 let filter_name = args.get(1).and_then(|v| {
                     if matches!(v, Value::Null) {
                         None
@@ -9581,12 +9880,13 @@ pub fn reflection_class_constant_method(
         b"getvalue" => {
             // Evaluate (and cache) the constant like a Class::NAME fetch.
             let cached = ob.get_property(b"__reflection_value");
+            let has_cached = ob.has_property(b"__reflection_value");
             drop(ob);
             let decl = meta
                 .as_ref()
                 .map(|m| m.declaring_class.clone())
                 .unwrap_or_else(|| class_lower.clone());
-            if !is_deferred_const_value(&cached) {
+            if has_cached && !is_deferred_const_value(&cached) {
                 return Some(cached);
             }
             match resolve_class_constant(vm, &decl, const_name.as_bytes()) {
@@ -9696,8 +9996,25 @@ pub fn reflection_class_constant_method(
         }
         b"getbackingvalue" => {
             // For backed enum cases, return the backing value
-            let val = ob.get_property(b"__reflection_value");
+            let cached = ob.get_property(b"__reflection_value");
+            let has_cached = ob.has_property(b"__reflection_value");
             drop(ob);
+            let val = if has_cached && !is_deferred_const_value(&cached) {
+                cached
+            } else {
+                let decl = meta
+                    .as_ref()
+                    .map(|m| m.declaring_class.clone())
+                    .unwrap_or_else(|| class_lower.clone());
+                match resolve_class_constant(vm, &decl, const_name.as_bytes()) {
+                    Some(v) if vm.current_exception.is_none() => {
+                        obj.borrow_mut()
+                            .set_property(b"__reflection_value".to_vec(), v.clone());
+                        v
+                    }
+                    _ => return Some(Value::Null),
+                }
+            };
             if let Value::Object(enum_obj) = &val {
                 let eo = enum_obj.borrow();
                 let backing = eo.get_property(b"value");
@@ -9722,10 +10039,11 @@ pub fn reflection_class_constant_method(
         b"__tostring" => {
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
             let cached = ob.get_property(b"__reflection_value");
+            let has_cached = ob.has_property(b"__reflection_value");
             drop(ob);
             let _ = (visibility, is_final);
             // zend_update_class_constant() first; errors abort the cast.
-            let val = if is_deferred_const_value(&cached) {
+            let val = if !has_cached || is_deferred_const_value(&cached) {
                 let decl = meta
                     .as_ref()
                     .map(|m| m.declaring_class.clone())
@@ -10237,7 +10555,7 @@ pub fn reflection_static_call(
                     if modifiers & 0x10000 != 0 {
                         names.push(Value::String(PhpString::from_bytes(b"readonly")));
                     }
-                    if modifiers & 0x200000 != 0 {
+                    if modifiers & 0x200 != 0 {
                         names.push(Value::String(PhpString::from_bytes(b"virtual")));
                     }
                     if modifiers & 0x800 != 0 {
@@ -11112,6 +11430,16 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
     }
     if prop.is_readonly {
         mods |= 0x10000;
+    }
+    // Set visibility (zend_declare_typed_property): public readonly implies
+    // protected(set); private(set) implies final.
+    match prop.set_visibility {
+        Some(Visibility::Private) if prop.visibility != Visibility::Private => {
+            mods |= 0x1000 | 0x20;
+        }
+        Some(Visibility::Protected) if prop.visibility == Visibility::Public => mods |= 0x800,
+        None if prop.is_readonly && prop.visibility == Visibility::Public => mods |= 0x800,
+        _ => {}
     }
     mods
 }

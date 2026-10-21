@@ -939,6 +939,8 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
         return Ok(Value::False);
     }
+    let file = vm.current_file.clone();
+    vm.constant_files.insert(normalized.clone(), file);
     vm.constants.insert(normalized, value);
     Ok(Value::True)
 }
