@@ -76,8 +76,6 @@ fn is_construct_name(l: &[u8]) -> bool {
         b"isset"
             | b"empty"
             | b"eval"
-            | b"exit"
-            | b"die"
             | b"echo"
             | b"print"
             | b"unset"

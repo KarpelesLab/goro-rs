@@ -914,39 +914,7 @@ impl Parser {
                     }
                 }
             }
-            TokenKind::Const => {
-                // const FOO = value;
-                self.advance();
-                let name = match self.peek().clone() {
-                    TokenKind::Identifier(name) => {
-                        self.advance();
-                        name
-                    }
-                    _ if self.is_semi_reserved_keyword() => {
-                        let kw = self.keyword_to_identifier();
-                        self.advance();
-                        kw
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "expected constant name".into(),
-                            span: self.span(),
-                        });
-                    }
-                };
-                self.expect(&TokenKind::Assign)?;
-                let value = self.parse_expression()?;
-                self.expect_semicolon()?;
-                // Treat as a declare directive
-                Ok(Statement {
-                    kind: StmtKind::Declare {
-                        directives: vec![(name, value)],
-                        body: None,
-                        attributes: Vec::new(),
-                    },
-                    span,
-                })
-            }
+            TokenKind::Const => self.parse_const_with_attrs(Vec::new()),
             TokenKind::Namespace => {
                 self.advance();
                 // zend_compile_namespace(): `namespace namespace;` parses (the
@@ -1071,8 +1039,41 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::CloseBrace) {
                             break;
                         }
+                        // A leading separator is a fully qualified name.
+                        if matches!(self.peek(), TokenKind::Backslash) {
+                            let mut fq = String::new();
+                            let mut i = self.pos;
+                            while let Some(t) = self.tokens.get(i) {
+                                match &t.kind {
+                                    TokenKind::Backslash => fq.push('\\'),
+                                    TokenKind::Identifier(p) => {
+                                        fq.push_str(&String::from_utf8_lossy(p))
+                                    }
+                                    _ => break,
+                                }
+                                i += 1;
+                            }
+                            return Err(ParseError {
+                                message: format!(
+                                    "syntax error, unexpected fully qualified name \"{}\", expecting identifier or namespaced name or \"function\" or \"const\"",
+                                    fq
+                                ),
+                                span: self.span(),
+                            });
+                        }
                         // Check for `function` or `const` per-item kind
+                        // (only in a mixed group use).
+                        let mixed = matches!(default_kind, UseKind::Normal);
                         let item_kind = match self.peek() {
+                            TokenKind::Function | TokenKind::Const if !mixed => {
+                                return Err(ParseError {
+                                    message: format!(
+                                        "syntax error, unexpected {}, expecting \"}}\"",
+                                        self.peek().to_php_unexpected()
+                                    ),
+                                    span: self.span(),
+                                });
+                            }
                             TokenKind::Function => {
                                 // `function` keyword as per-item use kind
                                 self.advance();
@@ -1327,7 +1328,10 @@ impl Parser {
                     })
                 } else {
                     Err(ParseError {
-                        message: "expected label name after 'goto'".into(),
+                        message: format!(
+                            "syntax error, unexpected {}, expecting identifier",
+                            self.peek().to_php_unexpected()
+                        ),
                         span: self.span(),
                     })
                 }
@@ -1786,14 +1790,20 @@ impl Parser {
                     self.advance();
                     name
                 }
-                _ if self.is_semi_reserved_keyword() => {
+                // `enum` is only a keyword before a class-like name, and
+                // null/true/false are plain T_STRINGs.
+                TokenKind::Enum | TokenKind::Null | TokenKind::True | TokenKind::False => {
                     let kw = self.keyword_to_identifier();
                     self.advance();
                     kw
                 }
+                // const_decl takes a T_STRING: reserved words are rejected.
                 _ => {
                     return Err(ParseError {
-                        message: "expected constant name".into(),
+                        message: format!(
+                            "syntax error, unexpected {}, expecting identifier",
+                            self.peek().to_php_unexpected()
+                        ),
                         span: self.span(),
                     });
                 }
@@ -1830,14 +1840,22 @@ impl Parser {
                 self.advance();
                 name
             }
-            _ if self.is_semi_reserved_keyword() => {
+            // function_name: T_STRING | T_READONLY (`enum` is contextual).
+            TokenKind::Readonly
+            | TokenKind::Enum
+            | TokenKind::Null
+            | TokenKind::True
+            | TokenKind::False => {
                 let kw = self.keyword_to_identifier();
                 self.advance();
                 kw
             }
             _ => {
                 return Err(ParseError {
-                    message: "expected function name".into(),
+                    message: format!(
+                        "syntax error, unexpected {}, expecting \"(\"",
+                        self.peek().to_php_unexpected()
+                    ),
                     span: self.span(),
                 });
             }
@@ -6076,15 +6094,42 @@ impl Parser {
             }
             TokenKind::Exit => {
                 self.advance();
+                // PHP 8.4: exit/die is a function; `exit` without parentheses
+                // and `exit(<one positional arg>)` keep the fast path, other
+                // argument lists (named, unpacked, `...`) call \exit().
                 let value = if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
-                    let v = if matches!(self.peek(), TokenKind::CloseParen) {
-                        None
-                    } else {
-                        Some(Box::new(self.parse_expression()?))
-                    };
+                    let args = self.parse_arguments()?;
+                    let is_fcc = self.first_class_callable_flag;
+                    let end_span = self.span();
                     self.expect(&TokenKind::CloseParen)?;
-                    v
+                    let name_expr = Expr {
+                        kind: ExprKind::Identifier(b"exit".to_vec()),
+                        span,
+                    };
+                    if is_fcc {
+                        return Ok(Expr {
+                            span: span.merge(end_span),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(
+                                name_expr,
+                            ))),
+                        });
+                    }
+                    match args.len() {
+                        0 => None,
+                        1 if args[0].name.is_none() && !args[0].unpack => {
+                            Some(Box::new(args.into_iter().next().unwrap().value))
+                        }
+                        _ => {
+                            return Ok(Expr {
+                                span: span.merge(end_span),
+                                kind: ExprKind::FunctionCall {
+                                    name: Box::new(name_expr),
+                                    args,
+                                },
+                            });
+                        }
+                    }
                 } else {
                     None
                 };

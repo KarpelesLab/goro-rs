@@ -344,6 +344,22 @@ impl Vm {
             }
             if let Some(top) = &target_op {
                 params = Self::closure_param_entries(top);
+            } else if let Some(fi) = crate::arginfo::lookup(&tl) {
+                // zend_closure_get_debug_info() for an internal function.
+                params = fi
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let mut d = if a.by_ref != 0 {
+                            b"&$".to_vec()
+                        } else {
+                            b"$".to_vec()
+                        };
+                        d.extend_from_slice(a.name.as_bytes());
+                        (d, i >= fi.required as usize)
+                    })
+                    .collect();
             } else if let Some(names) = self.builtin_param_names.get(&tl) {
                 params = names
                     .iter()

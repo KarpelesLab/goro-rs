@@ -4583,6 +4583,74 @@ impl Vm {
         }
     }
 
+    /// exit(string|int $status): prints a string status and returns the
+    /// exit code, or the TypeError message for an invalid status.
+    pub fn exit_status_of(&mut self, val: &Value, line: u32) -> Result<i64, String> {
+        let mut type_err: Option<String> = None;
+        let code: i64 = match val {
+            Value::Long(n) => *n,
+            Value::True => 1,
+            Value::False => 0,
+            Value::Null | Value::Undef => {
+                self.emit_deprecated_at("exit(): Passing null to parameter #1 ($status) of type string|int is deprecated", line);
+                0
+            }
+            Value::Double(f) => {
+                if f.is_finite() && f.fract() != 0.0 {
+                    self.emit_deprecated_at(
+                        &format!(
+                            "Implicit conversion from float {} to int loses precision",
+                            crate::value::Value::Double(*f)
+                                .to_php_string()
+                                .to_string_lossy()
+                        ),
+                        line,
+                    );
+                }
+                *f as i64
+            }
+            Value::String(s) => {
+                let s = s.clone();
+                self.write_output(s.as_bytes());
+                0
+            }
+            Value::Object(o) => {
+                let cl: Vec<u8> = o
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let has_to_string = self
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__tostring").is_some())
+                    .unwrap_or(false);
+                if has_to_string {
+                    let s = val.to_php_string();
+                    self.write_output(s.as_bytes());
+                } else {
+                    type_err = Some(format!(
+                        "exit(): Argument #1 ($status) must be of type string|int, {} given",
+                        crate::value::display_class_name(&o.borrow().class_name)
+                    ));
+                }
+                0
+            }
+            other => {
+                type_err = Some(format!(
+                    "exit(): Argument #1 ($status) must be of type string|int, {} given",
+                    Vm::value_type_name(other)
+                ));
+                0
+            }
+        };
+        match type_err {
+            Some(m) => Err(m),
+            None => Ok(code),
+        }
+    }
+
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
         // Line 0 means "where we are" (zend_get_executed_lineno()).
         let line = if line == 0 { self.current_line } else { line };
@@ -31913,64 +31981,9 @@ impl Vm {
                         op_array,
                         op.line,
                     );
-                    let mut type_err: Option<String> = None;
-                    let code: i64 = match &val {
-                        Value::Long(n) => *n,
-                        Value::True => 1,
-                        Value::False => 0,
-                        Value::Null | Value::Undef => {
-                            self.emit_deprecated_at("exit(): Passing null to parameter #1 ($status) of type string|int is deprecated", op.line);
-                            0
-                        }
-                        Value::Double(f) => {
-                            if f.is_finite() && f.fract() != 0.0 {
-                                self.emit_deprecated_at(
-                                    &format!(
-                                        "Implicit conversion from float {} to int loses precision",
-                                        crate::value::Value::Double(*f)
-                                            .to_php_string()
-                                            .to_string_lossy()
-                                    ),
-                                    op.line,
-                                );
-                            }
-                            *f as i64
-                        }
-                        Value::String(s) => {
-                            let s = s.clone();
-                            self.write_output(s.as_bytes());
-                            0
-                        }
-                        Value::Object(o) => {
-                            let cl: Vec<u8> = o
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            let has_to_string = self
-                                .classes
-                                .get(&cl)
-                                .map(|c| c.get_method(b"__tostring").is_some())
-                                .unwrap_or(false);
-                            if has_to_string {
-                                let s = val.to_php_string();
-                                self.write_output(s.as_bytes());
-                            } else {
-                                type_err = Some(format!(
-                                    "exit(): Argument #1 ($status) must be of type string|int, {} given",
-                                    crate::value::display_class_name(&o.borrow().class_name)
-                                ));
-                            }
-                            0
-                        }
-                        other => {
-                            type_err = Some(format!(
-                                "exit(): Argument #1 ($status) must be of type string|int, {} given",
-                                Vm::value_type_name(other)
-                            ));
-                            0
-                        }
+                    let (code, type_err) = match self.exit_status_of(&val, op.line) {
+                        Ok(c) => (c, None),
+                        Err(m) => (0, Some(m)),
                     };
                     if let Some(msg) = type_err {
                         let exc = self.create_exception(b"TypeError", &msg, op.line);

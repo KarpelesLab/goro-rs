@@ -335,6 +335,8 @@ final class StreamBucket {
     vm.register_function(b"interface_exists", interface_exists_fn);
     vm.register_function(b"trait_exists", trait_exists_fn);
     vm.register_function(b"enum_exists", enum_exists_fn);
+    vm.register_function(b"exit", exit_fn);
+    vm.register_function(b"die", exit_fn);
     vm.register_function(b"gc_collect_cycles", gc_collect_fn);
     vm.register_function(b"gc_enabled", gc_enabled_fn);
     vm.register_function(b"gc_disable", gc_disable_fn);
@@ -8314,6 +8316,30 @@ fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     class_exists_impl(vm, args, |k| k == goro_core::class_table::ClassKind::Enum)
 }
+/// exit()/die() called as a function (named or unpacked arguments,
+/// `exit(...)`, or a callable string); the bare construct compiles to ExitOp.
+fn exit_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() > 1 {
+        let msg = format!("exit() expects at most 1 argument, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: format!("Uncaught ArgumentCountError: {}", msg),
+            line: vm.current_line,
+        });
+    }
+    let val = args.first().cloned().unwrap_or(Value::Long(0));
+    let line = vm.current_line;
+    match vm.exit_status_of(&val, line) {
+        Ok(code) => {
+            vm.exit_code = code;
+            vm.exit_requested = true;
+            Ok(Value::Null)
+        }
+        Err(msg) => Err(throw_type_error_msg(vm, msg)),
+    }
+}
+
 fn gc_collect_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(vm.gc_collect_cycles()))
 }
@@ -15822,6 +15848,19 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
                     if !func_name.is_empty() {
                         let lower: Vec<u8> =
                             func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                        // exit()/die() are language constructs that cannot be disabled.
+                        if lower == b"exit" || lower == b"die" {
+                            if vm.error_reporting & 2 != 0 {
+                                vm.write_output(
+                                    format!(
+                                        "\nWarning: Cannot disable function {}() in Unknown on line 0\n",
+                                        func_name
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                            continue;
+                        }
                         vm.functions.remove(&lower);
                         vm.disabled_functions.insert(lower);
                     }
