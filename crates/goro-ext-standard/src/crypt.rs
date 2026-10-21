@@ -6,6 +6,8 @@
 //! past the logical end of the salt (into the '$'-padded buffer built by
 //! PHP_FUNCTION(crypt)), so the algorithms here take byte buffers and read
 //! them through `at()`, which yields NUL past the end.
+// Ported from the C crypt implementations; indexed loops mirror the originals.
+#![allow(clippy::needless_range_loop)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -630,7 +632,7 @@ fn bf_crypt(key: &[u8], setting: &[u8], min: u32) -> Option<Vec<u8>> {
     let s = |i: usize| at(setting, i);
     if s(0) != b'$'
         || s(1) != b'2'
-        || !(b'a'..=b'z').contains(&s(2))
+        || !s(2).is_ascii_lowercase()
         || BF_FLAGS_BY_SUBTYPE[(s(2) - b'a') as usize] == 0
         || s(3) != b'$'
         || !(b'0'..=b'3').contains(&s(4))
@@ -1345,7 +1347,7 @@ fn zpp_str_or_long_or_null(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v:
         Value::Long(n) => Ok(AlgoArg::Long(*n)),
         Value::True => Ok(AlgoArg::Long(1)),
         Value::False => Ok(AlgoArg::Long(0)),
-        Value::Double(d) if d.is_finite() && *d >= -9.223372036854775808e18 && *d < 9.223372036854775808e18 => {
+        Value::Double(d) if d.is_finite() && *d >= -9.223_372_036_854_776e18 && *d < 9.223_372_036_854_776e18 => {
             if d.fract() != 0.0 {
                 vm.emit_deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",

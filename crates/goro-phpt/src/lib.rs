@@ -421,7 +421,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     // run-tests.php compares trim()med output (PHP's trim() character set).
     // Compare with expected output
     if let Some(expected) = test.expect_section() {
-        let expected_trimmed = php_trim(&expected);
+        let expected_trimmed = php_trim(expected);
         let actual_trimmed = php_trim(&actual_normalized);
         // Replace %0 with actual null byte for comparison (PHPT files encode null as %0)
         let expected_with_nulls = expected_trimmed.replace("%0", "\0");
@@ -435,7 +435,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     } else if let Some(pattern) = test.expectf_section() {
         // EXPECTF: convert printf-style patterns to regex
-        let pattern_trimmed = php_trim(&pattern);
+        let pattern_trimmed = php_trim(pattern);
         let actual_trimmed = php_trim(&actual_normalized);
         if matches_expectf(pattern_trimmed, actual_trimmed) {
             TestResult::Pass
@@ -460,7 +460,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     } else if let Some(regex_pattern) = test.expect_regex_section() {
         // EXPECTREGEX: match output against regex pattern
-        let regex_trimmed = php_trim(&regex_pattern);
+        let regex_trimmed = php_trim(regex_pattern);
         let actual_trimmed = php_trim(&actual_normalized);
         if matches_expect_regex(regex_trimmed, actual_trimmed) {
             TestResult::Pass
@@ -1575,64 +1575,6 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             Ok(vm.take_output())
         }
     }
-}
-
-fn format_exception_trace(trace_val: &goro_core::value::Value, fallback_trace: &str) -> String {
-    format_exception_trace_with_limit(trace_val, fallback_trace, 15)
-}
-
-fn format_exception_trace_with_limit(trace_val: &goro_core::value::Value, fallback_trace: &str, max_len: usize) -> String {
-    use goro_core::value::Value;
-    use goro_core::array::ArrayKey;
-    if let Value::Array(arr) = trace_val {
-        let arr = arr.borrow();
-        let mut lines = Vec::new();
-        let mut idx = 0;
-        for (_key, frame_val) in arr.iter() {
-            if let Value::Array(frame) = frame_val {
-                let frame = frame.borrow();
-                let file = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"file")))
-                    .map(|v| v.to_php_string().to_string_lossy())
-                    .unwrap_or_default();
-                let line = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"line")))
-                    .map(|v| v.to_long())
-                    .unwrap_or(0);
-                let function = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"function")))
-                    .map(|v| v.to_php_string().to_string_lossy())
-                    .unwrap_or_default();
-                let class = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"class")))
-                    .map(|v| v.to_php_string().to_string_lossy())
-                    .unwrap_or_default();
-                let type_str = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"type")))
-                    .map(|v| v.to_php_string().to_string_lossy())
-                    .unwrap_or_default();
-                // Format args
-                let args_str = if let Some(args_val) = frame.get(&ArrayKey::String(goro_core::string::PhpString::from_bytes(b"args"))) {
-                    if let Value::Array(args_arr) = args_val {
-                        let args_arr = args_arr.borrow();
-                        let formatted: Vec<String> = args_arr.iter().map(|(_k, v)| {
-                            goro_core::vm::Vm::format_trace_arg_with_limit(v, max_len)
-                        }).collect();
-                        formatted.join(", ")
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-                let loc = if file.is_empty() || file == "[internal function]" || line == 0 {
-                    "[internal function]".to_string()
-                } else {
-                    format!("{}({})", file, line)
-                };
-                lines.push(format!("#{} {}: {}{}{}({})", idx, loc, class, type_str, function, args_str));
-            }
-            idx += 1;
-        }
-        lines.push(format!("#{} {{main}}", idx));
-        return lines.join("\n");
-    }
-    fallback_trace.to_string()
 }
 
 /// Translate PCRE-isms run-tests relies on into Rust regex syntax: a `{`

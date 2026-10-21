@@ -3857,7 +3857,7 @@ impl Vm {
     /// Type-check (and coerce, weak mode) the arguments of a user callable
     /// invoked by an internal function (e.g. a Fiber callback). Returns
     /// `Some((message, declaration line))` on a mismatch.
-    pub fn check_callback_arg_types(&mut self, callback: &Value, args: &mut Vec<Value>) -> Option<(String, u32)> {
+    pub fn check_callback_arg_types(&mut self, callback: &Value, args: &mut [Value]) -> Option<(String, u32)> {
         let (fname, prefix) = match callback {
             Value::String(s) => (s.as_bytes().to_ascii_lowercase(), 0usize),
             Value::Array(arr) => {
@@ -23185,9 +23185,7 @@ impl Vm {
                     // Try to read and execute the file
                     let path: &str = resolved_stream_path.as_deref().unwrap_or(&path_str);
                     // Resolve to absolute path for __DIR__/__FILE__
-                    let abs_path = if is_stream_path {
-                        path.to_string()
-                    } else if std::path::Path::new(path).is_absolute() {
+                    let abs_path = if is_stream_path || std::path::Path::new(path).is_absolute() {
                         path.to_string()
                     } else {
                         // Resolve relative to the directory of the current file
@@ -24902,7 +24900,7 @@ impl Vm {
                 }
 
                 OpCode::VarVarSet => {
-                    let name_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let name_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string();
                     let name_bytes = name.as_bytes().to_vec();
@@ -33521,7 +33519,7 @@ impl Vm {
 
         let bases = self.fiber_stack_bases();
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
-        self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
+        self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
 
         let fiber_susp_pos = (self.current_file.clone(), self.current_line);
         self.call_stack.truncate(fiber_stack_base);
@@ -34033,7 +34031,7 @@ impl Vm {
         let bases = self.fiber_stack_bases();
         self.fiber_enter_stacks(&mut fiber);
         let result = fiber.resume(input);
-        self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
+        self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
         let fiber_susp_pos = (self.current_file.clone(), self.current_line);
         self.call_stack.pop();
         clear_current_vm_ptr();

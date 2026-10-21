@@ -2422,10 +2422,6 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Err(VmError { message: msg, line: vm.current_line })
 }
 
-fn validate_callback_for_array_map(vm: &mut Vm, callback: &Value) -> Result<(), VmError> {
-    validate_callback_generic(vm, callback, "array_map", "Argument #1 ($callback)")
-}
-
 fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_label: &str) -> Result<(), VmError> {
     match callback {
         Value::Null => Ok(()), // null is valid (identity/zip)
@@ -3123,76 +3119,6 @@ fn value_type_for_error(v: &Value) -> &'static str {
     }
 }
 
-fn array_walk_entries(
-    vm: &mut Vm,
-    callback: &Value,
-    entries: &[(ArrayKey, Value)],
-    extra_data: Option<&Value>,
-    arr: Option<&Rc<RefCell<PhpArray>>>,
-) -> Result<Value, VmError> {
-    let (func_name, captured) = match callback {
-        Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-        Value::Array(cb) => {
-            let cb = cb.borrow();
-            let vals: Vec<Value> = cb.values().cloned().collect();
-            if vals.is_empty() {
-                return Ok(Value::True);
-            }
-            (
-                vals[0].to_php_string().as_bytes().to_vec(),
-                vals[1..].to_vec(),
-            )
-        }
-        _ => return Ok(Value::True),
-    };
-    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-    if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-        for (key, val) in entries {
-            // Wrap value in a Reference so by-ref params (&$v) work
-            let val_ref = Rc::new(RefCell::new(val.clone()));
-            let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-            let mut idx = 0;
-            for cv in &captured {
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = cv.clone();
-                    idx += 1;
-                }
-            }
-            if idx < fn_cvs.len() {
-                fn_cvs[idx] = Value::Reference(val_ref.clone());
-                idx += 1;
-            }
-            // Pass key as second argument
-            if idx < fn_cvs.len() {
-                let key_val = match key {
-                    ArrayKey::Int(n) => Value::Long(*n),
-                    ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                fn_cvs[idx] = key_val;
-                idx += 1;
-            }
-            // Pass extra_data as third argument
-            if let Some(extra) = extra_data {
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = extra.clone();
-                }
-            }
-            vm.execute_fn(&user_fn, fn_cvs)?;
-            // Write modified value back to the array (if it's an array)
-            if let Some(arr) = arr {
-                let new_val = val_ref.borrow().clone();
-                arr.borrow_mut().set(key.clone(), new_val);
-            }
-        }
-    } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-        for (_key, val) in entries {
-            builtin(vm, std::slice::from_ref(val))?;
-        }
-    }
-    Ok(Value::True)
-}
-
 fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let keys = match args.first() {
         Some(Value::Array(a)) => a.borrow(),
@@ -3421,62 +3347,6 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     php_array_merge_wrapper(vm, args, "array_merge_recursive", true)
 }
 
-fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth: usize) -> Result<Value, VmError> {
-    if depth > 256 { return Ok(new_val.clone()); }
-    match (existing, new_val) {
-        (Value::Array(a), Value::Array(b)) => {
-            let mut merged_arr = a.borrow().clone();
-            let b_ref = b.borrow();
-            for (k, v) in b_ref.iter() {
-                match k {
-                    goro_core::array::ArrayKey::Int(_) => {
-                        if let Err(msg) = merged_arr.try_push(unwrap_rc1_ref(v)) {
-                            let exc = vm.create_exception(b"Error", msg, vm.current_line);
-                            vm.current_exception = Some(exc);
-                            return Err(VmError { message: msg.to_string(), line: vm.current_line });
-                        }
-                    }
-                    goro_core::array::ArrayKey::String(s) => {
-                        if let Some(ex) = merged_arr.get_str(s.as_bytes()) {
-                            let merged = merge_recursive_values(vm, ex, v, depth + 1)?;
-                            merged_arr.set(k.clone(), merged);
-                        } else {
-                            merged_arr.set(k.clone(), unwrap_rc1_ref(v));
-                        }
-                    }
-                }
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(merged_arr))))
-        }
-        (existing_val, new_v) => {
-            let mut arr = PhpArray::new();
-            if let Value::Array(a) = existing_val {
-                for (_, v) in a.borrow().iter() {
-                    if let Err(msg) = arr.try_push(v.clone()) {
-                        let exc = vm.create_exception(b"Error", msg, vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg.to_string(), line: vm.current_line });
-                    }
-                }
-            } else {
-                let _ = arr.try_push(existing_val.clone());
-            }
-            if let Value::Array(b) = new_v {
-                for (_, v) in b.borrow().iter() {
-                    if let Err(msg) = arr.try_push(unwrap_rc1_ref(v)) {
-                        let exc = vm.create_exception(b"Error", msg, vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg.to_string(), line: vm.current_line });
-                    }
-                }
-            } else {
-                let _ = arr.try_push(new_v.clone());
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(arr))))
-        }
-    }
-}
-
 fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
@@ -3567,20 +3437,6 @@ fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-/// Get a type priority for sorting that establishes total ordering
-fn type_priority(v: &Value) -> u8 {
-    match v {
-        Value::Null | Value::Undef => 0,
-        Value::False => 1,
-        Value::True => 2,
-        Value::Long(_) | Value::Double(_) | Value::Resource(_) => 3,
-        Value::String(_) => 4,
-        Value::Array(_) => 5,
-        Value::Object(_) | Value::Generator(_) => 6,
-        Value::Reference(_) => 7,
-    }
-}
-
 // Sort flag constants
 const SORT_REGULAR: i64 = 0;
 const SORT_NUMERIC: i64 = 1;
@@ -3588,90 +3444,6 @@ const SORT_STRING: i64 = 2;
 const SORT_LOCALE_STRING: i64 = 5;
 const SORT_NATURAL: i64 = 6;
 const SORT_FLAG_CASE: i64 = 8;
-
-fn php_sort_cmp_flags(a: &Value, b: &Value, flags: i64) -> std::cmp::Ordering {
-    let base_flag = flags & !SORT_FLAG_CASE;
-    let case_insensitive = (flags & SORT_FLAG_CASE) != 0;
-
-    match base_flag {
-        SORT_STRING | SORT_LOCALE_STRING => {
-            let sa = a.to_php_string();
-            let sb = b.to_php_string();
-            if case_insensitive {
-                let la = sa.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
-                let lb = sb.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
-                la.cmp(&lb)
-            } else {
-                sa.as_bytes().cmp(sb.as_bytes())
-            }
-        }
-        SORT_NUMERIC => {
-            let fa = a.to_double();
-            let fb = b.to_double();
-            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
-        }
-        SORT_NATURAL => {
-            let sa = a.to_php_string();
-            let sb = b.to_php_string();
-            if case_insensitive {
-                let la = sa.to_string_lossy().to_lowercase();
-                let lb = sb.to_string_lossy().to_lowercase();
-                natcmp(&la, &lb)
-            } else {
-                natcmp(&sa.to_string_lossy(), &sb.to_string_lossy())
-            }
-        }
-        _ => {
-            // SORT_REGULAR (default)
-            let cmp = a.compare(b);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                let tp_a = type_priority(a);
-                let tp_b = type_priority(b);
-                tp_a.cmp(&tp_b)
-            }
-        }
-    }
-}
-
-fn php_key_sort_cmp_flags(a: &ArrayKey, b: &ArrayKey, flags: i64) -> std::cmp::Ordering {
-    let base_flag = flags & !SORT_FLAG_CASE;
-    let case_insensitive = (flags & SORT_FLAG_CASE) != 0;
-
-    match base_flag {
-        SORT_STRING | SORT_LOCALE_STRING => {
-            let sa = match a { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() };
-            let sb = match b { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() };
-            if case_insensitive {
-                let la: Vec<u8> = sa.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let lb: Vec<u8> = sb.iter().map(|b| b.to_ascii_lowercase()).collect();
-                la.cmp(&lb)
-            } else {
-                sa.cmp(&sb)
-            }
-        }
-        SORT_NUMERIC => {
-            let na = match a { ArrayKey::Int(n) => *n as f64, ArrayKey::String(s) => s.to_string_lossy().parse::<f64>().unwrap_or(0.0) };
-            let nb = match b { ArrayKey::Int(n) => *n as f64, ArrayKey::String(s) => s.to_string_lossy().parse::<f64>().unwrap_or(0.0) };
-            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-        }
-        SORT_NATURAL => {
-            let sa = match a { ArrayKey::Int(n) => n.to_string(), ArrayKey::String(s) => s.to_string_lossy() };
-            let sb = match b { ArrayKey::Int(n) => n.to_string(), ArrayKey::String(s) => s.to_string_lossy() };
-            if case_insensitive {
-                let la = sa.to_lowercase();
-                let lb = sb.to_lowercase();
-                natcmp(&la, &lb)
-            } else {
-                natcmp(&sa, &sb)
-            }
-        }
-        _ => a.cmp(b),
-    }
-}
 
 /// String conversion used by the sort comparators (zval_get_tmp_string):
 /// arrays warn, objects use __toString.
@@ -3704,7 +3476,7 @@ fn sort_cmp_double(vm: &mut Vm, v: &Value) -> f64 {
             vm.emit_warning(&format!("Object of class {} could not be converted to float", cn));
             1.0
         }
-        Value::Array(a) => if a.borrow().len() > 0 { 1.0 } else { 0.0 },
+        Value::Array(a) => if !a.borrow().is_empty() { 1.0 } else { 0.0 },
         _ => v.to_double(),
     }
 }
@@ -3934,7 +3706,7 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let strict = vm.caller_strict_types;
     // Z_PARAM_NUMBER_OR_STR
-    let mut num_or_str = |vm: &mut Vm, idx: usize, name: &str| -> Result<Value, VmError> {
+    let num_or_str = |vm: &mut Vm, idx: usize, name: &str| -> Result<Value, VmError> {
         let v = args.get(idx).cloned().unwrap_or(Value::Null).deref();
         match &v {
             Value::Long(_) | Value::Double(_) | Value::String(_) => Ok(v),
@@ -3967,7 +3739,7 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::String(s) if !strict => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
                 Some((goro_core::value::NumStr::Long(l), _)) => Value::Long(l),
                 Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
-                None => return terr(vm, format!("range(): Argument #3 ($step) must be of type int|float, string given")),
+                None => return terr(vm, "range(): Argument #3 ($step) must be of type int|float, string given".to_string()),
             },
             Value::Null | Value::Undef | Value::False | Value::True if !strict => {
                 if matches!(v, Value::Null | Value::Undef) {
@@ -3993,7 +3765,7 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     is_step_negative = true;
                     step_double = -step_double;
                 }
-                step = if step_double >= -9223372036854775808.0 && step_double < 9223372036854775808.0 { step_double as i64 } else { 0 };
+                step = if (-9223372036854775808.0..9223372036854775808.0).contains(&step_double) { step_double as i64 } else { 0 };
                 if step as f64 != step_double {
                     is_step_double = true;
                 }
@@ -4970,7 +4742,7 @@ fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> 
                 return None;
             }
             let pv = Value::String(PhpString::from_vec(pname.clone()));
-            let isset = vm.call_object_method(data, b"__isset", &[pv.clone()]).unwrap_or(Value::False);
+            let isset = vm.call_object_method(data, b"__isset", std::slice::from_ref(&pv)).unwrap_or(Value::False);
             if !isset.is_truthy() {
                 return None;
             }
@@ -5002,7 +4774,7 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::Null),
     };
     // Z_PARAM_STR_OR_LONG_OR_NULL
-    let mut key_param = |vm: &mut Vm, idx: usize, pname: &str| -> Result<Option<Value>, VmError> {
+    let key_param = |vm: &mut Vm, idx: usize, pname: &str| -> Result<Option<Value>, VmError> {
         let v = match args.get(idx) { Some(v) => v.deref(), None => return Ok(None) };
         match &v {
             Value::Null | Value::Undef => Ok(None),
@@ -5805,28 +5577,6 @@ fn parse_str_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn php_urldecode(s: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => { result.push(b' '); i += 1; }
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(byte) = u8::from_str_radix(&s[i+1..i+3], 16) {
-                    result.push(byte);
-                    i += 3;
-                } else {
-                    result.push(b'%');
-                    i += 1;
-                }
-            }
-            c => { result.push(c); i += 1; }
-        }
-    }
-    String::from_utf8_lossy(&result).to_string()
-}
-
 // === URL ===
 
 #[derive(Default)]
@@ -5960,16 +5710,14 @@ fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
             pp += 1;
         }
         if pp - p > 0 && pp - p < 6 && (pp == ue || b[pp] == b'/') {
-            match parse_port_num(&b[p..pp]) {
-                Some(port) => {
-                    ret.has_port = true;
-                    ret.port = port;
-                    if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
-                        s += 2;
-                    }
-                    label = L::ParseHost;
+            {
+                let port = parse_port_num(&b[p..pp])?;
+                ret.has_port = true;
+                ret.port = port;
+                if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
+                    s += 2;
                 }
-                None => return None,
+                label = L::ParseHost;
             }
         } else if p == pp && pp == ue {
             return None;
@@ -6003,12 +5751,10 @@ fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
                     if e - pd > 5 {
                         return None;
                     } else if e - pd > 0 {
-                        match parse_port_num(&b[pd..e]) {
-                            Some(port) => {
-                                ret.has_port = true;
-                                ret.port = port;
-                            }
-                            None => return None,
+                        {
+                            let port = parse_port_num(&b[pd..e])?;
+                            ret.has_port = true;
+                            ret.port = port;
                         }
                     }
                 }
@@ -8349,10 +8095,6 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn php_compare_for_sort(a: &Value, b: &Value, sort_type: i64) -> std::cmp::Ordering {
-    php_sort_cmp_flags(a, b, sort_type)
-}
-
 
 // ============= File I/O implementation using thread-local file handle storage =============
 
@@ -10472,90 +10214,6 @@ fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 // Simple stable merge sort that tolerates inconsistent comparators without
 // panicking, unlike the stdlib sort on recent Rust versions. Used by usort
 // and friends, where user callbacks may not implement a total order.
-fn stable_sort_by<T, F>(arr: &mut Vec<T>, mut cmp: F)
-where
-    T: Clone,
-    F: FnMut(&T, &T) -> std::cmp::Ordering,
-{
-    let n = arr.len();
-    if n < 2 {
-        return;
-    }
-    // Bottom-up merge sort using two alternating buffers.
-    let mut buf: Vec<T> = arr.clone();
-    let mut width = 1usize;
-    // Track whether arr is the current source (true) or buf is (false).
-    let mut arr_is_src = true;
-    while width < n {
-        let (src, dst): (&[T], &mut [T]) = if arr_is_src {
-            (arr.as_slice(), buf.as_mut_slice())
-        } else {
-            (buf.as_slice(), arr.as_mut_slice())
-        };
-        let mut i = 0usize;
-        while i < n {
-            let mid = std::cmp::min(i + width, n);
-            let end = std::cmp::min(i + 2 * width, n);
-            let (left, right) = src[i..end].split_at(mid - i);
-            let mut li = 0usize;
-            let mut ri = 0usize;
-            let mut di = i;
-            while li < left.len() && ri < right.len() {
-                if cmp(&left[li], &right[ri]) == std::cmp::Ordering::Greater {
-                    dst[di] = right[ri].clone();
-                    ri += 1;
-                } else {
-                    dst[di] = left[li].clone();
-                    li += 1;
-                }
-                di += 1;
-            }
-            while li < left.len() {
-                dst[di] = left[li].clone();
-                li += 1;
-                di += 1;
-            }
-            while ri < right.len() {
-                dst[di] = right[ri].clone();
-                ri += 1;
-                di += 1;
-            }
-            i = end;
-        }
-        arr_is_src = !arr_is_src;
-        width *= 2;
-    }
-    if !arr_is_src {
-        // Latest result is in buf; copy back to arr.
-        arr.clone_from_slice(&buf);
-    }
-}
-
-fn cmp_callback_result(
-    vm: &mut Vm,
-    result: Value,
-    fname: &str,
-    warned: &mut bool,
-) -> std::cmp::Ordering {
-    // PHP 8.2+ deprecates comparison functions returning bool. PHP emits the
-    // notice once per sort call (not once per comparison) and then continues
-    // with int coercion semantics.
-    if matches!(result, Value::True | Value::False) && !*warned {
-        *warned = true;
-        vm.emit_deprecated(&format!(
-            "{}(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero",
-            fname
-        ));
-    }
-    let cmp = result.to_long();
-    if cmp < 0 {
-        std::cmp::Ordering::Less
-    } else if cmp > 0 {
-        std::cmp::Ordering::Greater
-    } else {
-        std::cmp::Ordering::Equal
-    }
-}
 
 /// php_array_user_compare_unstable(): call the user comparator, handling the
 /// bool-return deprecation (with swapped retry for false) like PHP.
@@ -11663,69 +11321,6 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     Ok(Value::True)
 }
 
-fn walk_recursive_inner(
-    vm: &mut Vm,
-    arr: &Rc<RefCell<PhpArray>>,
-    func_name: &[u8],
-    captured: &[Value],
-    extra_data: &Option<Value>,
-) -> Result<(), VmError> {
-    let entries: Vec<_> = arr
-        .borrow()
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-    for (key, val) in entries {
-        if let Value::Array(sub_arr) = &val {
-            // Recurse into sub-arrays
-            walk_recursive_inner(vm, sub_arr, func_name, captured, extra_data)?;
-        } else {
-            // Call callback(&$value, $key) on leaf values
-            let key_val = match &key {
-                ArrayKey::Int(n) => Value::Long(*n),
-                ArrayKey::String(s) => Value::String(s.clone()),
-            };
-
-            if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-                // Wrap value in a Reference so by-ref params (&$v) work
-                let val_ref = Rc::new(RefCell::new(val.clone()));
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                let mut idx = 0;
-                for cv in captured {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = cv.clone();
-                        idx += 1;
-                    }
-                }
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = Value::Reference(val_ref.clone());
-                    idx += 1;
-                }
-                if idx < fn_cvs.len() {
-                    fn_cvs[idx] = key_val;
-                    idx += 1;
-                }
-                // Pass extra_data as third argument
-                if let Some(extra) = extra_data {
-                    if idx < fn_cvs.len() {
-                        fn_cvs[idx] = extra.clone();
-                    }
-                }
-                vm.execute_fn(&user_fn, fn_cvs)?;
-                // Write modified value back to the array
-                let new_val = val_ref.borrow().clone();
-                arr.borrow_mut().set(key.clone(), new_val);
-            } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-                let _ = builtin(vm, &[val, key_val]);
-            }
-        }
-    }
-    Ok(())
-}
-
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
@@ -11828,96 +11423,6 @@ fn natsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn natcasesort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     php_natsort(vm, args, "natcasesort", true)
-}
-
-/// Natural order comparison (matches PHP strnatcmp).
-fn natcmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let ab = a.as_bytes();
-    let bb = b.as_bytes();
-    let mut ai = 0;
-    let mut bi = 0;
-    while ai < ab.len() && bi < bb.len() {
-        // Skip spaces.
-        while ai < ab.len() && (ab[ai] as char).is_whitespace() {
-            ai += 1;
-        }
-        while bi < bb.len() && (bb[bi] as char).is_whitespace() {
-            bi += 1;
-        }
-        if ai >= ab.len() || bi >= bb.len() {
-            break;
-        }
-        let ca = ab[ai];
-        let cb = bb[bi];
-        if ca.is_ascii_digit() && cb.is_ascii_digit() {
-            // If either starts with '0', compare left-aligned (fractional):
-            // digit-by-digit, shorter wins on tie.
-            let fractional = ca == b'0' || cb == b'0';
-            if fractional {
-                // Left-aligned: compare digit by digit; first mismatch decides.
-                loop {
-                    let da = if ai < ab.len() { ab[ai] } else { 0 };
-                    let db = if bi < bb.len() { bb[bi] } else { 0 };
-                    let da_digit = (da as char).is_ascii_digit();
-                    let db_digit = (db as char).is_ascii_digit();
-                    if !da_digit && !db_digit {
-                        break;
-                    }
-                    if !da_digit {
-                        return std::cmp::Ordering::Less;
-                    }
-                    if !db_digit {
-                        return std::cmp::Ordering::Greater;
-                    }
-                    if da != db {
-                        return da.cmp(&db);
-                    }
-                    ai += 1;
-                    bi += 1;
-                }
-            } else {
-                // Right-aligned: longer number is bigger; tie → first mismatch.
-                let mut bias: std::cmp::Ordering = std::cmp::Ordering::Equal;
-                loop {
-                    let da_in_range = ai < ab.len();
-                    let db_in_range = bi < bb.len();
-                    let da = if da_in_range { ab[ai] } else { 0 };
-                    let db = if db_in_range { bb[bi] } else { 0 };
-                    let da_digit = da_in_range && (da as char).is_ascii_digit();
-                    let db_digit = db_in_range && (db as char).is_ascii_digit();
-                    if !da_digit && !db_digit {
-                        if bias != std::cmp::Ordering::Equal {
-                            return bias;
-                        }
-                        break;
-                    }
-                    if !da_digit {
-                        return std::cmp::Ordering::Less;
-                    }
-                    if !db_digit {
-                        return std::cmp::Ordering::Greater;
-                    }
-                    if bias == std::cmp::Ordering::Equal {
-                        if da < db {
-                            bias = std::cmp::Ordering::Less;
-                        } else if da > db {
-                            bias = std::cmp::Ordering::Greater;
-                        }
-                    }
-                    ai += 1;
-                    bi += 1;
-                }
-            }
-        } else {
-            if ca != cb {
-                return ca.cmp(&cb);
-            }
-            ai += 1;
-            bi += 1;
-        }
-    }
-    // Remaining chars (trailing spaces are skipped above) break the tie by length.
-    (ab.len() - ai).cmp(&(bb.len() - bi))
 }
 
 fn set_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -13769,25 +13274,6 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 
-/// Parse PHP memory_limit value (e.g., "128M", "256K", "1G", "-1")
-fn parse_memory_value(val: &Value) -> i64 {
-    let s = val.to_php_string().to_string_lossy();
-    let s = s.trim();
-    if s == "-1" {
-        return -1; // unlimited
-    }
-    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
-        (&s[..s.len()-1], 1024 * 1024 * 1024i64)
-    } else if s.ends_with('M') || s.ends_with('m') {
-        (&s[..s.len()-1], 1024 * 1024i64)
-    } else if s.ends_with('K') || s.ends_with('k') {
-        (&s[..s.len()-1], 1024i64)
-    } else {
-        (s, 1i64)
-    };
-    num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
-}
-
 fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fgetc")?;
@@ -14021,7 +13507,7 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
             }
             let mut buf = Vec::new();
             if max_length >= 0 {
-                buf.resize(max_length as usize, 0);
+                buf = vec![0; max_length as usize];
                 match fh.file.read(&mut buf) {
                     Ok(n) => {
                         buf.truncate(n);

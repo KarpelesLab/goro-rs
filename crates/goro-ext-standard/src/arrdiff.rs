@@ -208,7 +208,7 @@ impl<'a> Funcs<'a> {
     }
 }
 
-fn sort_list(vm: &mut Vm, list: &mut Vec<Bucket>, f: &mut Funcs, by_data: bool) {
+fn sort_list(vm: &mut Vm, list: &mut [Bucket], f: &mut Funcs, by_data: bool) {
     if list.len() > 1 {
         crate::zsort::zend_sort(list, &mut |a: &Bucket, b: &Bucket| {
             if by_data { f.data(vm, a, b) } else { f.key(vm, a, b) }

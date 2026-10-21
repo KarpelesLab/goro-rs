@@ -59,7 +59,7 @@ fn zpp_long(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) ->
         Value::True => Ok(1),
         Value::False => Ok(0),
         Value::Double(d) => {
-            if !d.is_finite() || *d < -9.2233720368547758e18 || *d >= 9.2233720368547758e18 {
+            if !d.is_finite() || *d < -9.223_372_036_854_776e18 || *d >= 9.223_372_036_854_776e18 {
                 Err(arg_type_error(vm, func, n, name, "int", &v))
             } else {
                 Ok(*d as i64)
@@ -68,7 +68,7 @@ fn zpp_long(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) ->
         Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
             Some((goro_core::value::NumStr::Long(l), _)) => Ok(l),
             Some((goro_core::value::NumStr::Double(d), _)) => {
-                if !d.is_finite() || d < -9.2233720368547758e18 || d >= 9.2233720368547758e18 {
+                if !d.is_finite() || d < -9.223_372_036_854_776e18 || d >= 9.223_372_036_854_776e18 {
                     Err(arg_type_error(vm, func, n, name, "int", &v))
                 } else {
                     Ok(d as i64)
@@ -1165,13 +1165,13 @@ fn avif_parse_box(st: &mut AvifStream, num_remaining: u32, num_parsed: &mut u32)
         version = be(&d, 1);
         flags = be(&d[1..], 3);
         let parsable = match &typ {
-            b"meta" => version <= 0,
+            b"meta" => version == 0,
             b"pitm" => version <= 1,
             b"ipma" => version <= 1,
-            b"ispe" => version <= 0,
-            b"pixi" => version <= 0,
+            b"ispe" => version == 0,
+            b"pixi" => version == 0,
             b"iref" => version <= 1,
-            b"auxC" => version <= 0,
+            b"auxC" => version == 0,
             _ => true,
         };
         if !parsable {
@@ -1204,7 +1204,7 @@ fn avif_parse_ipco(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
                 let d = av_try!(st.read(1));
                 let num_channels = d[0] as u32;
                 av_check!(num_channels >= 1, AvSt::Invalid);
-                av_check!(bx.content_size >= 1 + num_channels, AvSt::Invalid);
+                av_check!(bx.content_size > num_channels, AvSt::Invalid);
                 let d = av_try!(st.read(1));
                 let bit_depth = d[0] as u32;
                 av_check!(bit_depth >= 1, AvSt::Invalid);
@@ -1724,7 +1724,7 @@ fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result
         if want_info { Some(&mut info_arr) } else { None },
     );
     if let Some(r) = info_ref {
-        if info_arr.len() > 0 {
+        if !info_arr.is_empty() {
             *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(info_arr)));
         }
     }

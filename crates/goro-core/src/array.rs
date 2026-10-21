@@ -89,7 +89,7 @@ fn hash_key(k: &ArrayKey) -> u64 {
 
 thread_local! {
     /// Arrays currently being cloned (guards against cycles).
-    static CLONE_STACK: std::cell::RefCell<Vec<*const PhpArray>> = std::cell::RefCell::new(Vec::new());
+    static CLONE_STACK: std::cell::RefCell<Vec<*const PhpArray>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Copy a nested array for PhpArray::clone; None means share it instead

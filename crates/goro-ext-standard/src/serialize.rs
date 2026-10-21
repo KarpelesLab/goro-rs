@@ -496,7 +496,7 @@ impl Serializer {
         let _ = is_root;
     }
 
-    fn serialize_object(&mut self, vm: &mut Vm, val: &Value, obj_in: &Rc<RefCell<PhpObject>>) {
+    fn serialize_object(&mut self, vm: &mut Vm, _val: &Value, obj_in: &Rc<RefCell<PhpObject>>) {
         // Lazy objects: an initialized proxy serializes its instance;
         // otherwise the object is initialized first, unless the class has
         // __serialize() (which runs on the lazy object) or the object was

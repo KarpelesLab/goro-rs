@@ -148,7 +148,7 @@ pub fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let len: i64 = match len {
         None | Some(0) => -1,
-        Some(l) if l < 0 || l > i64::MAX - 1 => {
+        Some(l) if !(0..=i64::MAX - 1).contains(&l) => {
             return Err(value_error(vm, format!("{}(): Argument #2 ($length) must be between 0 and {}", F, i64::MAX - 1)));
         }
         Some(l) => l,

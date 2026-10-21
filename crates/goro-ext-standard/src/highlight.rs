@@ -205,7 +205,7 @@ fn strip_url_passwd(url: &str) -> String {
             let at = start + at;
             let dots = (at - start).min(3);
             let mut out = b[..start].to_vec();
-            out.extend(std::iter::repeat(b'.').take(dots));
+            out.extend(std::iter::repeat_n(b'.', dots));
             out.extend_from_slice(&b[at..]);
             return String::from_utf8_lossy(&out).into_owned();
         }
@@ -399,7 +399,7 @@ pub fn tokenize_raw(src: &[u8]) -> goro_core::array::PhpArray {
     use std::cell::RefCell;
     use std::rc::Rc;
     let mut result = PhpArray::new();
-    let mut add = |result: &mut PhpArray, id: i32, text: &[u8], line: u32| {
+    let add = |result: &mut PhpArray, id: i32, text: &[u8], line: u32| {
         if id >= 256 {
             let mut arr = PhpArray::new();
             arr.set(ArrayKey::Int(0), Value::Long(id as i64));

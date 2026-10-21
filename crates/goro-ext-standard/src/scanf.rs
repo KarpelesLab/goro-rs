@@ -288,7 +288,7 @@ fn build_char_set(fmt: &CStr, mut format: usize) -> (CharSet, usize) {
 
 fn char_in_set(cset: &CharSet, c: u8) -> bool {
     let ch = c as i8;
-    let mut matched = cset.chars.iter().any(|&x| x == ch);
+    let mut matched = cset.chars.contains(&ch);
     if !matched {
         matched = cset.ranges.iter().any(|&(s, e)| s <= ch && ch <= e);
     }
@@ -305,7 +305,7 @@ fn c_strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
         i += 1;
     }
     if base == 16 && i + 1 < buf.len() && buf[i] == b'0' && (buf[i + 1] == b'x' || buf[i + 1] == b'X') {
-        if i + 2 < buf.len() && (buf[i + 2] as char).is_digit(16) {
+        if i + 2 < buf.len() && (buf[i + 2] as char).is_ascii_hexdigit() {
             i += 2;
         }
     }

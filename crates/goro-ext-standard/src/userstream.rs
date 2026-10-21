@@ -345,7 +345,7 @@ const BUILTIN_WRAPPERS: &[&[u8]] = &[
 ];
 
 fn is_builtin(scheme_lower: &[u8]) -> bool {
-    BUILTIN_WRAPPERS.iter().any(|b| *b == scheme_lower)
+    BUILTIN_WRAPPERS.contains(&scheme_lower)
 }
 
 fn builtin_disabled(scheme_lower: &[u8]) -> bool {
@@ -1187,6 +1187,9 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
 }
 
 /// _php_stream_read(): None == -1
+// The loop mirrors the C one, which also exits after a single pass for
+// non-greedy streams.
+#[allow(clippy::never_loop)]
 fn stream_read(vm: &mut Vm, fid: i64, us: &Us, mut size: usize) -> Result<Option<Vec<u8>>, VmError> {
     let mut out: Vec<u8> = Vec::new();
     while size > 0 {
@@ -1363,9 +1366,7 @@ fn stream_get_record(vm: &mut Vm, fid: i64, us: &Us, maxlen: usize, delim: &[u8]
             tent_ret_len = p;
         } else if !has_delim && b.buffered() >= maxlen {
             tent_ret_len = maxlen;
-        } else if b.buffered() < maxlen && !b.eof {
-            return Ok(None);
-        } else if b.buffered() == 0 && b.eof {
+        } else if (b.buffered() < maxlen && !b.eof) || (b.buffered() == 0 && b.eof) {
             return Ok(None);
         } else {
             tent_ret_len = b.buffered().min(maxlen);

@@ -583,27 +583,6 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
 
-/// Helper: single string search/replace, returns (result, count_of_replacements)
-fn str_replace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, i64) {
-    if needle.is_empty() {
-        return (haystack.to_vec(), 0);
-    }
-    let mut result = Vec::new();
-    let mut count = 0i64;
-    let mut i = 0;
-    while i < haystack.len() {
-        if i + needle.len() <= haystack.len() && &haystack[i..i + needle.len()] == needle {
-            result.extend_from_slice(replacement);
-            i += needle.len();
-            count += 1;
-        } else {
-            result.push(haystack[i]);
-            i += 1;
-        }
-    }
-    (result, count)
-}
-
 /// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
 fn str_replace_once(subject: &[u8], needle: &[u8], repl: &[u8], ci: bool, count: &mut i64) -> Vec<u8> {
     let n = needle.len();
@@ -640,7 +619,7 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
         return Err(VmError { message: msg, line: vm.current_line });
     }
     // Z_PARAM_ARRAY_HT_OR_STR
-    let mut parse = |vm: &mut Vm, idx: usize, name: &str| -> Result<StrOrArr, VmError> {
+    let parse = |vm: &mut Vm, idx: usize, name: &str| -> Result<StrOrArr, VmError> {
         let v = args[idx].deref();
         match &v {
             Value::Array(a) => {
@@ -680,7 +659,7 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
     }
     // Pre-convert search/replace array entries lazily per subject, like PHP.
     let mut count: i64 = 0;
-    let mut in_subject = |vm: &mut Vm, subj: Vec<u8>, count: &mut i64| -> Vec<u8> {
+    let in_subject = |vm: &mut Vm, subj: Vec<u8>, count: &mut i64| -> Vec<u8> {
         if subj.is_empty() {
             return subj;
         }
@@ -721,7 +700,7 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
         StrOrArr::Str(subj) => Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count))),
         StrOrArr::Arr(vals, keys) => {
             let mut out = PhpArray::new();
-            for (k, v) in keys.into_iter().zip(vals.into_iter()) {
+            for (k, v) in keys.into_iter().zip(vals) {
                 let sb = crate::misc::sort_cmp_string(vm, &v);
                 let r = in_subject(vm, sb, &mut count);
                 out.set(k, Value::String(PhpString::from_vec(r)));
@@ -1499,7 +1478,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                     Value::Double(f) => {
                         let f = *f;
-                        if !f.is_finite() || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+                        if !f.is_finite() || !(-9223372036854775808.0..9223372036854775808.0).contains(&f) {
                             if let Some(vm_ref) = vm.as_deref_mut() {
                                 let prev = goro_core::value::get_php_precision();
                                 goro_core::value::set_php_precision(-1);
@@ -2465,7 +2444,7 @@ fn convert_uuencode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if ee > e {
             ee = e;
             len = ee - s;
-            if len % 3 != 0 {
+            if !len.is_multiple_of(3) {
                 ee = s + (len / 3) * 3;
             }
         }
@@ -3879,33 +3858,6 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn str_ireplace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     php_str_replace_common(vm, args, "str_ireplace", true)
-}
-
-fn str_ireplace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, i64) {
-    if needle.is_empty() {
-        return (haystack.to_vec(), 0);
-    }
-    let needle_lower: Vec<u8> = needle.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let mut result = Vec::new();
-    let mut count = 0i64;
-    let mut i = 0;
-    while i < haystack.len() {
-        if i + needle_lower.len() <= haystack.len() {
-            let window: Vec<u8> = haystack[i..i + needle_lower.len()]
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
-            if window == needle_lower {
-                result.extend_from_slice(replacement);
-                i += needle_lower.len();
-                count += 1;
-                continue;
-            }
-        }
-        result.push(haystack[i]);
-        i += 1;
-    }
-    (result, count)
 }
 
 fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

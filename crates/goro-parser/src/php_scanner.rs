@@ -281,7 +281,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn starts(&self, i: usize, lit: &[u8]) -> bool {
-        self.s.get(i..i + lit.len()).map_or(false, |w| w == lit)
+        self.s.get(i..i + lit.len()) == Some(lit)
     }
 
     fn label_end(&self, mut i: usize) -> usize {
@@ -426,7 +426,7 @@ impl<'a> Scanner<'a> {
         let mut best: Option<(usize, u8)> = None; // kind: b'b', b'o', b'l', b'h', b'd'
         let consider = |end: Option<usize>, kind: u8, best: &mut Option<(usize, u8)>| {
             if let Some(e) = end {
-                if best.map_or(true, |(be, _)| e > be) {
+                if best.is_none_or(|(be, _)| e > be) {
                     *best = Some((e, kind));
                 }
             }
@@ -633,7 +633,7 @@ impl<'a> Scanner<'a> {
         if cur == n {
             return Some(self.tok(T_START_HEREDOC, p, end));
         }
-        if len < n - cur && &self.s[cur..cur + len] == &self.s[lstart..lend] && !is_label_char(self.at(cur + len)) {
+        if len < n - cur && self.s[cur..cur + len] == self.s[lstart..lend] && !is_label_char(self.at(cur + len)) {
             if let Some(h) = self.heredocs.last_mut() {
                 h.indentation = indentation;
             }
@@ -975,8 +975,8 @@ impl<'a> Scanner<'a> {
         if p >= n {
             return None;
         }
-        let cursor;
-        if self.starts(p, b"<?=") {
+        
+        let cursor = if self.starts(p, b"<?=") {
             self.state = St::InScripting;
             return self.tok(T_OPEN_TAG_WITH_ECHO, p, p + 3);
         } else if self.starts_ci(p, b"<?php") && p + 5 <= n {
@@ -997,16 +997,16 @@ impl<'a> Scanner<'a> {
                 self.state = St::InScripting;
                 return self.tok(T_OPEN_TAG, p, p + 2);
             }
-            cursor = p + 5;
+            p + 5
         } else if self.starts(p, b"<?") {
             if self.short_tags {
                 self.state = St::InScripting;
                 return self.tok(T_OPEN_TAG, p, p + 2);
             }
-            cursor = p + 2;
+            p + 2
         } else {
-            cursor = p + 1;
-        }
+            p + 1
+        };
         // inline_char_handler
         let mut cur = cursor;
         loop {
