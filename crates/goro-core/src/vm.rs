@@ -24942,20 +24942,28 @@ impl Vm {
                             {
                                 // For late static binding, use the actual object class when $this is present.
                                 // For forwarding calls (parent::, self::, static::), preserve the current called class.
+                                // (The first argument is $this only for a method that has
+                                // one; the caller's first CV only when it is $this.)
+                                let callee_this =
+                                    user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                                let caller_this = op_array.cv_names.first().map(|n| n.as_slice())
+                                    == Some(b"this");
                                 let called_class = if is_forwarding_call {
-                                    if let Some(Value::Object(obj)) = call.args.first() {
-                                        obj.borrow().class_name.clone()
-                                    } else if let Some(Value::Object(obj)) = cvs.first() {
-                                        obj.borrow().class_name.clone()
-                                    } else if let Some(current) = self.called_class_stack.last() {
-                                        current.clone()
-                                    } else {
-                                        let orig_bytes = call.name.as_bytes();
-                                        orig_bytes[..sep_pos].to_vec()
+                                    match (call.args.first(), cvs.first()) {
+                                        (Some(Value::Object(obj)), _) if callee_this => {
+                                            obj.borrow().class_name.clone()
+                                        }
+                                        (_, Some(Value::Object(obj))) if caller_this => {
+                                            obj.borrow().class_name.clone()
+                                        }
+                                        _ => match self.called_class_stack.last() {
+                                            Some(current) => current.clone(),
+                                            None => call.name.as_bytes()[..sep_pos].to_vec(),
+                                        },
                                     }
-                                } else if let Some(Value::Object(obj)) = call.args.first() {
-                                    obj.borrow().class_name.clone()
-                                } else if let Some(Value::Object(obj)) = cvs.first() {
+                                } else if let (true, Some(Value::Object(obj))) =
+                                    (callee_this, call.args.first())
+                                {
                                     obj.borrow().class_name.clone()
                                 } else {
                                     // Pure static call - use the original class from the call name
@@ -25003,19 +25011,29 @@ impl Vm {
                             // For late static binding, use the actual object class when $this is present.
                             // For forwarding calls (parent::, self::, static::), preserve the current
                             // called class so that static:: in the called method resolves correctly.
+                            // (The first argument is $this only for a method that has
+                            // one; the caller's first CV only when it is $this.)
+                            let callee_this =
+                                user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                            let caller_this =
+                                op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
                             let called_class = if is_forwarding_call {
                                 // Forwarding call: preserve the current called_class
-                                if let Some(Value::Object(obj)) = call.args.first() {
-                                    obj.borrow().class_name.clone()
-                                } else if let Some(Value::Object(obj)) = cvs.first() {
-                                    obj.borrow().class_name.clone()
-                                } else if let Some(current) = self.called_class_stack.last() {
-                                    current.clone()
-                                } else {
-                                    let orig_bytes = call.name.as_bytes();
-                                    orig_bytes[..pos].to_vec()
+                                match (call.args.first(), cvs.first()) {
+                                    (Some(Value::Object(obj)), _) if callee_this => {
+                                        obj.borrow().class_name.clone()
+                                    }
+                                    (_, Some(Value::Object(obj))) if caller_this => {
+                                        obj.borrow().class_name.clone()
+                                    }
+                                    _ => match self.called_class_stack.last() {
+                                        Some(current) => current.clone(),
+                                        None => call.name.as_bytes()[..pos].to_vec(),
+                                    },
                                 }
-                            } else if let Some(Value::Object(obj)) = call.args.first() {
+                            } else if let (true, Some(Value::Object(obj))) =
+                                (callee_this, call.args.first())
+                            {
                                 // Instance method call (has $this via InitMethodCall) - use object's runtime class
                                 obj.borrow().class_name.clone()
                             } else {
