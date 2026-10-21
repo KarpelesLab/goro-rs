@@ -3469,6 +3469,32 @@ pub fn reflection_method_method(
             let ob = obj.borrow();
             Some(ob.get_property(b"name"))
         }
+        // Method names never carry a namespace.
+        b"innamespace" => Some(Value::False),
+        b"getnamespacename" => Some(Value::String(PhpString::from_bytes(b""))),
+        b"getshortname" => {
+            let ob = obj.borrow();
+            Some(ob.get_property(b"name"))
+        }
+        b"isclosure" => Some(Value::False),
+        b"getclosurethis" | b"getclosurescopeclass" | b"getclosurecalledclass" if closure_fn.is_none() => Some(Value::Null),
+        b"getclosureusedvariables" if closure_fn.is_none() => Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        b"getextension" | b"getextensionname" => {
+            let ext = rmethod(vm, &class_lower, method_lower.as_bytes())
+                .filter(|m| m.op_array.internal_sig.is_some())
+                .and_then(internal_method_ext);
+            Some(match (method, ext) {
+                (b"getextensionname", Some(e)) => Value::String(PhpString::from_string(e.to_string())),
+                (b"getextensionname", None) => Value::False,
+                (_, Some(e)) => {
+                    let obj_id = vm.next_object_id();
+                    let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
+                    ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(e.to_string())));
+                    Value::Object(Rc::new(RefCell::new(ext_obj)))
+                }
+                (_, None) => Value::Null,
+            })
+        }
         b"getdeclaringclass" => {
             let class = rcls(vm, &class_lower)
                 .and_then(|c| c.get_method(method_lower.as_bytes())
