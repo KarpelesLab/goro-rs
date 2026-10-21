@@ -34257,7 +34257,13 @@ impl Vm {
                     let abs_path = if is_stream_path || std::path::Path::new(path).is_absolute() {
                         path.to_string()
                     } else {
-                        self.resolve_include_path(path)
+                        // Relative to the file of the executing function.
+                        let exec_file = if op_array.filename.is_empty() {
+                            self.current_file.clone()
+                        } else {
+                            String::from_utf8_lossy(&op_array.filename).into_owned()
+                        };
+                        self.resolve_include_path_from(path, &exec_file)
                     };
 
                     // For include_once/require_once, skip if already included
@@ -34331,7 +34337,19 @@ impl Vm {
                                     compiler.source_file = abs_path.as_bytes().to_vec();
                                     self.current_file = abs_path.clone();
                                     match compiler.compile(&program) {
-                                        Ok((inc_op_array, inc_classes, inc_warnings)) => {
+                                        Ok((mut inc_op_array, inc_classes, inc_warnings)) => {
+                                            // A file that does not `return` yields 1
+                                            // (zend_emit_final_return(1)).
+                                            let implicit_ret =
+                                                inc_op_array.ops.last().is_some_and(|l| {
+                                                    l.opcode == OpCode::Return && l.line == 0
+                                                });
+                                            if implicit_ret {
+                                                let one = inc_op_array.add_literal(Value::Long(1));
+                                                if let Some(l) = inc_op_array.ops.last_mut() {
+                                                    l.op1 = OperandType::Const(one);
+                                                }
+                                            }
                                             // Emit compile warnings
                                             for (msg, wline) in &inc_warnings {
                                                 self.emit_warning_at(msg, *wline);

@@ -18,6 +18,12 @@ impl Vm {
     /// script. Returns the path the open should use (a not-found name is
     /// returned relative to the running script's directory).
     pub fn resolve_include_path(&self, path: &str) -> String {
+        self.resolve_include_path_from(path, &self.current_file)
+    }
+
+    /// resolve_include_path() with `exec_file` as the running script (the
+    /// file of the executing function, zend_get_executed_filename()).
+    pub fn resolve_include_path_from(&self, path: &str, exec_file: &str) -> String {
         let cwd = std::env::current_dir().unwrap_or_default();
         let explicit_relative =
             path.starts_with("./") || path.starts_with("../") || path == "." || path == "..";
@@ -43,8 +49,8 @@ impl Vm {
                 return found;
             }
         }
-        let script_dir = match self.current_file.rfind('/') {
-            Some(pos) => &self.current_file[..pos],
+        let script_dir = match exec_file.rfind('/') {
+            Some(pos) => &exec_file[..pos],
             None => ".",
         };
         let joined = format!("{}/{}", script_dir, path);
