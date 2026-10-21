@@ -235,8 +235,14 @@ pub static VERIFIED: &[(&str, u8)] = &[
     ("gmp_sqrtrem", 3),
     ("gmp_strval", 3),
     ("gmp_testbit", 3),
+    ("gzcompress", 3),
+    ("gzdecode", 3),
+    ("gzdeflate", 3),
+    ("gzencode", 3),
     ("gzfile", 1),
+    ("gzinflate", 3),
     ("gzopen", 1),
+    ("gzuncompress", 3),
     ("hash", 3),
     ("hash_algos", 3),
     ("hash_copy", 3),
@@ -652,6 +658,8 @@ pub static VERIFIED: &[(&str, u8)] = &[
     ("xml_get_current_line_number", 3),
     ("xml_get_error_code", 3),
     ("zend_version", 3),
+    ("zlib_decode", 3),
+    ("zlib_encode", 3),
     ("zlib_get_coding_type", 3),
 ];
 // Methods, by lowercase "declaring class::method".

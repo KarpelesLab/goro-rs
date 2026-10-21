@@ -40,6 +40,126 @@ fn arg_long(args: &[Value], i: usize, default: i64) -> i64 {
     }
 }
 
+/// zend_parse_arg_str() for a string parameter (weak mode).
+pub(crate) fn zpp_str(
+    vm: &mut Vm,
+    v: &Value,
+    fname: &str,
+    n: usize,
+    pname: &str,
+) -> Result<PhpString, VmError> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Long(_) | Value::Double(_) | Value::True | Value::False => Ok(v.to_php_string()),
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated(&format!(
+                "{}(): Passing null to parameter #{} (${}) of type string is deprecated",
+                fname, n, pname
+            ));
+            Ok(PhpString::empty())
+        }
+        Value::Object(o) => {
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            let has_tostring = vm
+                .classes
+                .get(&cl)
+                .is_some_and(|c| c.get_method(b"__tostring").is_some());
+            if has_tostring {
+                vm.value_to_string_checked(v)
+            } else {
+                Err(throw(
+                    vm,
+                    b"TypeError",
+                    &format!(
+                        "{}(): Argument #{} (${}) must be of type string, {} given",
+                        fname,
+                        n,
+                        pname,
+                        type_name(v)
+                    ),
+                ))
+            }
+        }
+        _ => Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): Argument #{} (${}) must be of type string, {} given",
+                fname,
+                n,
+                pname,
+                type_name(v)
+            ),
+        )),
+    }
+}
+
+/// zend_parse_arg_long() for an int parameter (weak mode).
+pub(crate) fn zpp_long(
+    vm: &mut Vm,
+    v: &Value,
+    fname: &str,
+    n: usize,
+    pname: &str,
+) -> Result<i64, VmError> {
+    let type_err = |vm: &mut Vm, v: &Value| {
+        throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): Argument #{} (${}) must be of type int, {} given",
+                fname,
+                n,
+                pname,
+                type_name(v)
+            ),
+        )
+    };
+    let from_double = |vm: &mut Vm, d: f64, v: &Value| -> Result<i64, VmError> {
+        if !d.is_finite() || d >= 9.223372036854776e18 || d < -9.223372036854776e18 {
+            return Err(type_err(vm, v));
+        }
+        if d.fract() != 0.0 {
+            vm.emit_deprecated(&format!(
+                "Implicit conversion from float {} to int loses precision",
+                Value::Double(d).to_php_string().to_string_lossy()
+            ));
+        }
+        Ok(d as i64)
+    };
+    match v {
+        Value::Long(l) => Ok(*l),
+        Value::True => Ok(1),
+        Value::False => Ok(0),
+        Value::Double(d) => from_double(vm, *d, v),
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated(&format!(
+                "{}(): Passing null to parameter #{} (${}) of type int is deprecated",
+                fname, n, pname
+            ));
+            Ok(0)
+        }
+        Value::String(s) => {
+            let t = s
+                .to_string_lossy()
+                .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}'))
+                .to_string();
+            if let Ok(l) = t.parse::<i64>() {
+                return Ok(l);
+            }
+            let numeric = !t.is_empty()
+                && t.bytes()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
+                && t.bytes().any(|c| c.is_ascii_digit());
+            match t.parse::<f64>() {
+                Ok(d) if numeric => from_double(vm, d, v),
+                _ => Err(type_err(vm, v)),
+            }
+        }
+        _ => Err(type_err(vm, v)),
+    }
+}
+
 /// php_zlib_encode()
 pub(crate) fn php_zlib_encode(vm: &mut Vm, input: &[u8], encoding: i64, level: i64) -> Value {
     let (status, out) = deflate_once(
@@ -419,7 +539,10 @@ pub(crate) fn inflate_init(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn flush_mode_arg(vm: &mut Vm, args: &[Value], fname: &str) -> Result<i32, VmError> {
-    let f = arg_long(args, 2, Z_SYNC_FLUSH as i64);
+    let f = match args.get(2).map(|v| v.deref()) {
+        None | Some(Value::Undef) => Z_SYNC_FLUSH as i64,
+        Some(v) => zpp_long(vm, &v, fname, 3, "flush_mode")?,
+    };
     match f as i32 {
         Z_NO_FLUSH | Z_PARTIAL_FLUSH | Z_SYNC_FLUSH | Z_FULL_FLUSH | Z_BLOCK | Z_FINISH
             if (0..=5).contains(&f) =>
@@ -450,7 +573,7 @@ pub(crate) fn inflate_add(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             ),
         ));
     };
-    let data = vm.value_to_string_checked(&arg(args, 1))?;
+    let data = zpp_str(vm, &arg(args, 1), "inflate_add", 2, "data")?;
     let flush_type = flush_mode_arg(vm, args, "inflate_add")?;
     let mut c = ctx.borrow_mut();
     let ZCtx::Inflate { z, dict, status } = &mut *c else {
@@ -660,7 +783,7 @@ pub(crate) fn deflate_add(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             ),
         ));
     };
-    let data = vm.value_to_string_checked(&arg(args, 1))?;
+    let data = zpp_str(vm, &arg(args, 1), "deflate_add", 2, "data")?;
     let flush_type = flush_mode_arg(vm, args, "deflate_add")?;
     let input = data.as_bytes();
     if input.is_empty() && flush_type != Z_FINISH {
