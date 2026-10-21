@@ -192,7 +192,12 @@ impl Vm {
             };
             let value = if by_ref {
                 match value {
-                    Value::Reference(r) => Value::Reference(r),
+                    Value::Reference(r) => {
+                        // The loop variable binds the slot: a typed property
+                        // types the reference.
+                        self.typed_ref_register_slot(obj, &name, &r);
+                        Value::Reference(r)
+                    }
                     other => {
                         if let Some((_, decl, true, _, _)) =
                             self.find_property_def(&class_lower, &key)
@@ -211,10 +216,13 @@ impl Vm {
                             ));
                         }
                         let r = Rc::new(RefCell::new(other));
-                        let mut ob = obj.borrow_mut();
-                        if let Some(slot) = ob.properties.get_mut(i - 1) {
-                            slot.1 = Value::Reference(r.clone());
+                        {
+                            let mut ob = obj.borrow_mut();
+                            if let Some(slot) = ob.properties.get_mut(i - 1) {
+                                slot.1 = Value::Reference(r.clone());
+                            }
                         }
+                        self.typed_ref_register_slot(obj, &name, &r);
                         Value::Reference(r)
                     }
                 }

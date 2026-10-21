@@ -13,6 +13,8 @@ use crate::value::Value;
 
 #[path = "static_props.rs"]
 mod static_props;
+#[path = "typed_ref.rs"]
+pub(crate) mod typed_ref;
 #[path = "variance.rs"]
 pub(crate) mod variance;
 use static_props::SpFetch;
@@ -514,7 +516,6 @@ pub struct Vm {
     consts_updated: std::collections::HashSet<Vec<u8>>,
     /// Typed properties a reference is bound to (ZEND_REF_HAS_TYPE_SOURCES),
     /// keyed by the reference cell's address.
-    pub(crate) typed_refs: static_props::TypedRefs,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     pub(crate) call_depth: u32,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
@@ -809,7 +810,6 @@ impl Vm {
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
             const_thunks_active: Vec::new(),
             consts_updated: std::collections::HashSet::new(),
-            typed_refs: Default::default(),
             call_depth: 0,
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
@@ -14996,10 +14996,9 @@ impl Vm {
             if global_bound || globals_cv.is_some() {
                 prev_op = Some(ip - 1);
             }
-
             // In-place modification of a CV holding a reference bound to typed
             // properties is verified after the op.
-            let typed_ref_watch = if self.typed_refs.is_empty() {
+            let typed_ref_watch = if !typed_ref::any() {
                 None
             } else {
                 match (op.opcode, op.op1) {
@@ -15235,7 +15234,7 @@ impl Vm {
                         _ => None,
                     };
                     // A reference bound to typed properties checks the value.
-                    if !self.typed_refs.is_empty() && !matches!(val, Value::Reference(_)) {
+                    if typed_ref::any() && !matches!(val, Value::Reference(_)) {
                         if let OperandType::Cv(ci) = op.op1 {
                             if let Some(Value::Reference(r)) = cvs.get(ci as usize) {
                                 let r = r.clone();
@@ -23174,6 +23173,17 @@ impl Vm {
                                 };
                                 let exc_val =
                                     self.create_exception(b"TypeError", &err_msg, def_line);
+                                // The exception's file is the function's definition file.
+                                if !user_fn.filename.is_empty() {
+                                    if let Value::Object(ref o) = exc_val {
+                                        o.borrow_mut().set_property(
+                                            b"file".to_vec(),
+                                            Value::String(PhpString::from_vec(
+                                                user_fn.filename.clone(),
+                                            )),
+                                        );
+                                    }
+                                }
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -28100,7 +28110,7 @@ impl Vm {
                             Some(r) => {
                                 // An element bound to typed properties checks the value.
                                 let mut val = val;
-                                if !self.typed_refs.is_empty() {
+                                if typed_ref::any() {
                                     let overflow =
                                         Self::incdec_overflow_kind(op_array, ip, &op.op2, &val);
                                     if let Err(msg) = self.typed_ref_check(
@@ -28110,9 +28120,7 @@ impl Vm {
                                         None,
                                     ) {
                                         let msg = match overflow {
-                                            Some(inc) => {
-                                                static_props::typed_ref_incdec_msg(&msg, inc)
-                                            }
+                                            Some(inc) => typed_ref::incdec_msg(&msg, inc),
                                             None => msg,
                                         };
                                         let exc =
@@ -33898,6 +33906,26 @@ impl Vm {
                                     self.list_destructible(new_obj_val.clone());
                                 }
                             }
+                            // Shared typed references gain the clone's properties
+                            // as type sources.
+                            if typed_ref::any() {
+                                if let Value::Object(dst) = &new_obj_val {
+                                    let refs: Vec<(Vec<u8>, Rc<RefCell<Value>>)> = dst
+                                        .borrow()
+                                        .properties
+                                        .iter()
+                                        .filter_map(|(k, v)| match v {
+                                            Value::Reference(r) => Some((k.clone(), r.clone())),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    for (k, r) in &refs {
+                                        if typed_ref::is_typed(r) {
+                                            self.typed_ref_register_slot(dst, k, r);
+                                        }
+                                    }
+                                }
+                            }
                             if is_weakmap {
                                 let entries_copy: Vec<(
                                     u64,
@@ -34864,7 +34892,7 @@ impl Vm {
                         }
                     }
                     // The unset property no longer holds its reference.
-                    if !self.typed_refs.is_empty() {
+                    if typed_ref::any() {
                         if let Value::Object(o) = &obj_val_raw {
                             let slot_ref =
                                 o.borrow().properties.iter().find_map(|(k, v)| match v {
@@ -36415,22 +36443,44 @@ impl Vm {
                                 ref_error = Some(msg);
                                 Value::Null
                             }
-                        } else if let Ok(mut ob) = obj.try_borrow_mut() {
-                            let r = ob.get_property_ref(prop_name.as_bytes());
-                            drop(ob);
-                            // A reference to a typed property carries its type.
-                            if let Some((_, decl, _, Some(pt), _)) =
-                                self.find_property_def(&class_lower, prop_name.as_bytes())
-                            {
-                                self.typed_ref_register_owned(
-                                    &r,
-                                    &decl,
-                                    prop_name.as_bytes(),
-                                    pt,
-                                    Some(obj),
+                        } else if obj.try_borrow_mut().is_ok() {
+                            let pn = prop_name.as_bytes();
+                            // Shadowed privates live in mangled slots this path
+                            // does not address yet: leave those untyped.
+                            let scope = self.current_class_scope();
+                            let src =
+                                if self.property_storage_key(&class_lower, pn, scope.as_deref())
+                                    == pn
+                                {
+                                    self.typed_ref_source_for(obj, pn)
+                                } else {
+                                    None
+                                };
+                            let uninit = src.is_some()
+                                && matches!(
+                                    obj.borrow().properties.iter().find(|(k, _)| k == pn),
+                                    Some((_, Value::Undef)) | None
                                 );
+                            if uninit
+                                && src.as_ref().is_some_and(|s| {
+                                    variance::TypeView::from_param_type(&s.ty).mask
+                                        & variance::T_NULL
+                                        == 0
+                                })
+                            {
+                                let s = src.unwrap();
+                                ref_error = Some(format!(
+                                    "Cannot access uninitialized non-nullable property {}::${} by reference",
+                                    s.class, s.prop
+                                ));
+                                Value::Null
+                            } else {
+                                let r = obj.borrow_mut().get_property_ref(pn);
+                                if let Some(s) = src {
+                                    typed_ref::add_source(&r, s);
+                                }
+                                Value::Reference(r)
                             }
-                            Value::Reference(r)
                         } else {
                             // The object is being inspected (e.g. var_dump calling
                             // __debugInfo): fall back to the value.
@@ -36597,47 +36647,19 @@ impl Vm {
                     if let Value::Object(obj) = &obj_val {
                         match value {
                             Value::Reference(r) => {
-                                // Binding a typed property: the referenced value must
-                                // fit (coerced in weak mode); the reference then
-                                // carries the property's type.
-                                let cl = obj.borrow().class_name.to_ascii_lowercase();
-                                if let Some((_, decl, _, Some(pt), _)) =
-                                    self.find_property_def(&cl, prop_name.as_bytes())
-                                {
-                                    let bind_err = self
-                                        .typed_ref_bind_error(&r, &decl, prop_name.as_bytes(), &pt)
-                                        .or_else(|| {
-                                            let mut v = r.borrow().clone();
-                                            Self::coerce_value_to_type(
-                                                &mut v,
-                                                &pt,
-                                                op_array.strict_types,
-                                            );
-                                            if self.value_matches_type_mode(&v, &pt, true) {
-                                                *r.borrow_mut() = v;
-                                                None
-                                            } else {
-                                                Some(format!(
-                                                    "Cannot assign {} to property {}::${} of type {}",
-                                                    Self::value_type_name(&r.borrow()),
-                                                    self.classes
-                                                        .get(&decl.to_ascii_lowercase())
-                                                        .map(|c| crate::value::display_class_name(&c.name))
-                                                        .unwrap_or_default(),
-                                                    prop_name.to_string_lossy(),
-                                                    self.param_type_name(&pt)
-                                                ))
-                                            }
-                                        });
-                                    if let Some(msg) = bind_err {
+                                let src = self.typed_ref_source_for(obj, prop_name.as_bytes());
+                                if let Some(s) = &src {
+                                    if let Err(msg) =
+                                        self.typed_ref_verify_bind(s, &r, op_array.strict_types)
+                                    {
                                         let exc =
                                             self.create_exception(b"TypeError", &msg, op.line);
                                         self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                            exception_handlers.last()
+                                        if let Some((catch_target, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
                                         {
-                                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                                            ip = *catch_target as usize;
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
                                             continue;
                                         }
                                         return Err(VmError {
@@ -36645,34 +36667,12 @@ impl Vm {
                                             line: op.line,
                                         });
                                     }
-                                    // The previous reference is no longer this property's.
-                                    let old =
-                                        obj.borrow().properties.iter().find_map(|(k, v)| match v {
-                                            Value::Reference(o)
-                                                if k.as_slice() == prop_name.as_bytes()
-                                                    && !Rc::ptr_eq(o, &r) =>
-                                            {
-                                                Some(o.clone())
-                                            }
-                                            _ => None,
-                                        });
-                                    if let Some(old) = old {
-                                        self.typed_ref_unregister(
-                                            &old,
-                                            &decl,
-                                            prop_name.as_bytes(),
-                                        );
-                                    }
-                                    self.typed_ref_register_owned(
-                                        &r,
-                                        &decl,
-                                        prop_name.as_bytes(),
-                                        pt,
-                                        Some(obj),
-                                    );
                                 }
                                 obj.borrow_mut()
-                                    .set_property_ref(prop_name.as_bytes().to_vec(), r);
+                                    .set_property_ref(prop_name.as_bytes().to_vec(), r.clone());
+                                if let Some(s) = src {
+                                    typed_ref::add_source(&r, s);
+                                }
                             }
                             other => {
                                 // Non-referenceable value (e.g. by-value call result):
@@ -44451,46 +44451,6 @@ impl Vm {
                             });
                         }
                     }
-                    // Writing through a reference bound to other typed properties.
-                    if !self.typed_refs.is_empty() {
-                        if let Value::Object(o) = &obj_val_raw {
-                            let slot_ref =
-                                o.borrow().properties.iter().find_map(|(k, v)| match v {
-                                    Value::Reference(r) if k.as_slice() == prop_name.as_bytes() => {
-                                        Some(r.clone())
-                                    }
-                                    _ => None,
-                                });
-                            if let Some(r) = slot_ref {
-                                let overflow =
-                                    Self::incdec_overflow_kind(op_array, ip, &op.op2, &value);
-                                if let Err(msg) = self.typed_ref_check(
-                                    &r,
-                                    &mut value,
-                                    op_array.strict_types || overflow.is_some(),
-                                    Some(prop_name.as_bytes()),
-                                ) {
-                                    let msg = match overflow {
-                                        Some(inc) => static_props::typed_ref_incdec_msg(&msg, inc),
-                                        None => msg,
-                                    };
-                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
-                                    self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                        exception_handlers.last()
-                                    {
-                                        pending_calls_catch_depth = Some(*eh_pc_depth);
-                                        ip = *catch_target as usize;
-                                        continue;
-                                    }
-                                    return Err(VmError {
-                                        message: format!("Uncaught TypeError: {}", msg),
-                                        line: op.line,
-                                    });
-                                }
-                            }
-                        }
-                    }
                     // Only overwriting an object/array/reference (or a slot we
                     // cannot see, e.g. mangled or magic) can release anything.
                     let may_release = self.has_release_work()
@@ -45278,23 +45238,61 @@ impl Vm {
                                 }
                             }
                             // Enforce typed properties (only if no readonly error, since readonly takes precedence)
+                            let mut continue_to_ref_check = false;
                             if readonly_error.is_none() && visibility_error.is_none() {
                                 if let Some(ref pt) = prop_type {
+                                    // ++/-- past the int range on a property that
+                                    // does not accept float (zend_incdec_typed_prop):
+                                    // rejected before any coercion.
+                                    let incdec_overflow =
+                                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &value)
+                                            .is_some()
+                                            && variance::TypeView::from_param_type(pt).mask
+                                                & variance::T_DOUBLE
+                                                == 0;
+                                    // A typed reference in the slot reports the
+                                    // overflow itself (zend_incdec_typed_ref).
+                                    if incdec_overflow
+                                        && typed_ref::any()
+                                        && matches!(
+                                            obj.borrow().properties.iter().find(|(k, _)| k.as_slice() == prop_name.as_bytes()),
+                                            Some((_, Value::Reference(r))) if typed_ref::is_typed(r)
+                                        )
+                                    {
+                                        continue_to_ref_check = true;
+                                    }
+                                    let skip_coercion = incdec_overflow;
+                                    let incdec_overflow = incdec_overflow && !continue_to_ref_check;
                                     // Try coercion in weak mode
-                                    if !op_array.strict_types {
+                                    if !op_array.strict_types && !skip_coercion {
                                         // Emit implicit float-to-int deprecation BEFORE coercion truncates
                                         self.emit_implicit_float_to_int_if_needed(
                                             &value, pt, op.line,
                                         );
                                     }
-                                    Self::coerce_value_to_type(
-                                        &mut value,
-                                        pt,
-                                        op_array.strict_types,
-                                    );
-                                    if !self.value_matches_type(&value, pt) {
-                                        let class_display =
-                                            crate::value::display_class_name(&class_name_orig);
+                                    if !skip_coercion {
+                                        Self::coerce_value_to_type(
+                                            &mut value,
+                                            pt,
+                                            op_array.strict_types,
+                                        );
+                                    }
+                                    if !continue_to_ref_check
+                                        && (incdec_overflow
+                                            || !self.value_matches_type_mode(
+                                                &value,
+                                                pt,
+                                                op_array.strict_types,
+                                            ))
+                                    {
+                                        let declaring_lower = declaring_class.to_ascii_lowercase();
+                                        let class_display = self
+                                            .classes
+                                            .get(&declaring_lower)
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| {
+                                                crate::value::display_class_name(&class_name_orig)
+                                            });
                                         let prop_display =
                                             String::from_utf8_lossy(prop_name.as_bytes())
                                                 .to_string();
@@ -45638,6 +45636,32 @@ impl Vm {
                                     }
                                 }
                                 let was_new = !obj.borrow().has_property(prop_name.as_bytes());
+                                if typed_ref::any() && !was_new {
+                                    let incdec =
+                                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &value);
+                                    if let Err(msg) = self.typed_ref_slot_write_check(
+                                        obj,
+                                        prop_name.as_bytes(),
+                                        &mut value,
+                                        op_array.strict_types,
+                                        incdec,
+                                    ) {
+                                        let exc =
+                                            self.create_exception(b"TypeError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                                 obj.borrow_mut()
                                     .set_property(prop_name.as_bytes().to_vec(), value);
                                 if was_new && !self.native_class_handlers.is_empty() {

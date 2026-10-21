@@ -11641,6 +11641,35 @@ impl Compiler {
                     } else if elem.by_ref {
                         // [&$var] or ['k' => &$var] — store reference into array slot
                         // Compile the value as a CV (must be a variable) and make it a reference
+                        if let ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        } = &elem.value.kind
+                        {
+                            // [&$obj->prop]: the element binds to the property slot.
+                            let ref_tmp =
+                                self.compile_property_ref(object, property, expr.span.line)?;
+                            if let Some(key_expr) = &elem.key {
+                                let key = self.compile_expr(key_expr)?;
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArraySetRef,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: OperandType::Tmp(ref_tmp),
+                                    result: key,
+                                    line: expr.span.line,
+                                });
+                            } else {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayAppendRef,
+                                    op1: OperandType::Tmp(arr_tmp),
+                                    op2: OperandType::Tmp(ref_tmp),
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                            }
+                            continue;
+                        }
                         let val = self.compile_expr(&elem.value)?;
                         if let OperandType::Cv(cv) = val {
                             self.op_array.emit(Op {
