@@ -145,6 +145,25 @@ pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeOb
 }
 
 impl Vm {
+    /// Run the extension create_object hook for a freshly allocated object
+    /// of a (subclass of a) built-in class.
+    pub fn run_object_create_hook(&mut self, rc: &Rc<RefCell<PhpObject>>) {
+        if self.object_create_handlers.is_empty() {
+            return;
+        }
+        let mut cur = rc.borrow().class_name.to_ascii_lowercase();
+        for _ in 0..64 {
+            if let Some(h) = self.object_create_handlers.get(&cur).copied() {
+                h(self, rc);
+                return;
+            }
+            match self.classes.get(&cur).and_then(|c| c.parent.clone()) {
+                Some(p) => cur = p.to_ascii_lowercase(),
+                None => return,
+            }
+        }
+    }
+
     /// Place named arguments of a native method call at their positions.
     /// `args[offset..]` are the positional arguments. Returns Err(name) for an
     /// unknown parameter name.
@@ -582,6 +601,10 @@ pub struct Vm {
     /// constructor dispatch (SPL/Reflection/etc.).
     pub object_construct_handlers:
         std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
+    /// create_object hooks keyed by lowercase built-in class name: called for
+    /// every `new` of the class or a subclass, before the constructor.
+    pub object_create_handlers:
+        std::collections::HashMap<Vec<u8>, fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: std::collections::HashMap<Vec<u8>, NativeClassHandler>,
     /// INI on-update validators keyed by directive name: (vm, new value, at_startup) -> accept.
@@ -1619,6 +1642,7 @@ impl Vm {
             gmp_to_hex: None,
             gmp_from_hex: None,
             object_construct_handlers: std::collections::HashMap::new(),
+            object_create_handlers: std::collections::HashMap::new(),
             native_class_handlers: std::collections::HashMap::new(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
@@ -2900,7 +2924,9 @@ impl Vm {
             _ => b.clone(),
         };
         match (&a_inner, &b_inner) {
-            (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj)) => {
+            (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj))
+                if crate::value::native_cast(obj, 1).is_none() =>
+            {
                 let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
                     &format!(
@@ -2910,7 +2936,9 @@ impl Vm {
                     line,
                 );
             }
-            (Value::Object(obj), Value::Double(_)) | (Value::Double(_), Value::Object(obj)) => {
+            (Value::Object(obj), Value::Double(_)) | (Value::Double(_), Value::Object(obj))
+                if crate::value::native_cast(obj, 2).is_none() =>
+            {
                 let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
                     &format!(
@@ -18646,7 +18674,28 @@ impl Vm {
                             } else {
                                 self.find_native_class_handler(&class_part)
                             } {
-                                if (h.has_method)(&native, &method_part, true) {
+                                // parent::method() from a subclass instance method reaches the
+                                // native instance method with $this.
+                                let fwd_this: Option<Value> = if is_forwarding_call
+                                    && !(h.has_method)(&native, &method_part, true)
+                                    && (h.has_method)(&native, &method_part, false)
+                                {
+                                    match cvs.first() {
+                                        Some(v @ Value::Object(o)) => {
+                                            let cl = o.borrow().class_name.to_ascii_lowercase();
+                                            if cl == native || self.class_extends(&cl, &native) {
+                                                Some(v.clone())
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                if (h.has_method)(&native, &method_part, true) || fwd_this.is_some()
+                                {
                                     let called: Vec<u8> = if is_forwarding_call {
                                         self.called_class_stack
                                             .last()
@@ -18680,7 +18729,7 @@ impl Vm {
                                             &native,
                                             &method_part,
                                             &called,
-                                            None,
+                                            fwd_this.as_ref(),
                                             &args,
                                         ),
                                         Err(n) => {
@@ -23003,10 +23052,33 @@ impl Vm {
                                         raw_class_lower.clone()
                                     };
 
-                                    // Extension-registered native constructor handlers (e.g. GMP).
-                                    if let Some(&handler) =
-                                        self.object_construct_handlers.get(class_lower.as_slice())
-                                    {
+                                    // Extension-registered native constructor handlers (e.g. GMP),
+                                    // also reached from user subclasses of the class.
+                                    let construct_handler = self
+                                        .object_construct_handlers
+                                        .get(class_lower.as_slice())
+                                        .copied()
+                                        .or_else(|| {
+                                            let mut cur = raw_class_lower.clone();
+                                            for _ in 0..64 {
+                                                if let Some(h) = self
+                                                    .object_construct_handlers
+                                                    .get(cur.as_slice())
+                                                {
+                                                    return Some(*h);
+                                                }
+                                                match self
+                                                    .classes
+                                                    .get(&cur)
+                                                    .and_then(|c| c.parent.clone())
+                                                {
+                                                    Some(p) => cur = p.to_ascii_lowercase(),
+                                                    None => return None,
+                                                }
+                                            }
+                                            None
+                                        });
+                                    if let Some(handler) = construct_handler {
                                         drop(obj_mut);
                                         let args_clone = call.args.clone();
                                         match handler(self, &args_clone, op.line) {
@@ -26568,8 +26640,15 @@ impl Vm {
                     } else {
                         None
                     };
+                    let native = if let Value::Object(obj) = &val {
+                        crate::value::native_cast(obj, 1)
+                    } else {
+                        None
+                    };
                     let result = if let Some(n) = long_val {
                         n
+                    } else if let Some(v) = native {
+                        v.to_long()
                     } else {
                         if let Value::Object(obj) = &val {
                             let class_name = {
@@ -26605,8 +26684,15 @@ impl Vm {
                     } else {
                         None
                     };
+                    let native = if let Value::Object(obj) = &val {
+                        crate::value::native_cast(obj, 2)
+                    } else {
+                        None
+                    };
                     let result = if let Some(d) = double_val {
                         d
+                    } else if let Some(v) = native {
+                        v.to_double()
                     } else {
                         if let Value::Object(obj) = &val {
                             let class_name = {
@@ -27403,8 +27489,9 @@ impl Vm {
                     self.exit_requested = true;
                     return Ok(Value::Null);
                 }
-                OpCode::ArrayGet | OpCode::ArrayGetRW => {
+                OpCode::ArrayGet | OpCode::ArrayGetRW | OpCode::ArrayGetObjW => {
                     let is_rw = matches!(op.opcode, OpCode::ArrayGetRW);
+                    let obj_w = matches!(op.opcode, OpCode::ArrayGetObjW);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // If the source is an uninitialized superglobal CV, fall back to the global.
                     if matches!(arr_val, Value::Null | Value::Undef) {
@@ -27433,7 +27520,9 @@ impl Vm {
                     if let Value::Object(obj) = &arr_val.deref() {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension) {
                             let k = key_val.deref();
-                            if let Some(v) = f(self, obj, Some(&k), if is_rw { 1 } else { 0 }) {
+                            if let Some(v) =
+                                f(self, obj, Some(&k), if is_rw || obj_w { 1 } else { 0 })
+                            {
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
@@ -40681,6 +40770,9 @@ impl Vm {
                     }
 
                     let obj_value = Value::Object(Rc::new(RefCell::new(obj)));
+                    if let Value::Object(ref rc) = obj_value {
+                        self.run_object_create_hook(rc);
+                    }
 
                     // Track objects with __destruct for shutdown-time destruction
                     // Note: we track the object here, but mark it with __ctor_pending.
@@ -40711,7 +40803,10 @@ impl Vm {
                     self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
-                OpCode::PropertyGet | OpCode::PropertyGetRW | OpCode::PropertyGetW => {
+                OpCode::PropertyGet
+                | OpCode::PropertyGetRW
+                | OpCode::PropertyGetW
+                | OpCode::PropertyGetObjW => {
                     if !matches!(op.opcode, OpCode::PropertyGetW) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     } else if let OperandType::Tmp(t) = op.result {
@@ -40733,16 +40828,19 @@ impl Vm {
                             } else {
                                 1
                             };
+                            let mode = if matches!(op.opcode, OpCode::PropertyGetObjW) {
+                                1
+                            } else {
+                                mode
+                            };
                             if let Some(v) = f(self, obj, prop_name.as_bytes(), mode) {
-                                if self.current_exception.is_some() {
-                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                        exception_handlers.pop()
-                                    {
-                                        pending_calls_catch_depth = Some(saved_pc);
-                                        ip = catch_target as usize;
-                                        continue;
-                                    }
-                                }
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
                                 self.write_operand(
                                     &op.result,
                                     v,
@@ -44612,8 +44710,17 @@ impl Vm {
             return self.value_to_string(&inner);
         }
         if let Value::Object(o) = val {
-            if let Some(v) = crate::value::native_cast(o, 3) {
-                return v.to_php_string();
+            // a user-defined __toString() wins over the extension cast
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            let user_tostring = self
+                .classes
+                .get(&cl)
+                .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                .unwrap_or(false);
+            if !user_tostring {
+                if let Some(v) = crate::value::native_cast(o, 3) {
+                    return v.to_php_string();
+                }
             }
         }
         if let Value::Object(obj) = val {

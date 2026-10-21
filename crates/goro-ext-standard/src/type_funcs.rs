@@ -326,6 +326,11 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if matches!(&derefed, Value::Array(_)) {
         vm.emit_warning("Array to string conversion");
     }
+    if let Value::Object(obj) = &derefed {
+        if let Some(v) = goro_core::value::native_cast(obj, 3) {
+            return Ok(Value::String(v.to_php_string()));
+        }
+    }
     // Object without a __toString hook is not convertible — PHP throws Error.
     if let Value::Object(obj) = &derefed {
         let class_name_bytes = obj.borrow().class_name.clone();
@@ -389,11 +394,14 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let new_val = match type_str.to_ascii_lowercase().as_str() {
             "int" | "integer" => {
                 if let Value::Object(obj) = &current {
-                    let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
-                    _vm.emit_warning(&format!(
-                        "Object of class {} could not be converted to int",
-                        class_name
-                    ));
+                    if goro_core::value::native_cast(obj, 1).is_none() {
+                        let class_name =
+                            goro_core::value::display_class_name(&obj.borrow().class_name);
+                        _vm.emit_warning(&format!(
+                            "Object of class {} could not be converted to int",
+                            class_name
+                        ));
+                    }
                 }
                 let l = current.to_long();
                 let line = _vm.current_line;
@@ -402,11 +410,14 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             "float" | "double" => {
                 if let Value::Object(obj) = &current {
-                    let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
-                    _vm.emit_warning(&format!(
-                        "Object of class {} could not be converted to float",
-                        class_name
-                    ));
+                    if goro_core::value::native_cast(obj, 2).is_none() {
+                        let class_name =
+                            goro_core::value::display_class_name(&obj.borrow().class_name);
+                        _vm.emit_warning(&format!(
+                            "Object of class {} could not be converted to float",
+                            class_name
+                        ));
+                    }
                 }
                 Value::Double(current.to_double())
             }

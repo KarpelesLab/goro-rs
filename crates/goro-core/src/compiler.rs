@@ -8593,6 +8593,109 @@ impl Compiler {
         self.compile_expr(array)
     }
 
+    /// Compile the object of a property write (`X->p = v`). A property
+    /// chain is fetched for writing (FETCH_OBJ_W); `[]` inside the chain is
+    /// a dimension write fetch.
+    fn compile_obj_write_base(&mut self, object: &Expr) -> CompileResult<OperandType> {
+        fn has_append(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::ArrayAccess { index: None, .. } => true,
+                ExprKind::ArrayAccess { array, .. } => has_append(array),
+                ExprKind::PropertyAccess {
+                    object,
+                    nullsafe: false,
+                    ..
+                } => has_append(object),
+                _ => false,
+            }
+        }
+        match &object.kind {
+            ExprKind::PropertyAccess {
+                object: inner,
+                property,
+                nullsafe: false,
+            } => {
+                let base = self.compile_obj_write_base(inner)?;
+                let name = self.compile_property_name(property)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::PropertyGetObjW,
+                    op1: base,
+                    op2: name,
+                    result: OperandType::Tmp(tmp),
+                    line: object.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+            ExprKind::ArrayAccess { .. } if has_append(object) => {
+                self.compile_dim_write_base_obj(object)
+            }
+            ExprKind::ArrayAccess {
+                array: inner,
+                index: Some(idx),
+            } => {
+                let base = self.compile_obj_write_base(inner)?;
+                let key = self.compile_expr(idx)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::ArrayGetObjW,
+                    op1: base,
+                    op2: key,
+                    result: OperandType::Tmp(tmp),
+                    line: object.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+            _ => self.compile_expr(object),
+        }
+    }
+
+    /// Like compile_dim_write_base, for the `[]`-containing base of a
+    /// property write.
+    fn compile_dim_write_base_obj(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::ArrayAccess {
+            array: inner,
+            index,
+        } = &e.kind
+        {
+            let container = match &inner.kind {
+                ExprKind::PropertyAccess {
+                    object,
+                    property,
+                    nullsafe: false,
+                } => {
+                    let obj = self.compile_obj_write_base(object)?;
+                    let name = self.compile_property_name(property)?;
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::PropertyGetW,
+                        op1: obj,
+                        op2: name,
+                        result: OperandType::Tmp(tmp),
+                        line: inner.span.line,
+                    });
+                    OperandType::Tmp(tmp)
+                }
+                ExprKind::ArrayAccess { .. } => self.compile_dim_write_base_obj(inner)?,
+                _ => self.compile_expr(inner)?,
+            };
+            let key = match index {
+                Some(idx) => self.compile_expr(idx)?,
+                None => OperandType::Unused,
+            };
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayGetW,
+                op1: container,
+                op2: key,
+                result: OperandType::Tmp(tmp),
+                line: e.span.line,
+            });
+            return Ok(OperandType::Tmp(tmp));
+        }
+        self.compile_expr(e)
+    }
+
     /// Emit `throw new \Error($msg)`.
     fn compile_throw_error(&mut self, msg: &[u8], line: u32) -> CompileResult<()> {
         let span = goro_parser::token::Span::new(0, 0, line);
@@ -8781,7 +8884,7 @@ impl Compiler {
                     ExprKind::PropertyAccess {
                         object, property, ..
                     } => {
-                        let obj = self.compile_expr(object)?;
+                        let obj = self.compile_obj_write_base(object)?;
                         let prop_operand = match &property.kind {
                             ExprKind::Identifier(name) => {
                                 let name_idx = self

@@ -2508,7 +2508,9 @@ pub fn reflection_class_method(
                     new_obj.set_property(name, resolved);
                 }
             }
-            Some(Value::Object(Rc::new(RefCell::new(new_obj))))
+            let rc = Rc::new(RefCell::new(new_obj));
+            vm.run_object_create_hook(&rc);
+            Some(Value::Object(rc))
         }
         b"getextension" => Some(Value::Null),
         b"getextensionname" => Some(Value::False),

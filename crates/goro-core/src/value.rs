@@ -712,6 +712,14 @@ impl Value {
                 Some((NumStr::Double(f), _)) => Value::Double(f),
                 None => Value::Long(0),
             },
+            Value::Object(o) if native_cast(o, 3).is_some() => {
+                let s = native_cast(o, 3).unwrap().to_php_string();
+                match parse_numeric_str(s.as_bytes(), true) {
+                    Some((NumStr::Long(n), _)) => Value::Long(n),
+                    Some((NumStr::Double(f), _)) => Value::Double(f),
+                    None => Value::Long(0),
+                }
+            }
             Value::Array(_) | Value::Object(_) | Value::Generator(_) => {
                 Value::Long(if self.is_truthy() { 1 } else { 0 })
             }

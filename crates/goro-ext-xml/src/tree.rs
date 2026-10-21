@@ -291,7 +291,7 @@ impl Tree {
     }
 
     pub fn new_cdata(&mut self, doc: Option<NodeId>, content: &str) -> NodeId {
-        let id = self.new_node(doc, NType::CData, "cdata");
+        let id = self.new_node(doc, NType::CData, "");
         self.nodes[id].content = content.to_string();
         id
     }

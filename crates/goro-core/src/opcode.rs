@@ -346,6 +346,15 @@ pub enum OpCode {
     /// PropertyGet, but a missing/null property is initialised to an array,
     /// a shared array is separated, and readonly properties are rejected.
     PropertyGetW,
+    /// Fetch the object of a nested property write (`$a->b->c = v`,
+    /// FETCH_OBJ_W): behaves like PropertyGet for ordinary objects, while
+    /// extension objects (SimpleXML) get a write fetch that may create
+    /// the property.
+    PropertyGetObjW,
+    /// Fetch `$a[k]` as the object of a property write (FETCH_DIM_W before
+    /// ASSIGN_OBJ): like ArrayGet for arrays; extension objects get a write
+    /// fetch (SimpleXML creates the element).
+    ArrayGetObjW,
     /// Jump to op1 (JmpTarget) if the pending call's next positional
     /// parameter is by-reference (runtime FUNC_ARG dispatch).
     JmpIfArgByRef,

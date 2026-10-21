@@ -1725,6 +1725,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 }
                 if let Value::Object(obj) = arg.deref() {
+                    if goro_core::value::native_cast(&obj, 1).is_some() {
+                        return;
+                    }
                     if let Some(vm_ref) = vm.as_deref_mut() {
                         let class_name =
                             goro_core::value::display_class_name(&obj.borrow().class_name);
@@ -1794,6 +1797,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             }
             fn object_warn_float(vm: &mut Option<&mut Vm>, arg: &Value) {
                 if let Value::Object(obj) = arg.deref() {
+                    if goro_core::value::native_cast(&obj, 2).is_some() {
+                        return;
+                    }
                     if let Some(vm_ref) = vm.as_deref_mut() {
                         let class_name =
                             goro_core::value::display_class_name(&obj.borrow().class_name);

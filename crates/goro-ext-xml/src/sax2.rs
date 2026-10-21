@@ -666,6 +666,24 @@ pub fn parse_att_value_children(t: &mut Tree, doc: Option<NodeId>, attr: NodeId,
                 continue;
             }
             flush(t, &mut buf);
+            // the entity content is parsed (as attribute content) on first use
+            if let Some(d) = doc {
+                if let Some(ent) = t.get_doc_entity(d, &name) {
+                    let pending = match &t.nodes[ent].extra {
+                        Extra::Entity(info) => !info.checked && t.nodes[ent].children.is_none(),
+                        _ => false,
+                    };
+                    if pending {
+                        if let Extra::Entity(info) = &mut t.nodes[ent].extra {
+                            info.checked = true;
+                        }
+                        let content = t.nodes[ent].content.clone();
+                        if !content.is_empty() {
+                            parse_att_value_children(t, doc, ent, &content);
+                        }
+                    }
+                }
+            }
             let r = t.new_entity_ref(doc, &name);
             t.link_child_raw(attr, r);
             continue;

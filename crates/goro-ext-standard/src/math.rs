@@ -1686,6 +1686,11 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
     let s = match &val {
         Value::String(s) if base != 10 => s.as_bytes().to_vec(),
+        Value::Object(obj) if goro_core::value::native_cast(obj, 1).is_some() => {
+            return Ok(Value::Long(
+                goro_core::value::native_cast(obj, 1).unwrap().to_long(),
+            ));
+        }
         Value::Object(obj) => {
             let cn = goro_core::value::display_class_name(&obj.borrow().class_name);
             vm.emit_warning(&format!(

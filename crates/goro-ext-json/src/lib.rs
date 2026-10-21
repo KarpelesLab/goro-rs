@@ -305,6 +305,22 @@ fn resolve_json_serializable_depth(
     match val {
         Value::Object(obj) => {
             let obj_ptr = Rc::as_ptr(obj) as usize;
+            // Extension objects (SimpleXML): encode their property table.
+            if let Some(f) = goro_core::vm::native_handlers(obj).and_then(|h| h.get_properties) {
+                if let Some(table) = f(vm, obj, 1) {
+                    let cn = obj.borrow().class_name.clone();
+                    let mut shadow = goro_core::object::PhpObject::new(cn, 0);
+                    for (k, v) in table.iter() {
+                        let name = match k {
+                            goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        };
+                        let rv = resolve_json_serializable_depth(vm, v, depth + 1, seen);
+                        shadow.properties.push((name, rv));
+                    }
+                    return Value::Object(Rc::new(std::cell::RefCell::new(shadow)));
+                }
+            }
             let obj_ref = obj.borrow();
             // Skip enum cases
             if obj_ref.has_property(b"__enum_case") {

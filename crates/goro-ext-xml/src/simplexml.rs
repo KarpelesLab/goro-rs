@@ -176,6 +176,17 @@ fn node_as_zval(
     Value::Object(new_sxe_object(vm, &cn, s))
 }
 
+/// php_error_docref(NULL, E_WARNING, ...) from an object handler: the
+/// message is prefixed with the active function ("main" at top level).
+pub fn docref_warning(vm: &mut Vm, msg: &str) {
+    let f = vm
+        .call_stack
+        .last()
+        .map(|f| f.0.clone())
+        .unwrap_or_else(|| "main".to_string());
+    vm.emit_warning(&format!("{}(): {}", f, msg));
+}
+
 fn throw_error(vm: &mut Vm, class: &[u8], msg: &str) {
     let e = vm.create_exception(class, msg, vm.current_line);
     vm.current_exception = Some(e);
@@ -724,10 +735,13 @@ fn prop_dim_read(
                 if let Some(Member::Long(n)) = &mem {
                     if *n > 0 {
                         let nm = tree::with(|t| t.nodes[mynode].name.clone());
-                        vm.emit_warning(&format!(
-                            "Cannot add element {} number {} when only 0 such elements exist",
-                            nm, n
-                        ));
+                        docref_warning(
+                            vm,
+                            &format!(
+                                "Cannot add element {} number {} when only 0 such elements exist",
+                                nm, n
+                            ),
+                        );
                     }
                 }
             } else if let Some(Member::Long(n)) = &mem {
@@ -743,10 +757,13 @@ fn prop_dim_read(
                 if let Some(Member::Long(n)) = &mem {
                     if cnt < *n {
                         let nm = tree::with(|t| t.nodes[mynode].name.clone());
-                        vm.emit_warning(&format!(
-                            "Cannot add element {} number {} when only {} such elements exist",
-                            nm, n, cnt
-                        ));
+                        docref_warning(
+                            vm,
+                            &format!(
+                                "Cannot add element {} number {} when only {} such elements exist",
+                                nm, n, cnt
+                            ),
+                        );
                     }
                 }
                 let newn = tree::with(|t| {
@@ -1015,10 +1032,13 @@ fn prop_dim_write(
                     if let Some(Member::Long(n)) = &mem {
                         if *n > 0 {
                             let nm = tree::with(|t| t.nodes[mynode].name.clone());
-                            vm.emit_warning(&format!(
-                                "Cannot add element {} number {} when only 0 such elements exist",
-                                nm, n
-                            ));
+                            docref_warning(
+                                vm,
+                                &format!(
+                                    "Cannot add element {} number {} when only 0 such elements exist",
+                                    nm, n
+                                ),
+                            );
                             return None;
                         }
                     }
@@ -1029,7 +1049,6 @@ fn prop_dim_write(
                     if newnode.is_some() {
                         counter += 1;
                     }
-                    cursor = r;
                 }
             }
             Some(Member::Str(name)) => {
@@ -1065,7 +1084,10 @@ fn prop_dim_write(
             });
         }
     } else if counter > 1 {
-        vm.emit_warning("Cannot assign to an array of nodes (duplicate subnodes or attr detected)");
+        docref_warning(
+            vm,
+            "Cannot assign to an array of nodes (duplicate subnodes or attr detected)",
+        );
         return None;
     } else if access == Access::Elements {
         if cursor.is_none() {
@@ -1086,10 +1108,13 @@ fn prop_dim_write(
         } else if let Some(Member::Long(n)) = &mem {
             if cnt < *n {
                 let nm = tree::with(|t| t.nodes[mynode].name.clone());
-                vm.emit_warning(&format!(
-                    "Cannot add element {} number {} when only {} such elements exist",
-                    nm, n, cnt
-                ));
+                docref_warning(
+                    vm,
+                    &format!(
+                        "Cannot add element {} number {} when only {} such elements exist",
+                        nm, n, cnt
+                    ),
+                );
             }
             newnode = tree::with(|t| {
                 let parent = t.nodes[mynode].parent?;
@@ -1106,10 +1131,13 @@ fn prop_dim_write(
     } else {
         match mem.as_ref().unwrap() {
             Member::Long(n) => {
-                vm.emit_warning(&format!(
-                    "Cannot change attribute number {} when only {} attributes exist",
-                    n, nodendx
-                ));
+                docref_warning(
+                    vm,
+                    &format!(
+                        "Cannot change attribute number {} when only {} attributes exist",
+                        n, nodendx
+                    ),
+                );
             }
             Member::Str(name) => {
                 newnode = Some(tree::with(|t| {
@@ -2172,6 +2200,17 @@ fn simplexml_import_dom(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(new_sxe_object(vm, &class, s)))
 }
 
+/// create_object: every SimpleXMLElement starts uninitialized.
+fn create_object(vm: &mut Vm, o: &Obj) {
+    let s = Sxe::new();
+    let cl = o.borrow().class_name.to_ascii_lowercase();
+    s.fptr_count.set(find_fptr_count(vm, &cl));
+    o.borrow_mut().native = Some(NativeData {
+        data: Rc::new(s) as Rc<dyn Any>,
+        handlers: &HANDLERS,
+    });
+}
+
 /// Native constructor `new SimpleXMLElement(...)`.
 fn construct(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
     let this = match args.first() {
@@ -2382,7 +2421,12 @@ fn call_method(
         "__tostring" => Value::String(PhpString::from_string(
             cast_contents(&s).unwrap_or_default(),
         )),
-        "count" => Value::Long(count_elements(&s)),
+        "count" => {
+            if get_node(vm, &s).is_none() {
+                return Value::Null;
+            }
+            Value::Long(count_elements(&s))
+        }
         "getname" => {
             let n = match get_node(vm, &s) {
                 Some(n) => n,
@@ -2837,9 +2881,33 @@ fn call_method(
 // Registration
 
 pub fn register(vm: &mut Vm) {
-    vm.register_function(b"simplexml_load_string", simplexml_load_string);
-    vm.register_function(b"simplexml_load_file", simplexml_load_file);
-    vm.register_function(b"simplexml_import_dom", simplexml_import_dom);
+    vm.register_function_with_params(
+        b"simplexml_load_string",
+        simplexml_load_string,
+        &[
+            b"data",
+            b"class_name",
+            b"options",
+            b"namespace_or_prefix",
+            b"is_prefix",
+        ],
+    );
+    vm.register_function_with_params(
+        b"simplexml_load_file",
+        simplexml_load_file,
+        &[
+            b"filename",
+            b"class_name",
+            b"options",
+            b"namespace_or_prefix",
+            b"is_prefix",
+        ],
+    );
+    vm.register_function_with_params(
+        b"simplexml_import_dom",
+        simplexml_import_dom,
+        &[b"node", b"class_name"],
+    );
     vm.register_extension(b"simplexml");
 
     let mut ce = ClassEntry::new(b"SimpleXMLElement".to_vec());
@@ -2872,4 +2940,6 @@ pub fn register(vm: &mut Vm) {
         .insert(b"simplexmlelement".to_vec(), construct);
     vm.object_construct_handlers
         .insert(b"simplexmliterator".to_vec(), construct);
+    vm.object_create_handlers
+        .insert(b"simplexmlelement".to_vec(), create_object);
 }
