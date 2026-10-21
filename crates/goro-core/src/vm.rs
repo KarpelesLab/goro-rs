@@ -25016,9 +25016,31 @@ impl Vm {
                                         };
                                         return Err(VmError { message: msg, line: op.line });
                                     }
+                                    // Traversables: by-ref only for ArrayObject/ArrayIterator.
+                                    let spl_ref_target = match self.spl_foreach_ref_target(obj) {
+                                        Ok(t) => t,
+                                        Err(()) => {
+                                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                                pending_calls_catch_depth = Some(saved_pc);
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                            let msg = match &self.current_exception {
+                                                Some(Value::Object(o)) => {
+                                                    let ob = o.borrow();
+                                                    format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name),
+                                                        ob.get_property(b"message").to_php_string().to_string_lossy())
+                                                }
+                                                _ => "Uncaught exception".to_string(),
+                                            };
+                                            return Err(VmError { message: msg, line: op.line });
+                                        }
+                                    };
                                     // WeakMap by-ref iteration: build refs into weak_map_entries.
                                     let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    if class_lower == b"weakmap" {
+                                    if let Some(rc) = spl_ref_target {
+                                        rc
+                                    } else if class_lower == b"weakmap" {
                                         let wm_id = obj.borrow().object_id;
                                         let mut arr = PhpArray::new();
                                         let mut key_objs: Vec<Value> = Vec::new();

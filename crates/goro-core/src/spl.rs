@@ -99,6 +99,44 @@ impl Vm {
         }
     }
 
+    /// foreach-by-reference over an object. Traversables other than the
+    /// ArrayObject/ArrayIterator family cannot be iterated by reference
+    /// (Err: exception set). ArrayObject/ArrayIterator iterate their
+    /// backing array in place (Ok(Some)). Plain objects: Ok(None).
+    pub(crate) fn spl_foreach_ref_target(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Result<Option<Rc<RefCell<PhpArray>>>, ()> {
+        let cl = obj_class_lower(obj);
+        if cl == b"weakmap" {
+            return Ok(None);
+        }
+        if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_some() {
+            return Ok(match obj.borrow().get_property(b"__spl_array") {
+                Value::Array(a) => Some(a),
+                _ => None,
+            });
+        }
+        let is_iter = self.class_implements_interface(&cl, b"iterator")
+            || crate::vm::is_builtin_subclass(&cl, b"iterator");
+        if is_iter {
+            self.spl_throw(b"Error", "An iterator cannot be used with foreach by reference");
+            return Err(());
+        }
+        let is_agg = self.class_implements_interface(&cl, b"iteratoraggregate")
+            || crate::vm::is_builtin_subclass(&cl, b"iteratoraggregate");
+        if is_agg {
+            let it = self.call_object_method(&Value::Object(obj.clone()), b"getIterator", &[]);
+            if self.current_exception.is_some() {
+                return Err(());
+            }
+            if let Some(Value::Object(io)) = it {
+                return self.spl_foreach_ref_target(&io);
+            }
+        }
+        Ok(None)
+    }
+
     /// Load a serialized property table (possibly with mangled keys) into obj.
     pub(crate) fn spl_load_props(&mut self, obj: &Rc<RefCell<PhpObject>>, props: &PhpArray) {
         for (k, v) in props.iter() {
