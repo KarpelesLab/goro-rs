@@ -6104,8 +6104,35 @@ fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 // === Shell ===
 
-fn escapeshellarg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// Throw a ValueError from a builtin.
+fn throw_value_error_msg(vm: &mut Vm, msg: &str) -> VmError {
+    throw_value_error_in(vm, "", &[], msg)
+}
+
+/// Throw a ValueError with the builtin's own frame in the stack trace.
+fn throw_value_error_in(vm: &mut Vm, func: &str, args: &[Value], msg: &str) -> VmError {
+    if !func.is_empty() {
+        vm.call_stack.push((func.to_string(), vm.current_file.clone(), vm.current_line, args.to_vec(), false));
+    }
+    let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+    if !func.is_empty() {
+        vm.call_stack.pop();
+    }
+    vm.current_exception = Some(exc);
+    VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line }
+}
+
+/// sysconf(_SC_ARG_MAX) on Linux.
+const SHELL_CMD_MAX_LEN: usize = 2097152;
+
+fn escapeshellarg_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    if s.as_bytes().contains(&0) {
+        return Err(throw_value_error_in(vm, "escapeshellarg", args, "escapeshellarg(): Argument #1 ($arg) must not contain any null bytes"));
+    }
+    if s.len() > SHELL_CMD_MAX_LEN - 3 {
+        return Err(throw_value_error_msg(vm, &format!("Argument exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
+    }
     let mut result = Vec::new();
     result.push(b'\'');
     for &byte in s.as_bytes() {
@@ -6119,14 +6146,44 @@ fn escapeshellarg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn escapeshellcmd_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let str = s.as_bytes();
+    if str.contains(&0) {
+        return Err(throw_value_error_in(vm, "escapeshellcmd", args, "escapeshellcmd(): Argument #1 ($command) must not contain any null bytes"));
+    }
+    if str.len() > SHELL_CMD_MAX_LEN - 3 {
+        return Err(throw_value_error_msg(vm, &format!("Command exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
+    }
     let mut result = Vec::new();
-    for &byte in s.as_bytes() {
-        if b"#&;`|*?~<>^()[]{}$\\\x0A\xFF\"".contains(&byte) {
-            result.push(b'\\');
+    // Quotes are only escaped when unpaired (php_escape_shell_cmd).
+    let mut pending: Option<usize> = None;
+    for (x, &byte) in str.iter().enumerate() {
+        match byte {
+            b'"' | b'\'' => {
+                if pending.is_none() {
+                    if let Some(off) = str[x + 1..].iter().position(|&c| c == byte) {
+                        pending = Some(x + 1 + off);
+                    } else {
+                        result.push(b'\\');
+                    }
+                } else if pending.map(|p| str[p] == byte).unwrap_or(false) {
+                    pending = None;
+                } else {
+                    result.push(b'\\');
+                }
+                result.push(byte);
+            }
+            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^'
+            | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b'\x0A' | b'\xFF' => {
+                result.push(b'\\');
+                result.push(byte);
+            }
+            _ => result.push(byte),
         }
-        result.push(byte);
+    }
+    if result.len() > SHELL_CMD_MAX_LEN + 1 {
+        return Err(throw_value_error_msg(vm, &format!("Escaped command exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
@@ -8147,6 +8204,9 @@ fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
 }
 fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let secs = args.first().unwrap_or(&Value::Null).to_long();
+    if secs < 0 {
+        return Err(throw_value_error_in(_vm, "sleep", args, "sleep(): Argument #1 ($seconds) must be greater than or equal to 0"));
+    }
     // Actually sleep up to 2 seconds to support tests that compare timestamps
     // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
     if secs > 0 {
@@ -8157,10 +8217,12 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let usecs = args.first().unwrap_or(&Value::Null).to_long();
+    if usecs < 0 {
+        return Err(throw_value_error_in(_vm, "usleep", args, "usleep(): Argument #1 ($microseconds) must be greater than or equal to 0"));
+    }
     if usecs > 0 {
-        // For usleep, the typical use is short waits (e.g., 50ms in
-        // php_cli_server.inc). Sleep the actual duration up to 200ms.
-        let actual = (usecs as u64).min(200_000);
+        // Sleep the actual duration, capped at 2s (like sleep()).
+        let actual = (usecs as u64).min(2_000_000);
         std::thread::sleep(std::time::Duration::from_micros(actual));
     }
     Ok(Value::Null)
@@ -14140,8 +14202,14 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn php_uname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mode = args.first().unwrap_or(&Value::Null).to_php_string();
-    let mode_char = mode.as_bytes().first().copied().unwrap_or(b'a');
+    let mode = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"a"));
+    if mode.len() != 1 {
+        return Err(throw_value_error_msg(_vm, "php_uname(): Argument #1 ($mode) must be a single character"));
+    }
+    let mode_char = mode.as_bytes()[0];
+    if !matches!(mode_char, b'a' | b'm' | b'n' | b'r' | b's' | b'v') {
+        return Err(throw_value_error_msg(_vm, "php_uname(): Argument #1 ($mode) must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\""));
+    }
     let result = match mode_char {
         b's' => "Linux".to_string(),
         b'n' => "localhost".to_string(),
