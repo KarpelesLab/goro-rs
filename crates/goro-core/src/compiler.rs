@@ -8258,6 +8258,17 @@ impl Compiler {
         }
     }
 
+    /// Turn the StaticPropFetch producing `op` into a by-reference fetch.
+    fn ref_static_prop(&mut self, op: &OperandType) {
+        if let OperandType::Tmp(_) = op {
+            if let Some(f) = self.op_array.ops.iter_mut().rev().find(|o| o.result == *op) {
+                if f.opcode == OpCode::StaticPropFetch {
+                    f.opcode = OpCode::StaticPropGetRef;
+                }
+            }
+        }
+    }
+
     fn is_call_expr(e: &Expr) -> bool {
         matches!(
             e.kind,
@@ -8308,6 +8319,11 @@ impl Compiler {
             } => Ok(OperandType::Tmp(
                 self.compile_property_ref(object, property, line)?,
             )),
+            ExprKind::StaticPropertyAccess { .. } => {
+                let v = self.compile_expr(expr)?;
+                self.ref_static_prop(&v);
+                Ok(v)
+            }
             _ if Self::is_call_expr(expr) => {
                 let v = self.compile_expr(expr)?;
                 self.mark_ref_call(&v);
@@ -13955,6 +13971,20 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         Ok(value_op)
+                    }
+                    (ExprKind::Variable(target_name), ExprKind::StaticPropertyAccess { .. }) => {
+                        // $var = &C::$p
+                        let v = self.compile_expr(value)?;
+                        self.ref_static_prop(&v);
+                        let target_cv = self.op_array.get_or_create_cv(target_name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::AssignRef,
+                            op1: OperandType::Cv(target_cv),
+                            op2: v,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Cv(target_cv))
                     }
                     (ExprKind::Variable(target_name), _) => {
                         // $target = &<expr> — evaluate expr, assign to target, then make both reference

@@ -235,6 +235,18 @@ impl Vm {
         true
     }
 }
+/// Store a static property value, writing through a slot shared with a
+/// parent / child class or bound by reference.
+pub(crate) fn set_static_slot(map: &mut IndexMap<Vec<u8>, Value>, name: &[u8], value: Value) {
+    if let Some(Value::Reference(r)) = map.get(name) {
+        if !matches!(value, Value::Reference(_)) {
+            *r.borrow_mut() = value;
+            return;
+        }
+    }
+    map.insert(name.to_vec(), value);
+}
+
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
 
@@ -30462,7 +30474,7 @@ impl Vm {
                             let mut raw_val_opt = class
                                 .static_properties
                                 .get(prop_name.as_bytes())
-                                .cloned()
+                                .map(|v| v.deref())
                                 .or_else(|| class.constants.get(prop_name.as_bytes()).cloned());
                             // zend_get_class_constant_ex: visibility of the constant
                             if raw_val_opt.is_some()
@@ -30555,7 +30567,7 @@ impl Vm {
                                                 .get(prop_name.as_bytes())
                                                 .or_else(|| pc.constants.get(prop_name.as_bytes()))
                                             {
-                                                raw_val_opt = Some(v.clone());
+                                                raw_val_opt = Some(v.deref());
                                                 found = true;
                                                 break;
                                             }
@@ -31424,13 +31436,24 @@ impl Vm {
                         }
                     }
                     if let Some(class) = self.classes.get_mut(&class_lower) {
-                        class
-                            .static_properties
-                            .insert(prop_name.as_bytes().to_vec(), value);
+                        // Assigning writes through a shared (inherited or
+                        // referenced) slot; `C::$p = &$x` rebinds it.
+                        match (class.static_properties.get(prop_name.as_bytes()), value) {
+                            (Some(Value::Reference(r)), v) if !matches!(v, Value::Reference(_)) => {
+                                let r = r.clone();
+                                let old = std::mem::replace(&mut *r.borrow_mut(), v);
+                                drop(old);
+                            }
+                            (_, v) => {
+                                class
+                                    .static_properties
+                                    .insert(prop_name.as_bytes().to_vec(), v);
+                            }
+                        }
                     }
                 }
 
-                OpCode::StaticPropFetch => {
+                OpCode::StaticPropFetch | OpCode::StaticPropGetRef => {
                     // Fetch a static property only (no constant fallback).
                     // Used for `C::$p` reads.
                     let class_name_raw = self
@@ -31506,8 +31529,42 @@ impl Vm {
                         }
                     }
 
+                    if let (Some(_), OpCode::StaticPropGetRef) = (&value_opt, op.opcode) {
+                        // Bind to the slot itself (in the class that holds it).
+                        let mut owner = Some(class_lower.clone());
+                        let mut cell: Option<Value> = None;
+                        while let Some(cl) = owner {
+                            let Some(c) = self.classes.get_mut(&cl) else {
+                                break;
+                            };
+                            if let Some(slot) = c.static_properties.get_mut(prop_name.as_bytes()) {
+                                if !matches!(slot, Value::Reference(_)) {
+                                    let v = std::mem::replace(slot, Value::Null);
+                                    let v = if matches!(v, Value::Undef) {
+                                        Value::Null
+                                    } else {
+                                        v
+                                    };
+                                    *slot = Value::Reference(Rc::new(RefCell::new(v)));
+                                }
+                                cell = Some(slot.clone());
+                                break;
+                            }
+                            owner = c.parent.as_ref().map(|p| p.to_ascii_lowercase());
+                        }
+                        if let Some(c) = cell {
+                            self.write_operand(&op.result, c, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
+                    }
                     if let Some(v) = value_opt {
-                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                        self.write_operand(
+                            &op.result,
+                            v.deref(),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
                     } else {
                         let class_display = String::from_utf8_lossy(&resolved_class).to_string();
                         let prop_display = prop_name.to_string_lossy();
@@ -31613,7 +31670,7 @@ impl Vm {
                             }
                         }
                     }
-                    let result = match found_val {
+                    let result = match found_val.map(|v| v.deref()) {
                         Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
                         _ => Value::False,
                     };
@@ -37281,12 +37338,29 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // Inherit static properties
+                                // Inherit static properties: a child that does not
+                                // redeclare one shares the parent's slot.
                                 for (prop_name, prop_val) in &parent.static_properties {
                                     if !class.static_properties.contains_key(prop_name) {
+                                        let cell = match prop_val {
+                                            Value::Reference(r) => r.clone(),
+                                            v => {
+                                                let r = Rc::new(RefCell::new(v.clone()));
+                                                if let Some(pc) =
+                                                    self.classes.get_mut(&parent_lower)
+                                                {
+                                                    if let Some(slot) =
+                                                        pc.static_properties.get_mut(prop_name)
+                                                    {
+                                                        *slot = Value::Reference(r.clone());
+                                                    }
+                                                }
+                                                r
+                                            }
+                                        };
                                         class
                                             .static_properties
-                                            .insert(prop_name.clone(), prop_val.clone());
+                                            .insert(prop_name.clone(), Value::Reference(cell));
                                     }
                                 }
                             }
@@ -38569,7 +38643,14 @@ impl Vm {
                                 }
                                 // Copy trait static properties (class's own take precedence)
                                 for (prop_name, prop_val) in &trait_def.static_properties {
-                                    if !class.static_properties.contains_key(prop_name) {
+                                    // A trait's static is the class's own (separate from
+                                    // an inherited slot shared with the parent).
+                                    let inherited = matches!(
+                                        class.static_properties.get(prop_name),
+                                        Some(Value::Reference(_))
+                                    );
+                                    if inherited || !class.static_properties.contains_key(prop_name)
+                                    {
                                         // Patch __CLASS__ in static property defaults
                                         let patched_val = if let Value::String(s) = prop_val {
                                             if s.as_bytes() == trait_name_original.as_slice() {

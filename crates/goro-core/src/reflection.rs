@@ -2345,7 +2345,7 @@ pub fn reflection_class_method(
                             let val = lce
                                 .static_properties
                                 .get(&prop.name)
-                                .cloned()
+                                .map(|v| v.deref())
                                 .unwrap_or_else(|| prop.default.clone());
                             result.set(key, val);
                         }
@@ -2414,12 +2414,12 @@ pub fn reflection_class_method(
                         // Static value is stored on the declaring class
                         let val = if is_inherited {
                             rcls(vm, &decl_lower)
-                                .and_then(|d| d.static_properties.get(&prop.name).cloned())
+                                .and_then(|d| d.static_properties.get(&prop.name).map(|v| v.deref()))
                                 .unwrap_or_else(|| prop.default.clone())
                         } else {
                             ce.static_properties
                                 .get(&prop.name)
-                                .cloned()
+                                .map(|v| v.deref())
                                 .unwrap_or_else(|| prop.default.clone())
                         };
                         result.set(key, val);
@@ -4345,8 +4345,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 }
                 if let Some(ce) = vm.classes.get_mut(&class_lower) {
-                    ce.static_properties
-                        .insert(prop_name.as_bytes().to_vec(), coerced);
+                    crate::vm::set_static_slot(
+                        &mut ce.static_properties,
+                        prop_name.as_bytes(),
+                        coerced,
+                    );
                 }
                 Some(Value::Null)
             }
@@ -7329,8 +7332,11 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         value = coerced;
                     }
                     if let Some(ce) = vm.classes.get_mut(declaring.as_slice()) {
-                        ce.static_properties
-                            .insert(prop_name.as_bytes().to_vec(), value);
+                        crate::vm::set_static_slot(
+                            &mut ce.static_properties,
+                            prop_name.as_bytes(),
+                            value,
+                        );
                     }
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
@@ -7555,8 +7561,11 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 }
                 if is_static {
                     if let Some(ce) = vm.classes.get_mut(&class_lower) {
-                        ce.static_properties
-                            .insert(prop_name.as_bytes().to_vec(), value);
+                        crate::vm::set_static_slot(
+                            &mut ce.static_properties,
+                            prop_name.as_bytes(),
+                            value,
+                        );
                     }
                 } else if let Value::Object(target_obj) = &target {
                     let mut ob = target_obj.borrow_mut();
@@ -10371,7 +10380,7 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
 /// Walk a class's parent chain to find a static property's current value.
 fn find_static_property_value(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> Option<Value> {
     let owner = find_static_property_owner(vm, class_lower, prop_name)?;
-    rcls(vm, owner.as_slice()).and_then(|c| c.static_properties.get(prop_name).cloned())
+    rcls(vm, owner.as_slice()).and_then(|c| c.static_properties.get(prop_name).map(|v| v.deref()))
 }
 
 /// Walk a class's parent chain (and interfaces) to find the deepest ancestor

@@ -13379,7 +13379,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let val = class
                     .static_properties
                     .get(&prop.name)
-                    .cloned()
+                    .map(|v| v.deref())
                     .unwrap_or_else(|| prop.default.clone());
                 let val = match val {
                     Value::Undef => Value::Null,

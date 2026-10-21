@@ -366,6 +366,9 @@ pub enum OpCode {
     /// the result tmp: snapshots an operand that a magic method could change
     /// between two uses (`$o->$name ?? x` calls __isset then __get).
     QmAssign,
+    /// `C::$p` fetched by reference (`$x = &C::$p`, `return C::$p;` from a
+    /// by-ref function): like StaticPropFetch, result = Reference to the slot.
+    StaticPropGetRef,
 }
 
 /// A compiled function / script
