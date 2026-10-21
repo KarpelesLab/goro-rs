@@ -5338,9 +5338,9 @@ impl Vm {
         // (see execute_fn for why this matters with includes in callbacks).
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
-        let pushed = self.closure_frame_enter(op_array, &func_cvs);
+        let scope_pushed = self.closure_frame_enter(op_array, &func_cvs);
         let result = self.execute_op_array(op_array, func_cvs);
-        self.closure_frame_leave(pushed);
+        self.closure_frame_leave(scope_pushed);
         self.is_global_scope = was_global;
         if pushed {
             self.call_stack.pop();

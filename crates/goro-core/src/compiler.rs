@@ -13741,7 +13741,7 @@ impl Compiler {
             },
         };
 
-        let closure_id = self.op_array.child_functions.len();
+        let _closure_id = self.op_array.child_functions.len();
         let global_id = next_closure_id();
         let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
 
