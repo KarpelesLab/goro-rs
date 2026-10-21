@@ -1002,6 +1002,7 @@ pub fn mk_error(
         line: l,
         col: 0,
         formatted,
+        no_ctx: false,
     }
 }
 

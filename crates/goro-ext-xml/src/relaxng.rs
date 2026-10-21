@@ -577,6 +577,7 @@ fn node_error(domain: i32, code: i32, level: i32, node: Option<NodeId>, msg: Str
         line,
         col: 0,
         formatted,
+        no_ctx: false,
     }
 }
 
