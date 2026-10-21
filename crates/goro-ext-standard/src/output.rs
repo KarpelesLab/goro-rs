@@ -870,7 +870,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                             let class_name = goro_core::value::display_class_name(&canonical);
                             format!("\"{}\":\"{}\":private", name_str, class_name)
                         }
-                        _ => format!("\"{}\"", name_str),
+                        _ => match &mangled_decl {
+                            // Undeclared property stored under a mangled name.
+                            Some(d) if d.as_slice() == b"*" => format!("\"{}\":protected", name_str),
+                            Some(d) => format!("\"{}\":\"{}\":private", name_str, goro_core::value::display_class_name(d)),
+                            None => format!("\"{}\"", name_str),
+                        },
                     }
                 };
                 // Handle uninitialized typed properties

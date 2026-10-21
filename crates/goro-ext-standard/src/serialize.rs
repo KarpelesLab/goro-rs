@@ -1411,6 +1411,13 @@ impl<'a> Parser<'a> {
 
     /// object_init_ex(): create an instance with default properties.
     fn instantiate(&mut self, vm: &mut Vm, class_lower: &[u8], canonical: &[u8]) -> Option<Rc<RefCell<PhpObject>>> {
+        if !vm.classes.contains_key(class_lower)
+            && matches!(class_lower, b"filteriterator" | b"recursivefilteriterator" | b"splheap" | b"reflectionfunctionabstract")
+        {
+            let msg = format!("Cannot instantiate abstract class {}", goro_core::value::display_class_name(canonical));
+            throw(vm, b"Error", &msg);
+            return None;
+        }
         if let Some(ce) = vm.classes.get(class_lower) {
             let kind = if ce.is_interface {
                 Some("interface")
@@ -1944,7 +1951,9 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
                             None => break,
                         };
                         if !is_valid_class_name(&name) {
-                            err = Some((b"ValueError", format!("{}(): Option \"allowed_classes\" must be an array of class names, \"{}\" given", function_name, String::from_utf8_lossy(&name))));
+                            // %s in the C message stops at a NUL byte
+                            let shown = &name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())];
+                            err = Some((b"ValueError", format!("{}(): Option \"allowed_classes\" must be an array of class names, \"{}\" given", function_name, String::from_utf8_lossy(shown))));
                             break;
                         }
                         names.push(lower(&name));
