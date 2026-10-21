@@ -244,7 +244,7 @@ fn handle_connection(
     //    If file doesn't exist, return 404.
     let target_file: Option<PathBuf>;
     let mut script_name = decoded_path.clone();
-    let mut script_filename: PathBuf = doc_root.to_path_buf();
+    let script_filename: PathBuf;
     let mut path_info: String = String::new();
 
     if let Some(router_path) = router {
@@ -462,18 +462,6 @@ fn send_response(
     body: &[u8],
 ) -> std::io::Result<()> {
     send_response_with_host_proto(stream, status, status_msg, headers, body, "", 0, "HTTP/1.1")
-}
-
-fn send_response_with_host(
-    stream: &mut TcpStream,
-    status: u16,
-    status_msg: &str,
-    headers: &[(Vec<u8>, Vec<u8>)],
-    body: &[u8],
-    host: &str,
-    port: u16,
-) -> std::io::Result<()> {
-    send_response_with_host_proto(stream, status, status_msg, headers, body, host, port, "HTTP/1.1")
 }
 
 fn send_response_with_host_proto(
@@ -766,8 +754,8 @@ fn execute_php_request(
             if let Some(decoded) = base64_decode(b64.trim()) {
                 if let Ok(s) = std::str::from_utf8(&decoded) {
                     if let Some(colon) = s.find(':') {
-                        set_kv(&mut server, b"PHP_AUTH_USER", s[..colon].as_bytes());
-                        set_kv(&mut server, b"PHP_AUTH_PW", s[colon + 1..].as_bytes());
+                        set_kv(&mut server, b"PHP_AUTH_USER", &s.as_bytes()[..colon]);
+                        set_kv(&mut server, b"PHP_AUTH_PW", &s.as_bytes()[colon + 1..]);
                     }
                 }
             }

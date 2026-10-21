@@ -115,7 +115,7 @@ fn main() {
             }
             // Switches with no argument; ignore.
             "-n" | "-C" | "-q" | "-z" => { i += 1; continue; }
-            "--" => { i += 1; break; }
+            "--" => break,
             _ => {
                 if a.starts_with('-') && a.len() > 1 {
                     // Unknown option: ignore rather than treat as a file, to
@@ -167,6 +167,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::field_reassign_with_default)] // fields filled in step by step
 fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
     use goro_core::compiler::Compiler;
     use goro_core::vm::Vm;

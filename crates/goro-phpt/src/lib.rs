@@ -207,7 +207,7 @@ pub enum TestResult {
     Error(String),
 }
 
-/// Run a PHPT test against the goro engine
+// Run a PHPT test against the goro engine
 thread_local! {
     static TEST_ARGS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static TEST_ENV: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -381,8 +381,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             if let Some(clean) = test.sections.get("CLEAN") {
                 let clean_trimmed = clean.trim();
                 if !clean_trimmed.is_empty() {
-                    let clean_filename = if filename.ends_with(".php") {
-                        format!("{}.clean.php", &filename[..filename.len() - 4])
+                    let clean_filename = if let Some(stem) = filename.strip_suffix(".php") {
+                        format!("{}.clean.php", stem)
                     } else {
                         format!("{}.clean.php", filename)
                     };
@@ -401,8 +401,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     if let Some(clean) = test.sections.get("CLEAN") {
         let clean_trimmed = clean.trim();
         if !clean_trimmed.is_empty() {
-            let clean_filename = if filename.ends_with(".php") {
-                format!("{}.clean.php", &filename[..filename.len() - 4])
+            let clean_filename = if let Some(stem) = filename.strip_suffix(".php") {
+                format!("{}.clean.php", stem)
             } else {
                 format!("{}.clean.php", filename)
             };
@@ -2215,6 +2215,7 @@ fn shell_split(s: &str) -> Vec<String> {
     out
 }
 
+#[allow(clippy::field_reassign_with_default)] // fields filled in step by step
 fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> PhptRequest {
     let raw = |k: &str| test.raw_sections.get(k).map(|s| s.as_str());
     let not_empty = |k: &str| raw(k).is_some_and(|s| !php_trim(s).is_empty());
@@ -2246,7 +2247,7 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
             }
         }
     }
-    let mut method = String::new();
+    let method: String;
     let mut content_type = String::new();
     let mut body: Vec<u8> = Vec::new();
     let mut content_length = String::new();
