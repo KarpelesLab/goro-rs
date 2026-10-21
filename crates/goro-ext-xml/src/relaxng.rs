@@ -9,7 +9,7 @@
 //!   errors) are handed to the `sink` as they are raised, so that they come
 //!   out in libxml2's order relative to errors reported by the user entity
 //!   loader.
-//! - [`validate_doc`]: xmlRelaxNGValidateDoc.
+//! - [`validate_doc()`] is xmlRelaxNGValidateDoc.
 //! - [`ValidCtxt`]: a validation context, also offering the progressive
 //!   (streaming) interface used by xmlreader (xmlRelaxNGValidatePushElement,
 //!   PushCData, PopElement, FullElement).
@@ -951,7 +951,7 @@ impl<'a> PCtxt<'a> {
     }
 
     /// xmlRelaxNGRemoveRedefine
-    fn remove_redefine(&mut self, url: &str, target: Option<NodeId>, name: Option<&str>) -> bool {
+    fn remove_redefine(&mut self, target: Option<NodeId>, name: Option<&str>) -> bool {
         let mut found = false;
         let mut tmp = target;
         while let Some(c) = tmp {
@@ -977,13 +977,13 @@ impl<'a> PCtxt<'a> {
                     if let Some(first) = nchildren(d) {
                         if nname(first) == "grammar" {
                             let rc = root_element(d).and_then(nchildren);
-                            if self.remove_redefine("", rc, name) {
+                            if self.remove_redefine(rc, name) {
                                 found = true;
                             }
                         }
                     }
                 }
-                if self.remove_redefine(url, nchildren(c), name) {
+                if self.remove_redefine(nchildren(c), name) {
                     found = true;
                 }
             }
@@ -1056,7 +1056,7 @@ impl<'a> PCtxt<'a> {
         let mut cur = nchildren(node);
         while let Some(c) = cur {
             if is_rng(Some(c), "start") {
-                let found = self.remove_redefine(url, nchildren(root), None);
+                let found = self.remove_redefine(nchildren(root), None);
                 if !found {
                     self.perr(
                         Some(node),
@@ -1076,7 +1076,7 @@ impl<'a> PCtxt<'a> {
                     ),
                     Some(name) => {
                         let name = norm_ext_space(&name);
-                        let found = self.remove_redefine(url, nchildren(root), Some(&name));
+                        let found = self.remove_redefine(nchildren(root), Some(&name));
                         if !found {
                             self.perr(Some(node), xe::RNGP_DEFINE_MISSING, format!("xmlRelaxNG: include {} has a define {} but not the included grammar\n", url, name));
                         }
@@ -2695,8 +2695,7 @@ impl<'a> PCtxt<'a> {
             }
             Some(n) => n,
         };
-        let def;
-        if is_rng(Some(n), "empty") {
+        let def = if is_rng(Some(n), "empty") {
             let d = self.new_def(Some(n));
             self.dm(d).typ = T::Empty;
             if nchildren(n).is_some() {
@@ -2706,7 +2705,7 @@ impl<'a> PCtxt<'a> {
                     "element empty is not empty\n".to_string(),
                 );
             }
-            def = Some(d);
+            Some(d)
         } else if is_rng(Some(n), "notAllowed") {
             let d = self.new_def(Some(n));
             self.dm(d).typ = T::NotAllowed;
@@ -2717,10 +2716,10 @@ impl<'a> PCtxt<'a> {
                     "element notAllowed is not empty\n".to_string(),
                 );
             }
-            def = Some(d);
+            Some(d)
         } else {
-            def = self.parse_patterns(Some(n), true);
-        }
+            self.parse_patterns(Some(n), true)
+        };
         match self.cur_grammar().start {
             Some(mut last) => {
                 while let Some(nx) = self.d(last).next {
@@ -3081,11 +3080,7 @@ impl<'a> PCtxt<'a> {
             self.check_cycles(Some(start), 0);
             if self.flags & IN_EXTERNALREF == 0 {
                 self.simplify(self.grammars[top].start, None);
-                loop {
-                    let s = match self.grammars[top].start {
-                        Some(s) => s,
-                        None => break,
-                    };
+                while let Some(s) = self.grammars[top].start {
                     if self.d(s).typ == T::Noop && self.d(s).next.is_some() {
                         self.grammars[top].start = self.d(s).content;
                     } else {
@@ -3112,12 +3107,11 @@ fn is_nullable(defs: &mut [Define], define: Option<DefId>) -> i32 {
     if defs[d].dflags & IS_NOT_NULLABLE != 0 {
         return 0;
     }
-    let ret;
-    match defs[d].typ {
-        T::Empty | T::Text => ret = 1,
+    let ret = match defs[d].typ {
+        T::Empty | T::Text => 1,
         T::Noop | T::Def | T::Ref | T::ExternalRef | T::ParentRef | T::OneOrMore => {
             let c = defs[d].content;
-            ret = is_nullable(defs, c);
+            is_nullable(defs, c)
         }
         T::Except
         | T::NotAllowed
@@ -3126,7 +3120,7 @@ fn is_nullable(defs: &mut [Define], define: Option<DefId>) -> i32 {
         | T::Param
         | T::Value
         | T::List
-        | T::Attribute => ret = 0,
+        | T::Attribute => 0,
         T::Choice => {
             let mut list = defs[d].content;
             let mut r = 0;
@@ -3137,7 +3131,7 @@ fn is_nullable(defs: &mut [Define], define: Option<DefId>) -> i32 {
                 }
                 list = defs[l].next;
             }
-            ret = r;
+            r
         }
         T::Start | T::Interleave | T::Group => {
             let mut list = defs[d].content;
@@ -3154,7 +3148,7 @@ fn is_nullable(defs: &mut [Define], define: Option<DefId>) -> i32 {
             return 1;
         }
         _ => return -1,
-    }
+    };
     if ret == 0 {
         defs[d].dflags |= IS_NOT_NULLABLE;
     }
@@ -3180,9 +3174,8 @@ fn element_match_noctx(defs: &[Define], define: DefId, name: &str, ns: Option<&s
             _ => {}
         },
         _ => {
-            if ns.is_some() && d.ns.is_some() && d.name.is_none() {
-                return 0;
-            } else if ns.is_some() && d.name.is_some() {
+            // ELEMEXTRANS on either the define name or the element name
+            if ns.is_some() && (d.name.is_some() || d.ns.is_some()) {
                 return 0;
             }
         }
@@ -3734,10 +3727,13 @@ impl<'a> PCtxt<'a> {
                             match self.triage_key(t) {
                                 Some(k) => {
                                     let tr = triage.as_mut().unwrap();
-                                    if tr.contains_key(&k) {
-                                        is_triable = -1;
-                                    } else {
-                                        tr.insert(k, c);
+                                    match tr.entry(k) {
+                                        std::collections::hash_map::Entry::Occupied(_) => {
+                                            is_triable = -1
+                                        }
+                                        std::collections::hash_map::Entry::Vacant(v) => {
+                                            v.insert(c);
+                                        }
                                     }
                                 }
                                 None => is_triable = -1,
@@ -3884,10 +3880,13 @@ impl<'a> PCtxt<'a> {
                                 {
                                     is_determinist = 2;
                                 }
-                                if triage.contains_key(&k) {
-                                    is_determinist = -1;
-                                } else {
-                                    triage.insert(k, i + 1);
+                                match triage.entry(k) {
+                                    std::collections::hash_map::Entry::Occupied(_) => {
+                                        is_determinist = -1
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(v) => {
+                                        v.insert(i + 1);
+                                    }
                                 }
                             }
                             None => is_determinist = -1,
@@ -4428,12 +4427,12 @@ impl<'a> PCtxt<'a> {
                 }
             }
             T::Element => {
-                if self.am.is_some() && self.d(d).name.is_some() {
-                    let name = self.d(d).name.clone().unwrap();
+                if let (true, Some(name)) = (self.am.is_some(), self.d(d).name.clone()) {
                     let ns = self.d(d).ns.clone();
                     let from = self.am_state();
-                    let am = self.am.as_mut().unwrap();
-                    self.state = am.new_transition2(from, None, &name, ns.as_deref(), Some(d));
+                    if let Some(am) = self.am.as_mut() {
+                        self.state = am.new_transition2(from, None, &name, ns.as_deref(), Some(d));
+                    }
                 }
                 if self.d(d).dflags & IS_COMPILABLE != 0 && self.d(d).depth != -25 {
                     self.compile_content(d, false);
@@ -5776,10 +5775,12 @@ impl ValidCtxt {
                     let s = st.borrow();
                     (s.value.clone(), s.endvalue.clone())
                 };
-                if ret == 0 && cv.is_some() && !VPtr::same(&cv, &ce) {
-                    let extra = cv.as_ref().unwrap().string();
-                    self.verr2(ERR_LISTEXTRA, Some(&extra));
-                    ret = -1;
+                if let (0, Some(v)) = (ret, &cv) {
+                    if !VPtr::same(&cv, &ce) {
+                        let extra = v.string();
+                        self.verr2(ERR_LISTEXTRA, Some(&extra));
+                        ret = -1;
+                    }
                 }
                 let mut s = st.borrow_mut();
                 s.value = oldvalue;
@@ -6340,9 +6341,8 @@ impl ValidCtxt {
         ret = 0;
         while let Some(c) = cur {
             self.set_seq(Some(c));
-            let i;
-            if part.flags & IS_DETERMINIST != 0 {
-                i = match Self::triage_lookup(&part.triage, c) {
+            let i = if part.flags & IS_DETERMINIST != 0 {
+                match Self::triage_lookup(&part.triage, c) {
                     None => nbgroups,
                     Some(v) => {
                         let i = v - 1;
@@ -6354,12 +6354,12 @@ impl ValidCtxt {
                             i
                         }
                     }
-                };
+                }
             } else {
-                i = (0..nbgroups)
+                (0..nbgroups)
                     .find(|&i| self.node_matches_list(c, part.groups[i].defs.as_ref()))
-                    .unwrap_or(nbgroups);
-            }
+                    .unwrap_or(nbgroups)
+            };
             if i >= nbgroups {
                 break;
             }
@@ -6407,8 +6407,8 @@ impl ValidCtxt {
                             && schema.defs[p].name.as_deref() == Some("open-name-class")
                     })
                     .unwrap_or(false);
-                if c.is_some() && !open {
-                    let n = nname(c.unwrap());
+                if let (Some(cn), false) = (c, open) {
+                    let n = nname(cn);
                     self.verr2(ERR_INTEREXTRA, Some(&n));
                     ret = -1;
                     self.state = oldstate.clone();
@@ -6672,9 +6672,10 @@ impl ValidCtxt {
             T::Choice => {
                 node = self.skip_ignored(node);
                 let err_nr = self.err_nr;
-                if d.dflags & IS_TRIABLE != 0 && d.triage.is_some() && node.is_some() {
-                    let n = node.unwrap();
-                    match Self::triage_lookup(d.triage.as_ref().unwrap(), n) {
+                if let (true, Some(triage), Some(n)) =
+                    (d.dflags & IS_TRIABLE != 0, d.triage.as_ref(), node)
+                {
+                    match Self::triage_lookup(triage, n) {
                         None => {
                             ret = -1;
                             let nm = nname(n);
@@ -7114,7 +7115,7 @@ impl ValidCtxt {
                 vec![value]
             } else {
                 value
-                    .split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                    .split([' ', '\t', '\n', '\r'])
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string())
                     .collect()
@@ -7196,4 +7197,134 @@ pub fn validate_doc(schema: &Rc<RelaxNg>, doc: NodeId) -> (i32, Vec<XmlError>) {
     let mut ctxt = ValidCtxt::new(schema.clone());
     let r = ctxt.validate_doc(doc);
     (r, ctxt.take_errors())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Walk a document the way xmlreader drives the progressive interface.
+    fn stream(ctxt: &mut ValidCtxt, n: NodeId, errs: &mut i32) {
+        match ntype(n) {
+            NType::Element => {
+                let r = ctxt.push_element(n);
+                if r == 0 {
+                    if ctxt.full_element(n) != 1 {
+                        *errs += 1;
+                    }
+                    return;
+                }
+                if r != 1 {
+                    *errs += 1;
+                }
+                let mut c = nchildren(n);
+                while let Some(x) = c {
+                    stream(ctxt, x, errs);
+                    c = nnext(x);
+                }
+                if ctxt.pop_element(n) != 1 {
+                    *errs += 1;
+                }
+            }
+            NType::Text | NType::CData => {
+                if ctxt.push_cdata(&ncontent(n)) != 1 {
+                    *errs += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check(rng: &str, xml: &str) -> (i32, i32, Vec<String>, Vec<String>) {
+        let mut vm = Vm::new();
+        let (schema, perrs) = parse_memory_collect(&mut vm, rng.as_bytes());
+        assert!(
+            perrs.is_empty(),
+            "{:?}",
+            perrs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        let schema = schema.unwrap();
+        let doc = crate::sax2::parse_doc(xml.as_bytes(), None, 0).doc.unwrap();
+        let (r, e1) = validate_doc(&schema, doc);
+        let mut ctxt = ValidCtxt::new(schema);
+        let mut errs = 0;
+        stream(&mut ctxt, root_element(doc).unwrap(), &mut errs);
+        let e2 = ctxt.take_errors();
+        (
+            r,
+            errs,
+            e1.into_iter().map(|e| e.message).collect(),
+            e2.into_iter().map(|e| e.message).collect(),
+        )
+    }
+
+    const R: &str = "xmlns='http://relaxng.org/ns/structure/1.0'";
+
+    #[test]
+    fn streaming() {
+        let rng = format!(
+            "<element name='a' {}><element name='b'><text/></element><zeroOrMore><element name='c'><attribute name='x'/><empty/></element></zeroOrMore></element>",
+            R
+        );
+        let (r, errs, _, e2) = check(&rng, "<a><b>t</b><c x='1'/><c x='2'/></a>");
+        assert_eq!((r, errs), (0, 0), "{:?}", e2);
+        let (r, errs, e1, e2) = check(&rng, "<a><b>t</b><c/><d/></a>");
+        assert_eq!(r, 1);
+        assert!(errs > 0);
+        assert_eq!(
+            e1,
+            vec![
+                "Element c failed to validate attributes\n".to_string(),
+                "Did not expect element d there\n".to_string()
+            ]
+        );
+        assert_eq!(
+            e2,
+            vec![
+                "Element c failed to validate attributes\n".to_string(),
+                "Did not expect element d there\n".to_string()
+            ]
+        );
+        // non-compilable content (interleave) is validated as a full element
+        let rng = format!(
+            "<element name='a' {}><interleave><element name='b'><empty/></element><element name='c'><empty/></element></interleave></element>",
+            R
+        );
+        let (r, errs, _, e2) = check(&rng, "<a><c/><b/></a>");
+        assert_eq!((r, errs), (0, 0), "{:?}", e2);
+        let (r, errs, _, e2) = check(&rng, "<a><c/></a>");
+        assert_eq!(
+            e2,
+            vec![
+                "Expecting an element b, got nothing\n".to_string(),
+                "Invalid sequence in interleave\n".to_string(),
+                "Element a failed to validate content\n".to_string()
+            ]
+        );
+        assert_eq!(r, 1);
+        assert!(errs > 0);
+        // text where none is allowed
+        let rng = format!(
+            "<element name='a' {}><element name='b'><empty/></element></element>",
+            R
+        );
+        let (_, errs, _, e2) = check(&rng, "<a>x<b/></a>");
+        assert!(errs > 0);
+        assert_eq!(
+            e2,
+            vec![
+                "Did not expect text in element  TODO  content\n".to_string(),
+                "Did not expect element b there\n".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn norm_ext_space_cases() {
+        assert_eq!(norm_ext_space("abc"), "abc");
+        assert_eq!(norm_ext_space("abc  "), "abc");
+        assert_eq!(norm_ext_space("a b "), "a b");
+        assert_eq!(norm_ext_space("  abc "), "abc");
+        assert_eq!(norm_ext_space("  a b"), "ab");
+    }
 }
