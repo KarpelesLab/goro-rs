@@ -293,6 +293,17 @@ pub fn is_open_resource(id: i64) -> bool {
     RESOURCE_REGISTRY.with(|r| r.borrow().get(&id).map(|e| !e.closed).unwrap_or(false))
 }
 
+/// ZEND_THREEWAY_COMPARE for doubles: an unordered pair (NAN) compares as 1.
+fn float_threeway(a: f64, b: f64) -> i64 {
+    if a == b {
+        0
+    } else if a < b {
+        -1
+    } else {
+        1
+    }
+}
+
 impl Value {
     /// Dereference a value: if it's a Reference, return the inner value; otherwise return self.
     /// This is used by read_operand so existing code transparently reads through references.
@@ -1114,26 +1125,8 @@ impl Value {
                     0
                 }
             }
-            (Value::Resource(a), Value::Double(b)) => {
-                let a = *a as f64;
-                if a < *b {
-                    -1
-                } else if a > *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            (Value::Double(a), Value::Resource(b)) => {
-                let b = *b as f64;
-                if *a < b {
-                    -1
-                } else if *a > b {
-                    1
-                } else {
-                    0
-                }
-            }
+            (Value::Resource(a), Value::Double(b)) => float_threeway(*a as f64, *b),
+            (Value::Double(a), Value::Resource(b)) => float_threeway(*a, *b as f64),
             (Value::Long(a), Value::Long(b)) => {
                 if a < b {
                     -1
@@ -1143,35 +1136,9 @@ impl Value {
                     0
                 }
             }
-            (Value::Double(a), Value::Double(b)) => {
-                if a < b {
-                    -1
-                } else if a > b {
-                    1
-                } else {
-                    0
-                }
-            }
-            (Value::Long(a), Value::Double(b)) => {
-                let a = *a as f64;
-                if a < *b {
-                    -1
-                } else if a > *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            (Value::Double(a), Value::Long(b)) => {
-                let b = *b as f64;
-                if *a < b {
-                    -1
-                } else if *a > b {
-                    1
-                } else {
-                    0
-                }
-            }
+            (Value::Double(a), Value::Double(b)) => float_threeway(*a, *b),
+            (Value::Long(a), Value::Double(b)) => float_threeway(*a as f64, *b),
+            (Value::Double(a), Value::Long(b)) => float_threeway(*a, *b as f64),
             (Value::Array(a), Value::Array(b)) => {
                 // Same hash table: equal (zend_hash_compare's ht1 == ht2 shortcut).
                 if std::rc::Rc::ptr_eq(a, b) {
@@ -1381,24 +1348,16 @@ impl Value {
             }
             // PHP 8: float vs string - compare numerically if string is numeric, else cast float to string
             (Value::Double(f), Value::String(s)) | (Value::String(s), Value::Double(f)) => {
+                if f.is_nan() {
+                    // NAN is unordered with any string, either side.
+                    return 1;
+                }
                 let is_left_double = matches!(self, Value::Double(_));
                 if let Some(num) = parse_numeric_string(s.as_bytes()) {
                     if is_left_double {
-                        if *f < num {
-                            -1
-                        } else if *f > num {
-                            1
-                        } else {
-                            0
-                        }
+                        float_threeway(*f, num)
                     } else {
-                        if num < *f {
-                            -1
-                        } else if num > *f {
-                            1
-                        } else {
-                            0
-                        }
+                        float_threeway(num, *f)
                     }
                 } else {
                     // PHP 8: non-numeric string - cast float to string and compare as strings
