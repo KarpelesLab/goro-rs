@@ -250,10 +250,11 @@ impl PendingCall {
     fn resolve_named_args_builtin(
         &mut self,
         param_names: &[&[u8]],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<usize>, String> {
         if self.named_args.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut set_positions: Vec<usize> = Vec::new();
 
         // Track which positions were explicitly set by positional args
         let positional_count = self.args.len();
@@ -275,6 +276,7 @@ impl PendingCall {
                         self.args.push(Value::Null);
                     }
                     self.args[idx] = val.clone();
+                    set_positions.push(idx);
                     found = true;
                     break;
                 }
@@ -287,7 +289,8 @@ impl PendingCall {
             }
         }
 
-        Ok(())
+        // Positions padded with null for parameters skipped by named args
+        Ok((positional_count..self.args.len()).filter(|i| !set_positions.contains(i)).collect())
     }
 }
 
@@ -19485,6 +19488,7 @@ impl Vm {
                         );
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function - resolve named args if present
+                        let mut named_skipped_args: Vec<usize> = Vec::new();
                         if !call.named_args.is_empty() {
                             // Special functions that forward named args to their callbacks
                             let forwards_named = func_name_lower == b"call_user_func"
@@ -19496,7 +19500,11 @@ impl Vm {
                                 self.pending_named_args = call.named_args.drain(..).collect();
                             } else if let Some(param_names) = self.builtin_param_names.get(&func_name_lower).cloned() {
                                 let param_refs: Vec<&[u8]> = param_names.iter().map(|p| p.as_slice()).collect();
-                                if let Err(err_msg) = call.resolve_named_args_builtin(&param_refs) {
+                                let resolved = call.resolve_named_args_builtin(&param_refs);
+                                if let Ok(skipped) = &resolved {
+                                    named_skipped_args = skipped.clone();
+                                }
+                                if let Err(err_msg) = resolved {
                                     // For variadic builtins, use a different error format
                                     let (exc_class, final_msg) = if err_msg.starts_with("Unknown named parameter") {
                                         let display = call.name.to_string_lossy();
@@ -19547,7 +19555,9 @@ impl Vm {
                                         self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
                                         let val = arg.deref();
                                         // Null to non-nullable scalar param: emit deprecation (PHP 8.1+).
+                                        // (Not for optional params skipped via named arguments.)
                                         if matches!(&val, Value::Null | Value::Undef)
+                                            && !named_skipped_args.contains(&i)
                                             && !Self::param_type_is_nullable(pt)
                                         {
                                             let display_name = call.name.to_string_lossy();
@@ -19598,6 +19608,7 @@ impl Vm {
                         }
                         // Strict type checking for builtin function parameters
                         if op_array.strict_types {
+                            let mut strict_type_err: Option<String> = None;
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
                                 for (i, arg) in call.args.iter().enumerate() {
                                     if i >= param_types.len() {
@@ -19613,23 +19624,26 @@ impl Vm {
                                                 .and_then(|names| names.get(i))
                                                 .map(|n| String::from_utf8_lossy(n).to_string())
                                                 .unwrap_or_else(|| format!("arg{}", i + 1));
-                                            let err_msg = format!(
+                                            strict_type_err = Some(format!(
                                                 "{}(): Argument #{} (${}) must be of type {}, {} given",
                                                 display_name, i + 1, param_name, expected, given
-                                            );
-                                            let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
-                                            self.current_exception = Some(exc_val);
-                                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
-                                                ip = catch_target as usize;
-                                                continue;
-                                            } else {
-                                                return Err(VmError {
-                                                    message: format!("Uncaught TypeError: {}", err_msg),
-                                                    line: op.line,
-                                                });
-                                            }
+                                            ));
+                                            break;
                                         }
                                     }
+                                }
+                            }
+                            if let Some(err_msg) = strict_type_err {
+                                let exc_val = self.create_exception(b"TypeError", &err_msg, op.line);
+                                self.current_exception = Some(exc_val);
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                } else {
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", err_msg),
+                                        line: op.line,
+                                    });
                                 }
                             }
                         }
