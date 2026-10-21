@@ -15324,6 +15324,21 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
         if let Some(class) = vm.classes.get(&class_lower) {
             if class.constants.contains_key(const_name.as_bytes()) {
+                // Constants not visible from the calling scope are "not defined"
+                if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
+                    use goro_core::object::Visibility;
+                    if meta.visibility != Visibility::Public {
+                        let decl = meta.declaring_class.to_ascii_lowercase();
+                        let scope = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
+                        let ok = match meta.visibility {
+                            Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
+                            _ => scope.map(|sc| sc == decl || vm.class_extends(&sc, &decl) || vm.class_extends(&decl, &sc)).unwrap_or(false),
+                        };
+                        if !ok {
+                            return Ok(Value::False);
+                        }
+                    }
+                }
                 return Ok(Value::True);
             }
         }

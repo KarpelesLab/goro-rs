@@ -25503,6 +25503,33 @@ impl Vm {
                                 .get(prop_name.as_bytes())
                                 .cloned()
                                 .or_else(|| class.constants.get(prop_name.as_bytes()).cloned());
+                            // zend_get_class_constant_ex: visibility of the constant
+                            if raw_val_opt.is_some() && !class.static_properties.contains_key(prop_name.as_bytes()) {
+                                if let Some(meta) = class.constants_meta.get(prop_name.as_bytes()) {
+                                    use crate::object::Visibility;
+                                    if meta.visibility != Visibility::Public {
+                                        let decl = meta.declaring_class.to_ascii_lowercase();
+                                        let scope = op_array.scope_class.clone().or_else(|| self.class_scope_stack.last().cloned()).map(|s| s.to_ascii_lowercase());
+                                        let ok = match meta.visibility {
+                                            Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
+                                            _ => scope.map(|sc| sc == decl || self.class_extends(&sc, &decl) || self.class_extends(&decl, &sc)).unwrap_or(false),
+                                        };
+                                        if !ok {
+                                            let vis_s = if meta.visibility == Visibility::Private { "private" } else { "protected" };
+                                            let msg = format!("Cannot access {} constant {}::{}", vis_s,
+                                                crate::value::display_class_name(&class.name), String::from_utf8_lossy(prop_name.as_bytes()));
+                                            let exc = self.create_exception(b"Error", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                let ct = *catch_target;
+                                                ip = ct as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                        }
+                                    }
+                                }
+                            }
                             if raw_val_opt.is_none() {
                                 // Neither static property nor constant found - check parent classes
                                 let mut found = false;
@@ -29331,6 +29358,23 @@ impl Vm {
                                         .map(|m| m.visibility == Visibility::Private)
                                         .unwrap_or(false);
                                     if class.constants.contains_key(const_name) {
+                                        // Access level must not be weakened (do_inherit_constant_check)
+                                        if let (Some(pm), Some(cm)) = (parent_meta, class.constants_meta.get(const_name)) {
+                                            let rank = |v: &Visibility| match v { Visibility::Public => 0, Visibility::Protected => 1, Visibility::Private => 2 };
+                                            if pm.visibility != Visibility::Private && rank(&cm.visibility) > rank(&pm.visibility) {
+                                                let vis_s = if pm.visibility == Visibility::Public { "public" } else { "protected" };
+                                                let kind = if parent.is_interface { "interface" } else { "class" };
+                                                let tail = if pm.visibility == Visibility::Public { "" } else { " or weaker" };
+                                                return Err(VmError {
+                                                    message: format!("Access level to {}::{} must be {} (as in {} {}){}",
+                                                        crate::value::display_class_name(&class.name),
+                                                        String::from_utf8_lossy(const_name), vis_s, kind,
+                                                        crate::value::display_class_name(&parent.name),
+                                                        tail),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
                                         // Child overrides parent constant - check if parent's is final
                                         if let Some(meta) = parent_meta {
                                             if meta.is_final {
