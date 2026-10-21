@@ -37,7 +37,9 @@ impl std::fmt::Display for ArrayKey {
 /// PHP ordered hash map (HashTable equivalent)
 ///
 /// Preserves insertion order. Supports both integer and string keys.
-/// Packed optimization: when keys are sequential integers 0..n, uses a simple Vec.
+/// Lookups are O(1): "packed" arrays (keys 0..n in order) are indexed
+/// directly; other arrays above a small size get an open-addressing hash
+/// index of positions into `entries`.
 #[derive(Debug)]
 pub struct PhpArray {
     /// Current storage mode
@@ -46,6 +48,43 @@ pub struct PhpArray {
     next_int_key: i64,
     /// Internal array pointer position (for current/next/prev/reset/end)
     pub pointer: usize,
+    /// True while every entry i has key Int(i)
+    packed: bool,
+    /// Hash index (slot -> entry position + 1, 0 = empty); empty when unused
+    index: Vec<u32>,
+}
+
+/// Arrays smaller than this are searched linearly
+const INDEX_THRESHOLD: usize = 8;
+
+#[inline]
+fn hash_int(n: i64) -> u64 {
+    let mut x = n as u64;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    x
+}
+
+#[inline]
+fn hash_bytes(b: &[u8]) -> u64 {
+    // FNV-1a
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &c in b {
+        h ^= c as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^ (h >> 29)
+}
+
+#[inline]
+fn hash_key(k: &ArrayKey) -> u64 {
+    match k {
+        ArrayKey::Int(n) => hash_int(*n),
+        ArrayKey::String(s) => hash_bytes(s.as_bytes()),
+    }
 }
 
 impl Clone for PhpArray {
@@ -59,6 +98,8 @@ impl Clone for PhpArray {
             entries: self.entries.clone(),
             next_int_key: self.next_int_key,
             pointer: self.pointer,
+            packed: self.packed,
+            index: self.index.clone(),
         }
     }
 }
@@ -69,6 +110,8 @@ impl PhpArray {
             entries: Vec::new(),
             next_int_key: 0,
             pointer: 0,
+            packed: true,
+            index: Vec::new(),
         }
     }
 
@@ -77,6 +120,8 @@ impl PhpArray {
             entries: Vec::with_capacity(cap),
             next_int_key: 0,
             pointer: 0,
+            packed: true,
+            index: Vec::new(),
         }
     }
 
@@ -88,28 +133,131 @@ impl PhpArray {
         self.entries.is_empty()
     }
 
-    /// Get a value by integer key
-    pub fn get_int(&self, key: i64) -> Option<&Value> {
-        for (k, v) in &self.entries {
-            if let ArrayKey::Int(n) = k
-                && *n == key
-            {
-                return Some(v);
+    /* ----- index maintenance ----- */
+
+    fn index_insert_slot(index: &mut [u32], h: u64, pos: usize) {
+        let mask = index.len() - 1;
+        let mut i = (h as usize) & mask;
+        loop {
+            if index[i] == 0 {
+                index[i] = pos as u32 + 1;
+                return;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn rebuild_index(&mut self) {
+        if self.packed || self.entries.len() < INDEX_THRESHOLD || self.entries.len() >= u32::MAX as usize / 4 {
+            self.index = Vec::new();
+            return;
+        }
+        let cap = (self.entries.len() * 2).next_power_of_two().max(16);
+        let mut index = vec![0u32; cap];
+        for (pos, (k, _)) in self.entries.iter().enumerate() {
+            Self::index_insert_slot(&mut index, hash_key(k), pos);
+        }
+        self.index = index;
+    }
+
+    /// Called after pushing a new entry at the end of `entries`
+    fn after_push(&mut self) {
+        let pos = self.entries.len() - 1;
+        if self.packed {
+            if matches!(self.entries[pos].0, ArrayKey::Int(n) if n == pos as i64) {
+                return;
+            }
+            self.packed = false;
+            self.rebuild_index();
+            return;
+        }
+        if self.index.is_empty() {
+            if self.entries.len() >= INDEX_THRESHOLD {
+                self.rebuild_index();
+            }
+            return;
+        }
+        if (self.entries.len()) * 2 > self.index.len() {
+            self.rebuild_index();
+            return;
+        }
+        let h = hash_key(&self.entries[pos].0);
+        Self::index_insert_slot(&mut self.index, h, pos);
+    }
+
+    fn recompute_packed(&mut self) {
+        self.packed = self.entries.iter().enumerate().all(|(i, (k, _))| matches!(k, ArrayKey::Int(n) if *n == i as i64));
+    }
+
+    #[inline]
+    fn find_int(&self, key: i64) -> Option<usize> {
+        if self.packed {
+            if key >= 0 && (key as usize) < self.entries.len() {
+                return Some(key as usize);
+            }
+            return None;
+        }
+        if !self.index.is_empty() {
+            let mask = self.index.len() - 1;
+            let mut i = (hash_int(key) as usize) & mask;
+            loop {
+                let slot = self.index[i];
+                if slot == 0 {
+                    return None;
+                }
+                let pos = (slot - 1) as usize;
+                if let ArrayKey::Int(n) = &self.entries[pos].0 {
+                    if *n == key {
+                        return Some(pos);
+                    }
+                }
+                i = (i + 1) & mask;
             }
         }
-        None
+        self.entries.iter().position(|(k, _)| matches!(k, ArrayKey::Int(n) if *n == key))
+    }
+
+    #[inline]
+    fn find_str(&self, key: &[u8]) -> Option<usize> {
+        if self.packed {
+            return None;
+        }
+        if !self.index.is_empty() {
+            let mask = self.index.len() - 1;
+            let mut i = (hash_bytes(key) as usize) & mask;
+            loop {
+                let slot = self.index[i];
+                if slot == 0 {
+                    return None;
+                }
+                let pos = (slot - 1) as usize;
+                if let ArrayKey::String(s) = &self.entries[pos].0 {
+                    if s.as_bytes() == key {
+                        return Some(pos);
+                    }
+                }
+                i = (i + 1) & mask;
+            }
+        }
+        self.entries.iter().position(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes() == key))
+    }
+
+    #[inline]
+    fn find(&self, key: &ArrayKey) -> Option<usize> {
+        match key {
+            ArrayKey::Int(n) => self.find_int(*n),
+            ArrayKey::String(s) => self.find_str(s.as_bytes()),
+        }
+    }
+
+    /// Get a value by integer key
+    pub fn get_int(&self, key: i64) -> Option<&Value> {
+        self.find_int(key).map(|p| &self.entries[p].1)
     }
 
     /// Get a value by string key
     pub fn get_str(&self, key: &[u8]) -> Option<&Value> {
-        for (k, v) in &self.entries {
-            if let ArrayKey::String(s) = k
-                && s.as_bytes() == key
-            {
-                return Some(v);
-            }
-        }
-        None
+        self.find_str(key).map(|p| &self.entries[p].1)
     }
 
     /// Get a value by ArrayKey
@@ -122,12 +270,10 @@ impl PhpArray {
 
     /// Get a mutable reference by ArrayKey
     pub fn get_mut(&mut self, key: &ArrayKey) -> Option<&mut Value> {
-        for (k, v) in &mut self.entries {
-            if k == key {
-                return Some(v);
-            }
+        match self.find(key) {
+            Some(p) => Some(&mut self.entries[p].1),
+            None => None,
         }
-        None
     }
 
     /// Approximate bytes per entry (key + value overhead)
@@ -136,11 +282,9 @@ impl PhpArray {
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {
         // Check if key already exists
-        for (k, v) in &mut self.entries {
-            if *k == key {
-                *v = value;
-                return;
-            }
+        if let Some(p) = self.find(&key) {
+            self.entries[p].1 = value;
+            return;
         }
         // Check memory limit before adding
         if !memory_alloc(Self::ENTRY_SIZE) {
@@ -153,6 +297,7 @@ impl PhpArray {
             self.next_int_key = n.saturating_add(1);
         }
         self.entries.push((key, value));
+        self.after_push();
     }
 
     /// Append a value with the next integer key ($arr[] = value).
@@ -164,6 +309,7 @@ impl PhpArray {
         }
         self.next_int_key = key.saturating_add(1);
         self.entries.push((ArrayKey::Int(key), value));
+        self.after_push();
     }
 
     /// Append a value with the next integer key ($arr[] = value).
@@ -171,7 +317,7 @@ impl PhpArray {
     pub fn try_push(&mut self, value: Value) -> Result<(), &'static str> {
         // Check if next_int_key is already occupied (happens after PHP_INT_MAX was used)
         let key = self.next_int_key;
-        let already_occupied = self.entries.iter().any(|(k, _)| k == &ArrayKey::Int(key));
+        let already_occupied = self.find_int(key).is_some();
         if already_occupied {
             return Err("Cannot add element to the array as the next element is already occupied");
         }
@@ -180,23 +326,47 @@ impl PhpArray {
         }
         self.next_int_key = key.saturating_add(1);
         self.entries.push((ArrayKey::Int(key), value));
+        self.after_push();
         Ok(())
     }
 
     /// Remove and return the last element (like array_pop)
     pub fn pop(&mut self) -> Option<Value> {
-        self.entries.pop().map(|(_, v)| {
-            memory_free(Self::ENTRY_SIZE);
-            v
-        })
+        self.pop_entry_raw().map(|(_, v)| v)
+    }
+
+    fn pop_entry_raw(&mut self) -> Option<(ArrayKey, Value)> {
+        let e = self.entries.pop()?;
+        memory_free(Self::ENTRY_SIZE);
+        if !self.packed && !self.index.is_empty() {
+            // Remove the slot pointing at the popped position, then
+            // re-insert the rest of its probe cluster (backward-shift).
+            let pos = self.entries.len() as u32 + 1;
+            let mask = self.index.len() - 1;
+            let mut i = (hash_key(&e.0) as usize) & mask;
+            while self.index[i] != 0 && self.index[i] != pos {
+                i = (i + 1) & mask;
+            }
+            if self.index[i] == pos {
+                self.index[i] = 0;
+                let mut j = (i + 1) & mask;
+                while self.index[j] != 0 {
+                    let p = self.index[j];
+                    self.index[j] = 0;
+                    let h = hash_key(&self.entries[(p - 1) as usize].0);
+                    Self::index_insert_slot(&mut self.index, h, (p - 1) as usize);
+                    j = (j + 1) & mask;
+                }
+            }
+        }
+        Some(e)
     }
 
     /// Remove and return the last entry, adjusting the next free integer
     /// key the way PHP's array_pop() does (decremented only if the popped
     /// key was the most recently assigned one).
     pub fn pop_entry(&mut self) -> Option<(ArrayKey, Value)> {
-        let e = self.entries.pop()?;
-        memory_free(Self::ENTRY_SIZE);
+        let e = self.pop_entry_raw()?;
         if let ArrayKey::Int(k) = &e.0 {
             if *k == self.next_int_key.wrapping_sub(1) {
                 self.next_int_key -= 1;
@@ -211,7 +381,10 @@ impl PhpArray {
             None
         } else {
             memory_free(Self::ENTRY_SIZE);
-            Some(self.entries.remove(0).1)
+            let v = self.entries.remove(0).1;
+            self.recompute_packed();
+            self.rebuild_index();
+            Some(v)
         }
     }
 
@@ -230,13 +403,21 @@ impl PhpArray {
             }
         }
         self.next_int_key = next;
+        self.recompute_packed();
+        self.rebuild_index();
     }
 
     /// Remove an entry by key
     pub fn remove(&mut self, key: &ArrayKey) -> Option<Value> {
-        if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
+        if let Some(pos) = self.find(key) {
+            if pos + 1 == self.entries.len() {
+                return self.pop_entry_raw().map(|(_, v)| v);
+            }
             memory_free(Self::ENTRY_SIZE);
-            Some(self.entries.remove(pos).1)
+            let v = self.entries.remove(pos).1;
+            self.packed = false;
+            self.rebuild_index();
+            Some(v)
         } else {
             None
         }
@@ -277,7 +458,7 @@ impl PhpArray {
 
     /// Check if a key exists
     pub fn contains_key(&self, key: &ArrayKey) -> bool {
-        self.entries.iter().any(|(k, _)| k == key)
+        self.find(key).is_some()
     }
 }
 
