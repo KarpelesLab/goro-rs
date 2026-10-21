@@ -35669,6 +35669,7 @@ impl Vm {
                 OpCode::ArrayAppendRef => {
                     // Append to array keeping Reference wrapper (for closure by-ref capture)
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // `$a[] = &$b[k]`: the reference comes in a temporary
                     let raw_val = match &op.op2 {
                         OperandType::Tmp(t) => {
                             tmps.get(*t as usize).cloned().unwrap_or(Value::Null)
@@ -44427,6 +44428,8 @@ impl Vm {
                     if let Value::Object(obj) = &obj_val_raw {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.write_property) {
                             let v = value.deref();
+                            // typed internal properties coerce per the writer's strict_types
+                            self.caller_strict_types = op_array.strict_types;
                             if f(self, obj, prop_name.as_bytes(), &v) {
                                 native_exc_check!(
                                     self,

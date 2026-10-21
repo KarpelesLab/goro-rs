@@ -1433,6 +1433,15 @@ impl Compiler {
                         OperandType::Tmp(
                             self.emit_static_prop_fetch(OpCode::StaticPropGetRef, &arg.value)?,
                         )
+                    } else if let ExprKind::PropertyAccess {
+                        object,
+                        property,
+                        nullsafe: false,
+                    } = &arg.value.kind
+                    {
+                        // f($obj->prop) with a by-ref builtin parameter: pass
+                        // the property slot's reference
+                        OperandType::Tmp(self.compile_property_ref(object, property, line)?)
                     } else {
                         self.compile_expr(&arg.value)?
                     }
@@ -14772,11 +14781,13 @@ impl Compiler {
                         },
                     ) => {
                         // $var = &$obj->prop — bind the variable to the property slot
+                        // (rebinding, not writing through a reference the CV
+                        // may already hold)
                         let ref_tmp =
                             self.compile_property_ref(object, property, expr.span.line)?;
                         let target_cv = self.op_array.get_or_create_cv(target_name);
                         self.op_array.emit(Op {
-                            opcode: OpCode::Assign,
+                            opcode: OpCode::AssignRef,
                             op1: OperandType::Cv(target_cv),
                             op2: OperandType::Tmp(ref_tmp),
                             result: OperandType::Unused,
