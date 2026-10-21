@@ -6215,6 +6215,9 @@ impl Vm {
             // Native handlers always receive their arguments at DoFCall time.
             return None;
         }
+        if Self::spl_iter_class(class_lower) {
+            return self.spl_iter_dispatch(class_lower, method_lower, obj, &[]);
+        }
         match class_lower {
             b"phptoken" => self.phptoken_method(method_lower, obj),
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
@@ -9100,6 +9103,9 @@ impl Vm {
         if let Some(h) = self.native_class_handlers.get(class) {
             return (h.has_method)(class, method, false);
         }
+        if Self::spl_iter_class(class) {
+            return crate::spl_stubs::spl_stub_method(class, method).is_some() && method != b"__construct";
+        }
         match class {
             b"phptoken" => matches!(method, b"is"),
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_is_args_method(method),
@@ -9245,6 +9251,9 @@ impl Vm {
         }
         let this = args.first()?;
         if let Value::Object(obj) = this {
+            if Self::spl_iter_class(class) {
+                return self.spl_iter_dispatch(class, method, obj, &args[1..]);
+            }
             match class {
                 b"phptoken" => {
                     match method {
@@ -23593,6 +23602,24 @@ impl Vm {
                     } else if let Value::Object(obj) = &arr_val {
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
+                        // SPL get_iterator checks (e.g. uninitialized objects).
+                        if !self.spl_foreach_check(obj) {
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => {
+                                    let ob = o.borrow();
+                                    format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name),
+                                        ob.get_property(b"message").to_php_string().to_string_lossy())
+                                }
+                                _ => "Uncaught exception".to_string(),
+                            };
+                            return Err(VmError { message: msg, line: op.line });
+                        }
+
                         // Check for SPL __spl_array first (built-in SPL classes)
                         let has_spl_array = {
                             let ob = obj.borrow();
@@ -36564,6 +36591,9 @@ pub fn is_builtin_subclass(child: &[u8], parent: &[u8]) -> bool {
 
 /// Get all interfaces that a built-in class implements
 pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
+    if let Some(list) = crate::spl::spl_class_interfaces(class) {
+        return list.iter().map(|i| i.as_bytes().to_vec()).collect();
+    }
     let interfaces: &[&[u8]] = match class {
         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => &[
             b"IteratorAggregate", b"Traversable", b"ArrayAccess", b"Serializable", b"Countable",
@@ -36732,6 +36762,9 @@ pub fn canonicalize_class_name(name_lower: &[u8]) -> Vec<u8> {
 }
 
 fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {
+    if let Some(r) = crate::spl::spl_class_implements(class, interface) {
+        return r;
+    }
     match class {
         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
             interface,

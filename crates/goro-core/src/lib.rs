@@ -16,6 +16,7 @@ pub mod rfc1867;
 pub mod spl;
 pub mod spl_file;
 pub mod spl_heap;
+pub mod spl_iter;
 pub mod spl_stubs;
 pub mod string;
 pub mod uncaught;

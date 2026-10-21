@@ -398,6 +398,29 @@ impl Vm {
         }
     }
 
+    /// Push a `Base->__construct` stack frame (Base = nearest built-in SPL
+    /// class of obj) while a native constructor runs.
+    pub(crate) fn spl_push_ctor_frame(&mut self, obj: &Rc<RefCell<PhpObject>>, args: &[Value]) {
+        let cl = obj_class_lower(obj);
+        let base = self.spl_builtin_base(&cl).map(|b| b.to_vec()).unwrap_or(cl);
+        let disp = self.builtin_canonical_name(&base);
+        let line = self.current_line;
+        self.call_stack.push((format!("{}->__construct", disp), self.current_file.clone(), line, args.to_vec(), true));
+    }
+
+    /// get_iterator-time checks done by foreach. Returns false with an
+    /// exception set when iteration must not start.
+    pub(crate) fn spl_foreach_check(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let cl = obj_class_lower(obj);
+        if self.spl_find_base(&cl, &[b"recursiveiteratoriterator"]).is_some()
+            && !matches!(obj.borrow().get_property(b"__spl_rii_its"), Value::Array(_))
+        {
+            self.spl_throw(b"Error", "Object is not initialized");
+            return false;
+        }
+        true
+    }
+
     /// foreach-by-reference over an object. Traversables other than the
     /// ArrayObject/ArrayIterator family cannot be iterated by reference
     /// (Err: exception set). ArrayObject/ArrayIterator iterate their
@@ -473,6 +496,43 @@ pub(crate) const SPL_CLASSES: &[&[u8]] = &[
     b"cachingiterator", b"recursivecachingiterator", b"norewinditerator",
     b"appenditerator", b"infiniteiterator", b"regexiterator", b"recursiveregexiterator",
 ];
+
+/// ce->interfaces of an interface/class known from the SPL stubs (or a core
+/// iterator interface), in php-src's order. None for unknown classes.
+pub fn spl_class_interfaces(class_lower: &[u8]) -> Option<Vec<&'static str>> {
+    match class_lower {
+        b"iterator" | b"iteratoraggregate" => return Some(vec!["Traversable"]),
+        b"traversable" | b"arrayaccess" | b"countable" | b"serializable" | b"stringable"
+        | b"jsonserializable" => return Some(vec![]),
+        _ => {}
+    }
+    if class_lower.ends_with(b"exception") {
+        return None;
+    }
+    let (_, parent, ifaces, _, _) = crate::spl_stubs::spl_stub_class(class_lower)?;
+    let mut out: Vec<&'static str> = match parent {
+        Some(p) => spl_class_interfaces(p.to_ascii_lowercase().as_bytes()).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    for i in ifaces.iter() {
+        if out.iter().any(|x| x.eq_ignore_ascii_case(i)) {
+            continue;
+        }
+        out.push(i);
+        for sub in spl_class_interfaces(i.to_ascii_lowercase().as_bytes()).unwrap_or_default() {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(sub)) {
+                out.push(sub);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Whether an SPL class implements `iface_lower` (None: not an SPL class).
+pub fn spl_class_implements(class_lower: &[u8], iface_lower: &[u8]) -> Option<bool> {
+    let list = spl_class_interfaces(class_lower)?;
+    Some(list.iter().any(|i| i.as_bytes().eq_ignore_ascii_case(iface_lower)))
+}
 
 pub(crate) fn mangle_private(class: &[u8], name: &[u8]) -> Vec<u8> {
     let mut m = Vec::with_capacity(class.len() + name.len() + 2);

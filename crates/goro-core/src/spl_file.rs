@@ -1198,7 +1198,10 @@ pub fn spl_file_object_construct_native(vm: &mut Vm, args: &[Value], _line: u32)
         Some(Value::Object(o)) => o.clone(),
         _ => return Ok(()),
     };
-    if vm.spl_file_object_construct(&obj, &args[1..]) {
+    vm.spl_push_ctor_frame(&obj, &args[1..]);
+    let ok = vm.spl_file_object_construct(&obj, &args[1..]);
+    vm.call_stack.pop();
+    if ok {
         Ok(())
     } else {
         let msg = match &vm.current_exception {
@@ -1216,6 +1219,13 @@ pub fn spl_file_info_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -
         _ => return Ok(()),
     };
     let func = "SplFileInfo::__construct";
+    vm.spl_push_ctor_frame(&obj, &args[1..]);
+    let r = spl_file_info_construct_inner(vm, &obj, args, func);
+    vm.call_stack.pop();
+    r
+}
+
+fn spl_file_info_construct_inner(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, args: &[Value], func: &str) -> Result<(), String> {
     let fail = |vm: &mut Vm| -> Result<(), String> {
         let msg = match &vm.current_exception {
             Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
@@ -1237,6 +1247,6 @@ pub fn spl_file_info_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -
         vm.spl_throw(b"ValueError", &msg);
         return fail(vm);
     }
-    Vm::sfi_set_filename(&obj, name.as_bytes());
+    Vm::sfi_set_filename(obj, name.as_bytes());
     Ok(())
 }

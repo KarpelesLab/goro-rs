@@ -44,6 +44,10 @@ pub fn register(vm: &mut Vm) {
         b"splfileinfo".to_vec(),
         goro_core::spl_file::spl_file_info_construct_native,
     );
+    for cls in goro_core::spl_iter::ITER_CLASSES {
+        vm.object_construct_handlers
+            .insert(cls.to_vec(), goro_core::spl_iter::spl_iter_construct_native);
+    }
 
     // Register parameter names for named argument support
     register_param_names(vm);
