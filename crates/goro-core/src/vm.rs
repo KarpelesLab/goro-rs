@@ -162,7 +162,7 @@ impl Vm {
                 h(self, rc);
                 return;
             }
-            match self.classes.get(&cur).and_then(|c| c.parent.clone()) {
+            match self.classes.get(&cur).and_then(|c| c.parent.as_ref()) {
                 Some(p) => cur = p.to_ascii_lowercase(),
                 None => return,
             }
@@ -660,13 +660,13 @@ pub struct Vm {
     /// If no entry exists for a class, the VM falls through to its built-in
     /// constructor dispatch (SPL/Reflection/etc.).
     pub object_construct_handlers:
-        std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
+        crate::fxhash::FxHashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
     /// create_object hooks keyed by lowercase built-in class name: called for
     /// every `new` of the class or a subclass, before the constructor.
     pub object_create_handlers:
-        std::collections::HashMap<Vec<u8>, fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
+        crate::fxhash::FxHashMap<Vec<u8>, fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
-    pub native_class_handlers: std::collections::HashMap<Vec<u8>, NativeClassHandler>,
+    pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
     /// INI on-update validators keyed by directive name: (vm, new value, at_startup) -> accept.
     /// A rejecting validator is responsible for emitting PHP's warning.
     pub ini_validators: std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[u8], bool) -> bool>,
@@ -1772,9 +1772,9 @@ impl Vm {
             object_is_operator_type: None,
             gmp_to_hex: None,
             gmp_from_hex: None,
-            object_construct_handlers: std::collections::HashMap::new(),
-            object_create_handlers: std::collections::HashMap::new(),
-            native_class_handlers: std::collections::HashMap::new(),
+            object_construct_handlers: Default::default(),
+            object_create_handlers: Default::default(),
+            native_class_handlers: Default::default(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
             spl_internal_frames: Vec::new(),
@@ -8212,48 +8212,50 @@ impl Vm {
     /// Write to the output buffer
     /// Check if class_name extends target_name through the parent chain
     pub fn class_extends(&self, class_name: &[u8], target_name: &[u8]) -> bool {
-        let mut current: Vec<u8> = class_name.to_vec();
+        self.class_extends_any(class_name, &[target_name])
+    }
+
+    /// `class_extends(c, t1) || class_extends(c, t2) || ...` in one walk up
+    /// the parent chain.
+    pub fn class_extends_any(&self, class_name: &[u8], targets: &[&[u8]]) -> bool {
+        // `lower(x) == t` for one of the targets, without allocating.
+        let lower_eq = |x: &[u8]| {
+            targets.iter().any(|t| {
+                x.len() == t.len()
+                    && x.iter()
+                        .zip(t.iter())
+                        .all(|(a, b)| a.to_ascii_lowercase() == *b)
+            })
+        };
+        let mut current: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_name);
         for _ in 0..50 {
             // prevent infinite loops
-            let (parent, canonical_lower) = match self.classes.get(&current) {
-                Some(ce) => {
-                    // Also compute the canonical (original) name lowercased, to resolve aliases
-                    let canonical: Vec<u8> =
-                        ce.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    match &ce.parent {
-                        Some(p) => (
-                            p.iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect::<Vec<u8>>(),
-                            canonical,
-                        ),
-                        None => {
-                            // No parent — but check if this aliased class IS the target
-                            if canonical == target_name {
-                                return true;
-                            }
-                            return false;
+            let parent: std::borrow::Cow<[u8]> = match self.classes.get(current.as_ref()) {
+                Some(ce) => match &ce.parent {
+                    // Check the parent by alias key and the class by its
+                    // canonical (original) name, to resolve aliases.
+                    Some(p) => {
+                        if lower_eq(p) || lower_eq(&ce.name) {
+                            return true;
+                        }
+                        if p.iter().any(|b| b.is_ascii_uppercase()) {
+                            std::borrow::Cow::Owned(p.to_ascii_lowercase())
+                        } else {
+                            std::borrow::Cow::Borrowed(p.as_slice())
                         }
                     }
-                }
+                    // No parent — but check if this aliased class IS the target
+                    None => return lower_eq(&ce.name),
+                },
                 None => {
                     // Current class is not user-defined; check if it's a built-in
                     // that extends the target through the built-in hierarchy
-                    return is_builtin_subclass(&current, target_name);
+                    return targets.iter().any(|t| is_builtin_subclass(&current, t));
                 }
             };
-            // Check the parent by alias key and by canonical name
-            if parent == target_name || canonical_lower == target_name {
-                return true;
-            }
             // Also resolve the parent via canonical name (in case parent stored as alias key)
-            if let Some(parent_ce) = self.classes.get(&parent) {
-                let parent_canonical: Vec<u8> = parent_ce
-                    .name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if parent_canonical == target_name {
+            if let Some(parent_ce) = self.classes.get(parent.as_ref()) {
+                if lower_eq(&parent_ce.name) {
                     return true;
                 }
             }
@@ -8584,15 +8586,19 @@ impl Vm {
         &self,
         class_lower: &[u8],
     ) -> Option<(Vec<u8>, NativeClassHandler)> {
-        let mut cur = class_lower.to_vec();
+        if self.native_class_handlers.is_empty() {
+            return None;
+        }
+        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
         for _ in 0..50 {
-            if let Some(h) = self.native_class_handlers.get(&cur) {
-                return Some((cur, *h));
+            if let Some(h) = self.native_class_handlers.get(cur.as_ref()) {
+                return Some((cur.into_owned(), *h));
             }
-            {
-                let p = self.classes.get(&cur).and_then(|c| c.parent.clone())?;
-                cur = p.to_ascii_lowercase()
-            }
+            let p = self
+                .classes
+                .get(cur.as_ref())
+                .and_then(|c| c.parent.as_ref())?;
+            cur = std::borrow::Cow::Owned(p.to_ascii_lowercase());
         }
         None
     }
@@ -15127,7 +15133,10 @@ impl Vm {
         // Check return type if declared
         // Detect implicit return: the compiler emits `Return Null` with line=0 for implicit returns
         // If result is Ok(Null) or Ok(Undef), and there was no explicit return, it's "none returned"
-        let implicit_return = matches!(result, Ok(Value::Undef) | Ok(Value::Null))
+        // (Only needed with a declared return type: the scan over the ops
+        // is skipped for the common untyped function.)
+        let implicit_return = op_array.return_type.is_some()
+            && matches!(result, Ok(Value::Undef) | Ok(Value::Null))
             && op_array
                 .ops
                 .last()
@@ -15355,34 +15364,39 @@ impl Vm {
         let mut cvs = cvs;
         let mut tmps = tmps;
         let mut stepped = false;
-        let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
+        let mut foreach_positions: crate::fxhash::FxHashMap<u32, usize> = Default::default();
         // Object handles held by the internal iterators of running foreach
         // loops over Traversables (zend_iterator_init allocates one), keyed
         // by iterator tmp; released with the loop.
-        let mut foreach_iter_handles: HashMap<u32, Value> = HashMap::new();
+        let mut foreach_iter_handles: crate::fxhash::FxHashMap<u32, Value> = Default::default();
         // By-value foreach over an array iterates the array as it was when the
         // loop started (PHP iterates a copy): a shallow snapshot of its entries.
-        let mut foreach_snap: HashMap<u32, Vec<(ArrayKey, Value)>> = HashMap::new();
+        let mut foreach_snap: crate::fxhash::FxHashMap<u32, Vec<(ArrayKey, Value)>> =
+            Default::default();
         // Key of the element the foreach is currently on (ForeachKey, and the
         // by-ref iterator's position tracking).
-        let mut foreach_cur_key: HashMap<u32, ArrayKey> = HashMap::new();
+        let mut foreach_cur_key: crate::fxhash::FxHashMap<u32, ArrayKey> = Default::default();
         // By-ref foreach: the reference of the current element (the iterator
         // follows it when elements before it are removed or inserted).
-        let mut foreach_cur_ref: HashMap<u32, std::rc::Weak<RefCell<Value>>> = HashMap::new();
+        let mut foreach_cur_ref: crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<Value>>> =
+            Default::default();
         // foreach over a plain object: the object, and the storage name of the
         // current property slot.
         // (The iterator tmp holds the object itself, so it is released with it.)
-        let mut foreach_obj: HashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>> =
-            HashMap::new();
-        let mut foreach_obj_cur: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut foreach_obj: crate::fxhash::FxHashMap<
+            u32,
+            std::rc::Weak<RefCell<crate::object::PhpObject>>,
+        > = Default::default();
+        let mut foreach_obj_cur: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
         // Generator key storage for foreach (saved before advancing to next yield)
-        let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
+        let mut foreach_gen_keys: crate::fxhash::FxHashMap<u32, Value> = Default::default();
         // WeakMap iteration: maps iterator index to key objects
-        let mut weakmap_iter_keys: HashMap<u32, Vec<Value>> = HashMap::new();
+        let mut weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<Value>> = Default::default();
         // Track which foreach iterators are by-reference (stores the source array Rc)
-        let mut foreach_ref_arrays: HashMap<u32, Rc<RefCell<PhpArray>>> = HashMap::new();
+        let mut foreach_ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>> =
+            Default::default();
         // Maps CV index -> static var key (for saving back on write)
-        let static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
+        let static_cv_keys: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx, error_reporting_depth, pending_calls_depth)
         let mut exception_handlers: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
         // Saved pending_calls depth to restore when entering a catch block
@@ -23567,7 +23581,9 @@ impl Vm {
                         } else if let Some(ref scope) = user_fn.scope_class {
                             // Use the method's declaring class (scope_class) for the stack trace
                             // instead of the runtime class, matching PHP behavior
-                            let method_name = if let Some(pos) = raw_display.find("::") {
+                            let method_name = if let Some(pos) =
+                                raw_display.as_bytes().windows(2).position(|w| w == b"::")
+                            {
                                 &raw_display[pos + 2..]
                             } else {
                                 &raw_display
@@ -43628,8 +43644,7 @@ impl Vm {
                         || name_lower == b"error"
                         || is_builtin_subclass(&name_lower, b"exception")
                         || is_builtin_subclass(&name_lower, b"error")
-                        || self.class_extends(&name_lower, b"exception")
-                        || self.class_extends(&name_lower, b"error");
+                        || self.class_extends_any(&name_lower, &[b"exception", b"error"]);
                     if is_throwable {
                         obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
                         obj.set_property(b"code".to_vec(), Value::Long(0));
@@ -43759,8 +43774,8 @@ impl Vm {
                         // (a private property redeclared by a subclass). Such private
                         // slots must be stored under a mangled key so parent and child
                         // versions coexist.
-                        let mut name_counts: std::collections::HashMap<&[u8], usize> =
-                            std::collections::HashMap::new();
+                        let mut name_counts: crate::fxhash::FxHashMap<&[u8], usize> =
+                            Default::default();
                         for p in class.properties.iter().filter(|p| !p.is_static) {
                             *name_counts.entry(p.name.as_slice()).or_insert(0) += 1;
                         }
@@ -43795,6 +43810,7 @@ impl Vm {
                                 (key, p.default.clone(), p.is_readonly, p.is_virtual)
                             })
                             .collect();
+                        obj.properties.reserve(props.len());
                         for (name, default, is_readonly, is_virtual) in props {
                             // Virtual properties have no backing store and should not be initialized
                             if is_virtual {
@@ -46924,20 +46940,24 @@ impl Vm {
                                 .collect();
                         } // obj_borrow dropped here
 
-                        // Only apply builtin exception methods to Throwable subclasses
-                        let is_throwable = class_name_lower == b"exception"
-                            || class_name_lower == b"error"
-                            || is_builtin_subclass(&class_name_lower, b"exception")
-                            || is_builtin_subclass(&class_name_lower, b"error")
-                            || self.class_extends(&class_name_lower, b"exception")
-                            || self.class_extends(&class_name_lower, b"error");
-
                         // Check if the class has a user-defined method for this call
                         let has_user_method = self
                             .classes
                             .get(&class_name_lower)
                             .map(|c| c.methods.contains_key(&method_name_lower))
                             .unwrap_or(false);
+
+                        // Only apply builtin exception methods to Throwable subclasses
+                        // (only consulted without a user method: not computed otherwise).
+                        let is_throwable = !has_user_method
+                            && (class_name_lower == b"exception"
+                                || class_name_lower == b"error"
+                                || is_builtin_subclass(&class_name_lower, b"exception")
+                                || is_builtin_subclass(&class_name_lower, b"error")
+                                || self.class_extends_any(
+                                    &class_name_lower,
+                                    &[b"exception", b"error"],
+                                ));
 
                         // SplFileObject/GlobIterator: spl_filesystem_object_get_method_check()
                         if method_name_lower != b"__construct"
@@ -49055,7 +49075,7 @@ impl Vm {
         value: Value,
         cvs: &mut [Value],
         tmps: &mut [Value],
-        static_cv_keys: &HashMap<u32, Vec<u8>>,
+        static_cv_keys: &crate::fxhash::FxHashMap<u32, Vec<u8>>,
     ) {
         if let Value::Object(o) = &value {
             crate::gc::track_object(o);

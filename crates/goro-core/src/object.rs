@@ -55,7 +55,7 @@ pub struct ClassEntry {
     pub traits: Vec<Vec<u8>>,
     pub trait_adaptations: Vec<TraitAdaptation>,
     pub properties: Vec<PropertyDef>,
-    pub methods: IndexMap<Vec<u8>, MethodDef>,
+    pub methods: crate::fxhash::FxIndexMap<Vec<u8>, MethodDef>,
     pub constants: IndexMap<Vec<u8>, Value>,
     /// Metadata for constants (visibility, final flag, declaring class)
     pub constants_meta: IndexMap<Vec<u8>, ConstantMeta>,
@@ -148,7 +148,7 @@ impl ClassEntry {
             traits: Vec::new(),
             trait_adaptations: Vec::new(),
             properties: Vec::new(),
-            methods: IndexMap::new(),
+            methods: Default::default(),
             constants: IndexMap::new(),
             constants_meta: IndexMap::new(),
             static_properties: IndexMap::new(),
@@ -171,6 +171,10 @@ impl ClassEntry {
     }
 
     pub fn get_method(&self, name: &[u8]) -> Option<&MethodDef> {
+        // Callers mostly pass lowercase names already: no copy for those.
+        if !name.iter().any(u8::is_ascii_uppercase) {
+            return self.methods.get(name);
+        }
         let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
         self.methods.get(&lower)
     }
