@@ -413,6 +413,7 @@ impl ValidCtxt {
     pub fn stream_start(&mut self) {
         self.tree_mode = false;
         self.validation_root = None;
+        self.ec.filename = self.filename.clone();
         self.pre_run();
     }
 
@@ -428,22 +429,11 @@ impl ValidCtxt {
         ns_bindings: Vec<(Option<String>, String)>,
         attrs: Vec<StreamAttr>,
     ) -> i32 {
+        // xmlSchemaSAXHandleStartElementNs
+        self.depth += 1;
         if self.skip_depth != -1 && self.depth >= self.skip_depth {
-            self.depth += 1;
-            self.push_elem();
-            let e = self.inode();
-            e.local = local.to_string();
-            e.ns = ns.map(|s| s.to_string());
-            e.node = node;
-            e.line = line;
             return 0;
         }
-        if let Some(p) = self.parent_info_mut() {
-            if p.flags & ELEM_INFO_EMPTY != 0 {
-                p.flags ^= ELEM_INFO_EMPTY;
-            }
-        }
-        self.depth += 1;
         self.push_elem();
         {
             let e = self.inode();
@@ -458,20 +448,11 @@ impl ValidCtxt {
         for a in attrs {
             self.push_attribute(a.node, line, a.local, a.ns, a.value);
         }
-        let r = self.validate_elem();
-        if r == -1 {
+        if self.validate_elem() == -1 {
+            self.ec.err = -1;
             return -1;
         }
         0
-    }
-
-    fn parent_info_mut(&mut self) -> Option<&mut ElemInfo> {
-        if self.depth >= 0 {
-            let d = self.depth as usize;
-            Some(&mut self.elems[d])
-        } else {
-            None
-        }
     }
 
     /// Character data of the current element.
@@ -493,18 +474,20 @@ impl ValidCtxt {
 
     /// The end tag of the current element.
     pub fn end_element(&mut self) -> i32 {
+        // xmlSchemaSAXHandleEndElementNs
         if self.depth < 0 {
             return 0;
         }
-        if self.skip_depth != -1 && self.depth > self.skip_depth {
-            let d = self.depth as usize;
-            self.elems[d] = ElemInfo::default();
-            self.depth -= 1;
-            return 0;
+        if self.skip_depth != -1 {
+            if self.depth > self.skip_depth {
+                self.depth -= 1;
+                return 0;
+            }
+            self.skip_depth = -1;
         }
         self.activate_elem();
-        let r = self.pop_elem();
-        if r < 0 {
+        if self.pop_elem() < 0 {
+            self.ec.err = -1;
             return -1;
         }
         0
@@ -1813,5 +1796,98 @@ impl Schema {
     ) -> (Option<Rc<Schema>>, Vec<XmlError>) {
         let (s, e) = super::parse_doc::schema_parse(vm, None, Some(data));
         (s.map(Rc::new), e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_walk(v: &mut ValidCtxt, n: NodeId) {
+        let (t, name, ns, content, nsdefs) = tree::with(|t| {
+            let nd = &t.nodes[n];
+            let defs: Vec<(Option<String>, String)> = nd
+                .ns_def
+                .iter()
+                .map(|&x| (t.nss[x].prefix.clone(), t.nss[x].href.clone()))
+                .collect();
+            (
+                nd.t,
+                nd.name.clone(),
+                t.ns_href(nd.ns).map(|s| s.to_string()),
+                nd.content.clone(),
+                defs,
+            )
+        });
+        match t {
+            NType::Element => {
+                let attrs = tree::with(|t| {
+                    t.attrs_of(n)
+                        .into_iter()
+                        .map(|a| StreamAttr {
+                            local: t.nodes[a].name.clone(),
+                            ns: t.ns_href(t.nodes[a].ns).map(|s| s.to_string()),
+                            value: t.list_get_string(t.nodes[a].children, true),
+                            node: None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+                v.start_element(&name, ns.as_deref(), 1, None, nsdefs, attrs);
+                for c in node_children(n) {
+                    stream_walk(v, c);
+                }
+                v.end_element();
+            }
+            NType::Text | NType::CData => {
+                v.characters(
+                    if t == NType::Text {
+                        TEXT_NODE
+                    } else {
+                        CDATA_NODE
+                    },
+                    &content,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn msgs(e: &[XmlError]) -> Vec<String> {
+        e.iter().map(|x| x.message.clone()).collect()
+    }
+
+    #[test]
+    fn stream_matches_tree() {
+        let mut vm = goro_core::vm::Vm::new();
+        let xsd = br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:q="urn:q" targetNamespace="urn:q" elementFormDefault="qualified">
+<xs:element name="a"><xs:complexType><xs:sequence>
+<xs:element name="b" type="xs:int" maxOccurs="2"/>
+<xs:element name="c" type="xs:QName" minOccurs="0"/>
+<xs:element name="d" minOccurs="0"><xs:complexType><xs:sequence><xs:element name="e"/></xs:sequence><xs:attribute name="x" type="xs:boolean" use="required"/></xs:complexType></xs:element>
+</xs:sequence></xs:complexType></xs:element></xs:schema>"#;
+        let (s, errs) = Schema::parse_memory(&mut vm, xsd);
+        assert!(errs.is_empty(), "{:?}", msgs(&errs));
+        let s = s.unwrap();
+        for inst in [
+            &br#"<a xmlns="urn:q"><b>1</b><b>2</b><c>q:x</c><d x="true"><e/></d></a>"#[..],
+            br#"<a xmlns="urn:q" xmlns:q="urn:q"><b>1</b><b>2</b><c>q:x</c><d x="true"><e/></d></a>"#,
+            br#"<a xmlns="urn:q"><b>x</b><b>2</b><b>3</b></a>"#,
+            br#"<a xmlns="urn:q"><b>1</b><c>z:x</c><d y="1"><f/><e/></d></a>"#,
+            br#"<a xmlns="urn:q"><d x="1"/></a>"#,
+            br#"<z/>"#,
+        ] {
+            let out = crate::sax2::parse_doc(inst, None, 0);
+            let doc = out.doc.unwrap();
+            let mut v1 = ValidCtxt::new(s.clone());
+            let r1 = v1.validate_doc(doc);
+            let mut v2 = ValidCtxt::new(s.clone());
+            v2.stream_start();
+            let root = tree::with(|t| t.root_element(doc)).unwrap();
+            stream_walk(&mut v2, root);
+            let r2 = v2.stream_end();
+            assert_eq!(msgs(v1.errors()), msgs(v2.errors()));
+            assert_eq!(r1 == 0, r2 == 0);
+            eprintln!("{:?}", msgs(v1.errors()));
+        }
     }
 }
