@@ -26989,6 +26989,15 @@ impl Vm {
                             }
                         }
                     }
+                    // `$a[] = $r` with $r a reference to $a itself keeps the
+                    // (recursive) array rather than a copy.
+                    let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
+                        && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
+                    let val = if self_ref {
+                        val
+                    } else {
+                        self.dup_stored_array(&op.op2, val)
+                    };
                     if let Value::Array(arr) = &arr_val {
                         if let Err(msg) = arr.borrow_mut().try_push(val) {
                             let exc = self.create_exception(b"Error", msg, op.line);
@@ -27115,6 +27124,15 @@ impl Vm {
                             }
                         }
                     }
+                    // `$a[] = $r` with $r a reference to $a itself keeps the
+                    // (recursive) array rather than a copy.
+                    let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
+                        && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
+                    let val = if self_ref {
+                        val
+                    } else {
+                        self.dup_stored_array(&op.op2, val)
+                    };
                     // Array/object keys on a real array throw TypeError (matches
                     // zend_illegal_container_offset). value_to_array_key_checked
                     // silently maps both to Int(0), so check explicitly first.
@@ -31099,6 +31117,7 @@ impl Vm {
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let value = self.dup_stored_array(&op.op2, value);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -34716,9 +34735,61 @@ impl Vm {
                             let key_val =
                                 self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                             match c.deref() {
-                                Value::Object(_) => self
-                                    .call_object_method(&c.deref(), b"offsetGet", &[key_val])
-                                    .unwrap_or(Value::Null),
+                                Value::Object(o) => {
+                                    // `$obj[k][...] = v`: write through the reference a
+                                    // by-ref offsetGet returns.
+                                    let class_lower = o.borrow().class_name.to_ascii_lowercase();
+                                    let by_ref = self
+                                        .classes
+                                        .get(&class_lower)
+                                        .and_then(|c| c.get_method(b"offsetget"))
+                                        .map(|m| m.op_array.returns_by_ref)
+                                        .unwrap_or(false);
+                                    if by_ref {
+                                        self.keep_ref_depth = Some(self.call_depth + 1);
+                                    }
+                                    let v = self
+                                        .call_object_method(&c.deref(), b"offsetGet", &[key_val])
+                                        .unwrap_or(Value::Null);
+                                    self.keep_ref_depth = None;
+                                    match v {
+                                        Value::Reference(r) => {
+                                            let cur = r.borrow().clone();
+                                            match cur {
+                                                Value::Null | Value::Undef => {
+                                                    let a = Value::Array(Rc::new(RefCell::new(
+                                                        PhpArray::new(),
+                                                    )));
+                                                    *r.borrow_mut() = a.clone();
+                                                    a
+                                                }
+                                                Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                                                    let sep = Value::Array(Rc::new(RefCell::new(
+                                                        a.borrow().clone(),
+                                                    )));
+                                                    *r.borrow_mut() = sep.clone();
+                                                    sep
+                                                }
+                                                other => other,
+                                            }
+                                        }
+                                        other => {
+                                            if !matches!(other, Value::Object(_))
+                                                && self
+                                                    .classes
+                                                    .get(&class_lower)
+                                                    .and_then(|c| c.get_method(b"offsetget"))
+                                                    .is_some()
+                                            {
+                                                let cd = crate::value::display_class_name(
+                                                    &o.borrow().class_name,
+                                                );
+                                                self.emit_notice_at(&format!("Indirect modification of overloaded element of {} has no effect", cd), op.line);
+                                            }
+                                            other
+                                        }
+                                    }
+                                }
                                 _ => Value::Null,
                             }
                         }
@@ -40909,6 +40980,87 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // `$o->magic[...] = v` with `function &__get()`: write through
+                    // the reference __get returns.
+                    if let (OpCode::PropertyGetW, Value::Object(obj)) = (op.opcode, &obj_val_raw) {
+                        let class_lower = obj.borrow().class_name.to_ascii_lowercase();
+                        let by_ref_get = self
+                            .classes
+                            .get(&class_lower)
+                            .and_then(|c| c.get_method(b"__get"))
+                            .map(|m| m.op_array.returns_by_ref)
+                            .unwrap_or(false);
+                        let oid = obj.borrow().object_id;
+                        let guard_key = (oid, prop_name.as_bytes().to_vec(), 0u8);
+                        if by_ref_get
+                            && !obj.borrow().has_property(prop_name.as_bytes())
+                            && !self.magic_prop_guards.contains(&guard_key)
+                        {
+                            self.keep_ref_depth = Some(self.call_depth + 1);
+                            self.magic_prop_guards.insert(guard_key.clone());
+                            let v = self
+                                .call_object_method(
+                                    &obj_val_raw,
+                                    b"__get",
+                                    &[Value::String(prop_name.clone())],
+                                )
+                                .unwrap_or(Value::Null);
+                            self.magic_prop_guards.remove(&guard_key);
+                            self.keep_ref_depth = None;
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception in __get".into(),
+                                    line: op.line,
+                                });
+                            }
+                            let container = match v {
+                                Value::Reference(r) => {
+                                    let cur = r.borrow().clone();
+                                    match cur {
+                                        Value::Null | Value::Undef => {
+                                            let a = Value::Array(Rc::new(RefCell::new(
+                                                PhpArray::new(),
+                                            )));
+                                            *r.borrow_mut() = a.clone();
+                                            a
+                                        }
+                                        Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                                            let sep = Value::Array(Rc::new(RefCell::new(
+                                                a.borrow().clone(),
+                                            )));
+                                            *r.borrow_mut() = sep.clone();
+                                            sep
+                                        }
+                                        other => other,
+                                    }
+                                }
+                                other => {
+                                    if !matches!(other, Value::Object(_)) {
+                                        let class_display = crate::value::display_class_name(
+                                            &obj.borrow().class_name,
+                                        );
+                                        self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_string_lossy()), op.line);
+                                    }
+                                    other
+                                }
+                            };
+                            self.write_operand(
+                                &op.result,
+                                container,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            continue;
+                        }
+                    }
                     // Extension property read handlers (e.g. DateInterval's fields).
                     if let Value::Object(obj) = &obj_val_raw {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.read_property) {
@@ -42035,6 +42187,7 @@ impl Vm {
                 OpCode::PropertySet => {
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let mut value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    value = self.dup_stored_array(&op.op2, value);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -45311,6 +45464,49 @@ impl Vm {
         }
     }
 
+    /// Value copy of an array being stored into a variable / element /
+    /// property (zend_array_dup()): references held only by the source
+    /// array are copied as plain values.
+    /// An array read from a variable or literal and stored elsewhere is a
+    /// copy (temporaries are already owned by the store).
+    fn dup_stored_array(&self, src: &OperandType, value: Value) -> Value {
+        if matches!(value, Value::Array(_))
+            && matches!(src, OperandType::Cv(_) | OperandType::Const(_))
+        {
+            self.dup_array_value(value)
+        } else {
+            value
+        }
+    }
+
+    fn dup_array_value(&self, value: Value) -> Value {
+        match &value {
+            Value::Array(arr) => {
+                // zend_array_dup(): references held only by the source
+                // array (refcount 1) are copied as plain values.
+                let mut copy = arr.borrow().clone();
+                // Closures with captured variables are represented as
+                // [name, captures...]; their by-ref captures must stay bound.
+                let is_closure = matches!(copy.values().next(), Some(Value::String(s))
+                            if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") });
+                // A copy of $GLOBALS sees the variables' values, not the
+                // cells that bind them to global-scope CVs.
+                let max_rc = if Rc::ptr_eq(arr, &self.globals) { 3 } else { 2 };
+                for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
+                    let single = matches!(v, Value::Reference(r) if Rc::strong_count(r) <= max_rc);
+                    if single {
+                        let inner = v.deref();
+                        if !matches!(&inner, Value::Array(a) if Rc::ptr_eq(a, arr)) {
+                            *v = inner;
+                        }
+                    }
+                }
+                Value::Array(Rc::new(RefCell::new(copy)))
+            }
+            _ => value,
+        }
+    }
+
     fn write_operand(
         &mut self,
         operand: &OperandType,
@@ -45328,32 +45524,8 @@ impl Vm {
             OperandType::Cv(idx) => {
                 // PHP copy-on-write: when assigning an array to a CV,
                 // clone the inner PhpArray so each variable has its own copy.
-                let value = match &value {
-                    Value::Array(arr) => {
-                        // zend_array_dup(): references held only by the source
-                        // array (refcount 1) are copied as plain values.
-                        let mut copy = arr.borrow().clone();
-                        // Closures with captured variables are represented as
-                        // [name, captures...]; their by-ref captures must stay bound.
-                        let is_closure = matches!(copy.values().next(), Some(Value::String(s))
-                            if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") });
-                        // A copy of $GLOBALS sees the variables' values, not the
-                        // cells that bind them to global-scope CVs.
-                        let max_rc = if Rc::ptr_eq(arr, &self.globals) { 3 } else { 2 };
-                        for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
-                            let single =
-                                matches!(v, Value::Reference(r) if Rc::strong_count(r) <= max_rc);
-                            if single {
-                                let inner = v.deref();
-                                if !matches!(&inner, Value::Array(a) if Rc::ptr_eq(a, arr)) {
-                                    *v = inner;
-                                }
-                            }
-                        }
-                        Value::Array(Rc::new(RefCell::new(copy)))
-                    }
-                    _ => value,
-                };
+                let value = self.dup_array_value(value);
+
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
                     // If the CV holds a reference, write through the reference
                     // (never store a reference inside itself).

@@ -6576,7 +6576,12 @@ impl Compiler {
                                                     param.name.clone(),
                                                 )));
                                             method_compiler.op_array.emit(Op {
-                                                opcode: OpCode::PropertySet,
+                                                // A by-ref promoted parameter binds the property to the reference.
+                                                opcode: if param.by_ref {
+                                                    OpCode::PropertySetRef
+                                                } else {
+                                                    OpCode::PropertySet
+                                                },
                                                 op1: OperandType::Cv(this_cv),
                                                 op2: OperandType::Cv(param_cv),
                                                 result: OperandType::Const(prop_name_idx),
