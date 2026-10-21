@@ -737,7 +737,7 @@ fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
             _ => {}
         }
     }
-    let chunks = if closing { (data.len() + 3) / 4 } else { data.len() / 4 };
+    let chunks = if closing { data.len().div_ceil(4) } else { data.len() / 4 };
     let consume = chunks * 4;
     let consume = consume.min(data.len());
     let mut out = Vec::with_capacity(consume * 3 / 4 + 4);
@@ -767,7 +767,7 @@ fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
         // Trailing partial group (no padding): decode whatever's there.
         let rem = &data[i..consume];
         let mut buf = rem.to_vec();
-        while buf.len() % 4 != 0 { buf.push(b'='); }
+        while !buf.len().is_multiple_of(4) { buf.push(b'='); }
         let mut n: u32 = 0;
         let mut padcount = 0u32;
         for &c in &buf {
@@ -833,7 +833,7 @@ fn qp_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: b
             i += 1;
             continue;
         }
-        let encode = b == b'=' || b < 0x20 || b > 0x7e;
+        let encode = b == b'=' || !(0x20..=0x7e).contains(&b);
         // Decide chunk length needed.
         let chunk_len = if encode { 3 } else { 1 };
         if col + chunk_len > max_col {
@@ -961,7 +961,7 @@ fn dechunk_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: boo
                 // Take hex digits up to ';' or whitespace.
                 let mut hex_end = 0usize;
                 for &b in line {
-                    if matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F') {
+                    if b.is_ascii_hexdigit() {
                         hex_end += 1;
                     } else {
                         break;

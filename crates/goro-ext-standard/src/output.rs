@@ -40,6 +40,7 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
     if indent > 8000 {
         return;
@@ -158,7 +159,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let file = String::from_utf8_lossy(&op.filename).to_string();
                     let line = op.decl_line;
                     let name = if op.name.starts_with(b"__closure_fcc_") {
-                        format!("{{closure}}")
+                        "{closure}".to_string()
                     } else if !op.display_name.is_empty() {
                         String::from_utf8_lossy(&op.display_name).to_string()
                     } else {
@@ -274,11 +275,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let weak_id = obj_borrow.get_property(b"__weak_ref_id").to_long() as u64;
                 drop(obj_borrow);
                 let referent = if let Some(weak) = vm.weak_refs.get(&weak_id) {
-                    if let Some(strong) = weak.upgrade() {
-                        Some(Value::Object(strong))
-                    } else {
-                        None
-                    }
+                    weak.upgrade().map(Value::Object)
                 } else {
                     None
                 };
@@ -1349,7 +1346,7 @@ fn print_r_value_inner(
                     }
                 }
             }
-            let arr_ptr = Rc::as_ptr(arr) as *const u8 as usize;
+            let _arr_ptr = Rc::as_ptr(arr) as *const u8 as usize;
             buf.extend_from_slice(b"Array\n");
             let arr = arr.borrow();
             let prefix = " ".repeat(indent);
@@ -1490,7 +1487,7 @@ fn print_r_value_inner(
             let class_info = classes.get(&class_lower);
 
             buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
-            let obj_ptr = Rc::as_ptr(obj) as *const u8 as usize;
+            let _obj_ptr = Rc::as_ptr(obj) as *const u8 as usize;
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties and uninitialized properties
@@ -1630,7 +1627,7 @@ thread_local! {
 }
 
 fn var_export_spaces(buf: &mut Vec<u8>, n: usize) {
-    buf.extend(std::iter::repeat(b' ').take(n));
+    buf.extend(std::iter::repeat_n(b' ', n));
 }
 
 /// php_addcslashes(s, "'\\") + "\0" → `' . "\0" . '`
@@ -1816,77 +1813,6 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             } else if !is_enum {
                 buf.extend_from_slice(b"))");
             }
-        }
-    }
-}
-
-/// Format a float using serialize_precision=-1 (shortest unique representation)
-/// Format a float using C's %.*G format (used by var_dump with precision INI setting).
-/// This formats with N significant digits, using E notation for very large/small numbers.
-fn format_php_float_g(f: f64, precision: usize) -> String {
-    if f.is_nan() {
-        return "NAN".to_string();
-    }
-    if f.is_infinite() {
-        return if f.is_sign_positive() {
-            "INF".to_string()
-        } else {
-            "-INF".to_string()
-        };
-    }
-    if f == 0.0 {
-        return if f.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
-    }
-    // Use Rust's %G equivalent: format with precision significant digits
-    // Rust doesn't have %G directly, so we implement it
-    let abs_f = f.abs();
-    let exp = abs_f.log10().floor() as i32;
-
-    // %G uses scientific notation if exp < -4 or exp >= precision
-    let prec = if precision == 0 { 1 } else { precision };
-
-    if exp < -4 || exp >= prec as i32 {
-        // Use scientific notation with precision-1 decimal places
-        let decimal_places = if prec > 1 { prec - 1 } else { 0 };
-        let s = format!("{:.width$E}", f, width = decimal_places);
-        // Remove trailing zeros from mantissa (like %G), fix exponent format
-        if s.contains('.') {
-            let parts: Vec<&str> = s.split('E').collect();
-            if parts.len() == 2 {
-                let mantissa = parts[0].trim_end_matches('0').trim_end_matches('.');
-                let exp_part = parts[1];
-                // Ensure exponent has explicit + sign
-                let exp_formatted = if !exp_part.starts_with('-') && !exp_part.starts_with('+') {
-                    format!("+{}", exp_part)
-                } else {
-                    exp_part.to_string()
-                };
-                if mantissa.contains('.') {
-                    format!("{}E{}", mantissa, exp_formatted)
-                } else {
-                    format!("{}.0E{}", mantissa, exp_formatted)
-                }
-            } else {
-                s
-            }
-        } else {
-            s
-        }
-    } else {
-        // Use fixed-point notation
-        // Number of decimal places = precision - (exp + 1)
-        let decimal_places = if prec as i32 > exp + 1 {
-            (prec as i32 - exp - 1) as usize
-        } else {
-            0
-        };
-        let s = format!("{:.width$}", f, width = decimal_places);
-        // Remove trailing zeros (like %G) but keep at least one digit
-        if s.contains('.') {
-            let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-            trimmed.to_string()
-        } else {
-            s
         }
     }
 }

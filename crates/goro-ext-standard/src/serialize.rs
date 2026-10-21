@@ -1177,7 +1177,7 @@ impl<'a> Parser<'a> {
                 *p = e + 2;
                 let slot = slot?;
                 let remaining = (self.max() - (*p).min(self.max())) as i64;
-                if elements < 0 || elements >= 0x40000000 || elements > remaining / 2 {
+                if !(0..0x40000000).contains(&elements) || elements > remaining / 2 {
                     return None;
                 }
                 let arr = Rc::new(RefCell::new(PhpArray::new()));
@@ -1355,7 +1355,7 @@ impl<'a> Parser<'a> {
             let d = self.d.borrow();
             match &d.allowed_classes {
                 None => true,
-                Some(list) => list.iter().any(|c| *c == lc),
+                Some(list) => list.contains(&lc),
             }
         };
         if !allowed {
@@ -1933,6 +1933,7 @@ fn option_class_name(vm: &mut Vm, v: &Value) -> Option<Vec<u8>> {
 }
 
 /// php_unserialize_with_options(). Returns Err when an exception is pending.
+#[allow(clippy::result_unit_err)] // error is reported via vm.current_exception
 pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Value>, function_name: &str) -> Result<Value, ()> {
     if buf.is_empty() {
         return Ok(Value::False);

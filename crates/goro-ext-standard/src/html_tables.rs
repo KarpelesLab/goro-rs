@@ -3848,9 +3848,6 @@ pub(crate) static ENT_HTML5_MULTI_CP: &[(u32, u32, &str)] = &[
     (0x02AFD, 0x020E5, "nparsl"),
 ];
 
-pub(crate) static ENT_HTML4_MULTI_CP: &[(u32, u32, &str)] = &[
-];
-
 pub(crate) static DEC_HTML4: &[(&str, u32, u32)] = &[
     ("#039", 0x00027, 0x00000),
     ("#039", 0x00027, 0x00000),

@@ -133,9 +133,6 @@ enum UnicodeClassKind {
     PosixAscii,
 }
 
-#[derive(Debug, Clone)]
-struct NegatedClass(UnicodeClassKind);
-
 // ============================================================================
 // Flags
 // ============================================================================
@@ -578,7 +575,7 @@ impl<'a> RegexParser<'a> {
                 let mut val: u8 = 0;
                 for _ in 0..2 {
                     match self.peek() {
-                        Some(c) if c >= b'0' && c <= b'7' => {
+                        Some(c) if (b'0'..=b'7').contains(&c) => {
                             self.advance();
                             val = val * 8 + (c - b'0');
                         }
@@ -587,7 +584,7 @@ impl<'a> RegexParser<'a> {
                 }
                 Ok(RegexNode::Literal(val))
             }
-            Some(ch) if ch >= b'1' && ch <= b'9' && !in_class => {
+            Some(ch) if (b'1'..=b'9').contains(&ch) && !in_class => {
                 // Backreference \1 through \9
                 let group_num = (ch - b'0') as usize;
                 Ok(RegexNode::Backreference(group_num))
@@ -665,9 +662,7 @@ impl<'a> RegexParser<'a> {
             // ASCII property
             b"ASCII" => UnicodeClassKind::PosixAscii,
             _ => {
-                return Err(format!(
-                    "Unknown property name after \\p",
-                ));
+                return Err("Unknown property name after \\p".to_string());
             }
         };
 
@@ -1292,6 +1287,7 @@ impl<'a> MatchState<'a> {
     }
 
     /// Try to match `node` starting at position `pos`. Returns the end position if successful.
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     fn try_match(&mut self, node: &RegexNode, pos: usize) -> Option<usize> {
         self.step_count += 1;
         if self.step_count > MAX_STEPS {
@@ -1303,7 +1299,7 @@ impl<'a> MatchState<'a> {
                 if pos < self.input.len() {
                     let input_ch = self.input[pos];
                     if self.flags.case_insensitive {
-                        if input_ch.to_ascii_lowercase() == ch.to_ascii_lowercase() {
+                        if input_ch.eq_ignore_ascii_case(ch) {
                             Some(pos + 1)
                         } else {
                             None
@@ -1424,10 +1420,7 @@ impl<'a> MatchState<'a> {
             RegexNode::Sequence(nodes) => {
                 let mut current_pos = pos;
                 for n in nodes {
-                    match self.try_match(n, current_pos) {
-                        Some(new_pos) => current_pos = new_pos,
-                        None => return None,
-                    }
+                    current_pos = self.try_match(n, current_pos)?;
                 }
                 Some(current_pos)
             }
@@ -1513,7 +1506,7 @@ impl<'a> MatchState<'a> {
                             slice
                                 .iter()
                                 .zip(captured.iter())
-                                .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+                                .all(|(a, b)| a.eq_ignore_ascii_case(b))
                         } else {
                             slice == captured
                         };
@@ -1623,12 +1616,7 @@ impl<'a> MatchState<'a> {
             if self.step_count > MAX_STEPS {
                 return None;
             }
-            match self.try_match(node, current_pos) {
-                Some(new_pos) => {
-                    current_pos = new_pos;
-                }
-                None => return None,
-            }
+            current_pos = self.try_match(node, current_pos)?;
         }
 
         // Lazy: return the minimum position
@@ -1796,8 +1784,8 @@ fn check_class(cp: u32, kind: UnicodeClassKind) -> bool {
             || cp == b'\r' as u32 || cp == 0x0B || cp == 0x0C,
         PosixBlank => cp == b' ' as u32 || cp == b'\t' as u32,
         PosixCntrl => cp < 0x20 || cp == 0x7F,
-        PosixGraph => cp >= 0x21 && cp <= 0x7E,
-        PosixPrint => cp >= 0x20 && cp <= 0x7E,
+        PosixGraph => (0x21..=0x7E).contains(&cp),
+        PosixPrint => (0x20..=0x7E).contains(&cp),
         PosixPunct => cp < 0x80 && (cp as u8).is_ascii_punctuation(),
         PosixWord => cp < 0x80 && ((cp as u8).is_ascii_alphanumeric() || cp == b'_' as u32),
         PosixAscii => cp < 0x80,
@@ -1891,40 +1879,27 @@ fn is_unicode_decimal_digit(cp: u32) -> bool {
 }
 
 fn is_unicode_space(cp: u32) -> bool {
-    match cp {
-        0x9..=0xD => true,
-        0x20 => true,
-        0x85 => true,
-        0xA0 => true,
-        0x1680 => true,
-        0x2000..=0x200A => true,
-        0x2028..=0x2029 => true,
-        0x202F => true,
-        0x205F => true,
-        0x3000 => true,
-        _ => false,
-    }
+    matches!(cp, 0x9..=0xD | 0x20 | 0x85 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028..=0x2029 | 0x202F | 0x205F | 0x3000)
 }
 
 fn is_unicode_punctuation(cp: u32) -> bool {
-    match cp {
-        0x21..=0x23 | 0x25..=0x2A | 0x2C..=0x2F | 0x3A..=0x3B | 0x3F..=0x40
-            | 0x5B..=0x5D | 0x5F | 0x7B | 0x7D => true,
-        0xA1 | 0xA7 | 0xAB | 0xB6..=0xB7 | 0xBB | 0xBF => true,
-        0x2010..=0x2027 | 0x2030..=0x205E => true,
-        0x3001..=0x3003 | 0x3008..=0x3011 | 0x3014..=0x301F => true,
-        _ => false,
-    }
+    matches!(
+        cp,
+        0x21..=0x23 | 0x25..=0x2A | 0x2C..=0x2F | 0x3A..=0x3B | 0x3F..=0x40 | 0x5B..=0x5D | 0x5F | 0x7B | 0x7D
+            | 0xA1 | 0xA7 | 0xAB | 0xB6..=0xB7 | 0xBB | 0xBF
+            | 0x2010..=0x2027 | 0x2030..=0x205E
+            | 0x3001..=0x3003 | 0x3008..=0x3011 | 0x3014..=0x301F
+    )
 }
 
 fn is_unicode_symbol(cp: u32) -> bool {
-    match cp {
-        0x24 | 0x2B | 0x3C..=0x3E | 0x5E | 0x60 | 0x7C | 0x7E => true,
-        0xA2..=0xA6 | 0xA8..=0xA9 | 0xAC | 0xAE..=0xB1 | 0xB4 | 0xB8 | 0xD7 | 0xF7 => true,
-        0x20A0..=0x20CF => true,
-        0x2100..=0x214F | 0x2190..=0x21FF | 0x2200..=0x22FF => true,
-        _ => false,
-    }
+    matches!(
+        cp,
+        0x24 | 0x2B | 0x3C..=0x3E | 0x5E | 0x60 | 0x7C | 0x7E
+            | 0xA2..=0xA6 | 0xA8..=0xA9 | 0xAC | 0xAE..=0xB1 | 0xB4 | 0xB8 | 0xD7 | 0xF7
+            | 0x20A0..=0x20CF
+            | 0x2100..=0x214F | 0x2190..=0x21FF | 0x2200..=0x22FF
+    )
 }
 
 fn is_unicode_separator(cp: u32) -> bool {
@@ -1932,23 +1907,15 @@ fn is_unicode_separator(cp: u32) -> bool {
 }
 
 fn is_unicode_other(cp: u32) -> bool {
-    cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)
+    cp < 0x20 || cp == 0x7F || (0x80..=0x9F).contains(&cp)
 }
 
 fn is_unicode_lowercase_letter(cp: u32) -> bool {
-    match cp {
-        0x61..=0x7A => true,
-        0xDF..=0xF6 | 0xF8..=0xFF => true,
-        _ => false,
-    }
+    matches!(cp, 0x61..=0x7A | 0xDF..=0xF6 | 0xF8..=0xFF)
 }
 
 fn is_unicode_uppercase_letter(cp: u32) -> bool {
-    match cp {
-        0x41..=0x5A => true,
-        0xC0..=0xD6 | 0xD8..=0xDE => true,
-        _ => false,
-    }
+    matches!(cp, 0x41..=0x5A | 0xC0..=0xD6 | 0xD8..=0xDE)
 }
 
 fn is_cyrillic(cp: u32) -> bool {
@@ -2061,7 +2028,7 @@ fn count_groups(node: &RegexNode) -> usize {
         RegexNode::Lookbehind { node, .. } => count_groups(node),
         RegexNode::Quantifier { node, .. } => count_groups(node),
         RegexNode::Sequence(nodes) | RegexNode::Alternation(nodes) => {
-            nodes.iter().map(|n| count_groups(n)).max().unwrap_or(0)
+            nodes.iter().map(count_groups).max().unwrap_or(0)
         }
         _ => 0,
     }
@@ -2158,11 +2125,10 @@ fn match_sequence_backtrack(
                 None
             } else {
                 // Lazy: try from shortest match forwards
-                for i in min_idx..positions.len() {
+                for &(try_pos, ref caps) in &positions[min_idx..] {
                     if state.step_count > MAX_STEPS {
                         return None;
                     }
-                    let (try_pos, ref caps) = positions[i];
                     let mut sub_state = state.clone();
                     sub_state.captures = caps.clone();
                     if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, try_pos) {
@@ -2357,7 +2323,7 @@ fn match_node_backtrack(node: &RegexNode, state: &mut MatchState, pos: usize) ->
         }
         _ => {
             // Wrap in a single-element sequence for uniform handling
-            match_sequence_backtrack(&[node.clone()], state, pos)
+            match_sequence_backtrack(std::slice::from_ref(node), state, pos)
         }
     }
 }
@@ -2995,9 +2961,8 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Fill matches array if provided
     if let Some(matches_ref) = args.get(2) {
         let num_groups = compiled.num_groups + 1;
-        let result;
 
-        if set_order {
+        let result = if set_order {
             // PREG_SET_ORDER — each element is an array of all groups for that match
             let mut set_arr = PhpArray::new();
             for m in &all_matches {
@@ -3030,7 +2995,7 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 set_arr.push(Value::Array(Rc::new(RefCell::new(match_arr))));
             }
-            result = set_arr;
+            set_arr
         } else {
             // PREG_PATTERN_ORDER (default) — group each capture group across all matches
             let mut pattern_arr = PhpArray::new();
@@ -3064,8 +3029,8 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 pattern_arr.set(ArrayKey::Int(group_idx as i64), val);
             }
-            result = pattern_arr;
-        }
+            pattern_arr
+        };
 
         if let Value::Reference(r) = matches_ref {
             *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(result)));
@@ -3459,7 +3424,6 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     };
                     search_offset = match_end + step;
                 } else {
-                    search_offset = match_end + 1;
                     break;
                 }
             } else {
@@ -3487,14 +3451,14 @@ pub fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => return Ok(Value::String(PhpString::empty())),
     };
 
-    let delimiter = args.get(1).map(|v| {
+    let delimiter = args.get(1).and_then(|v| {
         let s = v.to_php_string();
         if s.as_bytes().is_empty() {
             None
         } else {
             Some(s.as_bytes()[0])
         }
-    }).flatten();
+    });
 
     let mut result = Vec::with_capacity(input.len() * 2);
     for &ch in input.as_bytes() {

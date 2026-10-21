@@ -40,28 +40,27 @@ const ENT_HTML_SUBSTITUTE_DISALLOWED_CHARS: i64 = 128;
 fn unicode_cp_is_allowed(cp: u32, doctype: i64) -> bool {
     match doctype {
         ENT_HTML_DOC_HTML401 => {
-            (cp >= 0x20 && cp <= 0x7E)
+            (0x20..=0x7E).contains(&cp)
                 || cp == 0x0A
                 || cp == 0x09
                 || cp == 0x0D
-                || (cp >= 0xA0 && cp <= 0xD7FF)
-                || (cp >= 0xE000 && cp <= 0x10FFFF)
+                || (0xA0..=0xD7FF).contains(&cp)
+                || (0xE000..=0x10FFFF).contains(&cp)
         }
         ENT_HTML_DOC_HTML5 => {
-            (cp >= 0x20 && cp <= 0x7E)
-                || (cp >= 0x09 && cp <= 0x0D && cp != 0x0B)
-                || (cp >= 0xA0 && cp <= 0xD7FF)
-                || (cp >= 0xE000
-                    && cp <= 0x10FFFF
+            (0x20..=0x7E).contains(&cp)
+                || ((0x09..=0x0D).contains(&cp) && cp != 0x0B)
+                || (0xA0..=0xD7FF).contains(&cp)
+                || ((0xE000..=0x10FFFF).contains(&cp)
                     && (cp & 0xFFFF) < 0xFFFE
-                    && (cp < 0xFDD0 || cp > 0xFDEF))
+                    && !(0xFDD0..=0xFDEF).contains(&cp))
         }
         ENT_HTML_DOC_XHTML | ENT_HTML_DOC_XML1 => {
-            (cp >= 0x20 && cp <= 0xD7FF)
+            (0x20..=0xD7FF).contains(&cp)
                 || cp == 0x0A
                 || cp == 0x09
                 || cp == 0x0D
-                || (cp >= 0xE000 && cp <= 0x10FFFF && cp != 0xFFFE && cp != 0xFFFF)
+                || ((0xE000..=0x10FFFF).contains(&cp) && cp != 0xFFFE && cp != 0xFFFF)
         }
         _ => true,
     }
@@ -73,12 +72,11 @@ fn numeric_entity_is_allowed(cp: u32, doctype: i64) -> bool {
     match doctype {
         ENT_HTML_DOC_HTML401 => cp <= 0x10FFFF,
         ENT_HTML_DOC_HTML5 => {
-            (cp >= 0x20 && cp <= 0x7E)
-                || (cp >= 0x09 && cp <= 0x0C && cp != 0x0B)
-                || (cp >= 0xA0
-                    && cp <= 0x10FFFF
+            (0x20..=0x7E).contains(&cp)
+                || ((0x09..=0x0C).contains(&cp) && cp != 0x0B)
+                || ((0xA0..=0x10FFFF).contains(&cp)
                     && (cp & 0xFFFF) < 0xFFFE
-                    && (cp < 0xFDD0 || cp > 0xFDEF))
+                    && !(0xFDD0..=0xFDEF).contains(&cp))
         }
         ENT_HTML_DOC_XHTML | ENT_HTML_DOC_XML1 => unicode_cp_is_allowed(cp, doctype),
         _ => true,
@@ -211,6 +209,7 @@ fn resolve_charset(vm: &mut Vm, args: &[Value], fn_name: &str, arg_idx: usize) -
 /// Decode the next character at `bytes[i..]` as a Unicode codepoint.
 /// Returns (codepoint, bytes_consumed). On invalid sequences returns
 /// (None, 1) — the caller decides whether to skip, substitute, or pass through.
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
     if i >= bytes.len() {
         return (None, 0);
@@ -267,12 +266,12 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
         Charset::Big5 => {
             // ASCII (or any byte < 0x81): single byte, pass through.
             // Lead 0x81-0xFE: requires trail (0x40-0x7E or 0xA1-0xFE).
-            if b >= 0x81 && b <= 0xFE {
+            if (0x81..=0xFE).contains(&b) {
                 if i + 1 >= bytes.len() {
                     return (None, 1);
                 }
                 let n = bytes[i + 1];
-                if (n >= 0x40 && n <= 0x7E) || (n >= 0xA1 && n <= 0xFE) {
+                if (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n) {
                     (Some(((b as u32) << 8) | n as u32), 2)
                 } else {
                     (None, 1)
@@ -282,12 +281,12 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
             }
         }
         Charset::Big5HkScs => {
-            if b >= 0x81 && b <= 0xFE {
+            if (0x81..=0xFE).contains(&b) {
                 if i + 1 >= bytes.len() {
                     return (None, 1);
                 }
                 let n = bytes[i + 1];
-                if (n >= 0x40 && n <= 0x7E) || (n >= 0xA1 && n <= 0xFE) {
+                if (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n) {
                     (Some(((b as u32) << 8) | n as u32), 2)
                 } else if n != 0x80 && n != 0xFF {
                     (None, 1)
@@ -302,8 +301,8 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
             // gb2312_lead = c != 0x8E, 0x8F, 0xA0, 0xFF
             // gb2312_trail = 0xA1..=0xFE
             let lead = |c: u8| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
-            let trail = |c: u8| c >= 0xA1 && c <= 0xFE;
-            if b >= 0xA1 && b <= 0xFE {
+            let trail = |c: u8| (0xA1..=0xFE).contains(&c);
+            if (0xA1..=0xFE).contains(&b) {
                 if i + 1 >= bytes.len() {
                     return (None, 1);
                 }
@@ -326,7 +325,7 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
             // sjis_trail = c >= 0x40 && c != 0x7F && c < 0xFD
             let lead = |c: u8| c != 0x80 && c != 0xA0 && c < 0xFD;
             let trail = |c: u8| c >= 0x40 && c != 0x7F && c < 0xFD;
-            if (b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC) {
+            if (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b) {
                 if i + 1 >= bytes.len() {
                     return (None, 1);
                 }
@@ -338,7 +337,7 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
                 } else {
                     (None, 2)
                 }
-            } else if b < 0x80 || (b >= 0xA1 && b <= 0xDF) {
+            } else if b < 0x80 || (0xA1..=0xDF).contains(&b) {
                 (Some(b as u32), 1)
             } else {
                 (None, 1)
@@ -350,12 +349,12 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
             // could start a new character (i.e. not 0xA0/0xFF). Advance further
             // only when subsequent bytes are 0xA0/0xFF, which can't start anything.
             let avail = bytes.len() - i;
-            if b >= 0xA1 && b <= 0xFE {
+            if (0xA1..=0xFE).contains(&b) {
                 if avail < 2 {
                     return (None, 1);
                 }
                 let n = bytes[i + 1];
-                if n >= 0xA1 && n <= 0xFE {
+                if (0xA1..=0xFE).contains(&n) {
                     (Some(((b as u32) << 8) | n as u32), 2)
                 } else {
                     let adv = if n != 0xA0 && n != 0xFF { 1 } else { 2 };
@@ -366,7 +365,7 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
                     return (None, 1);
                 }
                 let n = bytes[i + 1];
-                if n >= 0xA1 && n <= 0xDF {
+                if (0xA1..=0xDF).contains(&n) {
                     (Some(((b as u32) << 8) | n as u32), 2)
                 } else {
                     let adv = if n != 0xA0 && n != 0xFF { 1 } else { 2 };
@@ -636,6 +635,7 @@ fn map_unicode_to_byte(cp: u32, cs: Charset) -> Option<u8> {
 /// Common encoder: walks the input character by character and replaces
 /// per the policy. Output is always UTF-8 unless the input charset is single
 /// byte AND no entity replacement happens (we emit original bytes).
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn encode_html(
     input: &[u8],
     cs: Charset,

@@ -221,6 +221,7 @@ fn php_is_numeric_string(s: &[u8]) -> bool {
     i == s.len()
 }
 
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
@@ -230,10 +231,10 @@ fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let trimmed = s_str.trim();
 
         // Handle sign
-        let (sign, trimmed) = if trimmed.starts_with('-') {
-            (-1i64, trimmed[1..].trim_start())
-        } else if trimmed.starts_with('+') {
-            (1i64, trimmed[1..].trim_start())
+        let (sign, trimmed) = if let Some(rest) = trimmed.strip_prefix('-') {
+            (-1i64, rest.trim_start())
+        } else if let Some(rest) = trimmed.strip_prefix('+') {
+            (1i64, rest.trim_start())
         } else {
             (1i64, trimmed)
         };
@@ -252,7 +253,7 @@ fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 parse_int_str(trimmed, 10)
             };
             return Ok(Value::Long(sign * result));
-        } else if base >= 2 && base <= 36 {
+        } else if (2..=36).contains(&base) {
             // Strip prefix for matching bases
             let digits = if (base == 16) && (trimmed.starts_with("0x") || trimmed.starts_with("0X")) {
                 &trimmed[2..]
@@ -273,7 +274,7 @@ fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let s = val.to_php_string();
         let trimmed = s.to_string_lossy();
         let trimmed = trimmed.trim();
-        if base >= 2 && base <= 36 {
+        if (2..=36).contains(&base) {
             return Ok(Value::Long(parse_int_str(trimmed, base as u32)));
         }
     }
@@ -348,6 +349,7 @@ fn boolval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
+#[allow(clippy::blocks_in_conditions)] // scrutinee emits the NaN warning before matching
 fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let var_ref = args.first().unwrap_or(&Value::Null);
     let type_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
@@ -545,7 +547,7 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
                         vm.emit_warning(&format!("Object of class {} could not be converted to int", cn));
                         1
                     }
-                    Value::Array(a) => if a.borrow().len() > 0 { 1 } else { 0 },
+                    Value::Array(a) => if !a.borrow().is_empty() { 1 } else { 0 },
                     other => other.to_long(),
                 };
                 return Ok(Value::Long(n));

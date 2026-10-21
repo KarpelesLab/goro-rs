@@ -226,14 +226,9 @@ fn parse_url(str: &[u8]) -> Option<Url> {
                 pp += 1;
             }
             if pp - p > 0 && pp - p < 6 && (pp == ue || str[pp] == b'/') {
-                match parse_port_digits(&str[p..pp]) {
-                    Some(port) => {
-                        ret.port = Some(port);
-                        if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
-                            s += 2;
-                        }
-                    }
-                    None => return None,
+                ret.port = Some(parse_port_digits(&str[p..pp])?);
+                if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
+                    s += 2;
                 }
                 go_host = true;
             } else if p == pp && pp == ue {
@@ -265,24 +260,20 @@ fn parse_url(str: &[u8]) -> Option<Url> {
         } else {
             str[s..e].iter().rposition(|&c| c == b':').map(|x| s + x)
         };
-        let host_end;
-        match p {
+        let host_end = match p {
             Some(pc) => {
                 if ret.port.is_none() {
                     let pd = pc + 1;
                     if e - pd > 5 {
                         return None;
                     } else if e - pd > 0 {
-                        match parse_port_digits(&str[pd..e]) {
-                            Some(port) => ret.port = Some(port),
-                            None => return None,
-                        }
+                        ret.port = Some(parse_port_digits(&str[pd..e])?);
                     }
                 }
-                host_end = pc;
+                pc
             }
-            None => host_end = e,
-        }
+            None => e,
+        };
         if host_end < s + 1 {
             return None;
         }

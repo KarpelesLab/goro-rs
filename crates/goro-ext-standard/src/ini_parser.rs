@@ -328,7 +328,7 @@ impl<'a> Scanner<'a> {
             let raw_mode = self.mode == SCANNER_RAW;
             // Candidate rules: (length, rule id). Longest wins; ties → lowest id.
             let mut best: (usize, u32) = (0, u32::MAX);
-            let mut cand = |len: usize, id: u32, best: &mut (usize, u32)| {
+            let cand = |len: usize, id: u32, best: &mut (usize, u32)| {
                 if len > best.0 || (len == best.0 && len > 0 && id < best.1) {
                     *best = (len, id);
                 }
@@ -608,7 +608,7 @@ impl<'a> Scanner<'a> {
                     self.begin(Initial);
                     return (Tok::Eol, Sv::empty());
                 }
-                23 | 24 | 25 => return self.tok(Tok::Str, text),
+                23..=25 => return self.tok(Tok::Str, text),
                 26 => {
                     self.push(DoubleQuotes);
                     return (Tok::Ch(b'"'), Sv::empty());

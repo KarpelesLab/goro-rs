@@ -243,11 +243,6 @@ fn is_numeric_string(s: &[u8]) -> bool {
     i == s.len()
 }
 
-/// Expand PHP charlist ranges like "A..Z" → all chars A-Z
-fn expand_charlist(charlist: &[u8]) -> Vec<u8> {
-    expand_charlist_inner(charlist, None, "")
-}
-
 /// Expand PHP charlist ranges with optional warning emission
 fn expand_charlist_warn(charlist: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
     let vm_ptr = vm as *mut Vm;
@@ -991,7 +986,7 @@ fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let n = args[0].to_long();
-    if n < 0 || n > 255 {
+    if !(0..=255).contains(&n) {
         vm.emit_deprecated_at(
             "chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256",
             vm.current_line,
@@ -1331,8 +1326,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             }
 
             // Width: literal digits, or '*' (next arg / positional arg)
-            let mut width: usize = 0;
-            if i < format_bytes.len() && format_bytes[i] == b'*' {
+            let width: usize = if i < format_bytes.len() && format_bytes[i] == b'*' {
                 i += 1;
                 let w_argpos = parse_argpos(format_bytes, &mut i, &mut vm)?;
                 let w_idx = match w_argpos {
@@ -1349,7 +1343,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 if w_val < 0 || w_val > i32::MAX as i64 {
                     return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
                 }
-                width = w_val as usize;
+                w_val as usize
             } else {
                 let mut w: u64 = 0;
                 let mut overflow = false;
@@ -1361,8 +1355,8 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 if overflow {
                     return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
                 }
-                width = w as usize;
-            }
+                w as usize
+            };
 
             // Precision: '.' then either '*' or digits. Sentinel: -1 means
             // "auto/shortest" (only valid for g/G/h/H). Negative literal not
@@ -1654,7 +1648,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                         // Use Rust's formatting with significant digits
                         let abs = f.abs();
                         let exp = abs.log10().floor() as i32;
-                        if exp >= -(1 as i32) && exp < prec as i32 {
+                        if exp >= -1_i32 && exp < prec as i32 {
                             // Use fixed notation
                             let decimal_digits = if prec as i32 > exp + 1 { (prec as i32 - exp - 1) as usize } else { 0 };
                             let s = format!("{:.decimal_digits$}", f);
@@ -1668,11 +1662,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                             }
                         } else {
                             // Use scientific notation
-                            let decimal_digits = if prec > 1 { prec - 1 } else { 0 };
+                            let decimal_digits = prec.saturating_sub(1);
                             let s = format!("{:.decimal_digits$e}", f);
                             let s = php_fix_exponent(&s);
                             // Remove trailing zeros in mantissa
-                            if let Some(e_pos) = s.find(|c: char| c == 'e' || c == 'E') {
+                            if let Some(e_pos) = s.find(['e', 'E']) {
                                 let mantissa = &s[..e_pos];
                                 let exponent = &s[e_pos..];
                                 if mantissa.contains('.') {
@@ -1745,9 +1739,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     // For zero-padding with sign, put sign before zeros
                     if pad_zero && !formatted.is_empty() && (formatted[0] == b'-' || formatted[0] == b'+') {
                         result.push(formatted[0]);
-                        for _ in 0..padding {
-                            result.push(b'0');
-                        }
+                        result.extend(std::iter::repeat_n(b'0', padding));
                         result.extend_from_slice(&formatted[1..]);
                     } else {
                         for _ in 0..padding {
@@ -1771,7 +1763,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
 /// Fix scientific notation exponent to always show sign (e.g., e2 -> e+2)
 fn php_fix_exponent(s: &str) -> String {
     // Find 'e' or 'E' and check if the next char is a digit (no sign)
-    if let Some(e_pos) = s.rfind(|c| c == 'e' || c == 'E') {
+    if let Some(e_pos) = s.rfind(['e', 'E']) {
         let after = &s[e_pos + 1..];
         if !after.is_empty() && after.as_bytes()[0].is_ascii_digit() {
             // Insert '+' after e/E
@@ -2058,9 +2050,7 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             } else {
                 // Invalid range - warn and set each individual character
-                vm.emit_warning(&format!(
-                    "addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing"
-                ));
+                vm.emit_warning("addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing");
                 char_set[start as usize] = true;
                 char_set[b'.' as usize] = true;
                 char_set[end as usize] = true;
@@ -2083,7 +2073,7 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 0x0B => result.extend_from_slice(b"\\v"), // vertical tab
                 0x0C => result.extend_from_slice(b"\\f"), // form feed
                 0 => result.extend_from_slice(b"\\000"),
-                _ if b < 0x20 || b > 0x7E => {
+                _ if !(0x20..=0x7E).contains(&b) => {
                     // Other control chars and bytes > 126: use octal
                     result.extend_from_slice(format!("\\{:03o}", b).as_bytes());
                 }
@@ -2659,7 +2649,7 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             pairs.push((key, v.to_php_string().as_bytes().to_vec()));
         }
-        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
 
         let src = subject.as_bytes();
         let mut result = Vec::with_capacity(src.len());
@@ -3140,6 +3130,7 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the C implementation
 fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s1 = args
         .first()
@@ -3184,11 +3175,12 @@ fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(matrix[len1][len2] as i64))
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the C implementation
 fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
 
-    if mode < 0 || mode > 4 {
+    if !(0..=4).contains(&mode) {
         let msg = "count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
@@ -3642,7 +3634,7 @@ fn stristr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 thread_local! {
-    static STRTOK_STATE: RefCell<(Vec<u8>, usize, bool)> = RefCell::new((Vec::new(), 0, false));
+    static STRTOK_STATE: RefCell<(Vec<u8>, usize, bool)> = const { RefCell::new((Vec::new(), 0, false)) };
 }
 
 fn strtok_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4322,7 +4314,7 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             };
 
             // Get length for this element
-            let length = length_arg.map(|la| {
+            let length = length_arg.and_then(|la| {
                 if let Value::Array(len_arr) = la {
                     let len_arr = len_arr.borrow();
                     len_arr.iter().nth(i)
@@ -4330,7 +4322,7 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     Some(la.to_long())
                 }
-            }).flatten();
+            });
 
             let replaced = substr_replace_single(s.as_bytes(), repl.as_bytes(), start, length);
             result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
@@ -4356,14 +4348,14 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             start_arg.to_long()
         };
         // When length is array, use array[0]
-        let length = length_arg.map(|la| {
+        let length = length_arg.and_then(|la| {
             if let Value::Array(len_arr) = la {
                 let len_arr = len_arr.borrow();
                 len_arr.iter().next().map(|(_, v)| v.to_long())
             } else {
                 Some(la.to_long())
             }
-        }).flatten();
+        });
         let result = substr_replace_single(s.as_bytes(), replacement.as_bytes(), start, length);
         Ok(Value::String(PhpString::from_vec(result)))
     }
@@ -4373,7 +4365,7 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn hex2bin(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let hex = s.as_bytes();
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         vm.emit_warning("hex2bin(): Hexadecimal input string must have an even length");
         return Ok(Value::False);
     }
@@ -4486,7 +4478,6 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // For string codes, count means padding length; * means full string
             if i < fmt.len() && fmt[i] == b'*' {
                 count = u32::MAX;
-                has_count = true;
                 i += 1;
             } else {
                 while i < fmt.len() && fmt[i].is_ascii_digit() {
@@ -4720,9 +4711,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'x' => {
                 // NUL byte
-                for _ in 0..repeat {
-                    result.push(0);
-                }
+                result.extend(std::iter::repeat_n(0, repeat));
             }
             b'Z' => {
                 // NUL-padded string (NUL terminated)
@@ -4744,9 +4733,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         result.push(0);
                     } else {
                         result.extend_from_slice(s.as_bytes());
-                        for _ in 0..(len - s.len()) {
-                            result.push(0);
-                        }
+                        result.extend(std::iter::repeat_n(0, len - s.len()));
                     }
                 }
             }
@@ -5201,7 +5188,7 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     count as usize
                 };
-                let bytes_needed = (len + 1) / 2;
+                let bytes_needed = len.div_ceil(2);
                 let end = (pos + bytes_needed).min(bytes.len());
                 let actual_capacity = ((end - pos) * 2).min(len);
                 if bytes_needed > bytes.len().saturating_sub(pos) {
@@ -5211,8 +5198,7 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ));
                 }
                 let mut hex = String::with_capacity(actual_capacity);
-                for idx in pos..end {
-                    let byte = bytes[idx];
+                for &byte in &bytes[pos..end] {
                     if code == b'H' {
                         hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
                         if hex.len() < len {

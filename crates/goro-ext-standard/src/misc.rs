@@ -57,7 +57,7 @@ fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_n
 fn arg_type_name(val: &Value) -> String {
     match val {
         Value::Long(n) if *n > 3 && goro_core::value::is_registered_resource(*n) => "resource".to_string(),
-        Value::Reference(r) => arg_type_name(&*r.borrow()),
+        Value::Reference(r) => arg_type_name(&r.borrow()),
         _ => Vm::value_type_name(val),
     }
 }
@@ -86,7 +86,7 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             if matches!(&*inner, Value::Array(_)) {
                 Ok(())
             } else {
-                let type_name = arg_type_name(&*inner);
+                let type_name = arg_type_name(&inner);
                 let msg = make_msg(&type_name);
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
@@ -1068,7 +1068,7 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            Err(VmError { message: msg, line: vm.current_line })
         } else {
             Ok(caller_args[index as usize].clone())
         }
@@ -2258,17 +2258,17 @@ fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         let end = end.min(entries.len());
         let start = start.min(end);
-        for &(ref k, ref v) in &entries[start..end] {
+        for &(ref k, v) in &entries[start..end] {
             match k {
                 ArrayKey::String(s) => {
                     // String keys are always preserved
-                    result.set(ArrayKey::String(s.clone()), (*v).clone());
+                    result.set(ArrayKey::String(s.clone()), v.clone());
                 }
                 ArrayKey::Int(i) => {
                     if preserve_keys {
-                        result.set(ArrayKey::Int(*i), (*v).clone());
+                        result.set(ArrayKey::Int(*i), v.clone());
                     } else {
-                        result.push((*v).clone());
+                        result.push(v.clone());
                     }
                 }
             }
@@ -2391,25 +2391,6 @@ fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
     Err(VmError { message: msg, line: vm.current_line })
-}
-
-fn array_key_exists(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let key = args.first().unwrap_or(&Value::Null);
-    if let Some(Value::Array(arr)) = args.get(1) {
-        let arr = arr.borrow();
-        let k = match key {
-            Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-            Value::String(s) => goro_core::array::ArrayKey::String(s.clone()),
-            _ => return Ok(Value::False),
-        };
-        Ok(if arr.contains_key(&k) {
-            Value::True
-        } else {
-            Value::False
-        })
-    } else {
-        Ok(Value::False)
-    }
 }
 
 fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3122,7 +3103,7 @@ fn array_walk_object_entries(
         }
     } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
         for (_, _, val) in entries {
-            builtin(vm, &[val.clone()])?;
+            builtin(vm, std::slice::from_ref(val))?;
         }
     }
     Ok(Value::True)
@@ -3206,7 +3187,7 @@ fn array_walk_entries(
         }
     } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
         for (_key, val) in entries {
-            builtin(vm, &[val.clone()])?;
+            builtin(vm, std::slice::from_ref(val))?;
         }
     }
     Ok(Value::True)
@@ -3457,7 +3438,7 @@ fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth:
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         if let Some(ex) = merged_arr.get_str(s.as_bytes()) {
-                            let merged = merge_recursive_values(vm, &ex, v, depth + 1)?;
+                            let merged = merge_recursive_values(vm, ex, v, depth + 1)?;
                             merged_arr.set(k.clone(), merged);
                         } else {
                             merged_arr.set(k.clone(), unwrap_rc1_ref(v));
@@ -3600,13 +3581,7 @@ fn type_priority(v: &Value) -> u8 {
     }
 }
 
-/// Compare two PHP values for sorting, ensuring total ordering
-fn php_sort_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
-    php_sort_cmp_flags(a, b, 0)
-}
-
 // Sort flag constants
-const SORT_REGULAR: i64 = 0;
 const SORT_NUMERIC: i64 = 1;
 const SORT_STRING: i64 = 2;
 const SORT_LOCALE_STRING: i64 = 5;
@@ -4650,7 +4625,7 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
-    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
         if let Some(class) = vm.classes.get(&name_lower) {
@@ -5323,7 +5298,7 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut with_sep = String::new();
     let len = int_bytes.len();
     for (i, &b) in int_bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 && !thousands_sep.is_empty() {
+        if i > 0 && (len - i).is_multiple_of(3) && !thousands_sep.is_empty() {
             with_sep.push_str(&thousands_sep);
         }
         with_sep.push(b as char);
@@ -5351,7 +5326,7 @@ fn base64_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = data.as_bytes();
     const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = Vec::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 2 < bytes.len() {
         let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
@@ -5378,6 +5353,7 @@ fn base64_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let strict = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
@@ -5399,7 +5375,7 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for &b in input {
         if b == b'=' {
             filtered.push(b);
-        } else if let Some(_) = b64_val(b) {
+        } else if b64_val(b).is_some() {
             filtered.push(b);
         } else if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
             // whitespace is always ignored
@@ -5555,188 +5531,6 @@ fn rawurldecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // htmlspecialchars/htmlentities/html_entity_decode/htmlspecialchars_decode
 // moved to the html module.
 
-// Note: the active str_word_count implementation is `str_word_count_fn` in
-// strings.rs (it overrides this one at registration time, since both register
-// under the same PHP function name). This stub is unused but kept to avoid
-// disturbing the registration order. See strings.rs for the real impl.
-fn str_word_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(
-        s.to_string_lossy().split_whitespace().count() as i64
-    ))
-}
-fn substr_count(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let haystack = args.first().unwrap_or(&Value::Null).to_php_string();
-    let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let h = haystack.as_bytes();
-    let n = needle.as_bytes();
-    if n.is_empty() {
-        return Ok(Value::Long(0));
-    }
-    let mut count = 0i64;
-    let mut i = 0;
-    while i + n.len() <= h.len() {
-        if &h[i..i + n.len()] == n {
-            count += 1;
-            i += n.len();
-        } else {
-            i += 1;
-        }
-    }
-    Ok(Value::Long(count))
-}
-fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let subject = args.first().unwrap_or(&Value::Null).to_php_string();
-    let replacement = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let start = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let length = args.get(3).map(|v| Some(v.to_long())).unwrap_or(None);
-
-    let bytes = subject.as_bytes();
-    let len = bytes.len() as i64;
-    let s = if start < 0 {
-        (len + start).max(0) as usize
-    } else {
-        start.min(len) as usize
-    };
-    let e = match length {
-        Some(l) if l < 0 => (len + l).max(s as i64) as usize,
-        Some(l) => (s + l as usize).min(bytes.len()),
-        None => bytes.len(),
-    };
-
-    let mut result = Vec::new();
-    result.extend_from_slice(&bytes[..s]);
-    result.extend_from_slice(replacement.as_bytes());
-    if e < bytes.len() {
-        result.extend_from_slice(&bytes[e..]);
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-fn str_ireplace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let search = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_lowercase();
-    let replace = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let subject = args.get(2).unwrap_or(&Value::Null).to_php_string();
-
-    let subj = subject.to_string_lossy();
-    let subj_lower = subj.to_lowercase();
-    let mut result = String::new();
-    let mut i = 0;
-    while i < subj.len() {
-        if i + search.len() <= subj_lower.len()
-            && &subj_lower[i..i + search.len()] == search.as_str()
-        {
-            result.push_str(&replace.to_string_lossy());
-            i += search.len();
-        } else {
-            result.push(subj.as_bytes()[i] as char);
-            i += 1;
-        }
-    }
-    Ok(Value::String(PhpString::from_string(result)))
-}
-fn stripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let h = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_lowercase();
-    let n = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_lowercase();
-    match h.find(&n) {
-        Some(pos) => Ok(Value::Long(pos as i64)),
-        None => Ok(Value::False),
-    }
-}
-fn strrpos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let h = args.first().unwrap_or(&Value::Null).to_php_string();
-    let n = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let hb = h.as_bytes();
-    let nb = n.as_bytes();
-    if nb.is_empty() {
-        return Ok(Value::False);
-    }
-    for i in (0..=(hb.len().saturating_sub(nb.len()))).rev() {
-        if &hb[i..i + nb.len()] == nb {
-            return Ok(Value::Long(i as i64));
-        }
-    }
-    Ok(Value::False)
-}
-fn strripos(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let h = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_lowercase();
-    let n = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_lowercase();
-    match h.rfind(&n) {
-        Some(pos) => Ok(Value::Long(pos as i64)),
-        None => Ok(Value::False),
-    }
-}
-fn strcmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::Long(php_strcmp(a.as_bytes(), b.as_bytes())))
-}
-fn strncmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let a = args.first().unwrap_or(&Value::Null).to_php_string();
-    let b = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let n = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let sa = &a.as_bytes()[..n.min(a.len())];
-    let sb = &b.as_bytes()[..n.min(b.len())];
-    Ok(Value::Long(php_strcmp(sa, sb)))
-}
-fn strcasecmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let a: Vec<u8> = s1
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let b: Vec<u8> = s2
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    Ok(Value::Long(php_strcmp(&a, &b)))
-}
-fn strncasecmp(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let a: Vec<u8> = s1
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let b: Vec<u8> = s2
-        .as_bytes()
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let n = args.get(2).map(|v| v.to_long()).unwrap_or(0) as usize;
-    let sa = &a[..n.min(a.len())];
-    let sb = &b[..n.min(b.len())];
-    Ok(Value::Long(php_strcmp(sa, sb)))
-}
-
 /// PHP-style string comparison returning the byte difference (not just -1/0/1)
 pub fn php_strcmp(a: &[u8], b: &[u8]) -> i64 {
     let min_len = a.len().min(b.len());
@@ -5746,98 +5540,6 @@ pub fn php_strcmp(a: &[u8], b: &[u8]) -> i64 {
         }
     }
     (a.len() as i64) - (b.len() as i64)
-}
-fn str_contains_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let h = args.first().unwrap_or(&Value::Null).to_php_string();
-    let n = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    if n.is_empty() {
-        return Ok(Value::True);
-    }
-    let hb = h.as_bytes();
-    let nb = n.as_bytes();
-    if nb.len() > hb.len() {
-        return Ok(Value::False);
-    }
-    for i in 0..=hb.len() - nb.len() {
-        if &hb[i..i + nb.len()] == nb {
-            return Ok(Value::True);
-        }
-    }
-    Ok(Value::False)
-}
-fn wordwrap(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let str_val = args.first().unwrap_or(&Value::Null).to_php_string();
-    let width = args.get(1).map(|v| v.to_long()).unwrap_or(75) as usize;
-    let break_str = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"\n"));
-    let cut_long_words = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
-
-    if width == 0 && cut_long_words {
-        // Cannot cut long words with width 0
-        return Ok(Value::False);
-    }
-
-    let input = str_val.as_bytes();
-    let brk = break_str.as_bytes();
-
-    if input.is_empty() {
-        return Ok(Value::String(PhpString::empty()));
-    }
-
-    let mut result: Vec<u8> = Vec::with_capacity(input.len() + input.len() / width.max(1) * brk.len());
-    let mut line_len = 0;
-    let mut last_space = None;
-    let mut last_space_out = None;
-    let mut i = 0;
-
-    while i < input.len() {
-        if input[i] == b'\n' {
-            result.push(b'\n');
-            line_len = 0;
-            last_space = None;
-            last_space_out = None;
-            i += 1;
-            continue;
-        }
-
-        if input[i] == b' ' {
-            last_space = Some(i);
-            last_space_out = Some(result.len());
-        }
-
-        if line_len >= width && width > 0 {
-            if let Some(sp_out) = last_space_out {
-                // Replace the space with break
-                let tail: Vec<u8> = result[sp_out + 1..].to_vec();
-                result.truncate(sp_out);
-                result.extend_from_slice(brk);
-                result.extend_from_slice(&tail);
-                line_len = result.len() - sp_out - brk.len();
-                // Actually recalculate line_len properly
-                // It should be the length since the last break was inserted
-                let last_brk_pos = result.len() - tail.len();
-                line_len = tail.len();
-                let _ = last_brk_pos; // suppress warning
-                last_space = None;
-                last_space_out = None;
-            } else if cut_long_words {
-                result.extend_from_slice(brk);
-                line_len = 0;
-            }
-        }
-
-        result.push(input[i]);
-        line_len += 1;
-        i += 1;
-    }
-
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-fn printf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Use the sprintf implementation from strings module
-    let formatted = crate::strings::do_sprintf(args);
-    let len = formatted.len();
-    vm.write_output(&formatted);
-    Ok(Value::Long(len as i64))
 }
 /// Validate that the format argument is a string (for fprintf/vfprintf where
 /// `$stream` is arg #1 and `$format` is arg #2).
@@ -6379,6 +6081,7 @@ fn parse_url_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
+#[allow(clippy::only_used_in_recursion)] // build_query_recursive keeps `separator` for signature parity
 fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null);
     // Top-level enum: throw TypeError.
@@ -6508,7 +6211,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         walk_class = None;
                     }
                 }
-                let props: Vec<(Vec<u8>, Value)> = obj_b.properties.iter().cloned().collect();
+                let props: Vec<(Vec<u8>, Value)> = obj_b.properties.to_vec();
                 drop(obj_b);
                 for (prop_name, prop_val) in props {
                     let visible = if let Some((vis, decl)) = visibility_map.get(&prop_name) {
@@ -6819,8 +6522,8 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
         let fp = fopen_fn(vm, &inner_args)?;
         let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
-        let get_args = if length.is_some() {
-            vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
+        let get_args = if let Some(length) = length {
+            vec![Value::Resource(fid), Value::Long(length), Value::Long(offset)]
         } else {
             vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
         };
@@ -6838,8 +6541,8 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let fp = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
         let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
-        let get_args = if length.is_some() {
-            vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
+        let get_args = if let Some(length) = length {
+            vec![Value::Resource(fid), Value::Long(length), Value::Long(offset)]
         } else {
             vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
         };
@@ -6938,9 +6641,6 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 }
-fn http_fetch(url: &str, vm: &mut Vm) -> Value {
-    http_fetch_ctx(url, vm, "GET", &[], &[])
-}
 
 fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, String)], body: &[u8]) -> Value {
     // Follow up to 20 redirects (PHP default is 20).
@@ -6955,8 +6655,9 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
         }
         let response_body = response_body.unwrap();
         // Follow 3xx Location redirects.
-        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && location.is_some() {
-            let loc = location.unwrap();
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)
+            && let Some(loc) = location
+        {
             let next_url = if loc.starts_with("http://") || loc.starts_with("https://") {
                 loc
             } else if let Some(slash) = cur_url.find("://").and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p)) {
@@ -7782,7 +7483,7 @@ fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
-    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
         if vm.classes.get(&name_lower).map(|c| c.is_interface).unwrap_or(false) {
@@ -7803,7 +7504,7 @@ fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
-    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
         if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
@@ -7824,7 +7525,7 @@ fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
-    let autoload = args.get(1).map_or(true, |v| v.to_bool());
+    let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
         if vm.classes.get(&name_lower).map(|c| c.is_enum).unwrap_or(false) {
@@ -7871,7 +7572,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let calling_class_lower: Option<Vec<u8>> = calling_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
 
         // Build a map of property visibility from the class definition
-        let prop_visibility: std::collections::HashMap<Vec<u8>, goro_core::object::Visibility> =
+        let _prop_visibility: std::collections::HashMap<Vec<u8>, goro_core::object::Visibility> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
                 class_def.properties.iter()
                     .map(|p| (p.name.clone(), p.visibility))
@@ -7881,7 +7582,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             };
 
         // Build a set of typed properties to skip when uninitialized
-        let typed_props: std::collections::HashSet<Vec<u8>> =
+        let _typed_props: std::collections::HashSet<Vec<u8>> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
                 class_def.properties.iter()
                     .filter(|p| p.property_type.is_some())
@@ -8235,7 +7936,7 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
         // Use the original class name (not alias) for the class entry
-        let mut aliased_class = class;
+        let aliased_class = class;
         // Keep original class name so get_class() returns the canonical name
         vm.classes.insert(alias_lower.clone(), aliased_class);
         // Register bidirectional alias mappings so instanceof works correctly
@@ -8340,12 +8041,7 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
 
     // Walk the parent chain
     let mut current = class_lower;
-    loop {
-        let class_entry = match vm.classes.get(&current) {
-            Some(ce) => ce.clone(),
-            None => break,
-        };
-
+    while let Some(class_entry) = vm.classes.get(&current).cloned() {
         // Check interfaces
         for iface in &class_entry.interfaces {
             let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -8400,7 +8096,7 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
                 }
                 if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
-                    return Err(throw_type_error_msg(vm, format!("get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given")));
+                    return Err(throw_type_error_msg(vm, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given".to_string()));
                 }
             }
             s.as_bytes().to_vec()
@@ -8660,7 +8356,7 @@ fn php_compare_for_sort(a: &Value, b: &Value, sort_type: i64) -> std::cmp::Order
 // ============= File I/O implementation using thread-local file handle storage =============
 
 use std::collections::HashMap as StdHashMap;
-use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom, BufRead, BufReader};
+use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom};
 
 /// Userspace stream wrappers (stream_wrapper_register classes).
 #[path = "userstream.rs"]
@@ -8694,6 +8390,7 @@ pub(crate) struct StreamContext {
 
 #[derive(Clone)]
 pub(crate) struct UserWrapper {
+    #[allow(dead_code)]
     pub class_name: Vec<u8>,
     #[allow(dead_code)]
     pub flags: i64,
@@ -8707,10 +8404,8 @@ pub(crate) struct DirHandle {
 fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
     let entries = std::fs::read_dir(path)?;
     let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-    for entry in entries {
-        if let Ok(e) = entry {
-            names.push(e.file_name().to_string_lossy().to_string());
-        }
+    for e in entries.flatten() {
+        names.push(e.file_name().to_string_lossy().to_string());
     }
     names.sort();
     // Reverse so we can pop from the end efficiently while still feeding entries
@@ -8720,10 +8415,7 @@ fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
 }
 
 fn alloc_dir_handle(path: String) -> i64 {
-    let names = match read_dir_entries(&path) {
-        Ok(n) => n,
-        Err(_) => Vec::new(),
-    };
+    let names = read_dir_entries(&path).unwrap_or_default();
     NEXT_FILE_ID.with(|id| {
         let did = id.get();
         id.set(did + 1);
@@ -8787,6 +8479,7 @@ struct FileHandle {
     /// For special streams (php://stdout etc.), routes writes through vm.
     special: SpecialStream,
     /// Buffer of bytes pending consumption by the read filter chain.
+    #[allow(dead_code)]
     filter_read_pending: Vec<u8>,
     /// Buffer of post-filter bytes ready to be returned by fread/fgets.
     filter_read_ready: Vec<u8>,
@@ -8938,10 +8631,7 @@ fn data_uri_urldecode(input: &[u8]) -> Vec<u8> {
         if b == b'%' && i + 2 < input.len() {
             let h1 = hex_digit_misc(input[i + 1]);
             let h2 = hex_digit_misc(input[i + 2]);
-            match (h1, h2) {
-                (Some(a), Some(b)) => { out.push((a << 4) | b); i += 3; continue; }
-                _ => {}
-            }
+            if let (Some(a), Some(b)) = (h1, h2) { out.push((a << 4) | b); i += 3; continue; }
         }
         if b == b'+' { out.push(b' '); } else { out.push(b); }
         i += 1;
@@ -8981,9 +8671,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // PHP fopen rejects null bytes embedded in the path.
     if filename.contains('\0') {
-        vm.emit_warning(&format!(
-            "fopen(): Argument #1 ($filename) must not contain any null bytes"
-        ));
+        vm.emit_warning("fopen(): Argument #1 ($filename) must not contain any null bytes");
         return Ok(Value::False);
     }
 
@@ -9202,7 +8890,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // php://fd/<n> -- duplicate the file descriptor <n>.
         // php://fd is invalid (must include a number).
         if lower == "fd" {
-            vm.emit_warning(&format!("fopen(): Invalid php:// URL specified"));
+            vm.emit_warning("fopen(): Invalid php:// URL specified");
             vm.emit_warning(&format!(
                 "fopen({}): Failed to open stream: operation failed",
                 filename
@@ -9346,12 +9034,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&open_path),
         "w" => std::fs::File::create(&open_path),
         "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&open_path),
-        "a" => std::fs::OpenOptions::new().write(true).append(true).create(true).open(&open_path),
-        "a+" => std::fs::OpenOptions::new().read(true).write(true).append(true).create(true).open(&open_path),
+        "a" => std::fs::OpenOptions::new().append(true).create(true).open(&open_path),
+        "a+" => std::fs::OpenOptions::new().read(true).append(true).create(true).open(&open_path),
         "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&open_path),
         "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&open_path),
-        "c" => std::fs::OpenOptions::new().write(true).create(true).open(&open_path),
-        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).open(&open_path),
+        "c" => std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&open_path),
+        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&open_path),
         _ => std::fs::File::open(&open_path), // default to read
     };
 
@@ -9425,10 +9113,7 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
                     if mode_chars.starts_with('a') {
                         let _ = fh.file.seek(SeekFrom::End(0));
                     }
-                    match fh.file.write(bytes) {
-                        Ok(n) => n,
-                        Err(_) => 0,
-                    }
+                    fh.file.write(bytes).unwrap_or_default()
                 } else { 0 }
             })
         }
@@ -9823,7 +9508,7 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     // Invalid whence values return -1 without seeking.
-    if !matches!(whence, 0 | 1 | 2) {
+    if !matches!(whence, 0..=2) {
         return Ok(Value::Long(-1));
     }
 
@@ -9883,7 +9568,7 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            match fh.file.seek(SeekFrom::Current(0)) {
+            match fh.file.stream_position() {
                 Ok(pos) => Ok(Value::Long(pos as i64)),
                 Err(_) => Ok(Value::False),
             }
@@ -10120,10 +9805,8 @@ fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match std::fs::read_dir(&*dir_str) {
         Ok(entries) => {
             let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
-            for entry in entries {
-                if let Ok(e) = entry {
-                    names.push(e.file_name().to_string_lossy().to_string());
-                }
+            for e in entries.flatten() {
+                names.push(e.file_name().to_string_lossy().to_string());
             }
             if sort_order == 1 {
                 names.sort_by(|a, b| b.cmp(a));
@@ -11013,7 +10696,7 @@ fn array_is_list_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(if is_list { Value::True } else { Value::False })
         }
         _ => {
-            let type_name = args.first().map(|v| Vm::value_type_name(v)).unwrap_or("null".to_string());
+            let type_name = args.first().map(Vm::value_type_name).unwrap_or("null".to_string());
             let msg = format!("array_is_list(): Argument #1 ($array) must be of type array, {} given", type_name);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
@@ -11160,7 +10843,7 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
 }
 
 #[allow(dead_code)]
-fn var_dump_direct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn var_dump_direct(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // This overrides the one in output.rs - but output.rs registers first
     // So this won't actually be called. Let's skip.
     Ok(Value::Null)
@@ -11469,13 +11152,13 @@ fn resolve_dir_handle(
                 func_name
             ));
             vm.current_exception = Some(exc);
-            return Err(VmError {
+            Err(VmError {
                 message: format!(
                     "{}(): Argument #1 ($dir_handle) must be of type resource, int given",
                     func_name
                 ),
                 line: vm.current_line,
-            });
+            })
         }
         Value::Resource(n) => {
             let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n));
@@ -12587,9 +12270,7 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(_) => return Ok(Value::String(PhpString::from_string(name))),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => {
-                vm.emit_warning(&format!(
-                    "tempnam(): file created in the system's temporary directory"
-                ));
+                vm.emit_warning("tempnam(): file created in the system's temporary directory");
                 return Ok(Value::False);
             }
         }
@@ -12687,7 +12368,7 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpAr
             if visited.contains(&ptr) {
                 return Err("Recursion detected".to_string());
             }
-            if let Some(existing) = result.get(&key) {
+            if let Some(existing) = result.get(key) {
                 let existing = existing.deref();
                 if let Value::Array(inner_old) = existing {
                     visited.push(ptr);
@@ -13111,7 +12792,7 @@ fn array_udiff_with_key_check(
         let mut found_in_all = true;
         for other in &other_arrays {
             let mut found = false;
-            if let Some(ovalue) = other.get(&key) {
+            if let Some(ovalue) = other.get(key) {
                 let cmp_result = call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
                 if cmp_result.to_long() == 0 {
                     found = true;
@@ -13310,90 +12991,6 @@ fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(crate::ini_parser::parse_ini(vm, &data, process_sections, scanner_mode, "Unknown"))
 }
 
-fn process_ini_value(raw: &str, is_raw: bool, _is_typed: bool, vm: &Vm) -> (String, bool) {
-    let raw = raw.trim_end();
-    if raw.is_empty() {
-        return (String::new(), false);
-    }
-
-    // Handle single-quoted (literal, no constants, no escapes). Only for NORMAL/TYPED.
-    if !is_raw && raw.starts_with('\'') {
-        if let Some(end) = raw[1..].find('\'') {
-            return (raw[1..1 + end].to_string(), true);
-        }
-        return (raw[1..].to_string(), true);
-    }
-
-    // Handle double-quoted with matching closing quote.
-    if raw.starts_with('"') {
-        if let Some(end) = raw[1..].rfind('"') {
-            let inner = &raw[1..1 + end];
-            let after = raw[2 + end..].trim();
-            // For RAW mode, the value must be entirely `"..."`. Anything
-            // beyond the closing quote means the whole thing is treated
-            // literally (quotes preserved). Inline comments are still
-            // stripped at the next `;` outside the quoted region.
-            if is_raw {
-                if after.is_empty() {
-                    return (inner.to_string(), true);
-                }
-                // Literal: keep raw, but strip from `;` after the quoted region.
-                let close_pos = 2 + end; // index of char after closing "
-                let tail = &raw[close_pos..];
-                let val = if let Some(semi) = tail.find(';') {
-                    format!("{}{}", &raw[..close_pos], &tail[..semi])
-                } else {
-                    raw.to_string()
-                };
-                return (val.trim_end().to_string(), true);
-            }
-            // NORMAL/TYPED: process escape sequences inside the quoted region.
-            let mut out = String::new();
-            let mut chars = inner.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\\' {
-                    match chars.peek() {
-                        Some(&'n') => { chars.next(); out.push('\n'); }
-                        Some(&'t') => { chars.next(); out.push('\t'); }
-                        Some(&'r') => { chars.next(); out.push('\r'); }
-                        Some(&'\\') => { chars.next(); out.push('\\'); }
-                        Some(&'"') => { chars.next(); out.push('"'); }
-                        _ => { out.push('\\'); }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-            return (out, true);
-        }
-        // Unterminated double quote: PHP RAW keeps the opening quote but
-        // still cuts at semicolon. Fall through to unquoted handling.
-    }
-    // Unquoted value: strip inline comment from semicolon onwards.
-    // (Both NORMAL and RAW strip `;` for unquoted values.)
-    let mut val = match raw.find(';') {
-        Some(p) => raw[..p].trim_end().to_string(),
-        None => raw.to_string(),
-    };
-    val = val.trim().to_string();
-    // For NORMAL/TYPED mode, resolve constants. Constants resolve only for
-    // bareword values (identifier-like).
-    if !is_raw && !val.is_empty() {
-        let is_ident = val.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if is_ident {
-            let upper = val.as_bytes().to_vec();
-            // Skip booleans/null keywords which the caller handles.
-            let lower = val.to_ascii_lowercase();
-            if !matches!(lower.as_str(), "true" | "false" | "on" | "off" | "yes" | "no" | "none" | "null") {
-                if let Some(c) = vm.constants.get(upper.as_slice()) {
-                    return (c.to_php_string().to_string_lossy().to_string(), false);
-                }
-            }
-        }
-    }
-    (val, false)
-}
-
 fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let option = args.first().map(|v| v.to_long()).unwrap_or(0);
     let new_value = args.get(1).map(|v| v.deref());
@@ -13555,7 +13152,7 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         use std::os::unix::fs::MetadataExt;
         match std::fs::metadata(&*path_str) {
-            Ok(meta) => Ok(Value::Long(meta.ctime() as i64)),
+            Ok(meta) => Ok(Value::Long(meta.ctime())),
             Err(_) => {
                 vm.emit_warning(&format!("filectime(): stat failed for {}", path_str));
                 Ok(Value::False)
@@ -14788,39 +14385,6 @@ fn passthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn escapeshellarg(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len() + 2);
-    result.push(b'\'');
-    for &b in bytes {
-        if b == b'\'' {
-            result.extend_from_slice(b"'\\''");
-        } else {
-            result.push(b);
-        }
-    }
-    result.push(b'\'');
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
-fn escapeshellcmd(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    for &b in bytes {
-        match b {
-            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^'
-            | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b'\x0A' | b'\xFF' => {
-                result.push(b'\\');
-                result.push(b);
-            }
-            _ => result.push(b),
-        }
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
 struct GetoptOpt {
     opt_char: u8,
     opt_name: Option<Vec<u8>>,
@@ -14829,6 +14393,7 @@ struct GetoptOpt {
 
 /// Port of main/getopt.c php_getopt(). Returns the option char (0 for a long
 /// option, -2 for an invalid argument, -1 at the end) and sets *optidx.
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn php_getopt(argv: &[Vec<u8>], opts: &[GetoptOpt], optarg: &mut Option<Vec<u8>>, optind: &mut usize,
               optchr: &mut usize, dash: &mut bool, optidx: &mut isize) -> i32 {
     const INVALID: i32 = -2;
@@ -15459,6 +15024,7 @@ fn stream_set_read_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
     Ok(Value::Long(0))
 }
 
+#[allow(clippy::slow_vector_initialization)] // resize is conditional
 fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let src_fid = args.first().unwrap_or(&Value::Null).to_long();
     let dst_fid = args.get(1).unwrap_or(&Value::Null).to_long();
@@ -15552,11 +15118,7 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
 
     // First check whether it's a registered user filter; if so, instantiate
     // an object of the registered class.
-    let user_obj = if let Some(class_name) = crate::stream_filters::user_filter_class(&name) {
-        Some(instantiate_user_filter(vm, &class_name, &name, &params))
-    } else {
-        None
-    };
+    let user_obj = crate::stream_filters::user_filter_class(&name).map(|class_name| instantiate_user_filter(vm, &class_name, &name, &params));
 
     let user_obj_opt = match user_obj {
         Some(Some(o)) => Some(o),
@@ -16590,13 +16152,13 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let s_line = tok.span.line;
 
         let adjacent = |idx: usize, end_pos: usize| -> bool {
-            tokens.get(idx).map_or(false, |t| t.span.start as usize == end_pos)
+            tokens.get(idx).is_some_and(|t| t.span.start as usize == end_pos)
         };
 
         // Case 1: `\` + Ident (+ \ Ident)* → T_NAME_FULLY_QUALIFIED (263)
         if matches!(tok.kind, TK::Backslash)
             && adjacent(i + 1, s_end)
-            && tokens.get(i + 1).map_or(false, |t| is_ident(&t.kind))
+            && tokens.get(i + 1).is_some_and(|t| is_ident(&t.kind))
         {
             let mut j = i + 1;
             let mut end = tokens[j].span.end as usize;
@@ -16617,8 +16179,8 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Case 2: `namespace` + `\` + Ident (+ \ Ident)* → T_NAME_RELATIVE (264)
         if matches!(tok.kind, TK::Namespace)
             && adjacent(i + 1, s_end)
-            && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
-            && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+            && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
+            && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
             && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
         {
             let mut j = i + 3;
@@ -16638,9 +16200,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Case 3: Ident + `\` + Ident (+ \ Ident)* → T_NAME_QUALIFIED (265)
         if is_ident(&tok.kind)
-            && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+            && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
             && tokens[i + 1].span.start as usize == s_end
-            && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+            && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
             && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
         {
             let mut j = i + 3;
@@ -16676,8 +16238,7 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // `::` (T_DOUBLE_COLON=397), `->` (T_OBJECT_OPERATOR=384), `?->`
         // (T_NULLSAFE_OBJECT_OPERATOR=385), or `const` (T_CONST=312).
         if token_parse
-            && token_id >= 272
-            && token_id <= 342
+            && (272..=342).contains(&token_id)
             && matches!(last_meaningful_id, 397 | 384 | 385 | 312)
         {
             token_id = 262;
@@ -16743,7 +16304,7 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         let bytes = s.as_bytes();
-                        if !valid_keys.iter().any(|vk| *vk == bytes) {
+                        if !valid_keys.contains(&bytes) {
                             let exc = vm.create_exception(b"ValueError", &format!("Invalid key \"{}\" in $options argument", s.to_string_lossy()), 0);
                             vm.current_exception = Some(exc);
                             return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
@@ -16755,7 +16316,7 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                             return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
                         }
                         // For *_max_filesize/post_max_size keys: validate suffix (K/M/G).
-                        if size_keys.iter().any(|sk| *sk == bytes) {
+                        if size_keys.contains(&bytes) {
                             if let Value::String(strval) = &v {
                                 let raw = strval.as_bytes();
                                 if let Some(&last) = raw.last() {
@@ -16795,26 +16356,6 @@ fn connection_aborted_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
 
 fn connection_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
-}
-
-fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let table = if !args.is_empty() { args[0].to_long() } else { 0 };
-    let _flags = if args.len() > 1 { args[1].to_long() } else { 11 };
-    let mut result = PhpArray::new();
-    if table == 1 {
-        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
-    } else {
-        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn nl_langinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

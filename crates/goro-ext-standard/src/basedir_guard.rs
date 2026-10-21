@@ -192,7 +192,7 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
                         limited = true;
                     }
                 }
-                if limited && out.len() == 0 {
+                if limited && out.is_empty() {
                     return Ok(Value::False);
                 }
                 return Ok(Value::Array(std::rc::Rc::new(RefCell::new(out))));

@@ -487,7 +487,7 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Single argument must be an array
         if let Value::Array(arr) = &args[0] {
             let arr = arr.borrow();
-            if arr.len() == 0 {
+            if arr.is_empty() {
                 let msg = "max(): Argument #1 ($value) must contain at least one element".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
@@ -531,7 +531,7 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() == 1 {
         if let Value::Array(arr) = &args[0] {
             let arr = arr.borrow();
-            if arr.len() == 0 {
+            if arr.is_empty() {
                 let msg = "min(): Argument #1 ($value) must contain at least one element".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
@@ -852,7 +852,7 @@ fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.current_exception = Some(exc);
             Err(VmError { message: msg.into(), line: vm.current_line })
         }
-        Some(b) if b == 1.0 => {
+        Some(1.0) => {
             // Division by zero in log would return NaN/Inf, but PHP throws ValueError
             vm.emit_warning("log(): Base must not be 1");
             Ok(Value::Double(f64::NAN))
@@ -1024,19 +1024,6 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(goro_core::string::PhpString::from_string(result)))
 }
 
-fn int_to_base(mut val: u64, base: u32) -> String {
-    if val == 0 {
-        return "0".to_string();
-    }
-    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut result = Vec::new();
-    while val > 0 {
-        result.push(digits[(val % base as u64) as usize]);
-        val /= base as u64;
-    }
-    result.reverse();
-    String::from_utf8(result).unwrap_or_default()
-}
 fn bindec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "bindec", "binary_string") {
         Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 2)),
@@ -1432,7 +1419,6 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    use goro_core::string::PhpString;
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let name_lower = name.to_string_lossy().to_ascii_lowercase();
     // Report our built-in extensions as loaded
@@ -1454,7 +1440,6 @@ fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn version_compare_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    use goro_core::string::PhpString;
     let v1 = args
         .first()
         .unwrap_or(&Value::Null)
