@@ -6191,6 +6191,25 @@ impl Compiler {
         Ok(ref_tmp)
     }
 
+    /// Compile the container of a dimension write. A property container
+    /// (`$obj->p[...] = v`) is fetched for writing (FETCH_OBJ_W semantics).
+    fn compile_dim_write_base(&mut self, array: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::PropertyAccess { object, property, nullsafe: false } = &array.kind {
+            let obj = self.compile_expr(object)?;
+            let name = self.compile_property_name(property)?;
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::PropertyGetW,
+                op1: obj,
+                op2: name,
+                result: OperandType::Tmp(tmp),
+                line: array.span.line,
+            });
+            return Ok(OperandType::Tmp(tmp));
+        }
+        self.compile_expr(array)
+    }
+
     fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
         match &class.kind {
             ExprKind::Identifier(name) => {
@@ -6309,7 +6328,7 @@ impl Compiler {
                     }
                     ExprKind::ArrayAccess { array, index } => {
                         // $arr[$key] = $val  →  ArraySet
-                        let arr_op = self.compile_expr(array)?;
+                        let arr_op = self.compile_dim_write_base(array)?;
                         if let Some(idx_expr) = index {
                             let idx_op = self.compile_expr(idx_expr)?;
                             self.op_array.emit(Op {

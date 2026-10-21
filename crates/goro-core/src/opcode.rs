@@ -332,6 +332,10 @@ pub enum OpCode {
     /// Bind an object property to a reference: op1 = object, op2 = value
     /// (CV made a reference, or a tmp Reference), result = property name
     PropertySetRef,
+    /// Fetch a property for a dimension write (`$obj->p[...] = v`): like
+    /// PropertyGet, but a missing/null property is initialised to an array,
+    /// a shared array is separated, and readonly properties are rejected.
+    PropertyGetW,
 }
 
 /// A compiled function / script

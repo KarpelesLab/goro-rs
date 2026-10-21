@@ -13928,6 +13928,19 @@ impl Vm {
     }
 }
 
+/// Whether a declared property type permits auto-initialising to an array.
+fn param_type_accepts_array(pt: &ParamType) -> bool {
+    match pt {
+        ParamType::Simple(t) => {
+            let t: Vec<u8> = t.iter().map(|b| b.to_ascii_lowercase()).collect();
+            matches!(t.as_slice(), b"array" | b"mixed" | b"iterable")
+        }
+        ParamType::Nullable(inner) => param_type_accepts_array(inner),
+        ParamType::Union(ts) => ts.iter().any(param_type_accepts_array),
+        ParamType::Intersection(_) => false,
+    }
+}
+
 /// Auto-global variable names other than $GLOBALS.
 pub(crate) fn is_auto_global_name(name: &[u8]) -> bool {
     matches!(
@@ -32601,8 +32614,16 @@ impl Vm {
                     self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
-                OpCode::PropertyGet | OpCode::PropertyGetRW => {
-                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                OpCode::PropertyGet | OpCode::PropertyGetRW | OpCode::PropertyGetW => {
+                    if !matches!(op.opcode, OpCode::PropertyGetW) {
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                    } else if let OperandType::Tmp(t) = op.result {
+                        // Drop a stale holder of the previous fetch (loops) so the
+                        // copy-on-write check below doesn't see a phantom share.
+                        if let Some(slot) = tmps.get_mut(t as usize) {
+                            *slot = Value::Undef;
+                        }
+                    }
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -33092,6 +33113,53 @@ impl Vm {
                                 } else if let Value::Object(o) = &prop {
                                     // Single name-bound SXE: mark to signal "1 element"
                                     o.borrow_mut().set_property(b"__sxml_named".to_vec(), Value::True);
+                                }
+                            }
+                            // Write fetch for a dimension write: vivify / separate / readonly.
+                            if matches!(op.opcode, OpCode::PropertyGetW) && !hidden_private_prop {
+                                let exists = obj.borrow().has_property(&storage_key);
+                                let has_get = self.classes.get(&class_lower)
+                                    .map(|c| c.methods.contains_key(&b"__get".to_vec()))
+                                    .unwrap_or(false);
+                                let def = self.find_property_def(&class_lower, prop_name.as_bytes());
+                                let mut w_error: Option<String> = None;
+                                if let Some((_v, declaring_class, is_readonly, ref pt, _sv)) = def {
+                                    if is_readonly && exists && !matches!(prop, Value::Undef) {
+                                        let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let class_display = self.classes.get(&declaring_lower)
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
+                                        w_error = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_name.to_string_lossy()));
+                                    } else if matches!(prop, Value::Null | Value::Undef)
+                                        && (exists || !has_get)
+                                        && pt.as_ref().map(param_type_accepts_array).unwrap_or(true)
+                                    {
+                                        let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                        obj.borrow_mut().set_property(storage_key.clone(), arr.clone());
+                                        prop = arr;
+                                    }
+                                } else if matches!(prop, Value::Null | Value::Undef) && (exists || !has_get) {
+                                    let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                    obj.borrow_mut().set_property(storage_key.clone(), arr.clone());
+                                    prop = arr;
+                                }
+                                if let Some(msg) = w_error {
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                                }
+                                // Separate an array shared with other holders (copy-on-write).
+                                if let Value::Array(rc) = &prop {
+                                    if Rc::strong_count(rc) > 2 {
+                                        let sep = Value::Array(Rc::new(RefCell::new(rc.borrow().clone())));
+                                        obj.borrow_mut().set_property(storage_key.clone(), sep.clone());
+                                        prop = sep;
+                                    }
                                 }
                             }
                             // Check for typed property accessed before initialization
