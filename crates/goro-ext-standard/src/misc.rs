@@ -7580,6 +7580,31 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let path_str = path.to_string_lossy();
 
+    // php:// streams (php://stdout, php://fd/N, php://output, ...): open the
+    // stream and write to it (php_stream_open_wrapper_ex + php_stream_write).
+    if path.as_bytes().len() > 6 && path.as_bytes()[..6].eq_ignore_ascii_case(b"php://") {
+        let mode: &[u8] = if append { b"ab" } else { b"wb" };
+        let fp = fopen_fn(
+            vm,
+            &[
+                Value::String(path.clone()),
+                Value::String(PhpString::from_bytes(mode)),
+            ],
+        )?;
+        let Value::Resource(fid) = fp else {
+            return Ok(Value::False);
+        };
+        let r = fwrite_fn(
+            vm,
+            &[
+                Value::Resource(fid),
+                Value::String(PhpString::from_vec(data_bytes)),
+            ],
+        );
+        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        return r;
+    }
+
     let p = std::path::Path::new(&*path_str);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -9280,6 +9305,15 @@ impl Drop for FileHandle {
 }
 
 impl FileHandle {
+    /// A php://stdin, php://stdout, php://stderr or php://fd/N stream over
+    /// a dup()ed descriptor.
+    fn is_dup_descriptor(&self) -> bool {
+        matches!(self.special, SpecialStream::None)
+            && self.wrapper_type == "PHP"
+            && self.stream_type == "STDIO"
+            && self.sock.is_none()
+    }
+
     /// ops->read() on the underlying descriptor. Socket streams follow
     /// php_sockop_read(): Err(WouldBlock) means "no data right now" (not
     /// EOF) and Err(TimedOut) a timed-out blocking read. `has_buffered`
@@ -9345,7 +9379,12 @@ fn shutdown_filtered_streams(vm: &mut Vm) {
         let saved = vm.current_exception.take();
         flush_write_filters(vm, fid, true);
         crate::stream_filters::remove_stream_filters(vm, fid);
-        FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+        let fh = FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+        // STDIN/STDOUT/STDERR: PHP_STREAM_FLAG_NO_RSCR_DTOR_CLOSE, the
+        // resource is released but descriptors 0-2 stay open.
+        if (1..=3).contains(&fid) {
+            std::mem::forget(fh);
+        }
         if vm.current_exception.is_none() {
             vm.current_exception = saved;
         }
@@ -10011,27 +10050,47 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // php://temp are seekable in-memory streams backed by a tempfile.
     if let Some(rest) = filename.strip_prefix("php://") {
         let lower: String = rest.to_ascii_lowercase();
+        // php_stream_url_wrap_php(): the CLI's php://stdin (and, from the
+        // command line, php://stdout / php://stderr) is a dup() of the
+        // descriptor -- a socket stream for a socket. A descriptor that was
+        // closed (fclose(STDIN)) cannot be duplicated: the open fails.
+        let std_fd = match lower.as_str() {
+            "stdin" => Some(0),
+            "stdout" if vm.cli_direct_output => Some(1),
+            "stderr" if vm.cli_direct_output => Some(2),
+            _ => None,
+        };
+        if let Some(std_fd) = std_fd {
+            let fd = unsafe { libc::dup(std_fd) };
+            if fd < 0 {
+                vm.emit_warning(&format!(
+                    "{}({}): Failed to open stream: operation failed",
+                    fopen_caller, filename
+                ));
+                return Ok(Value::False);
+            }
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut st) } == 0
+                && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+            {
+                return Ok(Value::Resource(xp_socket::stream_from_socket(vm, fd)));
+            }
+            use std::os::unix::io::FromRawFd;
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let fid = alloc_file_handle_special_uri(file, &mode, SpecialStream::Stdin, &filename);
+            FILE_HANDLES.with(|h| {
+                if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                    fh.special = SpecialStream::None;
+                    fh.seekable = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) } >= 0;
+                }
+            });
+            goro_core::value::register_resource(fid, b"stream");
+            return Ok(Value::Resource(fid));
+        }
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
             "stderr" => Some(SpecialStream::Stderr),
-            "stdin" => {
-                let fd = unsafe { libc::dup(0) };
-                if fd >= 0 {
-                    use std::os::unix::io::FromRawFd;
-                    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-                    let fid =
-                        alloc_file_handle_special_uri(file, &mode, SpecialStream::Stdin, &filename);
-                    FILE_HANDLES.with(|h| {
-                        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
-                            fh.special = SpecialStream::None;
-                            fh.seekable = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) } >= 0;
-                        }
-                    });
-                    goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::Resource(fid));
-                }
-                Some(SpecialStream::Stdin)
-            }
+            "stdin" => Some(SpecialStream::Stdin),
             "output" => Some(SpecialStream::Output),
             "memory" => Some(SpecialStream::Memory),
             "input" => Some(SpecialStream::Memory), // tests don't rely on stdin
@@ -10113,11 +10172,19 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     use std::os::unix::io::FromRawFd;
                     let f = unsafe { std::fs::File::from_raw_fd(dup_fd) };
                     let sp = match n {
+                        _ if vm.cli_direct_output => SpecialStream::None,
                         1 => SpecialStream::Stdout,
                         2 => SpecialStream::Stderr,
                         _ => SpecialStream::None,
                     };
                     let fid = alloc_file_handle_special(f, &mode, sp);
+                    FILE_HANDLES.with(|h| {
+                        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                            fh.wrapper_type = "PHP".to_string();
+                            fh.stream_type = "STDIO".to_string();
+                            fh.uri = filename.to_string();
+                        }
+                    });
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::Resource(fid));
                 }
@@ -10297,6 +10364,9 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         return Ok(Value::False);
     }
+    // CLI: output written so far reaches descriptor 1 before a stream
+    // (possibly STDOUT itself) is closed.
+    vm.flush_cli_output();
     // _php_stream_free(): flush the write chain, then remove the filters.
     flush_write_filters(vm, fid, true);
     crate::stream_filters::remove_stream_filters(vm, fid);
@@ -10362,6 +10432,9 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
             0
         }
         SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp => {
+            // CLI: the descriptor may be (a dup of) descriptor 1; what was
+            // printed before goes out first.
+            vm.flush_cli_output();
             FILE_HANDLES.with(|h| {
                 let mut h = h.borrow_mut();
                 if let Some(fh) = h.get_mut(&fid) {
@@ -10716,6 +10789,9 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (stream_mode, is_special) = FILE_HANDLES.with(|h| {
         let b = h.borrow();
         match b.get(&fid) {
+            // A dup()ed descriptor (php://stdout opened "r") writes to
+            // whatever the descriptor allows.
+            Some(fh) if fh.is_dup_descriptor() => (None, false),
             Some(fh) => (
                 Some(fh.mode.clone()),
                 !matches!(fh.special, SpecialStream::None),
@@ -10877,7 +10953,12 @@ pub(crate) fn stream_get_line(
 /// streams are reported under `func`).
 pub(crate) fn stream_write(vm: &mut Vm, func: &str, handle: &Value, data: &[u8]) -> Option<i64> {
     let fid = handle.to_long();
-    if let Some(m) = stream_mode_clean(fid) {
+    let dup_fd = FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .is_some_and(|fh| fh.is_dup_descriptor())
+    });
+    if let Some(m) = stream_mode_clean(fid).filter(|_| !dup_fd) {
         let is_special = FILE_HANDLES.with(|h| {
             h.borrow()
                 .get(&fid)
@@ -11127,10 +11208,11 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             // Track whether this is a special stream that doesn't support seek.
+            // PHP_STREAM_FLAG_NO_SEEK: also a descriptor stream over a pipe.
             let is_unseekable_special = matches!(
                 fh.special,
                 SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output
-            );
+            ) || (fh.is_dup_descriptor() && !fh.seekable);
             fh.eof = false;
             // The read buffer is discarded; SEEK_CUR is relative to the
             // logical position (before the buffered bytes).

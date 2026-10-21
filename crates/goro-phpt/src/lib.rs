@@ -1116,11 +1116,28 @@ fn execute_php_with_timeout_and_filename(
             (fds[0], fds[1])
         };
 
+        // Like run-tests.php, the test's descriptors 1 and 2 are a pipe
+        // (shared, so that the order of what is written to them is kept),
+        // drained by the parent.
+        let (cap_r, cap_w) = {
+            let mut fds = [0i32; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                unsafe {
+                    libc::close(read_fd);
+                    libc::close(write_fd);
+                }
+                return Err("Failed to create pipe".to_string());
+            }
+            (fds[0], fds[1])
+        };
+
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             unsafe {
                 libc::close(read_fd);
                 libc::close(write_fd);
+                libc::close(cap_r);
+                libc::close(cap_w);
             }
             return Err("Failed to fork".to_string());
         }
@@ -1129,6 +1146,11 @@ fn execute_php_with_timeout_and_filename(
             // Child process
             unsafe {
                 libc::close(read_fd);
+                libc::close(cap_r);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                libc::dup2(cap_w, 1);
+                libc::dup2(cap_w, 2);
+                libc::close(cap_w);
             }
 
             // Like run-tests.php, a test runs from the directory the runner
@@ -1140,20 +1162,37 @@ fn execute_php_with_timeout_and_filename(
             // run-tests.php merges the test's stderr into its output: what
             // the script or its child processes (proc_open() workers that
             // inherit STDERR) write to descriptor 2 is appended.
-            let stderr_cap = capture_stderr_start();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 execute_php_inner(source, ini_settings, filename)
             }));
-            // Output that was flushed to descriptor 1 is in the capture file
-            // together with stderr, in order; what is still buffered in the
-            // engine comes last.
-            let result = match (result, capture_stderr_end(stderr_cap)) {
-                (Ok(Ok(bytes)), mut captured) => {
-                    captured.extend_from_slice(&bytes);
-                    Ok(Ok(captured))
+            // What is still buffered in the engine is written to descriptor
+            // 1 last, as the CLI does at shutdown (lost if the script closed
+            // it).
+            let result = match result {
+                Ok(Ok(bytes)) => {
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let mut done = 0;
+                    while done < bytes.len() {
+                        let n = unsafe {
+                            libc::write(
+                                1,
+                                bytes[done..].as_ptr() as *const libc::c_void,
+                                bytes.len() - done,
+                            )
+                        };
+                        if n <= 0 {
+                            break;
+                        }
+                        done += n as usize;
+                    }
+                    Ok(Ok(Vec::new()))
                 }
-                (r, _) => r,
+                r => r,
             };
+            unsafe {
+                libc::close(1);
+                libc::close(2);
+            }
 
             let (status, output) = match result {
                 Ok(Ok(bytes)) => (0u8, bytes),
@@ -1182,27 +1221,27 @@ fn execute_php_with_timeout_and_filename(
         // Parent process
         unsafe {
             libc::close(write_fd);
+            libc::close(cap_w);
         }
 
-        // Wait for child with timeout, draining the result pipe meanwhile so
-        // that a large output cannot fill it and block the child. (Reads are
-        // non-blocking: a grandchild may have inherited the write end.)
+        // Wait for child with timeout, draining the result and output pipes
+        // meanwhile so that a large output cannot fill them and block the
+        // child. (Reads are non-blocking: a grandchild may have inherited
+        // the write ends.)
         unsafe {
-            let fl = libc::fcntl(read_fd, libc::F_GETFL, 0);
-            libc::fcntl(read_fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+            for fd in [read_fd, cap_r] {
+                let fl = libc::fcntl(fd, libc::F_GETFL, 0);
+                libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+            }
         }
         let mut buf = Vec::new();
-        let drain = |buf: &mut Vec<u8>| -> bool {
+        let mut captured = Vec::new();
+        let drain = |fd: i32, buf: &mut Vec<u8>| -> bool {
             let mut got = false;
             let mut chunk = [0u8; 65536];
             loop {
-                let n = unsafe {
-                    libc::read(
-                        read_fd,
-                        chunk.as_mut_ptr() as *mut libc::c_void,
-                        chunk.len(),
-                    )
-                };
+                let n =
+                    unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
                 if n <= 0 {
                     return got;
                 }
@@ -1215,15 +1254,18 @@ fn execute_php_with_timeout_and_filename(
             let mut status = 0i32;
             let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             if ret > 0 {
-                drain(&mut buf);
+                drain(read_fd, &mut buf);
+                drain(cap_r, &mut captured);
                 break; // Child exited
             }
-            if drain(&mut buf) {
+            let got_out = drain(cap_r, &mut captured);
+            if drain(read_fd, &mut buf) || got_out {
                 continue;
             }
             if ret < 0 {
                 unsafe {
                     libc::close(read_fd);
+                    libc::close(cap_r);
                 }
                 return Err("waitpid error".to_string());
             }
@@ -1237,6 +1279,7 @@ fn execute_php_with_timeout_and_filename(
                 }
                 unsafe {
                     libc::close(read_fd);
+                    libc::close(cap_r);
                 }
                 return Err("Timeout: execution exceeded time limit".to_string());
             }
@@ -1245,6 +1288,7 @@ fn execute_php_with_timeout_and_filename(
 
         unsafe {
             libc::close(read_fd);
+            libc::close(cap_r);
         }
 
         if buf.is_empty() {
@@ -1266,7 +1310,10 @@ fn execute_php_with_timeout_and_filename(
         };
 
         match status {
-            0 => Ok(data),
+            0 => {
+                captured.extend_from_slice(&data);
+                Ok(captured)
+            }
             1 => Err(String::from_utf8_lossy(&data).to_string()),
             _ => Err("Fatal error: stack overflow or panic".to_string()),
         }
@@ -2879,64 +2926,4 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         .or_else(|| test.sections.get("STDIN"))
         .map(|s| test.bytes(s));
     PhptRequest { info, env, stdin }
-}
-
-/// Redirect descriptors 1 and 2 to an anonymous temporary file; returns
-/// (saved stdout, saved stderr, capture file) descriptors.
-#[cfg(unix)]
-fn capture_stderr_start() -> Option<(i32, i32, i32)> {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("goro-phpt-stderr-{}", std::process::id()));
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .ok()?;
-    let _ = std::fs::remove_file(&path);
-    use std::os::unix::io::IntoRawFd;
-    let fd = f.into_raw_fd();
-    unsafe {
-        let saved = libc::dup(2);
-        if saved < 0 || libc::dup2(fd, 2) < 0 {
-            libc::close(fd);
-            return None;
-        }
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let saved_out = libc::dup(1);
-        if saved_out >= 0 {
-            libc::dup2(fd, 1);
-        }
-        Some((saved_out, saved, fd))
-    }
-}
-
-/// Restore descriptors 1 and 2 and return what was written to them.
-#[cfg(unix)]
-fn capture_stderr_end(cap: Option<(i32, i32, i32)>) -> Vec<u8> {
-    let Some((saved_out, saved, fd)) = cap else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    unsafe {
-        if saved_out >= 0 {
-            libc::dup2(saved_out, 1);
-            libc::close(saved_out);
-        }
-        libc::dup2(saved, 2);
-        libc::close(saved);
-        libc::lseek(fd, 0, libc::SEEK_SET);
-        let mut chunk = [0u8; 65536];
-        loop {
-            let n = libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len());
-            if n <= 0 {
-                break;
-            }
-            out.extend_from_slice(&chunk[..n as usize]);
-        }
-        libc::close(fd);
-    }
-    out
 }

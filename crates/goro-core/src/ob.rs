@@ -488,6 +488,9 @@ impl Vm {
             None => return false,
         };
         handler.id = self.ob_alloc_id();
+        // CLI output is unbuffered: what was written before the buffer
+        // started has reached descriptor 1.
+        self.flush_cli_output();
         self.ob_stack.push(Vec::new());
         self.ob_handlers.push(handler);
         true
