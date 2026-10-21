@@ -389,3 +389,44 @@ fn php_strip_whitespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         None => Ok(Value::String(PhpString::from_bytes(b""))),
     }
 }
+
+/// tokenize() from ext/tokenizer/tokenizer.c (token_get_all() without
+/// TOKEN_PARSE): the raw scanner stream, with everything after
+/// `__halt_compiler` and its next three significant tokens returned as one
+/// T_INLINE_HTML.
+pub fn tokenize_raw(src: &[u8]) -> goro_core::array::PhpArray {
+    use goro_core::array::{ArrayKey, PhpArray};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut result = PhpArray::new();
+    let mut add = |result: &mut PhpArray, id: i32, text: &[u8], line: u32| {
+        if id >= 256 {
+            let mut arr = PhpArray::new();
+            arr.set(ArrayKey::Int(0), Value::Long(id as i64));
+            arr.set(ArrayKey::Int(1), Value::String(PhpString::from_bytes(text)));
+            arr.set(ArrayKey::Int(2), Value::Long(line as i64));
+            result.push(Value::Array(Rc::new(RefCell::new(arr))));
+        } else {
+            result.push(Value::String(PhpString::from_bytes(text)));
+        }
+    };
+    let mut sc = Scanner::new(src, goro_parser::short_open_tag(), false);
+    let mut need_tokens: i32 = -1;
+    while let Some(t) = sc.next_token() {
+        add(&mut result, t.id, &src[t.start..t.end], t.line);
+        if need_tokens != -1 {
+            if !matches!(t.id, ps::T_WHITESPACE | ps::T_OPEN_TAG | ps::T_COMMENT | ps::T_DOC_COMMENT) {
+                need_tokens -= 1;
+                if need_tokens == 0 {
+                    if t.end < src.len() {
+                        add(&mut result, ps::T_INLINE_HTML, &src[t.end..], t.line);
+                    }
+                    break;
+                }
+            }
+        } else if t.id == ps::T_HALT_COMPILER {
+            need_tokens = 3;
+        }
+    }
+    result
+}

@@ -17544,6 +17544,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let source = args[0].to_php_string();
     let flags = if args.len() > 1 { args[1].to_long() } else { 0 };
     let token_parse = (flags & 1) != 0; // TOKEN_PARSE
+    if !token_parse {
+        return Ok(Value::Array(Rc::new(RefCell::new(crate::highlight::tokenize_raw(source.as_bytes())))));
+    }
 
     let mut lexer = goro_parser::Lexer::new(source.as_bytes());
     lexer.set_preserve_trivia(true);
