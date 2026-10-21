@@ -2203,3 +2203,111 @@ pub(crate) fn stream_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         })
     })
 }
+
+// ---------------------------------------------------------------------------
+// ext/sockets services (socket_import_stream() / socket_export_stream())
+// ---------------------------------------------------------------------------
+
+/// php_stream_cast(PHP_STREAM_AS_SOCKETD) for `func`.
+fn hook_stream_socket_fd(vm: &mut Vm, v: &Value, func: &str) -> Result<Option<i32>, VmError> {
+    let v = v.deref();
+    let id = match v {
+        Value::Resource(id) => id,
+        _ => {
+            return Err(throw(
+                vm,
+                b"TypeError",
+                &format!(
+                    "{}(): Argument #1 ($stream) must be of type resource, {} given",
+                    func,
+                    Vm::value_type_name(&v)
+                ),
+            ));
+        }
+    };
+    let info = FILE_HANDLES.with(|h| {
+        h.borrow().get(&id).map(|fh| {
+            (
+                fh.sock.is_some(),
+                fh.file.as_raw_fd(),
+                fh.stream_type.clone(),
+            )
+        })
+    });
+    match info {
+        Some((true, fd, _)) => Ok(Some(fd)),
+        Some((false, _, ty)) => {
+            vm.emit_warning(&format!(
+                "{}(): Cannot represent a stream of type {} as a Socket Descriptor",
+                func, ty
+            ));
+            Ok(None)
+        }
+        None => Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): supplied resource is not a valid stream resource",
+                func
+            ),
+        )),
+    }
+}
+
+/// socket_export_stream(): a stream with the sockops of the socket's
+/// protocol (or a generic socket stream).
+fn hook_stream_from_socket(vm: &mut Vm, fd: i32) -> i64 {
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let fam = if unsafe { libc::getsockname(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut sl) }
+        == 0
+    {
+        ss.ss_family as i32
+    } else {
+        -1
+    };
+    let getopt = |opt: i32| -> i32 {
+        let mut v: i32 = 0;
+        let mut l = std::mem::size_of::<i32>() as libc::socklen_t;
+        unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &mut v as *mut i32 as *mut libc::c_void,
+                &mut l,
+            );
+        }
+        v
+    };
+    let ty = getopt(libc::SO_TYPE);
+    let (kind, uri) = match fam {
+        libc::AF_INET | libc::AF_INET6
+            if ty == libc::SOCK_STREAM && getopt(libc::SO_PROTOCOL) == libc::IPPROTO_TCP =>
+        {
+            (SockKind::Tcp, Some(&b"tcp://"[..]))
+        }
+        libc::AF_INET | libc::AF_INET6 if ty == libc::SOCK_DGRAM => {
+            (SockKind::Udp, Some(&b"udp://"[..]))
+        }
+        libc::AF_UNIX if ty == libc::SOCK_STREAM => (SockKind::Unix, Some(&b"unix://"[..])),
+        libc::AF_UNIX if ty == libc::SOCK_DGRAM => (SockKind::Udg, Some(&b"udg://"[..])),
+        _ => (SockKind::Generic, None),
+    };
+    let t = default_socket_timeout(vm);
+    alloc_socket_stream(fd, SockData::new(kind, t), uri, None)
+}
+
+fn hook_close_stream(vm: &mut Vm, id: i64) {
+    if FILE_HANDLES.with(|h| h.borrow().contains_key(&id)) {
+        let _ = super::fclose_fn(vm, &[Value::Resource(id)]);
+    }
+}
+
+pub(crate) fn install_hooks(vm: &mut Vm) {
+    vm.socket_stream_hooks = Some(goro_core::vm::SocketStreamHooks {
+        stream_socket_fd: hook_stream_socket_fd,
+        stream_from_socket: hook_stream_from_socket,
+        close_stream: hook_close_stream,
+    });
+}

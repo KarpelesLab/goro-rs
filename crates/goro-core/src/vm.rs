@@ -687,6 +687,9 @@ pub struct Vm {
     /// Stream-wrapper include hook: returns the source of an include/require
     /// target served by a userspace stream wrapper (None: not handled).
     pub include_stream_hook: Option<fn(&mut Vm, &str, u8) -> Option<Result<Vec<u8>, VmError>>>,
+    /// Stream layer services for ext/sockets (socket_import_stream() /
+    /// socket_export_stream()), installed by the standard extension.
+    pub socket_stream_hooks: Option<SocketStreamHooks>,
     /// Resolves an include target to a stream-wrapper URL (verbatim
     /// wrapper URLs, or relative names found through include_path entries
     /// served by userspace wrappers). None: use the plain-file logic.
@@ -717,6 +720,19 @@ pub struct Vm {
     /// directive. Used by SPL method dispatchers (ArrayObject::ksort, etc.) to
     /// throw the "Cannot call method X when function X is disabled" error.
     pub disabled_functions: std::collections::HashSet<Vec<u8>>,
+}
+
+/// See `Vm::socket_stream_hooks`.
+#[derive(Clone, Copy)]
+pub struct SocketStreamHooks {
+    /// php_stream_cast(PHP_STREAM_AS_SOCKETD) of a stream resource, for
+    /// `func`: Ok(None) after a warning when it is not a socket stream.
+    pub stream_socket_fd: fn(&mut Vm, &Value, &str) -> Result<Option<i32>, VmError>,
+    /// A socket stream owning descriptor `fd`; the stream type follows the
+    /// socket's family/type like socket_export_stream().
+    pub stream_from_socket: fn(&mut Vm, i32) -> i64,
+    /// Close a stream (php_stream_free()) if it is still open.
+    pub close_stream: fn(&mut Vm, i64),
 }
 
 impl Vm {
@@ -1701,6 +1717,7 @@ impl Vm {
             internal_deprecated_constants: HashMap::new(),
             output_start: None,
             include_stream_hook: None,
+            socket_stream_hooks: None,
             include_resolve_hook: None,
             resource_shutdown_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),

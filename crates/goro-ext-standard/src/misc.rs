@@ -154,6 +154,7 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 
 pub fn register(vm: &mut Vm) {
     register_std_streams();
+    xp_socket::install_hooks(vm);
     vm.register_function(b"fnmatch", fnmatch_fn);
     for (n, v) in [
         ("FNM_NOESCAPE", libc::FNM_NOESCAPE),

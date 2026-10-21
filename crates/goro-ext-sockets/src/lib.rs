@@ -33,6 +33,9 @@ thread_local! {
     static SOCKETS: RefCell<HashMap<i64, SocketHandle>> = RefCell::new(HashMap::new());
     static LAST_ERROR: Cell<i64> = const { Cell::new(0) };
     static ADDRINFOS: RefCell<HashMap<i64, AddrInfoEntry>> = RefCell::new(HashMap::new());
+    /// php_socket->zstream: the stream a socket was imported from or
+    /// exported to (socket id -> stream resource id).
+    static SOCKET_STREAMS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
 }
 
 fn set_last_error(code: i64) {
@@ -809,14 +812,30 @@ fn socket_write(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// socket_close(Socket $socket): void
-fn socket_close(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn socket_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(socket_id) = arg_socket_id(args.first()) {
         SOCKETS.with(|s| {
             // Replace with Closed to mark it closed but keep id valid
             s.borrow_mut().insert(socket_id, SocketHandle::Closed);
         });
+        // An imported/exported socket also closes its stream.
+        if let Some(sid) = SOCKET_STREAMS.with(|m| m.borrow_mut().remove(&socket_id)) {
+            if let Some(h) = vm.socket_stream_hooks {
+                (h.close_stream)(vm, sid);
+            }
+        }
     }
     Ok(Value::Null)
+}
+
+fn handle_raw_fd(h: &SocketHandle) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    match h {
+        SocketHandle::TcpClient(s) => Some(s.as_raw_fd()),
+        SocketHandle::TcpServer(s) => Some(s.as_raw_fd()),
+        SocketHandle::Udp(s) => Some(s.as_raw_fd()),
+        SocketHandle::Closed => None,
+    }
 }
 
 /// socket_send(Socket $socket, string $data, int $length, int $flags): int|false
@@ -2073,12 +2092,90 @@ fn socket_create_pair_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::True)
 }
 
-fn socket_import_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+/// socket_import_stream(resource $stream): Socket|false
+fn socket_import_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some(hooks) = vm.socket_stream_hooks else {
+        return Ok(Value::False);
+    };
+    let arg = args.first().cloned().unwrap_or(Value::Null);
+    let fd = match (hooks.stream_socket_fd)(vm, &arg, "socket_import_stream")? {
+        Some(fd) => fd,
+        None => return Ok(Value::False),
+    };
+    // The Socket shares the stream's connection: it gets its own
+    // descriptor and closing it closes the stream (php_socket->zstream).
+    let nfd = unsafe { libc::dup(fd) };
+    if nfd < 0 {
+        return Ok(Value::False);
+    }
+    let mut ty: i32 = 0;
+    let mut tl = std::mem::size_of::<i32>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            nfd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut ty as *mut i32 as *mut libc::c_void,
+            &mut tl,
+        );
+    }
+    let handle = if ty == libc::SOCK_DGRAM {
+        SocketHandle::Udp(unsafe { UdpSocket::from_raw_fd(nfd) })
+    } else {
+        SocketHandle::TcpClient(unsafe { TcpStream::from_raw_fd(nfd) })
+    };
+    // Imported sockets are always blocking in PHP's view only if the stream
+    // is; keep the descriptor flags as they are.
+    let id = alloc_socket_id_via_vm(vm);
+    SOCKETS.with(|s| {
+        s.borrow_mut().insert(id, handle);
+    });
+    if let Value::Resource(sid) = arg.deref() {
+        SOCKET_STREAMS.with(|m| m.borrow_mut().insert(id, sid));
+    }
+    set_last_error(0);
+    Ok(make_socket_object(id))
 }
 
-fn socket_export_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+/// socket_export_stream(Socket $socket): resource|false
+fn socket_export_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some(hooks) = vm.socket_stream_hooks else {
+        return Ok(Value::False);
+    };
+    let socket_id = match args.first().map(|v| v.deref()) {
+        Some(Value::Object(o)) if o.borrow().class_name == b"Socket" => o.borrow().object_id as i64,
+        Some(v) => {
+            return Err(throw_type_error(
+                vm,
+                &format!(
+                    "socket_export_stream(): Argument #1 ($socket) must be of type Socket, {} given",
+                    Vm::value_type_name(&v)
+                ),
+            ));
+        }
+        None => return Ok(Value::False),
+    };
+    // Already exported / imported: the existing stream.
+    if let Some(sid) = SOCKET_STREAMS.with(|m| m.borrow().get(&socket_id).copied()) {
+        if goro_core::value::is_open_resource(sid) {
+            return Ok(Value::Resource(sid));
+        }
+    }
+    let fd = SOCKETS.with(|s| s.borrow().get(&socket_id).and_then(handle_raw_fd));
+    let Some(fd) = fd else {
+        return Err(throw_value_error(
+            vm,
+            "socket_export_stream(): Argument #1 ($socket) has already been closed",
+        ));
+    };
+    let nfd = unsafe { libc::dup(fd) };
+    if nfd < 0 {
+        vm.emit_warning("socket_export_stream(): Failed to create stream");
+        return Ok(Value::False);
+    }
+    let sid = (hooks.stream_from_socket)(vm, nfd);
+    SOCKET_STREAMS.with(|m| m.borrow_mut().insert(socket_id, sid));
+    Ok(Value::Resource(sid))
 }
 
 /// socket_addrinfo_lookup(string $host, ?string $service = null, array $hints = []): array|false
