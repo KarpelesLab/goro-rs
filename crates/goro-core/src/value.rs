@@ -791,7 +791,7 @@ impl Value {
                     if a_has_ts && b_has_ts && a_has_tzt && b_has_tzt {
                         let ta = a_b.get_property(b"__timestamp").to_long();
                         let tb = b_b.get_property(b"__timestamp").to_long();
-                        ta == tb
+                        ta == tb && a_b.get_property(b"__timestamp_us").to_long() == b_b.get_property(b"__timestamp_us").to_long()
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
                         && a_b.properties.len() == b_b.properties.len()
                     {
@@ -1162,6 +1162,16 @@ impl Value {
                         }
                     }
                     return i64::MIN; // Not comparable
+                }
+                // ext/date DateTimeInterface objects compare by (timestamp, microseconds).
+                if a_borrow.has_property(b"__timestamp_us") && b_borrow.has_property(b"__timestamp_us") {
+                    let a_key = (a_borrow.get_property(b"__timestamp").to_long(), a_borrow.get_property(b"__timestamp_us").to_long());
+                    let b_key = (b_borrow.get_property(b"__timestamp").to_long(), b_borrow.get_property(b"__timestamp_us").to_long());
+                    return match a_key.cmp(&b_key) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    };
                 }
                 // Regular objects: compare by class name and properties
                 if !a_borrow.class_name.eq_ignore_ascii_case(&b_borrow.class_name) {

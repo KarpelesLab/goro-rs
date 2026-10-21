@@ -8319,7 +8319,7 @@ fn serialize_value_with_vm(val: &Value, depth: usize, vm: &mut Vm) -> String {
                     | b"random\\engine\\xoshiro256starstar"
                     | b"random\\engine\\pcgoneseq128xslrr64"
                     | b"random\\randomizer"
-                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval"
+                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval" | b"dateperiod"
                     | b"gmp"
                 )
             };
@@ -8922,7 +8922,7 @@ fn unserialize_value(data: &[u8], pos: &mut usize, vm: &mut Vm) -> Option<Value>
                     | b"random\\engine\\xoshiro256starstar"
                     | b"random\\engine\\pcgoneseq128xslrr64"
                     | b"random\\randomizer"
-                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval"
+                    | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval" | b"dateperiod"
                     | b"gmp"
                 )
             };

@@ -34,6 +34,17 @@ pub(crate) fn clear_current_vm_ptr() {
 /// Built-in function signature
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
+/// Extension-provided method dispatcher for a built-in class (e.g. ext/date's
+/// DateTime). `has_method(class_lower, method_lower, is_static)` tells the VM
+/// whether the extension implements a method; `call(vm, class_lower,
+/// method_lower, called_class, this, args)` runs it. Exceptions are reported by
+/// setting `vm.current_exception`.
+#[derive(Clone, Copy)]
+pub struct NativeClassHandler {
+    pub has_method: fn(&[u8], &[u8], bool) -> bool,
+    pub call: fn(&mut Vm, &[u8], &[u8], &[u8], Option<&Value>, &[Value]) -> Value,
+}
+
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
 
@@ -370,6 +381,8 @@ pub struct Vm {
     /// constructor dispatch (SPL/Reflection/etc.).
     pub object_construct_handlers:
         std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[Value], u32) -> Result<(), String>>,
+    /// Extension-provided method handlers keyed by lowercase built-in class name.
+    pub native_class_handlers: std::collections::HashMap<Vec<u8>, NativeClassHandler>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -1253,6 +1266,7 @@ impl Vm {
             gmp_to_hex: None,
             gmp_from_hex: None,
             object_construct_handlers: std::collections::HashMap::new(),
+            native_class_handlers: std::collections::HashMap::new(),
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available
@@ -5460,9 +5474,9 @@ impl Vm {
                     | b"splobjectstorage"
                     | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
                     | b"globiterator" | b"splfileobject" | b"spltempfileobject"
-                    | b"simplexmlelement"
+                    | b"simplexmlelement" | b"internaliterator"
             ),
-            b"iteratoraggregate" => matches!(class_lower, b"arrayobject" | b"weakmap"),
+            b"iteratoraggregate" => matches!(class_lower, b"arrayobject" | b"weakmap" | b"dateperiod"),
             b"traversable" => matches!(
                 class_lower,
                 b"arrayiterator" | b"recursivearrayiterator" | b"splfixedarray"
@@ -5480,7 +5494,7 @@ impl Vm {
                     | b"directoryiterator" | b"filesystemiterator" | b"recursivedirectoryiterator"
                     | b"globiterator" | b"splfileobject" | b"spltempfileobject"
                     | b"simplexmlelement"
-                    | b"weakmap"
+                    | b"weakmap" | b"dateperiod" | b"internaliterator"
             ),
             b"countable" => matches!(
                 class_lower,
@@ -5545,12 +5559,32 @@ impl Vm {
     }
 
     /// Dispatch method calls for SPL built-in classes
+    /// Find the extension-provided native handler for a class or its nearest
+    /// built-in ancestor. Returns (native_class_lower, handler).
+    pub fn find_native_class_handler(&self, class_lower: &[u8]) -> Option<(Vec<u8>, NativeClassHandler)> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..50 {
+            if let Some(h) = self.native_class_handlers.get(&cur) {
+                return Some((cur, *h));
+            }
+            match self.classes.get(&cur).and_then(|c| c.parent.clone()) {
+                Some(p) => cur = p.to_ascii_lowercase(),
+                None => return None,
+            }
+        }
+        None
+    }
+
     fn dispatch_spl_method(
         &mut self,
         class_lower: &[u8],
         method_lower: &[u8],
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
+        if self.native_class_handlers.contains_key(class_lower) {
+            // Native handlers always receive their arguments at DoFCall time.
+            return None;
+        }
         match class_lower {
             b"phptoken" => self.phptoken_method(method_lower, obj),
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
@@ -9088,6 +9122,9 @@ impl Vm {
 
     /// Check if this is an SPL method that needs call arguments
     fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
+        if let Some(h) = self.native_class_handlers.get(class) {
+            return (h.has_method)(class, method, false);
+        }
         match class {
             b"phptoken" => matches!(method, b"is"),
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_is_args_method(method),
@@ -9226,6 +9263,11 @@ impl Vm {
         args: &[Value],
     ) -> Option<Value> {
         // args[0] is $this, rest are method args
+        if let Some(h) = self.native_class_handlers.get(class).copied() {
+            let this = args.first().cloned().unwrap_or(Value::Null);
+            let called = if let Value::Object(o) = &this { o.borrow().class_name.clone() } else { class.to_vec() };
+            return Some((h.call)(self, class, method, &called, Some(&this), &args[1.min(args.len())..]));
+        }
         let this = args.first()?;
         if let Value::Object(obj) = this {
             match class {
@@ -13526,6 +13568,10 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"globiterator"
                 | b"directory"
                 | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval"
+                | b"dateperiod" | b"internaliterator"
+                | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
+                | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
+                | b"dateinvalidoperationexception" | b"dateerror" | b"dateobjecterror" | b"daterangeerror"
                 | b"throwable" | b"stringable" | b"traversable" | b"iterator"
                 | b"iteratoraggregate" | b"arrayaccess" | b"countable" | b"serializable"
                 | b"seekableiterator" | b"outeriterator" | b"recursiveiterator"
@@ -13656,6 +13702,8 @@ impl Vm {
             b"datetimeimmutable" => "DateTimeImmutable",
             b"dateinterval" => "DateInterval",
             b"datetimezone" => "DateTimeZone",
+            b"dateperiod" => "DatePeriod",
+            b"internaliterator" => "InternalIterator",
             b"phptoken" => "PhpToken",
             b"uri\\whatwg\\url" => "Uri\\WhatWg\\Url",
             b"uri\\rfc3986\\uri" => "Uri\\Rfc3986\\Uri",
@@ -17769,6 +17817,48 @@ impl Vm {
                                         call.name = PhpString::from_vec(orig_bytes[last_sep_orig + 1..].to_vec());
                                     }
                                     func_name_lower = global_name;
+                                }
+                            }
+                        }
+                    }
+
+                    // Extension-registered native class static methods (e.g. ext/date).
+                    if !self.native_class_handlers.is_empty() {
+                        if let Some(sep) = func_name_lower.windows(2).position(|w| w == b"::") {
+                            let class_part = func_name_lower[..sep].to_vec();
+                            let method_part = func_name_lower[sep + 2..].to_vec();
+                            let user_defined = self.classes.get(&class_part).map(|c| c.get_method(&method_part).is_some()).unwrap_or(false);
+                            if let Some((native, h)) = if user_defined { None } else { self.find_native_class_handler(&class_part) } {
+                                if (h.has_method)(&native, &method_part, true) {
+                                    let called: Vec<u8> = if is_forwarding_call {
+                                        self.called_class_stack.last().cloned().unwrap_or_else(|| call.name.as_bytes()[..sep].to_vec())
+                                    } else {
+                                        call.name.as_bytes()[..sep].to_vec()
+                                    };
+                                    let frame_name = format!("{}::{}", self.builtin_canonical_name(&native), String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..]));
+                                    self.call_stack.push((frame_name, self.current_file.clone(), op.line, call.args.clone(), false));
+                                    let args = call.args.clone();
+                                    let result = (h.call)(self, &native, &method_part, &called, None, &args);
+                                    self.call_stack.pop();
+                                    if let Some(exc_val) = self.current_exception.take() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            let catch_target = *catch_target;
+                                            self.current_exception = Some(exc_val);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        } else {
+                                            let msg = if let Value::Object(o) = &exc_val {
+                                                o.borrow().get_property(b"message").to_php_string().to_string_lossy()
+                                            } else {
+                                                "Unknown exception".to_string()
+                                            };
+                                            self.current_exception = Some(exc_val);
+                                            return Err(VmError { message: msg, line: op.line });
+                                        }
+                                    }
+                                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
                                 }
                             }
                         }
@@ -25750,6 +25840,12 @@ impl Vm {
                                 op.line,
                             );
                         }
+                        if matches!(name_bytes, b"SUNFUNCS_RET_TIMESTAMP" | b"SUNFUNCS_RET_STRING" | b"SUNFUNCS_RET_DOUBLE") {
+                            self.emit_deprecated_at(
+                                &format!("Constant {} is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1", String::from_utf8_lossy(name_bytes)),
+                                op.line,
+                            );
+                        }
                         if name_bytes == b"DATE_RFC7231" {
                             self.emit_deprecated_at(
                                 "Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT",
@@ -30836,6 +30932,8 @@ impl Vm {
                             b"datetimeimmutable" => b"DateTimeImmutable".to_vec(),
                             b"dateinterval" => b"DateInterval".to_vec(),
                             b"datetimezone" => b"DateTimeZone".to_vec(),
+                            b"dateperiod" => b"DatePeriod".to_vec(),
+                            b"internaliterator" => b"InternalIterator".to_vec(),
                             b"lengthexception" => b"LengthException".to_vec(),
                             b"outofrangeexception" => b"OutOfRangeException".to_vec(),
                             b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
@@ -35251,6 +35349,7 @@ pub fn get_builtin_interfaces(class: &[u8]) -> Vec<Vec<u8>> {
         | b"jsonexception" | b"fibererror"
         | b"dateexception" | b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
         | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
+        | b"dateinvalidoperationexception" | b"dateerror" | b"dateobjecterror" | b"daterangeerror"
         | b"parseerror" | b"compileerror"
         | b"random\\randomexception" | b"random\\randomerror" | b"random\\brokenrandomengineerror"
         | b"random\\intervalerror"
@@ -35300,8 +35399,11 @@ pub fn get_builtin_parent(class: &[u8]) -> Option<&'static [u8]> {
         b"spltempfileobject" => Some(b"SplFileObject"),
         b"splfileobject" => Some(b"SplFileInfo"),
         b"dateinvalidtimezoneexception" | b"datemalformedintervalstringexception"
-        | b"datemalformedstringexception" | b"datemalformedperiodstringexception" => Some(b"DateException"),
+        | b"datemalformedstringexception" | b"datemalformedperiodstringexception"
+        | b"dateinvalidoperationexception" => Some(b"DateException"),
         b"dateexception" => Some(b"Exception"),
+        b"dateobjecterror" | b"daterangeerror" => Some(b"DateError"),
+        b"dateerror" => Some(b"Error"),
         _ => None,
     }
 }
@@ -35381,6 +35483,10 @@ pub fn canonicalize_class_name(name_lower: &[u8]) -> Vec<u8> {
         b"datemalformedintervalstringexception" => b"DateMalformedIntervalStringException".to_vec(),
         b"datemalformedstringexception" => b"DateMalformedStringException".to_vec(),
         b"datemalformedperiodstringexception" => b"DateMalformedPeriodStringException".to_vec(),
+        b"dateinvalidoperationexception" => b"DateInvalidOperationException".to_vec(),
+        b"dateerror" => b"DateError".to_vec(),
+        b"dateobjecterror" => b"DateObjectError".to_vec(),
+        b"daterangeerror" => b"DateRangeError".to_vec(),
         b"datetimeinterface" => b"DateTimeInterface".to_vec(),
         _ => name_lower.to_vec(),
     }
@@ -35416,9 +35522,13 @@ fn is_builtin_implements(class: &[u8], interface: &[u8]) -> bool {
             interface,
             b"iterator" | b"traversable" | b"countable"
         ),
-        b"emptyiterator" => matches!(
+        b"emptyiterator" | b"internaliterator" => matches!(
             interface,
             b"iterator" | b"traversable"
+        ),
+        b"dateperiod" => matches!(
+            interface,
+            b"iteratoraggregate" | b"traversable"
         ),
         b"iteratoriterator" | b"recursiveiteratoriterator" => matches!(
             interface,
@@ -35490,9 +35600,13 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
             b"errorexception" => Some(b"exception".to_vec()),
             b"exception" => Some(b"throwable".to_vec()),
             // Date exception hierarchy
-            b"dateexception" | b"dateinvalidtimezoneexception"
+            b"dateexception" => Some(b"exception".to_vec()),
+            b"dateinvalidtimezoneexception"
             | b"datemalformedintervalstringexception" | b"datemalformedstringexception"
-            | b"datemalformedperiodstringexception" => Some(b"exception".to_vec()),
+            | b"datemalformedperiodstringexception"
+            | b"dateinvalidoperationexception" => Some(b"dateexception".to_vec()),
+            b"dateerror" => Some(b"error".to_vec()),
+            b"dateobjecterror" | b"daterangeerror" => Some(b"dateerror".to_vec()),
             // Random exception hierarchy
             b"random\\randomexception" => Some(b"exception".to_vec()),
             b"random\\randomerror" => Some(b"error".to_vec()),
