@@ -15896,9 +15896,13 @@ impl Vm {
             self.run_shutdown_destructors();
         }
 
-        // Module request shutdown (RSHUTDOWN), e.g. session write.
+        // Module request shutdown (RSHUTDOWN), e.g. session write. Output
+        // buffers are flushed first (php_request_shutdown step 3).
         self.exit_requested = false;
         let hooks = std::mem::take(&mut self.request_shutdown_hooks);
+        if !hooks.is_empty() {
+            self.ob_end_all();
+        }
         for hook in hooks {
             hook(self);
         }
