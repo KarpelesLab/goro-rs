@@ -3905,6 +3905,24 @@ impl Vm {
         }
     }
 
+    /// For a property write at `ip - 1` whose value comes from an increment /
+    /// decrement just before it that overflowed int (zend_incdec_typed_prop):
+    /// Some(true) = increment, Some(false) = decrement.
+    fn incdec_overflow_kind(op_array: &OpArray, ip: usize, value_operand: &OperandType, value: &Value) -> Option<bool> {
+        if !matches!(value, Value::Double(_)) || ip < 2 {
+            return None;
+        }
+        let prev = op_array.ops.get(ip - 2)?;
+        if prev.op1 != *value_operand {
+            return None;
+        }
+        match prev.opcode {
+            OpCode::PostIncrement | OpCode::PreIncrement => Some(true),
+            OpCode::PostDecrement | OpCode::PreDecrement => Some(false),
+            _ => None,
+        }
+    }
+
     /// "unexpected NAN value was coerced to <type>" (zend_nan_coerced_to_type_warning).
     pub fn warn_nan_coercion(&mut self, v: &Value, type_name: &str, line: u32) {
         let is_nan = match v {
@@ -26930,6 +26948,55 @@ impl Vm {
                         });
                     }
 
+                    // Typed static property: coerce / verify like instance properties.
+                    let mut value = value;
+                    let typed = {
+                        let mut found: Option<(ParamType, Vec<u8>)> = None;
+                        let mut cur = Some(class_lower.clone());
+                        let mut guard = 0;
+                        while let Some(cl) = cur {
+                            guard += 1;
+                            if guard > 64 { break; }
+                            let c = match self.classes.get(&cl) { Some(c) => c, None => break };
+                            if let Some(pd) = c.properties.iter().find(|pd| pd.is_static && pd.name.as_slice() == prop_name.as_bytes()) {
+                                if let Some(t) = &pd.property_type {
+                                    found = Some((t.clone(), c.name.clone()));
+                                }
+                                break;
+                            }
+                            cur = c.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                        }
+                        found
+                    };
+                    if let Some((pt, decl_name)) = typed {
+                        if !matches!(value, Value::Reference(_)) {
+                            if !op_array.strict_types {
+                                self.emit_implicit_float_to_int_if_needed(&value, &pt, op.line);
+                            }
+                            Self::coerce_value_to_type(&mut value, &pt, op_array.strict_types);
+                            if !self.value_matches_type_mode(&value, &pt, true) {
+                                let cd = crate::value::display_class_name(&decl_name);
+                                let pd = prop_name.to_string_lossy();
+                                let td = self.param_type_name(&pt);
+                                let err_msg = match Self::incdec_overflow_kind(op_array, ip, &op.op2, &value) {
+                                    Some(true) => format!("Cannot increment property {}::${} of type {} past its maximal value", cd, pd, td),
+                                    Some(false) => format!("Cannot decrement property {}::${} of type {} past its minimal value", cd, pd, td),
+                                    None => format!(
+                                        "Cannot assign {} to property {}::${} of type {}",
+                                        Self::value_type_name(&value), cd, pd, td
+                                    ),
+                                };
+                                let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: op.line });
+                            }
+                        }
+                    }
                     if let Some(class) = self.classes.get_mut(&class_lower) {
                         class
                             .static_properties
@@ -34545,10 +34612,14 @@ impl Vm {
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                                         let expected = self.param_type_name(pt);
                                         let given = Self::value_type_name(&value);
-                                        type_error = Some(format!(
-                                            "Cannot assign {} to property {}::${} of type {}",
-                                            given, class_display, prop_display, expected
-                                        ));
+                                        type_error = Some(match Self::incdec_overflow_kind(op_array, ip, &op.op2, &value) {
+                                            Some(true) => format!("Cannot increment property {}::${} of type {} past its maximal value", class_display, prop_display, expected),
+                                            Some(false) => format!("Cannot decrement property {}::${} of type {} past its minimal value", class_display, prop_display, expected),
+                                            None => format!(
+                                                "Cannot assign {} to property {}::${} of type {}",
+                                                given, class_display, prop_display, expected
+                                            ),
+                                        });
                                     }
                                 }
                             }
