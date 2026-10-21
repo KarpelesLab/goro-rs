@@ -27798,7 +27798,9 @@ impl Vm {
                                         let msg = format!("\n{}: {} in {}({}) : eval()'d code on line {}\n",
                                             error_type, e.message, self.current_file, op.line, e.line);
                                         self.write_output(msg.as_bytes());
-                                        Value::False
+                                        // E_COMPILE_ERROR is fatal: the script stops (bailout).
+                                        self.fatal_emitted = true;
+                                        return Err(VmError { message: e.message.clone(), line: op.line });
                                     }
                                 }
                             }
