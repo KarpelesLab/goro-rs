@@ -589,112 +589,142 @@ fn str_replace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Ve
     (result, count)
 }
 
-fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let search_val = args.first().unwrap_or(&Value::Null);
-    let replace_val = args.get(1).unwrap_or(&Value::Null);
-    let subject_val = args.get(2).unwrap_or(&Value::Null);
-    let count_ref = args.get(3);
+/// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
+fn str_replace_once(subject: &[u8], needle: &[u8], repl: &[u8], ci: bool, count: &mut i64) -> Vec<u8> {
+    let n = needle.len();
+    if n == 0 || subject.len() < n {
+        return subject.to_vec();
+    }
+    let eq = |a: &[u8]| if ci { a.eq_ignore_ascii_case(needle) } else { a == needle };
+    let mut out = Vec::with_capacity(subject.len());
+    let mut i = 0;
+    while i < subject.len() {
+        if i + n <= subject.len() && eq(&subject[i..i + n]) {
+            out.extend_from_slice(repl);
+            *count += 1;
+            i += n;
+        } else {
+            out.push(subject[i]);
+            i += 1;
+        }
+    }
+    out
+}
 
-    // Type validation: search/replace/subject must be string|array
-    for (i, val, name) in [
-        (1, search_val, "search"),
-        (2, replace_val, "replace"),
-        (3, subject_val, "subject"),
-    ] {
-        let d = val.deref();
-        match &d {
-            Value::String(_) | Value::Array(_) | Value::Null | Value::Long(_) | Value::Double(_) | Value::True | Value::False => {}
-            Value::Object(_) => {
-                // Objects without __toString are an error
-                let class_lower: Vec<u8> = if let Value::Object(o) = &d {
-                    o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
-                } else { Vec::new() };
-                let has_tostring = vm.classes.get(&class_lower)
-                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
-                    .unwrap_or(false);
-                if !has_tostring {
-                    let type_name = Vm::value_type_name(&d);
-                    let msg = format!("str_replace(): Argument #{} (${}) must be of type array|string, {} given", i, name, type_name);
-                    let exc = vm.create_exception(b"TypeError", &msg, 0);
+enum StrOrArr {
+    Str(Vec<u8>),
+    Arr(Vec<Value>, Vec<ArrayKey>),
+}
+
+/// php_str_replace_common() for str_replace / str_ireplace.
+fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) -> Result<Value, VmError> {
+    if args.len() < 3 {
+        let msg = format!("{}() expects at least 3 arguments, {} given", fname, args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    // Z_PARAM_ARRAY_HT_OR_STR
+    let mut parse = |vm: &mut Vm, idx: usize, name: &str| -> Result<StrOrArr, VmError> {
+        let v = args[idx].deref();
+        match &v {
+            Value::Array(a) => {
+                let b = a.borrow();
+                Ok(StrOrArr::Arr(b.values().cloned().collect(), b.keys().cloned().collect()))
+            }
+            Value::String(s) => Ok(StrOrArr::Str(s.as_bytes().to_vec())),
+            Value::Null | Value::Undef => Ok(StrOrArr::Str(Vec::new())),
+            Value::Long(_) | Value::Double(_) | Value::True | Value::False => Ok(StrOrArr::Str(v.to_php_string().as_bytes().to_vec())),
+            Value::Object(o) => {
+                let has = vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+                if has {
+                    Ok(StrOrArr::Str(vm.value_to_string(&v).as_bytes().to_vec()))
+                } else {
+                    let msg = format!("{}(): Argument #{} (${}) must be of type array|string, {} given", fname, idx + 1, name, goro_core::value::display_class_name(&o.borrow().class_name));
+                    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    Err(VmError { message: msg, line: vm.current_line })
                 }
             }
-            _ => {
-                let type_name = Vm::value_type_name(&d);
-                let msg = format!("str_replace(): Argument #{} (${}) must be of type array|string, {} given", i, name, type_name);
-                let exc = vm.create_exception(b"TypeError", &msg, 0);
+            other => {
+                let msg = format!("{}(): Argument #{} (${}) must be of type array|string, {} given", fname, idx + 1, name, Vm::value_type_name(other));
+                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                Err(VmError { message: msg, line: vm.current_line })
             }
         }
+    };
+    let search = parse(vm, 0, "search")?;
+    let replace = parse(vm, 1, "replace")?;
+    let subject = parse(vm, 2, "subject")?;
+    if let (StrOrArr::Str(_), StrOrArr::Arr(..)) = (&search, &replace) {
+        let msg = format!("{}(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string", fname);
+        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
     }
-
-    let mut total_count = 0i64;
-
-    // Build search/replace pairs
-    let pairs: Vec<(PhpString, PhpString)> = match search_val {
-        Value::Array(search_arr) => {
-            let search_arr = search_arr.borrow();
-            let is_replace_array = matches!(replace_val, Value::Array(_));
-            let replace_values: Vec<PhpString> = match replace_val {
-                Value::Array(replace_arr) => {
-                    let replace_arr = replace_arr.borrow();
-                    replace_arr.values().map(|v| v.to_php_string()).collect()
-                }
-                _ => vec![replace_val.to_php_string()],
-            };
-            search_arr
-                .values()
-                .enumerate()
-                .map(|(i, sv)| {
-                    let rv = if is_replace_array {
-                        replace_values.get(i).cloned().unwrap_or_else(PhpString::empty)
-                    } else {
-                        // When replace is a scalar, use it for all search values
-                        replace_values[0].clone()
+    // Pre-convert search/replace array entries lazily per subject, like PHP.
+    let mut count: i64 = 0;
+    let mut in_subject = |vm: &mut Vm, subj: Vec<u8>, count: &mut i64| -> Vec<u8> {
+        if subj.is_empty() {
+            return subj;
+        }
+        match &search {
+            StrOrArr::Str(needle) => {
+                let repl = match &replace { StrOrArr::Str(r) => r.clone(), _ => Vec::new() };
+                str_replace_once(&subj, needle, &repl, ci, count)
+            }
+            StrOrArr::Arr(needles, _) => {
+                let mut cur = subj;
+                let mut ridx = 0usize;
+                for nv in needles {
+                    let needle = crate::misc::sort_cmp_string(vm, nv);
+                    let repl: Vec<u8> = match &replace {
+                        StrOrArr::Str(r) => r.clone(),
+                        StrOrArr::Arr(rs, _) => {
+                            let r = match rs.get(ridx) {
+                                Some(rv) => crate::misc::sort_cmp_string(vm, rv),
+                                None => Vec::new(),
+                            };
+                            ridx += 1;
+                            r
+                        }
                     };
-                    (sv.to_php_string(), rv)
-                })
-                .collect()
-        }
-        _ => {
-            vec![(search_val.to_php_string(), replace_val.to_php_string())]
-        }
-    };
-
-    let result = match subject_val {
-        Value::Array(subject_arr) => {
-            let subject_arr = subject_arr.borrow();
-            let mut result_arr = PhpArray::new();
-            for (key, val) in subject_arr.iter() {
-                let mut current = val.to_php_string().as_bytes().to_vec();
-                for (needle, replacement) in &pairs {
-                    let (new_val, cnt) = str_replace_single(&current, needle.as_bytes(), replacement.as_bytes());
-                    total_count += cnt;
-                    current = new_val;
+                    if needle.is_empty() {
+                        continue;
+                    }
+                    cur = str_replace_once(&cur, &needle, &repl, ci, count);
+                    if cur.is_empty() {
+                        break;
+                    }
                 }
-                result_arr.set(key.clone(), Value::String(PhpString::from_vec(current)));
+                cur
             }
-            Value::Array(Rc::new(RefCell::new(result_arr)))
-        }
-        _ => {
-            let mut current = subject_val.to_php_string().as_bytes().to_vec();
-            for (needle, replacement) in &pairs {
-                let (new_val, cnt) = str_replace_single(&current, needle.as_bytes(), replacement.as_bytes());
-                total_count += cnt;
-                current = new_val;
-            }
-            Value::String(PhpString::from_vec(current))
         }
     };
-
-    // Set count if provided as reference
-    if let Some(Value::Reference(r)) = count_ref {
-        *r.borrow_mut() = Value::Long(total_count);
+    let result = match subject {
+        StrOrArr::Str(subj) => Value::String(PhpString::from_vec(in_subject(vm, subj, &mut count))),
+        StrOrArr::Arr(vals, keys) => {
+            let mut out = PhpArray::new();
+            for (k, v) in keys.into_iter().zip(vals.into_iter()) {
+                let sb = crate::misc::sort_cmp_string(vm, &v);
+                let r = in_subject(vm, sb, &mut count);
+                out.set(k, Value::String(PhpString::from_vec(r)));
+            }
+            Value::Array(Rc::new(RefCell::new(out)))
+        }
+    };
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
     }
-
+    if let Some(Value::Reference(r)) = args.get(3) {
+        *r.borrow_mut() = Value::Long(count);
+    }
     Ok(result)
+}
+
+fn str_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_str_replace_common(vm, args, "str_replace", false)
 }
 
 fn explode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1678,8 +1708,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             // php_sprintf_appendint/appenduint: left-aligned integers never
             // pad with zeros.
             let pad_char = if left_align && pad_char == b'0' && matches!(spec, b'd' | b'u') { b' ' } else { pad_char };
-            // Apply width and padding (byte-level).
-            if width > 0 && formatted.len() < width {
+            // Apply width and padding (byte-level). php_sprintf_appendchar()
+            // ignores width and padding for %c.
+            if spec != b'c' && width > 0 && formatted.len() < width {
                 let padding = width - formatted.len();
                 if left_align {
                     result.extend_from_slice(&formatted);
@@ -3791,59 +3822,8 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(count))
 }
 
-fn str_ireplace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let search_val = args.first().unwrap_or(&Value::Null);
-    let replace_val = args.get(1).unwrap_or(&Value::Null);
-    let subject_val = args.get(2).unwrap_or(&Value::Null);
-
-    // Build search/replace pairs (same logic as str_replace but case-insensitive)
-    let pairs: Vec<(PhpString, PhpString)> = match (search_val, replace_val) {
-        (Value::Array(sa), Value::Array(ra)) => {
-            let sa = sa.borrow();
-            let ra = ra.borrow();
-            let search_vals: Vec<_> = sa.values().collect();
-            let replace_vals: Vec<_> = ra.values().collect();
-            let mut pairs = Vec::new();
-            for (i, sv) in search_vals.iter().enumerate() {
-                let rv = replace_vals.get(i).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
-                pairs.push((sv.to_php_string(), rv));
-            }
-            pairs
-        }
-        (Value::Array(sa), _) => {
-            let sa = sa.borrow();
-            sa.values().map(|sv| (sv.to_php_string(), replace_val.to_php_string())).collect()
-        }
-        _ => {
-            vec![(search_val.to_php_string(), replace_val.to_php_string())]
-        }
-    };
-
-    let result = match subject_val {
-        Value::Array(subject_arr) => {
-            let subject_arr = subject_arr.borrow();
-            let mut result_arr = PhpArray::new();
-            for (key, val) in subject_arr.iter() {
-                let mut current = val.to_php_string().as_bytes().to_vec();
-                for (needle, replacement) in &pairs {
-                    let (new_val, _) = str_ireplace_single(&current, needle.as_bytes(), replacement.as_bytes());
-                    current = new_val;
-                }
-                result_arr.set(key.clone(), Value::String(PhpString::from_vec(current)));
-            }
-            Value::Array(Rc::new(RefCell::new(result_arr)))
-        }
-        _ => {
-            let mut current = subject_val.to_php_string().as_bytes().to_vec();
-            for (needle, replacement) in &pairs {
-                let (new_val, _) = str_ireplace_single(&current, needle.as_bytes(), replacement.as_bytes());
-                current = new_val;
-            }
-            Value::String(PhpString::from_vec(current))
-        }
-    };
-
-    Ok(result)
+fn str_ireplace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_str_replace_common(vm, args, "str_ireplace", true)
 }
 
 fn str_ireplace_single(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, i64) {
