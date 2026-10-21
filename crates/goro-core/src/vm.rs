@@ -538,6 +538,8 @@ pub struct Vm {
     pub in_error_log: bool,
     /// EG(ticks_count)
     pub ticks_count: u32,
+    /// EG(last_fatal_error_backtrace), for error_get_last()["trace"].
+    pub last_error_trace: Option<Value>,
     /// BG(user_tick_functions): (callback, arguments, being called)
     pub tick_functions: Vec<(Value, Vec<Value>, bool)>,
     /// Indices into `pending_calls` of calls dispatched through a Closure
@@ -836,6 +838,7 @@ impl Vm {
             error_handler_stack: Vec::new(),
             in_error_log: false,
             ticks_count: 0,
+            last_error_trace: None,
             tick_functions: Vec::new(),
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
@@ -2870,6 +2873,17 @@ impl Vm {
     /// that callers should propagate up. The error message is *not* wrapped
     /// in an exception — fatal errors halt execution unconditionally. Sets
     /// `self.fatal_emitted` so the top-level handler does not re-emit it.
+    /// Like [`emit_fatal_at`] for a given fatal error type.
+    pub fn emit_fatal_typed_at(&mut self, ty: i64, msg: &str, line: u32) -> VmError {
+        let file = self.current_file.clone();
+        self.fatal_error_cb(ty, msg, &file, line);
+        self.fatal_emitted = true;
+        VmError {
+            message: msg.to_string(),
+            line,
+        }
+    }
+
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
         let file = self.current_file.clone();
         self.fatal_error_cb(crate::errdisplay::E_ERROR, msg, &file, line);
@@ -3946,6 +3960,19 @@ impl Vm {
         let mut trace_arr = PhpArray::new();
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         let sensitive = self.any_sensitive_params();
+        // zend.exception_ignore_args: frames carry no "args"
+        let ignore_args = self
+            .constants
+            .get(b"zend.exception_ignore_args".as_slice())
+            .is_some_and(|v| {
+                let s = v
+                    .to_php_string()
+                    .to_string_lossy()
+                    .trim()
+                    .to_ascii_lowercase();
+                matches!(s.as_str(), "1" | "on" | "yes" | "true")
+                    || s.parse::<i64>().is_ok_and(|n| n != 0)
+            });
         let frame_list: Vec<(String, String, u32, Vec<Value>, bool)> =
             self.call_stack.iter().rev().cloned().collect();
         for (idx, (func_name, file, line, args, is_method)) in frame_list.iter().enumerate() {
@@ -4011,15 +4038,17 @@ impl Vm {
                     Value::String(PhpString::from_string(func_name.clone())),
                 );
             }
-            // Add args array
-            let mut args_arr = PhpArray::new();
-            for arg in args {
-                args_arr.push(arg.clone());
+            // Add args array (an eval() frame has none)
+            if !ignore_args && func_name != "eval" {
+                let mut args_arr = PhpArray::new();
+                for arg in args {
+                    args_arr.push(arg.clone());
+                }
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"args")),
+                    Value::Array(Rc::new(RefCell::new(args_arr))),
+                );
             }
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"args")),
-                Value::Array(Rc::new(RefCell::new(args_arr))),
-            );
             trace_arr.set(
                 ArrayKey::Int(idx as i64),
                 Value::Array(Rc::new(RefCell::new(frame))),
@@ -14789,7 +14818,22 @@ impl Vm {
         // The caller fetches the result of this by-ref function for writing.
         let keep_ref =
             self.keep_ref_depth.take() == Some(self.call_depth) && op_array.returns_by_ref;
+        // User code called from an engine-silenced region (offsetExists()
+        // or __isset() under isset(), __get() under ??) reports its errors.
+        let unsilenced = self.error_reporting == crate::errdisplay::ER_SILENT;
+        if unsilenced {
+            self.error_reporting = self
+                .error_reporting_stack
+                .iter()
+                .rev()
+                .copied()
+                .find(|&e| e != crate::errdisplay::ER_SILENT)
+                .unwrap_or(crate::errdisplay::E_ALL);
+        }
         let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
+        if unsilenced {
+            self.error_reporting = crate::errdisplay::ER_SILENT;
+        }
         self.is_global_scope = prev_global;
         if cv_frame {
             self.cv_frames.pop();
@@ -15240,6 +15284,10 @@ impl Vm {
                 OpCode::Nop => {}
 
                 OpCode::QmAssign => {
+                    if matches!(op.op2, OperandType::Const(_)) {
+                        // a key read for isset()/empty()/??
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                    }
                     let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let v = if matches!(v, Value::Undef) {
                         Value::Null
@@ -28948,7 +28996,13 @@ impl Vm {
                     if matches!(arr_val, Value::Undef | Value::Null) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
-                    // FETCH_DIM_R reads its key operand for reading (warns).
+                    // FETCH_DIM_R reads its key operand for reading (warns),
+                    // FETCH_DIM_IS too.
+                    if matches!(op.opcode, OpCode::ArrayGet)
+                        && self.error_reporting == crate::errdisplay::ER_SILENT
+                    {
+                        self.warn_undefined_key_cv(&op.op2, &cvs, op_array, op.line);
+                    }
                     let key_val = if matches!(op.opcode, OpCode::ArrayGet) {
                         self.read_operand_warn(
                             &op.op2,
@@ -33468,9 +33522,26 @@ impl Vm {
                                                 );
                                             }
 
-                                            let result = match self
-                                                .execute_op_array(&inc_op_array, inc_cvs)
-                                            {
+                                            // The include/require frame of backtraces.
+                                            let kind_name = match include_kind {
+                                                1 => "include_once",
+                                                2 => "require",
+                                                3 => "require_once",
+                                                _ => "include",
+                                            };
+                                            self.call_stack.push((
+                                                kind_name.to_string(),
+                                                old_file.clone(),
+                                                op.line,
+                                                vec![Value::String(PhpString::from_string(
+                                                    abs_path.clone(),
+                                                ))],
+                                                false,
+                                            ));
+                                            let exec_r =
+                                                self.execute_op_array(&inc_op_array, inc_cvs);
+                                            self.call_stack.pop();
+                                            let result = match exec_r {
                                                 Ok(v) => v,
                                                 Err(e) => {
                                                     // Propagate uncaught exceptions from included files
@@ -33593,7 +33664,17 @@ impl Vm {
                                 "{}({}): Failed to open stream: {}",
                                 kind_name, inc_path, reason
                             );
+                            // Raised from the INCLUDE_OR_EVAL opline: backtraces
+                            // show an argument-less include/require frame.
+                            self.call_stack.push((
+                                kind_name.to_string(),
+                                old_file.clone(),
+                                op.line,
+                                Vec::new(),
+                                false,
+                            ));
                             self.emit_warning_at(&warning_msg, op.line);
+                            self.call_stack.pop();
                             let include_path = self
                                 .constants
                                 .get(b"include_path".as_slice())
@@ -33605,8 +33686,11 @@ impl Vm {
                                     "Failed opening required '{}' (include_path='{}')",
                                     inc_path, include_path
                                 );
-                                let exc = self.create_exception(b"Error", &msg, op.line);
-                                self.current_exception = Some(exc);
+                                // Not when the error handler already threw.
+                                if self.current_exception.is_none() {
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                }
                                 self.current_file = old_file;
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -33689,32 +33773,42 @@ impl Vm {
                                         let saved_file = self.current_file.clone();
                                         self.current_file =
                                             format!("{}({}) : eval()'d code", saved_file, op.line);
-                                        let eval_result =
-                                            match self.execute_op_array(&eval_op_array, eval_cvs) {
-                                                Ok(v) => v,
-                                                Err(e) => {
-                                                    // Propagate errors from eval
-                                                    self.current_file = saved_file;
-                                                    self.pending_classes = eval_saved_pending;
-                                                    if self.current_exception.is_some() {
-                                                        if let Some((
-                                                            catch_target,
-                                                            _,
-                                                            _,
-                                                            _,
-                                                            eh_pc_depth,
-                                                        )) = exception_handlers.last()
-                                                        {
-                                                            pending_calls_catch_depth =
-                                                                Some(*eh_pc_depth);
-                                                            ip = *catch_target as usize;
-                                                            continue;
-                                                        }
-                                                        return Err(e);
+                                        // The eval() frame of backtraces.
+                                        self.call_stack.push((
+                                            "eval".to_string(),
+                                            saved_file.clone(),
+                                            op.line,
+                                            Vec::new(),
+                                            false,
+                                        ));
+                                        let exec_r =
+                                            self.execute_op_array(&eval_op_array, eval_cvs);
+                                        self.call_stack.pop();
+                                        let eval_result = match exec_r {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                // Propagate errors from eval
+                                                self.current_file = saved_file;
+                                                self.pending_classes = eval_saved_pending;
+                                                if self.current_exception.is_some() {
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        eh_pc_depth,
+                                                    )) = exception_handlers.last()
+                                                    {
+                                                        pending_calls_catch_depth =
+                                                            Some(*eh_pc_depth);
+                                                        ip = *catch_target as usize;
+                                                        continue;
                                                     }
                                                     return Err(e);
                                                 }
-                                            };
+                                                return Err(e);
+                                            }
+                                        };
                                         self.current_file = saved_file;
 
                                         // Restore outer pending_classes
@@ -33734,15 +33828,24 @@ impl Vm {
                                         } else {
                                             "Fatal error"
                                         };
-                                        let msg = format!(
-                                            "\n{}: {} in {}({}) : eval()'d code on line {}\n",
-                                            error_type,
-                                            e.message,
-                                            self.current_file,
-                                            op.line,
-                                            e.line
+                                        let eval_file = format!(
+                                            "{}({}) : eval()'d code",
+                                            self.current_file, op.line
                                         );
-                                        self.write_output(msg.as_bytes());
+                                        let ty = if error_type == "Parse error" {
+                                            crate::errdisplay::E_PARSE
+                                        } else {
+                                            crate::errdisplay::E_COMPILE_ERROR
+                                        };
+                                        self.call_stack.push((
+                                            "eval".to_string(),
+                                            self.current_file.clone(),
+                                            op.line,
+                                            Vec::new(),
+                                            false,
+                                        ));
+                                        self.fatal_error_cb(ty, &e.message, &eval_file, e.line);
+                                        self.call_stack.pop();
                                         // E_COMPILE_ERROR is fatal: the script stops (bailout).
                                         self.fatal_emitted = true;
                                         return Err(VmError {
@@ -37235,6 +37338,8 @@ impl Vm {
                 OpCode::ArrayIsset => {
                     // isset($arr[$key]) - for arrays, check if key exists and value is not null
                     // For objects implementing ArrayAccess, call offsetExists()
+                    // Only the dimension fetch is quiet: the key is read normally.
+                    self.warn_undefined_key_cv(&op.op2, &cvs, op_array, op.line);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // Superglobal fallback (lazy load) when CV is uninitialised.
                     if matches!(arr_val, Value::Null | Value::Undef) {
@@ -42093,10 +42198,13 @@ impl Vm {
                             };
                             let msg =
                                 format!("Cannot redeclare {} {}{}", kind, canonical, prev_info);
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
+                            // zend_bind_class_in_slot(): E_COMPILE_ERROR at the
+                            // declaration (in its file, with its backtrace).
+                            return Err(self.emit_fatal_typed_at(
+                                crate::errdisplay::E_COMPILE_ERROR,
+                                &msg,
+                                op.line,
+                            ));
                         }
                         // Validate #[Attribute] usage
                         let class_display = String::from_utf8_lossy(&class.name).to_string();
@@ -47655,8 +47763,15 @@ impl Vm {
                                         method_str, type_name
                                     )
                                 };
-                                let err = self.create_exception(b"Error", &err_msg, op.line);
-                                self.current_exception = Some(err);
+                                // INIT_METHOD_CALL on an undefined CV warns first; an
+                                // exception the error handler throws wins.
+                                if !is_this_cv && matches!(obj_val, Value::Undef) {
+                                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                                }
+                                if self.current_exception.is_none() {
+                                    let err = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(err);
+                                }
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                     exception_handlers.last()
                                 {
@@ -48345,6 +48460,34 @@ impl Vm {
 
     /// Check if a CV operand refers to an undefined variable and emit a warning if so.
     /// This implements PHP's "Warning: Undefined variable $name" behavior.
+    /// "Undefined variable" for an undefined CV used as a dimension key, even
+    /// inside an engine-silenced isset()/?? region.
+    fn warn_undefined_key_cv(
+        &mut self,
+        operand: &OperandType,
+        cvs: &[Value],
+        op_array: &OpArray,
+        line: u32,
+    ) {
+        if !matches!(operand, OperandType::Cv(_)) {
+            return;
+        }
+        let silent = self.error_reporting == crate::errdisplay::ER_SILENT;
+        if silent {
+            self.error_reporting = self
+                .error_reporting_stack
+                .iter()
+                .rev()
+                .copied()
+                .find(|&e| e != crate::errdisplay::ER_SILENT)
+                .unwrap_or(crate::errdisplay::E_ALL);
+        }
+        self.check_undefined_cv(operand, cvs, op_array, line);
+        if silent {
+            self.error_reporting = crate::errdisplay::ER_SILENT;
+        }
+    }
+
     fn check_undefined_cv(
         &mut self,
         operand: &OperandType,

@@ -1208,7 +1208,7 @@ fn flush_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // Return the number of arguments passed to the calling user function
-    if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
+    if let Some((_name, _file, _line, args, _is_method)) = vm.current_function_frame() {
         Ok(Value::Long(args.len() as i64))
     } else {
         // PHP 8.4: calling from global scope throws Error
@@ -1224,7 +1224,7 @@ fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     vm.sync_frame_args();
     // Return an array of all arguments passed to the calling user function
-    if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
+    if let Some((_name, _file, _line, args, _is_method)) = vm.current_function_frame() {
         let mut arr = PhpArray::new();
         for arg in args.iter() {
             arr.push(arg.clone());
@@ -1255,7 +1255,7 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     vm.sync_frame_args();
-    if let Some((_name, _file, _line, caller_args, _is_method)) = vm.call_stack.last() {
+    if let Some((_name, _file, _line, caller_args, _is_method)) = vm.current_function_frame() {
         if index as usize >= caller_args.len() {
             let msg = "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
@@ -16994,6 +16994,9 @@ fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(PhpString::from_bytes(b"line")),
                 Value::Long(line as i64),
             );
+            if let Some(t) = vm.last_error_trace.clone() {
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"trace")), t);
+            }
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
     }
@@ -17001,6 +17004,7 @@ fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn error_clear_last_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     vm.last_error = None;
+    vm.last_error_trace = None;
     Ok(Value::Null)
 }
 

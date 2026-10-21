@@ -9031,6 +9031,48 @@ impl Compiler {
     /// Copy a plain variable operand into a tmp so that a magic method run
     /// between two uses of it (offsetExists/__isset, then offsetGet/__get)
     /// cannot change what the second use sees.
+    /// Compile a dimension key inside isset()/empty()/`??`: only the
+    /// dimension fetch is quiet, the key is read normally (and an undefined
+    /// key variable warns). With `snapshot`, a CV key is copied while
+    /// unsilenced.
+    fn compile_key_unsilenced(&mut self, e: &Expr, snapshot: bool) -> CompileResult<OperandType> {
+        if matches!(e.kind, ExprKind::Int(_) | ExprKind::String(_)) {
+            return self.compile_expr(e);
+        }
+        let line = e.span.line;
+        let bracket = |c: &mut Self, opcode| {
+            c.op_array.emit(Op {
+                opcode,
+                op1: OperandType::Unused,
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line,
+            });
+        };
+        bracket(self, OpCode::ErrorRestore);
+        let r = self.compile_expr(e).map(|op| {
+            let before = self.op_array.ops.len();
+            let op = if snapshot {
+                self.snapshot_cv(op, line)
+            } else {
+                op
+            };
+            // The copy reads the key like QM_ASSIGN (an undefined CV warns).
+            if self.op_array.ops.len() > before {
+                if let Some(last) = self.op_array.ops.last_mut() {
+                    if last.opcode == OpCode::QmAssign {
+                        let lit = self.op_array.literals.len() as u32;
+                        self.op_array.literals.push(Value::True);
+                        last.op2 = OperandType::Const(lit);
+                    }
+                }
+            }
+            op
+        });
+        bracket(self, OpCode::ErrorSuppress);
+        r
+    }
+
     fn snapshot_cv(&mut self, op: OperandType, line: u32) -> OperandType {
         if let OperandType::Cv(i) = op {
             let name = self
@@ -11531,8 +11573,8 @@ impl Compiler {
                     let mut current = base_op;
 
                     for idx_expr in chain.iter() {
-                        let idx = self.compile_expr(idx_expr)?;
-                        let idx = self.snapshot_cv(idx, expr.span.line);
+                        let idx = self.compile_key_unsilenced(idx_expr, true)?;
+                        // (snapshotted while unsilenced)
 
                         // Check offsetExists first
                         let isset_tmp = self.op_array.alloc_temp();
@@ -12646,7 +12688,7 @@ impl Compiler {
                                 let mut current = base_op;
 
                                 for idx_expr in chain.iter() {
-                                    let idx = self.compile_expr(idx_expr)?;
+                                    let idx = self.compile_key_unsilenced(idx_expr, false)?;
                                     let isset_tmp = self.op_array.alloc_temp();
                                     self.op_array.emit(Op {
                                         opcode: OpCode::ArrayIsset,
@@ -12870,7 +12912,7 @@ impl Compiler {
                         let mut current = base_op;
                         for (i, idx_expr) in chain.iter().enumerate() {
                             let is_last = i == chain.len() - 1;
-                            let idx = self.compile_expr(idx_expr)?;
+                            let idx = self.compile_key_unsilenced(idx_expr, false)?;
 
                             // Emit ArrayIsset
                             let isset_tmp = self.op_array.alloc_temp();
@@ -13059,8 +13101,8 @@ impl Compiler {
 
                     for (i, idx_expr) in chain.iter().enumerate() {
                         let _is_last = i == chain.len() - 1;
-                        let idx = self.compile_expr(idx_expr)?;
-                        let idx = self.snapshot_cv(idx, expr.span.line);
+                        let idx = self.compile_key_unsilenced(idx_expr, true)?;
+                        // (snapshotted while unsilenced)
 
                         // Check offsetExists
                         let isset_tmp = self.op_array.alloc_temp();

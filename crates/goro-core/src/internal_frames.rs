@@ -124,6 +124,20 @@ impl Vm {
         }
     }
 
+    /// The call_stack frame of the function whose code is running: included
+    /// files run in their includer's frame; eval'd code (ZEND_CALL_CODE) has
+    /// none, like the global scope.
+    pub fn current_function_frame(&self) -> Option<&(String, String, u32, Vec<Value>, bool)> {
+        for f in self.call_stack.iter().rev() {
+            match f.0.as_str() {
+                "include" | "include_once" | "require" | "require_once" => continue,
+                "eval" => return None,
+                _ => return Some(f),
+            }
+        }
+        None
+    }
+
     /// Whether the innermost running frame is a builtin (as opposed to user
     /// code, possibly a callback the builtin invoked).
     pub fn in_builtin_frame(&self) -> bool {

@@ -270,6 +270,7 @@ impl Vm {
             return;
         }
         self.last_error = Some((ty, msg.to_string(), file.to_string(), line));
+        self.last_error_trace = None;
         if self.error_reporting & ty == 0 && ty & E_CORE == 0 {
             return;
         }
@@ -286,6 +287,13 @@ impl Vm {
     /// php_error_cb() for a fatal error (the caller bails out afterwards).
     pub fn fatal_error_cb(&mut self, ty: i64, msg: &str, file: &str, line: u32) {
         self.last_error = Some((ty, msg.to_string(), file.to_string(), line));
+        // zend_error_zstr_at(): EG(last_fatal_error_backtrace)
+        self.last_error_trace =
+            if ini_bool(self, b"fatal_error_backtraces") && !msg.starts_with("Uncaught ") {
+                Some(self.build_exception_trace())
+            } else {
+                None
+            };
         // Engine-internal silencing never hides fatal errors.
         let er = if self.error_reporting == ER_SILENT {
             E_FATAL_ERRORS
@@ -433,8 +441,17 @@ impl Vm {
             && !msg.starts_with("Uncaught ")
             && ini_bool(self, b"fatal_error_backtraces")
         {
-            self.materialize_builtin_frames(false);
-            format!("\nStack trace:\n{}", self.format_stack_trace())
+            // The backtrace taken when the error was raised (fatal_error_cb).
+            match self.last_error_trace.clone() {
+                Some(t) => format!(
+                    "\nStack trace:\n{}",
+                    Vm::format_exception_trace_value(&t, "", self.exception_string_param_max_len)
+                ),
+                None => {
+                    self.materialize_builtin_frames(false);
+                    format!("\nStack trace:\n{}", self.format_stack_trace())
+                }
+            }
         } else {
             String::new()
         };
