@@ -22,10 +22,17 @@ impl Vm {
             for (_key, frame_val) in arr.iter() {
                 if let Value::Array(frame) = frame_val {
                     let frame = frame.borrow();
+                    // Appended as C strings (smart_str_appends): an anonymous
+                    // class name ends at its NUL byte.
                     let get_s = |k: &[u8]| {
                         frame
                             .get(&key(k))
-                            .map(|v| v.to_php_string().to_string_lossy())
+                            .map(|v| {
+                                let s = v.to_php_string();
+                                let b = s.as_bytes();
+                                let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+                                String::from_utf8_lossy(&b[..end]).into_owned()
+                            })
                             .unwrap_or_default()
                     };
                     let file = get_s(b"file");
