@@ -241,7 +241,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             seen.remove(&akey);
         }
         Value::Object(obj) => {
-            let obj_borrow = obj.borrow();
+            let mut obj_borrow = obj.borrow();
             // Check if this is an enum case object
             if obj_borrow.has_property(b"__enum_case") {
                 let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
@@ -340,7 +340,17 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
             };
             if has_user_debug_info {
+                // Release our borrow: __debugInfo() may modify the object
+                // (e.g. initialize a lazy object).
+                drop(obj_borrow);
                 let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                obj_borrow = obj.borrow();
+                // Lazy prefix reflects the state after __debugInfo() ran.
+                let udbg_lazy_prefix = match obj_borrow.get_property(b"__lazy_state") {
+                    Value::String(s) if s.as_bytes() == b"ghost" => "lazy ghost ",
+                    Value::String(s) if s.as_bytes() == b"proxy" => "lazy proxy ",
+                    _ => "",
+                };
                 let debug_result = match debug_result {
                     Some(Value::Reference(r)) => Some(r.borrow().clone()),
                     other => other,
@@ -351,7 +361,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let class_name_owned = class_name.to_string();
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}object({})#{} ({}) {{\n", prefix, class_name_owned, oid, count).as_bytes(),
+                        format!("{}{}object({})#{} ({}) {{\n", prefix, udbg_lazy_prefix, class_name_owned, oid, count).as_bytes(),
                     );
                     if !seen.insert(oid) {
                         vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
@@ -671,7 +681,17 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // Use call_object_method so the class scope / called-class stacks
                 // are pushed correctly — without them, the method body cannot
                 // access private/protected properties of $this.
+                // Release our borrow: __debugInfo() may modify the object
+                // (e.g. initialize a lazy object).
+                drop(obj_borrow);
                 let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                obj_borrow = obj.borrow();
+                // Lazy prefix reflects the state after __debugInfo() ran.
+                let dbg_lazy_prefix = match obj_borrow.get_property(b"__lazy_state") {
+                    Value::String(s) if s.as_bytes() == b"ghost" => "lazy ghost ",
+                    Value::String(s) if s.as_bytes() == b"proxy" => "lazy proxy ",
+                    _ => "",
+                };
 
                 // Unwrap a by-reference return — var_dump dereferences before
                 // walking the array, mirroring PHP's behaviour for
@@ -686,7 +706,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let class_name_owned = class_name.to_string();
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}object({})#{} ({}) {{\n", prefix, class_name_owned, oid, count).as_bytes(),
+                        format!("{}{}object({})#{} ({}) {{\n", prefix, dbg_lazy_prefix, class_name_owned, oid, count).as_bytes(),
                     );
                     if !seen.insert(oid) {
                         vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
