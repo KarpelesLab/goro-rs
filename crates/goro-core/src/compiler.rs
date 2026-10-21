@@ -439,6 +439,53 @@ impl Compiler {
     ///    - Check use imports first
     ///    - Otherwise prefix with current namespace
     /// Special names like "self", "parent", "static" are not resolved.
+    /// Compile-time validation of `parent::$prop::get()` / `parent::$prop::set()`
+    /// (lowered by the parser to `parent::__property_{get,set}_<prop>()`),
+    /// matching zend_compile_parent_property_hook_call(). Returns Ok(false)
+    /// when the call is valid (or not a parent hook call).
+    fn check_parent_hook_call(&self, class: &Expr, method: &[u8], is_fcc: bool, line: u32) -> Result<bool, CompileError> {
+        let (kind, prop) = if let Some(p) = method.strip_prefix(b"__property_get_".as_slice()) {
+            ("get", p)
+        } else if let Some(p) = method.strip_prefix(b"__property_set_".as_slice()) {
+            ("set", p)
+        } else {
+            return Ok(false);
+        };
+        if !matches!(&class.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"parent")) {
+            return Ok(false);
+        }
+        let err = |m: String| Err(CompileError { message: m, line });
+        if self.current_class.is_none() {
+            return err("Cannot use \"parent\" when no class scope is active".into());
+        }
+        if is_fcc {
+            return err("Cannot create Closure for parent property hook call".into());
+        }
+        let prop_s = String::from_utf8_lossy(prop);
+        let n = &self.op_array.name;
+        let active = if n.len() > 6 && n[0] == b'$' && (n.ends_with(b"::get") || n.ends_with(b"::set")) {
+            Some((&n[1..n.len() - 5], &n[n.len() - 3..]))
+        } else {
+            None
+        };
+        let Some((active_prop, active_kind)) = active else {
+            return err(format!("Must not use parent::${}::{}() outside a property hook", prop_s, kind));
+        };
+        if active_prop != prop {
+            return err(format!(
+                "Must not use parent::${}::{}() in a different property (${})",
+                prop_s, kind, String::from_utf8_lossy(active_prop)
+            ));
+        }
+        if active_kind != kind.as_bytes() {
+            return err(format!(
+                "Must not use parent::${}::{}() in a different property hook ({})",
+                prop_s, kind, String::from_utf8_lossy(active_kind)
+            ));
+        }
+        Ok(false)
+    }
+
     /// Resolve a magic constant or known constant name in class constant context.
     fn resolve_class_const_magic(&self, name_lower: &[u8], class_name: &[u8], line: u32) -> Value {
         match name_lower {
@@ -7414,6 +7461,17 @@ impl Compiler {
                             line: operand.span.line,
                         });
                     }
+                    // zend_ensure_writable_variable()
+                    let call_msg = match &operand.kind {
+                        ExprKind::FunctionCall { .. } => Some("Can't use function return value in write context"),
+                        ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. } => {
+                            Some("Can't use method return value in write context")
+                        }
+                        _ => None,
+                    };
+                    if let Some(msg) = call_msg {
+                        return Err(CompileError { message: msg.into(), line: operand.span.line });
+                    }
 
                     // Increment/decrement on array element: $arr[$key]++ / --$arr[$key]
                     // Without explicit read-modify-write the inc would land on a
@@ -10288,6 +10346,7 @@ impl Compiler {
                 method,
                 args,
             } => {
+                self.check_parent_hook_call(class, method, false, expr.span.line)?;
                 // Check if the class expression is in a nullsafe chain
                 let chain_nullsafe = expr_is_in_nullsafe_chain(class);
                 let tmp = self.op_array.alloc_temp();
@@ -11198,6 +11257,9 @@ impl Compiler {
             }
 
             ExprKind::FirstClassCallable(target) => {
+                if let CallableTarget::StaticMethod { class, method } = target {
+                    self.check_parent_hook_call(class, method, true, expr.span.line)?;
+                }
                 self.compile_first_class_callable(target, expr.span.line)
             }
 

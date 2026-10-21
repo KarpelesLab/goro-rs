@@ -19215,6 +19215,51 @@ impl Vm {
                                             &method_part[b"__property_set_".len()..]
                                         };
                                         let this_val = cvs.first().cloned().unwrap_or(Value::Null);
+                                        // Validate like zend_std_{read,write}_property on the
+                                        // parent's plain property.
+                                        let class_part = &name_bytes[..sep_pos];
+                                        let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let prop_s = String::from_utf8_lossy(prop).to_string();
+                                        let mut hook_err: Option<(&[u8], String)> = None;
+                                        if class_lower == b"parent" {
+                                            hook_err = Some((b"Error", "Cannot use \"parent\" when current class scope has no parent".to_string()));
+                                        } else {
+                                            match self.find_property_def(&class_lower, prop) {
+                                                None => {
+                                                    let cd = self.classes.get(&class_lower).map(|c| crate::value::display_class_name(&c.name)).unwrap_or_else(|| String::from_utf8_lossy(class_part).to_string());
+                                                    hook_err = Some((b"Error", format!("Undefined property {}::${}", cd, prop_s)));
+                                                }
+                                                Some((vis, decl, _, ptype, _)) => {
+                                                    let decl_lower: Vec<u8> = decl.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    let decl_d = self.classes.get(&decl_lower).map(|c| crate::value::display_class_name(&c.name)).unwrap_or_else(|| crate::value::display_class_name(&decl));
+                                                    let argc = call.args.len();
+                                                    if vis == Visibility::Private {
+                                                        hook_err = Some((b"Error", format!("Cannot access private property {}::${}", decl_d, prop_s)));
+                                                    } else if is_get && argc != 0 {
+                                                        hook_err = Some((b"ArgumentCountError", format!("{}::${}::get() expects exactly 0 arguments, {} given", decl_d, prop_s, argc)));
+                                                    } else if is_set && argc != 1 {
+                                                        hook_err = Some((b"ArgumentCountError", format!("{}::${}::set() expects exactly 1 argument, {} given", decl_d, prop_s, argc)));
+                                                    } else if is_get && ptype.is_some() {
+                                                        if let Value::Object(obj) = &this_val {
+                                                            let ob = obj.borrow();
+                                                            if matches!(ob.get_property(prop), Value::Undef) {
+                                                                hook_err = Some((b"Error", format!("Typed property {}::${} must not be accessed before initialization", crate::value::display_class_name(&ob.class_name), prop_s)));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some((cls, msg)) = hook_err {
+                                            let exc = self.create_exception(cls, &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                                pending_calls_catch_depth = Some(pc);
+                                                ip = if c > 0 { c } else { f } as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError { message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg), line: op.line });
+                                        }
                                         if let Value::Object(obj) = &this_val {
                                             if is_get {
                                                 let v = obj.borrow().get_property(prop);

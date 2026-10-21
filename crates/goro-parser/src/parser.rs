@@ -4352,6 +4352,7 @@ impl Parser {
                                         self.advance(); // get/set
                                         self.advance(); // (
                                         let args = self.parse_arguments()?;
+                                        let is_fcc = self.first_class_callable_flag;
                                         let end_span = self.span();
                                         self.expect(&TokenKind::CloseParen)?;
                                         let synthetic_method = if is_set {
@@ -4363,13 +4364,23 @@ impl Parser {
                                             m.extend_from_slice(&name);
                                             m
                                         };
-                                        expr = Expr {
-                                            span: expr.span.merge(end_span),
-                                            kind: ExprKind::StaticMethodCall {
-                                                class: Box::new(expr),
-                                                method: synthetic_method,
-                                                args,
-                                            },
+                                        expr = if is_fcc {
+                                            Expr {
+                                                span: expr.span.merge(end_span),
+                                                kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
+                                                    class: Box::new(expr),
+                                                    method: synthetic_method,
+                                                }),
+                                            }
+                                        } else {
+                                            Expr {
+                                                span: expr.span.merge(end_span),
+                                                kind: ExprKind::StaticMethodCall {
+                                                    class: Box::new(expr),
+                                                    method: synthetic_method,
+                                                    args,
+                                                },
+                                            }
                                         };
                                         continue;
                                     }
