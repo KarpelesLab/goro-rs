@@ -22973,7 +22973,11 @@ impl Vm {
                                 let err_msg = if let Some(pos) = func_display.find("::") {
                                     let cls = &func_display[..pos];
                                     let cl = cls.trim_start_matches('\\').to_ascii_lowercase();
-                                    let known = self.classes.contains_key(cl.as_bytes())
+                                    // An instance call ($this prepended) always has a real class.
+                                    let is_instance_call = matches!(call.args.first(), Some(Value::Object(o))
+                                        if o.borrow().class_name.eq_ignore_ascii_case(cl.as_bytes()));
+                                    let known = is_instance_call
+                                        || self.classes.contains_key(cl.as_bytes())
                                         || self.class_aliases.contains_key(cl.as_bytes())
                                         || {
                                             // built-in classes implemented natively
