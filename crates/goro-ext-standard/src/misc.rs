@@ -9801,16 +9801,18 @@ fn putenv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original = args.first().unwrap_or(&Value::Null).to_php_string();
     let alias = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    // zend_lookup_class_ex() / zend_register_class_alias_ex(): a leading
+    // backslash is not part of the name.
     let original_lower: Vec<u8> = original
         .as_bytes()
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+        .strip_prefix(b"\\")
+        .unwrap_or(original.as_bytes())
+        .to_ascii_lowercase();
     let alias_lower: Vec<u8> = alias
         .as_bytes()
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+        .strip_prefix(b"\\")
+        .unwrap_or(alias.as_bytes())
+        .to_ascii_lowercase();
     // Single-underscore alias was deprecated in 8.4.
     if alias.as_bytes() == b"_" {
         vm.emit_deprecated("Using \"_\" as a class alias is deprecated since 8.4");
@@ -9838,20 +9840,29 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
         return Ok(Value::False);
     }
-    if let Some(existing) = vm.classes.get(&alias_lower) {
-        // The message names the kind of the class being aliased.
-        let kind = match vm.classes.get(&original_lower) {
+    if vm.classes.contains_key(&alias_lower) {
+        // zend_class_redeclaration_error_ex(E_WARNING, alias, ce): the kind
+        // and declaration site of the class being aliased.
+        let original_class = vm.classes.get(&original_lower);
+        let kind = match original_class {
             Some(o) if o.is_interface => "interface",
             Some(o) if o.is_trait => "trait",
             Some(o) if o.is_enum => "enum",
             _ => "class",
         };
+        let location = match original_class {
+            Some(o) if o.filename.is_some() && o.start_line > 0 => format!(
+                " (previously declared in {}:{})",
+                o.filename.clone().unwrap_or_default(),
+                o.start_line
+            ),
+            _ => String::new(),
+        };
         let msg = format!(
-            "Cannot redeclare {} {} (previously declared in {}:{})",
+            "Cannot redeclare {} {}{}",
             kind,
             alias.to_string_lossy(),
-            existing.filename.clone().unwrap_or_default(),
-            existing.start_line
+            location
         );
         vm.emit_warning(&msg);
         return Ok(Value::False);
