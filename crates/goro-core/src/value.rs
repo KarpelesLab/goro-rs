@@ -205,6 +205,39 @@ struct ResourceRegistryEntry {
     closed: bool,
 }
 
+thread_local! {
+    /// EG(regular_list) next free index: every resource kind shares it, ids
+    /// are never reused. 1-3 are the CLI's STDIN/STDOUT/STDERR.
+    static NEXT_RESOURCE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(4) };
+}
+
+/// Allocate the next resource id (zend_list_insert()).
+pub fn alloc_resource_id() -> i64 {
+    NEXT_RESOURCE_ID.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    })
+}
+
+thread_local! {
+    static DEFAULT_CONTEXT_HOOK: std::cell::Cell<Option<fn() -> i64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Installed by the streams extension: allocates FG(default_context).
+pub fn set_default_context_hook(f: fn() -> i64) {
+    DEFAULT_CONTEXT_HOOK.with(|h| h.set(Some(f)));
+}
+
+/// php_stream_context_from_zval(NULL, 0) from another extension: make sure
+/// the default stream context (and its resource id) exists.
+pub fn touch_default_stream_context() {
+    if let Some(f) = DEFAULT_CONTEXT_HOOK.with(|h| h.get()) {
+        f();
+    }
+}
+
 /// Mark an integer id as representing a resource of the given type.
 pub fn register_resource(id: i64, resource_type: &[u8]) {
     RESOURCE_REGISTRY.with(|r| {

@@ -96,15 +96,10 @@ impl BzHandle {
 
 thread_local! {
     static BZ_HANDLES: RefCell<HashMap<i64, BzHandle>> = RefCell::new(HashMap::new());
-    static NEXT_BZ_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(30000) };
 }
 
 fn alloc_bz_id() -> i64 {
-    NEXT_BZ_ID.with(|id| {
-        let bid = id.get();
-        id.set(bid + 1);
-        bid
-    })
+    goro_core::value::alloc_resource_id()
 }
 
 fn require_open_bz(vm: &mut Vm, gid: i64, fname: &str) -> Result<bool, VmError> {

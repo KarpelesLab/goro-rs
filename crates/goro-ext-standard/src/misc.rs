@@ -388,7 +388,8 @@ final class StreamBucket {
     vm.register_function(b"passthru", passthru_fn);
     vm.register_function(b"escapeshellarg", escapeshellarg_fn);
     vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
-    vm.register_function(b"fopen", fopen_fn);
+    vm.register_function(b"fopen", ctx_fopen_fn_entry);
+    goro_core::value::set_default_context_hook(default_context);
     vm.register_function(b"fclose", fclose_fn);
     vm.register_function(b"fread", fread_fn);
     vm.register_function(b"fwrite", fwrite_fn);
@@ -400,19 +401,19 @@ final class StreamBucket {
     vm.register_function(b"fflush", fflush_fn);
     vm.register_function(b"fsync", fsync_fn);
     vm.register_function(b"fdatasync", fdatasync_fn);
-    vm.register_function(b"unlink", unlink_fn);
-    vm.register_function(b"rename", rename_fn);
-    vm.register_function(b"copy", copy_fn);
-    vm.register_function(b"readfile", readfile_fn);
-    vm.register_function(b"file", file_fn);
+    vm.register_function(b"unlink", ctx_unlink_fn_entry);
+    vm.register_function(b"rename", ctx_rename_fn_entry);
+    vm.register_function(b"copy", ctx_copy_fn_entry);
+    vm.register_function(b"readfile", ctx_readfile_fn_entry);
+    vm.register_function(b"file", ctx_file_fn_entry);
     vm.register_function(b"lstat", lstat_fn);
     vm.register_function(b"is_executable", is_executable_fn);
     vm.register_function(b"tempnam", tempnam_fn3);
     vm.register_function(b"sys_get_temp_dir", sys_get_temp_dir_fn3);
-    vm.register_function(b"mkdir", mkdir_fn);
-    vm.register_function(b"rmdir", rmdir_fn);
+    vm.register_function(b"mkdir", ctx_mkdir_fn_entry);
+    vm.register_function(b"rmdir", ctx_rmdir_fn_entry);
     vm.register_function(b"glob", glob_fn);
-    vm.register_function(b"scandir", scandir_fn);
+    vm.register_function(b"scandir", ctx_scandir_fn_entry);
     vm.register_function(b"is_writable", is_writable_fn);
     vm.register_function(b"is_writeable", is_writable_fn);
     vm.register_function(b"is_readable", is_readable_fn);
@@ -524,8 +525,8 @@ final class StreamBucket {
     vm.register_function(b"chdir", chdir_fn);
     vm.register_function(b"filesize", filesize_fn);
     vm.register_function(b"touch", touch_fn);
-    vm.register_function(b"file_get_contents", file_get_contents_fn);
-    vm.register_function(b"file_put_contents", file_put_contents_fn);
+    vm.register_function(b"file_get_contents", ctx_file_get_contents_fn_entry);
+    vm.register_function(b"file_put_contents", ctx_file_put_contents_fn_entry);
     vm.register_function(b"realpath", realpath_fn);
     vm.register_function(b"realpath_cache_size", realpath_cache_size_fn);
     vm.register_function(b"realpath_cache_get", realpath_cache_get_fn);
@@ -536,7 +537,7 @@ final class StreamBucket {
     vm.register_function(b"array_walk_recursive", array_walk_recursive_fn);
     vm.register_function(b"fileperms", fileperms_fn);
     vm.register_function(b"filetype", filetype_fn);
-    vm.register_function(b"opendir", opendir_fn);
+    vm.register_function(b"opendir", ctx_opendir_fn_entry);
     vm.register_function(b"closedir", closedir_fn);
     vm.register_function(b"readdir", readdir_fn);
     vm.register_function(b"chmod", chmod_fn);
@@ -550,11 +551,11 @@ final class StreamBucket {
     vm.register_function(b"restore_include_path", restore_include_path_fn);
     vm.register_function(b"get_resource_type", get_resource_type_fn);
     vm.register_function(b"link", link_fn);
-    vm.register_function(b"unlink", unlink_fn2);
-    vm.register_function(b"rename", rename_fn2);
-    vm.register_function(b"copy", copy_fn2);
-    vm.register_function(b"file_get_contents", file_get_contents_fn);
-    vm.register_function(b"file_put_contents", file_put_contents_fn);
+    vm.register_function(b"unlink", ctx_unlink_fn2_entry);
+    vm.register_function(b"rename", ctx_rename_fn2_entry);
+    vm.register_function(b"copy", ctx_copy_fn2_entry);
+    vm.register_function(b"file_get_contents", ctx_file_get_contents_fn_entry);
+    vm.register_function(b"file_put_contents", ctx_file_put_contents_fn_entry);
     vm.register_function(b"realpath", realpath_fn);
     vm.register_function(b"dirname", dirname_fn);
     vm.register_function(b"basename", basename_fn);
@@ -655,8 +656,8 @@ final class StreamBucket {
     vm.register_function(b"stream_get_wrappers", stream_get_wrappers_fn);
     vm.register_function(b"stream_get_filters", stream_get_filters_fn);
     vm.register_function(b"stream_get_transports", stream_get_transports_fn);
-    vm.register_function(b"stream_socket_client", xp_socket::stream_socket_client);
-    vm.register_function(b"stream_socket_server", xp_socket::stream_socket_server);
+    vm.register_function(b"stream_socket_client", ctx_stream_socket_client_entry);
+    vm.register_function(b"stream_socket_server", ctx_stream_socket_server_entry);
     vm.register_function(b"stream_socket_get_name", xp_socket::stream_socket_get_name);
     vm.register_function(b"stream_select", xp_socket::stream_select);
     vm.register_function(b"stream_socket_pair", xp_socket::stream_socket_pair);
@@ -670,7 +671,7 @@ final class StreamBucket {
         stream_socket_enable_crypto_fn,
     );
     vm.register_function(b"headers_list", headers_list_fn);
-    vm.register_function(b"dir", dir_fn);
+    vm.register_function(b"dir", ctx_dir_fn_entry);
     vm.register_function(b"popen", popen_fn);
     vm.register_function(b"pclose", pclose_fn);
     vm.register_function(b"rewinddir", rewinddir_fn);
@@ -7730,7 +7731,20 @@ pub(crate) fn normalize_path_lexical(p: &str) -> String {
     }
 }
 
+/// Read a whole file the way file_get_contents()/file()/readfile() do: the
+/// opened stream takes a resource id (plus the inner one of a zlib stream).
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
+    let r = read_path_with_wrappers_inner(path_str);
+    if r.is_ok() {
+        if path_str.starts_with("compress.zlib://") {
+            goro_core::value::alloc_resource_id();
+        }
+        goro_core::value::alloc_resource_id();
+    }
+    r
+}
+
+fn read_path_with_wrappers_inner(path_str: &str) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
         let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
@@ -7952,6 +7966,8 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // If path is an existing directory, emit a notice rather than failing
     // silently. PHP says: "Read of N bytes failed with errno=21 Is a directory".
     if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+        // The directory opens as a plain-file stream.
+        goro_core::value::alloc_resource_id();
         let line = vm.current_line;
         vm.emit_notice_at(
             "file_get_contents(): Read of 8192 bytes failed with errno=21 Is a directory",
@@ -8403,6 +8419,10 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .truncate(true)
                 .open(&*path_str)
         };
+        if file_result.is_ok() {
+            // The opened stream's resource id.
+            goro_core::value::alloc_resource_id();
+        }
         file_result.and_then(|mut f| {
             if lock_ex {
                 #[cfg(unix)]
@@ -10168,7 +10188,6 @@ pub(crate) fn flush_cli_output(vm: &mut Vm) {
 
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
-    static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
     /// Directory handles keyed by resource id. Each entry stores the directory
     /// path (for rewind) and a remaining list of entry names that we pop from
     /// the back to feed readdir().
@@ -10220,9 +10239,8 @@ fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
 
 fn alloc_dir_handle(path: String) -> i64 {
     let names = read_dir_entries(&path).unwrap_or_default();
-    NEXT_FILE_ID.with(|id| {
-        let did = id.get();
-        id.set(did + 1);
+    {
+        let did = goro_core::value::alloc_resource_id();
         DIR_HANDLES.with(|dh| {
             dh.borrow_mut().insert(
                 did,
@@ -10235,7 +10253,7 @@ fn alloc_dir_handle(path: String) -> i64 {
         goro_core::value::register_resource(did, b"stream");
         CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
         did
-    })
+    }
 }
 
 /// Return the resource id from a directory handle Value. Accepts a Resource
@@ -10758,9 +10776,8 @@ fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64,
 }
 
 fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
-    NEXT_FILE_ID.with(|id| {
-        let fid = id.get();
-        id.set(fid + 1);
+    {
+        let fid = goro_core::value::alloc_resource_id();
         FILE_HANDLES.with(|handles| {
             handles.borrow_mut().insert(
                 fid,
@@ -10786,7 +10803,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
             );
         });
         fid
-    })
+    }
 }
 
 fn data_uri_urldecode(input: &[u8]) -> Vec<u8> {
@@ -11069,6 +11086,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 let _ = tmp.seek(SeekFrom::Start(0));
                 let fid = alloc_file_handle_special_uri(tmp, &mode, SpecialStream::Temp, &filename);
+                // A php://temp stream: its inner memory stream is a resource too.
+                goro_core::value::alloc_resource_id();
                 FILE_HANDLES.with(|h| {
                     if let Some(fh) = h.borrow_mut().get_mut(&fid) {
                         fh.wrapper_type = "RFC2397".to_string();
@@ -11132,7 +11151,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let _ = f.write_all(&body);
                         let _ = f.seek(SeekFrom::Start(0));
                     }
+                    let is_temp = matches!(sp, SpecialStream::Temp);
                     let fid = alloc_file_handle_special_uri(f, &mode, sp, &filename);
+                    if is_temp {
+                        // php_stream_temp_create(): its inner memory stream.
+                        goro_core::value::alloc_resource_id();
+                    }
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::Resource(fid));
                 }
@@ -11738,11 +11762,7 @@ pub(crate) fn filter_stream_seek(fid: i64, pos: i64) {
 
 /// Allocate a resource id from the shared stream/resource counter.
 pub(crate) fn alloc_resource_id() -> i64 {
-    NEXT_FILE_ID.with(|n| {
-        let v = n.get();
-        n.set(v + 1);
-        v
-    })
+    goro_core::value::alloc_resource_id()
 }
 
 fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -18755,11 +18775,7 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             apply_context_params(vm, &mut ctx, params_val)?;
         }
     }
-    let fid = NEXT_FILE_ID.with(|id| {
-        let v = id.get();
-        id.set(v + 1);
-        v
-    });
+    let fid = goro_core::value::alloc_resource_id();
     STREAM_CONTEXTS.with(|c| {
         c.borrow_mut().insert(fid, ctx);
     });
@@ -19006,8 +19022,90 @@ fn stream_context_get_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
+/// Builtins that call php_stream_context_from_zval(zcontext, flags & NO_DEFAULT):
+/// a missing context argument allocates FG(default_context) (a resource id).
+macro_rules! default_ctx_entry {
+    ($name:ident, $inner:path, $ctx:expr, $flags:expr) => {
+        fn $name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+            let flags: Option<usize> = $flags;
+            let no_default = flags
+                .and_then(|i| args.get(i))
+                .is_some_and(|f| f.deref().to_long() & 16 != 0);
+            touch_default_context(args.get($ctx), no_default);
+            $inner(vm, args)
+        }
+    };
+}
+default_ctx_entry!(ctx_copy_fn2_entry, copy_fn2, 2, None);
+default_ctx_entry!(ctx_copy_fn_entry, copy_fn, 2, None);
+default_ctx_entry!(ctx_dir_fn_entry, dir_fn, 1, None);
+default_ctx_entry!(ctx_file_fn_entry, file_fn, 2, Some(1));
+default_ctx_entry!(
+    ctx_file_get_contents_fn_entry,
+    file_get_contents_fn,
+    2,
+    None
+);
+default_ctx_entry!(
+    ctx_file_put_contents_fn_entry,
+    file_put_contents_fn,
+    3,
+    Some(2)
+);
+default_ctx_entry!(ctx_fopen_fn_entry, fopen_fn, 3, None);
+default_ctx_entry!(ctx_mkdir_fn_entry, mkdir_fn, 3, None);
+default_ctx_entry!(ctx_opendir_fn_entry, opendir_fn, 1, None);
+default_ctx_entry!(ctx_readfile_fn_entry, readfile_fn, 2, None);
+default_ctx_entry!(ctx_rename_fn2_entry, rename_fn2, 2, None);
+default_ctx_entry!(ctx_rename_fn_entry, rename_fn, 2, None);
+default_ctx_entry!(ctx_rmdir_fn_entry, rmdir_fn, 1, None);
+default_ctx_entry!(ctx_scandir_fn_entry, scandir_fn, 2, None);
+default_ctx_entry!(
+    ctx_stream_socket_client_entry,
+    xp_socket::stream_socket_client,
+    5,
+    Some(4)
+);
+default_ctx_entry!(
+    ctx_stream_socket_server_entry,
+    xp_socket::stream_socket_server,
+    4,
+    Some(3)
+);
+default_ctx_entry!(ctx_unlink_fn2_entry, unlink_fn2, 1, None);
+default_ctx_entry!(ctx_unlink_fn_entry, unlink_fn, 1, None);
+
 thread_local! {
     static DEFAULT_STREAM_CTX: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// FG(default_context), allocated on first use (php_stream_context_from_zval).
+pub(crate) fn default_context() -> i64 {
+    DEFAULT_STREAM_CTX.with(|d| {
+        if let Some(id) = d.get() {
+            return id;
+        }
+        let id = goro_core::value::alloc_resource_id();
+        STREAM_CONTEXTS.with(|c| {
+            c.borrow_mut().insert(id, StreamContext::default());
+        });
+        goro_core::value::register_resource(id, b"stream-context");
+        d.set(Some(id));
+        id
+    })
+}
+
+/// php_stream_context_from_zval(zcontext, no_default) for its side effect:
+/// a null / missing context argument allocates the default context.
+pub(crate) fn touch_default_context(ctx_arg: Option<&Value>, no_default: bool) {
+    if !no_default
+        && matches!(
+            ctx_arg.map(|v| v.deref()),
+            None | Some(Value::Null | Value::Undef)
+        )
+    {
+        default_context();
+    }
 }
 
 fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -19015,22 +19113,7 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     if let Some(opts) = args.first() {
         if !matches!(opts, Value::Null | Value::Undef) {
             let merged = validate_context_options(vm, opts)?;
-            let fid = DEFAULT_STREAM_CTX.with(|d| {
-                if let Some(id) = d.get() {
-                    return id;
-                }
-                let id = NEXT_FILE_ID.with(|n| {
-                    let v = n.get();
-                    n.set(v + 1);
-                    v
-                });
-                STREAM_CONTEXTS.with(|c| {
-                    c.borrow_mut().insert(id, StreamContext::default());
-                });
-                goro_core::value::register_resource(id, b"stream-context");
-                d.set(Some(id));
-                id
-            });
+            let fid = default_context();
             STREAM_CONTEXTS.with(|c| {
                 let mut cb = c.borrow_mut();
                 if let Some(ctx) = cb.get_mut(&fid) {
@@ -19045,22 +19128,7 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
             return Ok(Value::Resource(fid));
         }
     }
-    let fid = DEFAULT_STREAM_CTX.with(|d| {
-        if let Some(id) = d.get() {
-            return id;
-        }
-        let id = NEXT_FILE_ID.with(|n| {
-            let v = n.get();
-            n.set(v + 1);
-            v
-        });
-        STREAM_CONTEXTS.with(|c| {
-            c.borrow_mut().insert(id, StreamContext::default());
-        });
-        goro_core::value::register_resource(id, b"stream-context");
-        d.set(Some(id));
-        id
-    });
+    let fid = default_context();
     Ok(Value::Resource(fid))
 }
 
@@ -19068,22 +19136,7 @@ fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     if let Some(opts) = args.first() {
         if !matches!(opts, Value::Null | Value::Undef) {
             let merged = validate_context_options(vm, opts)?;
-            let fid = DEFAULT_STREAM_CTX.with(|d| {
-                if let Some(id) = d.get() {
-                    return id;
-                }
-                let id = NEXT_FILE_ID.with(|n| {
-                    let v = n.get();
-                    n.set(v + 1);
-                    v
-                });
-                STREAM_CONTEXTS.with(|c| {
-                    c.borrow_mut().insert(id, StreamContext::default());
-                });
-                goro_core::value::register_resource(id, b"stream-context");
-                d.set(Some(id));
-                id
-            });
+            let fid = default_context();
             STREAM_CONTEXTS.with(|c| {
                 let mut cb = c.borrow_mut();
                 if let Some(ctx) = cb.get_mut(&fid) {

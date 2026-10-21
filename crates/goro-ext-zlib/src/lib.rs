@@ -591,22 +591,21 @@ enum GzHandle {
 
 thread_local! {
     static GZ_HANDLES: RefCell<HashMap<i64, GzHandle>> = RefCell::new(HashMap::new());
-    static NEXT_GZ_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(10000) };
     // deflate/inflate contexts
     static DEFLATE_CONTEXTS: RefCell<HashMap<i64, DeflateContext>> = RefCell::new(HashMap::new());
     static INFLATE_CONTEXTS: RefCell<HashMap<i64, InflateContext>> = RefCell::new(HashMap::new());
-    static NEXT_CTX_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(20000) };
 }
 
+/// php_stream_gzopen(): the inner (file) stream is a resource too, then the
+/// zlib stream wrapping it.
 fn alloc_gz_id() -> i64 {
-    NEXT_GZ_ID.with(|id| {
-        let gid = id.get();
-        id.set(gid + 1);
-        gid
-    })
+    let _inner = goro_core::value::alloc_resource_id();
+    goro_core::value::alloc_resource_id()
 }
 
 fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_stream_context_from_zval(NULL, false)
+    goro_core::value::touch_default_stream_context();
     let filename = args
         .first()
         .unwrap_or(&Value::Null)
@@ -1155,6 +1154,8 @@ fn gzpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_stream_context_from_zval(NULL, false)
+    goro_core::value::touch_default_stream_context();
     let filename = args
         .first()
         .unwrap_or(&Value::Null)
@@ -1171,6 +1172,8 @@ fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     };
+    // The inner file stream and the zlib stream are resources.
+    let _ = alloc_gz_id();
 
     // Decompress if gzipped
     let decompressed = if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
@@ -1204,6 +1207,8 @@ fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn readgzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_stream_context_from_zval(NULL, false)
+    goro_core::value::touch_default_stream_context();
     let filename = args
         .first()
         .unwrap_or(&Value::Null)
@@ -1220,6 +1225,8 @@ fn readgzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     };
+    // The inner file stream and the zlib stream are resources.
+    let _ = alloc_gz_id();
 
     // Decompress if gzipped
     let decompressed = if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
@@ -1267,11 +1274,7 @@ struct InflateContext {
 }
 
 fn alloc_ctx_id() -> i64 {
-    NEXT_CTX_ID.with(|id| {
-        let cid = id.get();
-        id.set(cid + 1);
-        cid
-    })
+    goro_core::value::alloc_resource_id()
 }
 
 fn make_compress(encoding: i64, level: Compression) -> Compress {

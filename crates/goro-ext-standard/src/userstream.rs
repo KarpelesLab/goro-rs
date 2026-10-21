@@ -707,25 +707,6 @@ fn context_from_arg(
     }
 }
 
-fn default_context() -> i64 {
-    DEFAULT_STREAM_CTX.with(|d| {
-        if let Some(id) = d.get() {
-            return id;
-        }
-        let id = NEXT_FILE_ID.with(|n| {
-            let v = n.get();
-            n.set(v + 1);
-            v
-        });
-        STREAM_CONTEXTS.with(|c| {
-            c.borrow_mut().insert(id, StreamContext::default());
-        });
-        goro_core::value::register_resource(id, b"stream-context");
-        d.set(Some(id));
-        id
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Wrapper object creation (user_stream_create_object)
 // ---------------------------------------------------------------------------

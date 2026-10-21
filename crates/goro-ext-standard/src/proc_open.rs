@@ -703,11 +703,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Reference(r)) = args.get(2) {
         *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(pipes_arr)));
     }
-    let id = NEXT_FILE_ID.with(|n| {
-        let v = n.get();
-        n.set(v + 1);
-        v
-    });
+    let id = goro_core::value::alloc_resource_id();
     PROCS.with(|p| {
         p.borrow_mut().insert(
             id,

@@ -32438,11 +32438,17 @@ impl Vm {
                     };
 
                     let old_file = self.current_file.clone();
+                    let plain_file = hooked_source.is_none();
                     let result = match hooked_source
                         .map(Ok)
                         .unwrap_or_else(|| std::fs::read(&abs_path))
                     {
                         Ok(source) => {
+                            if plain_file {
+                                // php_stream_open_for_zend(): the file is
+                                // opened as a stream resource.
+                                crate::value::alloc_resource_id();
+                            }
                             // Track file for _once variants
                             self.included_files.insert(abs_path.clone());
                             // Compile and execute
