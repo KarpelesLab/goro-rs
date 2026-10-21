@@ -1115,7 +1115,16 @@ impl PhpGenerator {
                 // Function calls - delegate to VM
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &op_array.literals);
+                    // parent::$prop::get()/set() in a generator hook needs $this.
+                    let is_hook_call = matches!(&name_val, Value::String(s)
+                        if s.as_bytes().windows(14).any(|w| w.eq_ignore_ascii_case(b"::__property_g") || w.eq_ignore_ascii_case(b"::__property_s")));
                     vm.generator_init_fcall(name_val);
+                    if is_hook_call && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                        let this = self.read_operand(&OperandType::Cv(0), &op_array.literals);
+                        if matches!(this, Value::Object(_)) {
+                            vm.generator_send_val(this);
+                        }
+                    }
                 }
                 OpCode::InitDynamicStaticCall => {
                     let class_val = self.read_operand(&op.op1, &op_array.literals);

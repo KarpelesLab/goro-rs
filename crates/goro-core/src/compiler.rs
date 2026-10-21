@@ -4324,6 +4324,7 @@ impl Compiler {
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 // The get hook's return type is the property type.
                                 hook_compiler.op_array.return_type = prop_type.clone();
+                                hook_compiler.op_array.is_generator = stmts_contain_yield(hook_body);
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
@@ -13152,8 +13153,12 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
         ExprKind::CloneWith { object, with_args } => {
             expr_references_backing_store(object, prop_name) || with_args.iter().any(|(_, e)| expr_references_backing_store(e, prop_name))
         }
-        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) => {
+        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::YieldFrom(e) => {
             expr_references_backing_store(e, prop_name)
+        }
+        ExprKind::Yield(k, v) => {
+            k.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
+                || v.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
         }
         ExprKind::Array(elements) => {
             elements.iter().any(|el| {

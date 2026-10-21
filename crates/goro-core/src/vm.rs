@@ -30094,6 +30094,15 @@ impl Vm {
                             if !fn_cvs.is_empty() {
                                 fn_cvs[0] = obj_val.clone(); // $this
                             }
+                            // A get hook containing `yield` returns a Generator.
+                            if method.is_generator {
+                                let mut generator = crate::generator::PhpGenerator::new(method.clone(), fn_cvs);
+                                generator.called_class = Some(class_lower.clone());
+                                generator.class_scope = Some(hook_declaring.clone());
+                                let gv = Value::Generator(Rc::new(RefCell::new(generator)));
+                                self.write_operand(&op.result, gv, &mut cvs, &mut tmps, &static_cv_keys);
+                                continue;
+                            }
                             self.property_hook_stack.push(hook_key);
                             self.class_scope_stack.push(hook_declaring);
                             self.called_class_stack.push(class_name_orig.clone());
@@ -33398,6 +33407,53 @@ impl Vm {
                 }
                 Ok(Value::Null)
             } else if name_bytes.contains(&b':') {
+                // parent::$prop::get()/set() inside a generator hook ($this is
+                // passed as the first argument by the generator).
+                if let Some(pos) = name_bytes.windows(2).position(|w| w == b"::") {
+                    let class_part: Vec<u8> = name_bytes[..pos].iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let method_lower: Vec<u8> = name_bytes[pos + 2..].iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let hook_prop = method_lower.strip_prefix(b"__property_get_".as_slice()).map(|p| (p.to_vec(), false))
+                        .or_else(|| method_lower.strip_prefix(b"__property_set_".as_slice()).map(|p| (p.to_vec(), true)));
+                    if let (Some((_, is_set)), Some(Value::Object(this_obj))) = (hook_prop, call.args.first().cloned()) {
+                        let prop_name = name_bytes[pos + 2 + b"__property_get_".len()..].to_vec();
+                        let target_cls: Option<Vec<u8>> = if class_part == b"parent" {
+                            self.class_scope_stack.last()
+                                .and_then(|sc| self.classes.get(sc))
+                                .and_then(|c| c.parent.clone())
+                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                        } else {
+                            Some(class_part.clone())
+                        };
+                        let hook = target_cls.as_ref()
+                            .and_then(|cl| self.classes.get(cl))
+                            .and_then(|c| c.get_method(&method_lower))
+                            .map(|m| (m.op_array.clone(), m.declaring_class.clone()));
+                        let extra: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                        if let Some((op, decl)) = hook {
+                            let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
+                            if !fn_cvs.is_empty() { fn_cvs[0] = Value::Object(this_obj.clone()); }
+                            if fn_cvs.len() > 1 { if let Some(v) = extra.first() { fn_cvs[1] = v.clone(); } }
+                            let obj_class_lower: Vec<u8> = this_obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let mut hk = obj_class_lower;
+                            hk.extend_from_slice(b"::");
+                            hk.extend_from_slice(&prop_name);
+                            hk.extend_from_slice(if is_set { b"::set" } else { b"::get" });
+                            self.property_hook_stack.push(hk);
+                            self.class_scope_stack.push(decl);
+                            let r = self.execute_op_array(&op, fn_cvs);
+                            self.class_scope_stack.pop();
+                            self.property_hook_stack.pop();
+                            return r;
+                        }
+                        // Plain parent property: read/write the backing value.
+                        if is_set {
+                            let v = extra.first().cloned().unwrap_or(Value::Null);
+                            this_obj.borrow_mut().set_property(prop_name, v.clone());
+                            return Ok(v);
+                        }
+                        return Ok(this_obj.borrow().get_property(&prop_name));
+                    }
+                }
                 // This is a method call (class::method) - try dispatching through call_object_method
                 if let Some(pos) = name_bytes.iter().position(|&b| b == b':') {
                     let method_name = &name_bytes[pos + 2..]; // skip "::"
