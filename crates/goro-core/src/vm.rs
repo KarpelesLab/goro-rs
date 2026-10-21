@@ -493,6 +493,9 @@ pub struct Vm {
     pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     pub(crate) destructible_objects: Vec<Value>,
+    /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
+    /// destructors run at shutdown, so new objects get fresh handles.
+    object_store_no_reuse: bool,
     /// Stack of "called class" names for late static binding (static::)
     pub called_class_stack: Vec<Vec<u8>>,
     /// Stack of "defining class" names for visibility checks (lowercase)
@@ -757,6 +760,7 @@ impl Vm {
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
             globals: Rc::new(RefCell::new(PhpArray::new())),
+            object_store_no_reuse: false,
             classes: IndexMap::new(),
             next_object_id: 1,
             free_object_ids: Vec::new(),
@@ -3786,6 +3790,11 @@ impl Vm {
     /// PHP's handle-recycling behavior, falling back to a fresh increment.
     #[inline]
     pub fn alloc_object_id(&mut self) -> u64 {
+        if self.object_store_no_reuse {
+            let id = self.next_object_id;
+            self.next_object_id += 1;
+            return id;
+        }
         // Try global drop-recycled pool first (most PHP-accurate).
         // An id may have been recorded in both pools (explicit unset + Drop);
         // drop any duplicate so it is never handed out twice.
@@ -3815,8 +3824,7 @@ impl Vm {
     }
 
     pub fn create_exception(&mut self, class_name: &[u8], message: &str, line: u32) -> Value {
-        let err_id = self.next_object_id;
-        self.next_object_id += 1;
+        let err_id = self.alloc_object_id();
         let mut err_obj = PhpObject::new(class_name.to_vec(), err_id);
         // self/parent/static only reach a class lookup when no class scope
         // resolved them; PHP reports that condition instead.
@@ -5118,6 +5126,14 @@ impl Vm {
     /// Track an object created by an extension so that its __destruct runs
     /// once the last reference is dropped (or at shutdown).
     pub fn track_destructible(&mut self, obj: Value) {
+        self.list_destructible(obj);
+    }
+
+    /// Add an object to the list of objects awaiting destruction.
+    pub(crate) fn list_destructible(&mut self, obj: Value) {
+        if let Value::Object(o) = &obj {
+            o.borrow().dtor_listed.set(true);
+        }
         self.destructible_objects.push(obj);
     }
 
@@ -5171,75 +5187,133 @@ impl Vm {
         }
     }
 
-    fn run_pending_destructors(&mut self) {
-        loop {
-            let len = self.destructible_objects.len();
-            let scan_limit = len.min(64);
-            let mut found_idx = None;
-            for i in (len - scan_limit..len).rev() {
-                if let Value::Object(rc) = &self.destructible_objects[i] {
-                    if Rc::strong_count(rc) == 1 {
-                        let ob = rc.borrow();
-                        if !matches!(ob.get_property(b"__ctor_pending"), Value::True)
-                            && !matches!(ob.get_property(b"__destructed"), Value::True)
-                        {
-                            found_idx = Some(i);
-                            break;
-                        }
-                    }
+    /// Index in the destructible list of the next queued release candidate
+    /// that is now garbage (only the list still holds it).
+    fn next_dtor_candidate(&mut self) -> Option<usize> {
+        while let Some(w) = crate::gc::pop_dtor_candidate() {
+            let Some(rc) = w.upgrade() else { continue };
+            // Holders: the list entry and `rc`.
+            if Rc::strong_count(&rc) != 2 {
+                continue;
+            }
+            {
+                let ob = rc.borrow();
+                if !ob.dtor_listed.get()
+                    || matches!(ob.get_property(b"__ctor_pending"), Value::True)
+                    || matches!(ob.get_property(b"__destructed"), Value::True)
+                {
+                    continue;
                 }
             }
-            let idx = match found_idx {
-                Some(i) => i,
-                None => break,
-            };
-            let obj_val = self.destructible_objects.remove(idx);
-            if let Value::Object(ref obj_rc) = obj_val {
-                obj_rc
-                    .borrow_mut()
-                    .set_property(b"__destructed".to_vec(), Value::True);
-                let class_lower: Vec<u8> = obj_rc
-                    .borrow()
-                    .class_name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if class_lower == b"fiber" {
-                    self.fiber_destroy(obj_rc);
-                    continue;
+            // Search from both ends: long-lived objects sit at the front,
+            // recently created ones at the back.
+            let list = &self.destructible_objects;
+            let (mut lo, mut hi) = (0usize, list.len());
+            while lo < hi {
+                if matches!(&list[lo], Value::Object(o) if Rc::ptr_eq(o, &rc)) {
+                    return Some(lo);
                 }
-                // zend_objects_destroy_object(): lazy objects (uninitialized
-                // ghosts, and proxies even once initialized) are not destructed.
-                if matches!(
-                    obj_rc.borrow().get_property(b"__lazy_state"),
-                    Value::String(_)
-                ) {
-                    continue;
+                hi -= 1;
+                if matches!(&list[hi], Value::Object(o) if Rc::ptr_eq(o, &rc)) {
+                    return Some(hi);
                 }
-                let destruct_info = self
-                    .classes
-                    .get(&class_lower)
-                    .and_then(|c| c.get_method(b"__destruct"))
-                    .map(|m| {
-                        let mut op = m.op_array.clone();
-                        if op.attributes.is_empty() && !m.attributes.is_empty() {
-                            op.attributes = m.attributes.clone();
-                        }
-                        (
-                            op,
-                            m.attributes.clone(),
-                            m.visibility,
-                            m.declaring_class.clone(),
-                        )
-                    });
-                if let Some((_, _, vis, decl)) = &destruct_info {
-                    if let Some(msg) = self.destructor_visibility_error(&class_lower, *vis, decl) {
-                        let exc = self.create_exception(b"Error", &msg, self.current_line);
-                        self.current_exception = Some(exc);
-                        continue;
+                lo += 1;
+            }
+        }
+        None
+    }
+
+    fn run_pending_destructors(&mut self) {
+        loop {
+            // Everything released so far is destroyed as one batch, each
+            // object completely before the next (like php-src freeing the
+            // elements of a destroyed array in order): taking the batch out
+            // of the list first keeps destructors that run nested release
+            // points from picking up their not-yet-destroyed siblings.
+            let mut batch: Vec<Value> = Vec::new();
+            while let Some(idx) = self.next_dtor_candidate() {
+                batch.push(self.destructible_objects.remove(idx));
+            }
+            let len = self.destructible_objects.len();
+            let mut i = len - len.min(64);
+            while i < self.destructible_objects.len() {
+                let garbage = match &self.destructible_objects[i] {
+                    Value::Object(rc) if Rc::strong_count(rc) == 1 => {
+                        let ob = rc.borrow();
+                        !matches!(ob.get_property(b"__ctor_pending"), Value::True)
+                            && !matches!(ob.get_property(b"__destructed"), Value::True)
                     }
+                    _ => false,
+                };
+                if garbage {
+                    batch.push(self.destructible_objects.remove(i));
+                } else {
+                    i += 1;
                 }
-                if let Some((destruct_op, _method_attrs, _, _)) = destruct_info {
+            }
+            if batch.is_empty() {
+                break;
+            }
+            for obj_val in batch {
+                self.destruct_released(obj_val);
+            }
+        }
+    }
+
+    /// Run the destructor of an object nothing references any more.
+    fn destruct_released(&mut self, obj_val: Value) {
+        if let Value::Object(ref obj_rc) = obj_val {
+            obj_rc.borrow().dtor_listed.set(false);
+            obj_rc
+                .borrow_mut()
+                .set_property(b"__destructed".to_vec(), Value::True);
+            let class_lower: Vec<u8> = obj_rc
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            if class_lower == b"fiber" {
+                self.fiber_destroy(obj_rc);
+                return;
+            }
+            // zend_objects_destroy_object(): lazy objects (uninitialized
+            // ghosts, and proxies even once initialized) are not destructed.
+            if matches!(
+                obj_rc.borrow().get_property(b"__lazy_state"),
+                Value::String(_)
+            ) {
+                return;
+            }
+            let destruct_info = self
+                .classes
+                .get(&class_lower)
+                .and_then(|c| c.get_method(b"__destruct"))
+                .map(|m| {
+                    let mut op = m.op_array.clone();
+                    if op.attributes.is_empty() && !m.attributes.is_empty() {
+                        op.attributes = m.attributes.clone();
+                    }
+                    (
+                        op,
+                        m.attributes.clone(),
+                        m.visibility,
+                        m.declaring_class.clone(),
+                    )
+                });
+            if let Some((_, _, vis, decl)) = &destruct_info {
+                if let Some(msg) = self.destructor_visibility_error(&class_lower, *vis, decl) {
+                    let exc = self.create_exception(b"Error", &msg, self.current_line);
+                    self.current_exception = Some(exc);
+                    return;
+                }
+            }
+            if let Some((destruct_op, _method_attrs, _, decl)) = destruct_info {
+                // zend_objects_destroy_object(): an exception in flight (the
+                // object is released while unwinding) is set aside while the
+                // destructor runs, and becomes the previous of one it throws.
+                let old_exc = self.current_exception.take();
+                'run: {
                     let class_name_orig = obj_rc.borrow().class_name.clone();
                     let display_fallback =
                         format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
@@ -5249,17 +5323,43 @@ impl Vm {
                     // threw (e.g. converting E_USER_DEPRECATED to an ErrorException),
                     // the destructor body must NOT run — PHP aborts before entering it.
                     if self.current_exception.is_some() {
-                        continue;
+                        break 'run;
                     }
                     let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
                     if !fn_cvs.is_empty() {
                         fn_cvs[0] = obj_val.clone();
                     }
+                    // The destructor frame is called from the releasing statement.
+                    let frame = format!(
+                        "{}->__destruct",
+                        crate::value::display_class_name(&class_name_orig)
+                    );
+                    self.call_stack.push((
+                        frame,
+                        self.current_file.clone(),
+                        self.current_line,
+                        Vec::new(),
+                        true,
+                    ));
                     self.called_class_stack.push(class_name_orig);
-                    self.class_scope_stack.push(class_lower.clone());
+                    self.class_scope_stack.push(if decl.is_empty() {
+                        class_lower.clone()
+                    } else {
+                        decl.to_ascii_lowercase()
+                    });
                     let _ = self.execute_fn(&destruct_op, fn_cvs);
                     self.class_scope_stack.pop();
                     self.called_class_stack.pop();
+                    self.call_stack.pop();
+                }
+                if let Some(old) = old_exc {
+                    match self.current_exception.take() {
+                        Some(new) => {
+                            Self::exception_set_previous(&new, old);
+                            self.current_exception = Some(new);
+                        }
+                        None => self.current_exception = Some(old),
+                    }
                 }
             }
         }
@@ -5708,7 +5808,7 @@ impl Vm {
                     _ => false,
                 });
                 if !already {
-                    self.destructible_objects.push(Value::Object(obj.clone()));
+                    self.list_destructible(Value::Object(obj.clone()));
                 }
             }
         }
@@ -6692,7 +6792,7 @@ impl Vm {
                 .iter()
                 .any(|v| matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj)))
         {
-            self.destructible_objects.push(Value::Object(obj.clone()));
+            self.list_destructible(Value::Object(obj.clone()));
         }
     }
 
@@ -8133,8 +8233,7 @@ impl Vm {
                         } else {
                             Value::Long(3)
                         };
-                        let obj_id = self.next_object_id;
-                        self.next_object_id += 1;
+                        let obj_id = self.alloc_object_id();
                         let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
                         tz_obj.set_property(b"timezone_type".to_vec(), type_v);
                         tz_obj.set_property(b"timezone".to_vec(), Value::String(final_tz));
@@ -10374,8 +10473,7 @@ impl Vm {
                             let tz_name = if tz.is_empty() { "UTC".to_string() } else { tz };
                             if is_immutable {
                                 // Return new object
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let mut new_obj =
                                     PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                 new_obj.set_property(b"__timestamp".to_vec(), Value::Long(ts));
@@ -10439,8 +10537,7 @@ impl Vm {
                             drop(ob);
                             if let Some(new_ts) = vm_apply_relative_modification(&modifier, ts) {
                                 if is_immutable {
-                                    let obj_id = self.next_object_id;
-                                    self.next_object_id += 1;
+                                    let obj_id = self.alloc_object_id();
                                     let mut new_obj =
                                         PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                     new_obj
@@ -10506,8 +10603,7 @@ impl Vm {
                                 ("UTC".to_string(), 3i64)
                             };
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let ob = obj.borrow();
                                 let ts = ob.get_property(b"__timestamp").to_long();
                                 drop(ob);
@@ -10566,8 +10662,7 @@ impl Vm {
                                 Value::Long(3)
                             };
                             drop(ob);
-                            let obj_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let obj_id = self.alloc_object_id();
                             let mut tz_obj = PhpObject::new(b"DateTimeZone".to_vec(), obj_id);
                             tz_obj.set_property(b"timezone_type".to_vec(), type_v);
                             tz_obj.set_property(
@@ -10609,8 +10704,7 @@ impl Vm {
                                 vm_timezone_offset_and_abbrev(&tz_name, new_local_ts - offset_in);
                             let new_ts = new_local_ts - new_offset;
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let mut new_obj =
                                     PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                 new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
@@ -10669,8 +10763,7 @@ impl Vm {
                                 vm_timezone_offset_and_abbrev(&tz_name, new_local_ts - offset_in);
                             let new_ts = new_local_ts - new_offset;
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let mut new_obj =
                                     PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                 new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
@@ -10777,8 +10870,7 @@ impl Vm {
                             };
                             let tz_name = if tz.is_empty() { "UTC".to_string() } else { tz };
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let mut new_obj =
                                     PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                 new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
@@ -10872,8 +10964,7 @@ impl Vm {
                             };
                             let tz_name = if tz.is_empty() { "UTC".to_string() } else { tz };
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let mut new_obj =
                                     PhpObject::new(b"DateTimeImmutable".to_vec(), obj_id);
                                 new_obj.set_property(b"__timestamp".to_vec(), Value::Long(new_ts));
@@ -10933,8 +11024,7 @@ impl Vm {
                             let tod = ((ts % 86400) + 86400) % 86400;
                             let new_ts = target_days * 86400 + tod;
                             if is_immutable {
-                                let obj_id = self.next_object_id;
-                                self.next_object_id += 1;
+                                let obj_id = self.alloc_object_id();
                                 let ob = obj.borrow();
                                 let tz = ob
                                     .get_property(b"timezone")
@@ -13380,7 +13470,12 @@ impl Vm {
                     // Diagnostics raised by the caller after the call report
                     // the caller's line, not the callee's last line.
                     let saved_line = self.current_line;
+                    // A method body never runs in the global scope (otherwise
+                    // its CVs, including $this, get mirrored into the global
+                    // symbol table and outlive the call).
+                    let was_global = std::mem::replace(&mut self.is_global_scope, false);
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
+                    self.is_global_scope = was_global;
                     self.current_line = saved_line;
                     self.called_class_stack.pop();
                     self.class_scope_stack.pop();
@@ -13592,8 +13687,7 @@ impl Vm {
         let backing_value = self.resolve_deferred_value(&backing_value);
 
         // Create the enum case object
-        let obj_id = self.next_object_id;
-        self.next_object_id += 1;
+        let obj_id = self.alloc_object_id();
         let mut obj = PhpObject::new(class.name.clone(), obj_id);
         // Set the name property
         obj.set_property(
@@ -14052,7 +14146,7 @@ impl Vm {
 
     /// Track an object with __destruct for shutdown-time destruction.
     pub fn register_destructible(&mut self, obj: Value) {
-        self.destructible_objects.push(obj);
+        self.list_destructible(obj);
     }
 
     /// Bind a superglobal (e.g. `$_SESSION`) to `val` in the global symbol
@@ -14067,32 +14161,101 @@ impl Vm {
         }
     }
 
-    /// Run __destruct on all destructible objects in reverse creation order.
+    /// The object handle taken by an internal foreach iterator (php-src's
+    /// zend_object_iterator is a zend_object in the objects store).
+    fn foreach_iterator_handle(&mut self) -> Value {
+        let id = self.alloc_object_id();
+        Value::Object(Rc::new(RefCell::new(PhpObject::new(
+            b"InternalIterator".to_vec(),
+            id,
+        ))))
+    }
+
+    /// Run the shutdown destructors, like php-src's shutdown_destructors():
+    /// first the global symbol table is destroyed in reverse order, releasing
+    /// only objects nothing else references (repeated while that removes
+    /// entries); then every object still alive is destructed in handle order
+    /// (zend_objects_store_call_destructors).
     /// Called from `execute()` on clean exit, and from the SAPI layer after an
     /// uncaught fatal error has been emitted so that destructor output (e.g. `echo`
     /// inside `__destruct`) appears AFTER the "Fatal error: ..." message, matching PHP.
     pub fn run_shutdown_destructors(&mut self) {
-        // shutdown_destructors(): first release the global variables holding
-        // the only reference to an object (in reverse order, repeated while
-        // that frees more), then destruct the remaining objects in creation
-        // order (zend_objects_store_call_destructors). One object is taken
-        // at a time so objects released meanwhile are still seen.
-        self.shutdown_symbol_table_destructors();
-        self.destructible_objects.reverse();
+        if self.shutdown_symbol_table_destructors() {
+            self.shutdown_object_store_destructors();
+        }
+        for hook in self.shutdown_hooks.clone() {
+            hook(self);
+        }
+    }
+
+    /// zend_objects_store_call_destructors(): destruct the remaining objects
+    /// in ascending handle order, with handle reuse disabled
+    /// (EG_FLAGS_OBJECT_STORE_NO_REUSE). Objects created by a destructor with
+    /// a smaller handle than the current one are skipped, as php-src's single
+    /// pass over the store does.
+    fn shutdown_object_store_destructors(&mut self) {
+        self.destructible_objects
+            .sort_by_key(|v| std::cmp::Reverse(Self::dtor_list_id(v)));
+        self.object_store_no_reuse = true;
+        let mut cursor = 0u64;
         while let Some(obj_val) = self.destructible_objects.pop() {
-            if self.current_exception.is_some() {
-                // An exception escaped a shutdown destructor: it is fatal
-                // (zend_exception_error), and remaining objects are marked
-                // destructed without running their destructors.
-                let line = self.current_line;
-                self.report_uncaught(&VmError {
-                    message: "Uncaught exception".into(),
-                    line,
-                });
-                self.destructible_objects.clear();
+            if self.shutdown_exception_check() {
                 break;
             }
+            let id = Self::dtor_list_id(&obj_val);
+            if id < cursor {
+                continue;
+            }
+            cursor = id;
+            let tail = self.destructible_objects.last().map(Self::dtor_list_ptr);
             self.shutdown_destruct_one(&obj_val);
+            drop(obj_val);
+            if self.shutdown_exception_check() {
+                break;
+            }
+            if self.destructible_objects.last().map(Self::dtor_list_ptr) != tail {
+                // A destructor created or released destructible objects.
+                self.destructible_objects
+                    .sort_by_key(|v| std::cmp::Reverse(Self::dtor_list_id(v)));
+            }
+        }
+    }
+
+    fn dtor_list_id(v: &Value) -> u64 {
+        match v {
+            Value::Object(o) => o.borrow().object_id,
+            _ => 0,
+        }
+    }
+
+    fn dtor_list_ptr(v: &Value) -> usize {
+        match v {
+            Value::Object(o) => Rc::as_ptr(o) as usize,
+            _ => 0,
+        }
+    }
+
+    /// An exception escaped a shutdown destructor. Without an executing
+    /// frame (zend_throw_exception_internal) a user exception handler gets
+    /// it and shutdown goes on; otherwise it is fatal (zend_exception_error)
+    /// and the remaining objects are marked destructed without running their
+    /// destructors. Returns true when shutdown destruction must stop.
+    fn shutdown_exception_check(&mut self) -> bool {
+        if self
+            .current_exception
+            .as_ref()
+            .is_some_and(|e| !Self::is_graceful_exit(e))
+        {
+            if let Some(handler) = self.exception_handler.take() {
+                let exc = self.current_exception.take().unwrap_or(Value::Null);
+                let _ = self.call_callback(&handler, std::slice::from_ref(&exc));
+                // An exception thrown by the handler itself is discarded.
+                self.current_exception = None;
+                if self.exception_handler.is_none() {
+                    self.exception_handler = Some(handler);
+                }
+                return false;
+            }
         }
         if self.current_exception.is_some() {
             let line = self.current_line;
@@ -14100,13 +14263,17 @@ impl Vm {
                 message: "Uncaught exception".into(),
                 line,
             });
+            self.destructible_objects.clear();
+            return true;
         }
-        for hook in self.shutdown_hooks.clone() {
-            hook(self);
-        }
+        false
     }
 
-    fn shutdown_symbol_table_destructors(&mut self) {
+    /// First phase of shutdown_destructors(): zend_hash_reverse_apply() over
+    /// the global symbol table with zval_call_destructor, which deletes the
+    /// entries holding an object with refcount 1, until a pass deletes none.
+    /// Returns false when a destructor threw (shutdown is then aborted).
+    fn shutdown_symbol_table_destructors(&mut self) -> bool {
         loop {
             let before = self.globals.borrow().len();
             let keys: Vec<ArrayKey> = self.globals.borrow().keys().cloned().collect();
@@ -14128,13 +14295,14 @@ impl Vm {
                     ArrayKey::String(s) => s.as_bytes().to_vec(),
                     ArrayKey::Int(n) => n.to_string().into_bytes(),
                 };
+                // Bound with `global` from a function: an IS_REFERENCE entry.
                 if self.global_ref_names.contains(&name) {
                     continue;
                 }
                 let pos = self
                     .destructible_objects
                     .iter()
-                    .position(|v| matches!(v, Value::Object(d) if Rc::ptr_eq(d, &o)));
+                    .rposition(|v| matches!(v, Value::Object(d) if Rc::ptr_eq(d, &o)));
                 // Held only by the table (plus our clone and the destructor list).
                 if Rc::strong_count(&o) != 2 + pos.is_some() as usize {
                     continue;
@@ -14148,96 +14316,145 @@ impl Vm {
                 }
                 drop(o);
                 if self.exit_requested {
-                    return;
+                    return true;
+                }
+                if self.shutdown_exception_check() {
+                    return false;
+                }
+                // Objects released along with it are destroyed right away.
+                self.shutdown_release_garbage();
+                if self.shutdown_exception_check() {
+                    return false;
                 }
             }
             if self.globals.borrow().len() == before {
-                break;
+                return true;
             }
         }
     }
 
+    /// Destruct the listed objects nothing else references any more, in
+    /// creation order (objects freed while the symbol table is destroyed).
+    fn shutdown_release_garbage(&mut self) {
+        loop {
+            let batch: Vec<usize> = self
+                .destructible_objects
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| matches!(v, Value::Object(o) if Rc::strong_count(o) == 1))
+                .map(|(i, _)| i)
+                .collect();
+            if batch.is_empty() {
+                return;
+            }
+            let objs: Vec<Value> = batch
+                .iter()
+                .rev()
+                .map(|&i| self.destructible_objects.remove(i))
+                .collect();
+            for obj_val in objs.into_iter().rev() {
+                if self.current_exception.is_some() {
+                    return;
+                }
+                self.shutdown_destruct_one(&obj_val);
+            }
+        }
+    }
+
+    /// Call the destructor of one object during shutdown.
     fn shutdown_destruct_one(&mut self, obj_val: &Value) {
-        {
-            if let Value::Object(obj_rc) = obj_val {
-                if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
-                    return;
-                }
-                if matches!(obj_rc.borrow().get_property(b"__destructed"), Value::True) {
-                    return;
-                }
-                obj_rc
-                    .borrow_mut()
-                    .set_property(b"__destructed".to_vec(), Value::True);
-                let class_lower: Vec<u8> = obj_rc
-                    .borrow()
-                    .class_name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if class_lower == b"fiber" {
-                    self.fiber_destroy(obj_rc);
-                    return;
-                }
-                // zend_objects_destroy_object(): lazy objects (uninitialized
-                // ghosts, and proxies even once initialized) are not destructed.
-                if matches!(
-                    obj_rc.borrow().get_property(b"__lazy_state"),
-                    Value::String(_)
-                ) {
-                    return;
-                }
-                let destruct_vis = self
-                    .classes
-                    .get(&class_lower)
-                    .and_then(|c| c.get_method(b"__destruct"))
-                    .map(|m| m.visibility);
-                if let Some(vis) = destruct_vis {
-                    if !matches!(vis, crate::object::Visibility::Public) {
-                        if self.error_reporting & 2 != 0 {
-                            let vis_s = if matches!(vis, crate::object::Visibility::Private) {
-                                "private"
-                            } else {
-                                "protected"
-                            };
-                            let cname =
-                                crate::value::display_class_name(&obj_rc.borrow().class_name);
-                            let msg = format!(
-                                "Call to {} {}::__destruct() from global scope during shutdown ignored",
-                                vis_s, cname
-                            );
-                            self.display_error("Warning", &msg, "Unknown", 0);
-                        }
-                        return;
+        if let Value::Object(obj_rc) = obj_val {
+            if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
+                return;
+            }
+            if matches!(obj_rc.borrow().get_property(b"__destructed"), Value::True) {
+                return;
+            }
+            obj_rc.borrow().dtor_listed.set(false);
+            obj_rc
+                .borrow_mut()
+                .set_property(b"__destructed".to_vec(), Value::True);
+            let class_lower: Vec<u8> = obj_rc
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            if class_lower == b"fiber" {
+                self.fiber_destroy(obj_rc);
+                return;
+            }
+            // zend_objects_destroy_object(): lazy objects (uninitialized
+            // ghosts, and proxies even once initialized) are not destructed.
+            if matches!(
+                obj_rc.borrow().get_property(b"__lazy_state"),
+                Value::String(_)
+            ) {
+                return;
+            }
+            let destruct_vis = self
+                .classes
+                .get(&class_lower)
+                .and_then(|c| c.get_method(b"__destruct"))
+                .map(|m| m.visibility);
+            if let Some(vis) = destruct_vis {
+                if !matches!(vis, crate::object::Visibility::Public) {
+                    if self.error_reporting & 2 != 0 {
+                        let vis_s = if matches!(vis, crate::object::Visibility::Private) {
+                            "private"
+                        } else {
+                            "protected"
+                        };
+                        let cname = crate::value::display_class_name(&obj_rc.borrow().class_name);
+                        let msg = format!(
+                            "Call to {} {}::__destruct() from global scope during shutdown ignored",
+                            vis_s, cname
+                        );
+                        self.display_error("Warning", &msg, "Unknown", 0);
                     }
+                    return;
                 }
-                let destruct_op = self
-                    .classes
-                    .get(&class_lower)
-                    .and_then(|c| c.get_method(b"__destruct"))
-                    .map(|m| {
-                        let mut op = m.op_array.clone();
-                        if op.attributes.is_empty() && !m.attributes.is_empty() {
-                            op.attributes = m.attributes.clone();
-                        }
-                        op
-                    });
-                if let Some(destruct_op) = destruct_op {
-                    let class_name_orig = obj_rc.borrow().class_name.clone();
-                    let display_fallback =
-                        format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
-                    let line = self.current_line;
-                    self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
-                    let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
-                    if !fn_cvs.is_empty() {
-                        fn_cvs[0] = obj_val.clone(); // $this
+            }
+            let destruct_op = self
+                .classes
+                .get(&class_lower)
+                .and_then(|c| c.get_method(b"__destruct"))
+                .map(|m| {
+                    let mut op = m.op_array.clone();
+                    if op.attributes.is_empty() && !m.attributes.is_empty() {
+                        op.attributes = m.attributes.clone();
                     }
-                    self.called_class_stack.push(class_name_orig);
-                    self.class_scope_stack.push(class_lower.clone());
-                    let _ = self.execute_fn(&destruct_op, fn_cvs);
-                    self.class_scope_stack.pop();
-                    self.called_class_stack.pop();
+                    (op, m.declaring_class.to_ascii_lowercase())
+                });
+            if let Some((destruct_op, decl_lower)) = destruct_op {
+                // An inherited destructor runs in its declaring class scope.
+                let scope = if decl_lower.is_empty() {
+                    class_lower.clone()
+                } else {
+                    decl_lower
+                };
+                let class_name_orig = obj_rc.borrow().class_name.clone();
+                let display_fallback =
+                    format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
+                let line = self.current_line;
+                self.check_user_function_deprecation(&destruct_op, &display_fallback, line);
+                let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
+                if !fn_cvs.is_empty() {
+                    fn_cvs[0] = obj_val.clone(); // $this
                 }
+                // Shutdown destructors are called from [internal function].
+                let frame = format!(
+                    "{}->__destruct",
+                    crate::value::display_class_name(&class_name_orig)
+                );
+                self.call_stack
+                    .push((frame, String::new(), 0, Vec::new(), true));
+                self.called_class_stack.push(class_name_orig);
+                self.class_scope_stack.push(scope);
+                let _ = self.execute_fn(&destruct_op, fn_cvs);
+                self.class_scope_stack.pop();
+                self.called_class_stack.pop();
+                self.call_stack.pop();
             }
         }
     }
@@ -14451,6 +14668,10 @@ impl Vm {
         let mut tmps = tmps;
         let mut stepped = false;
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
+        // Object handles held by the internal iterators of running foreach
+        // loops over Traversables (zend_iterator_init allocates one), keyed
+        // by iterator tmp; released with the loop.
+        let mut foreach_iter_handles: HashMap<u32, Value> = HashMap::new();
         // Snapshot of array keys at foreach init (for stable iteration)
         let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
         // Generator key storage for foreach (saved before advancing to next yield)
@@ -14505,6 +14726,30 @@ impl Vm {
         if cv_frame {
             self.set_cv_frame_vars(cvs);
         }
+        // Run destructors of objects released by the current opcode (PHP
+        // destroys an object as soon as its refcount drops to zero); an
+        // exception thrown by one of them unwinds from this opcode.
+        macro_rules! release_point {
+            ($exec:lifetime) => {
+                if !self.destructible_objects.is_empty() {
+                    let had_exc = self.current_exception.is_some();
+                    self.run_pending_destructors();
+                    if !had_exc && self.current_exception.is_some() {
+                        if let Some((catch, finally, _, _, eh_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(eh_pc);
+                            if catch > 0 {
+                                ip = catch as usize;
+                            } else if finally > 0 {
+                                ip = finally as usize;
+                            }
+                            continue $exec;
+                        }
+                        return Err(VmError { message: "Uncaught exception from destructor".into(), line: self.current_line });
+                    }
+                }
+            };
+        }
+
         'exec: loop {
             if single_step.is_some() {
                 if stepped {
@@ -14598,8 +14843,13 @@ impl Vm {
                                 _ => *slot = Value::Undef,
                             }
                         }
+                        if !foreach_iter_handles.is_empty() {
+                            foreach_iter_handles.retain(|k, _| *k < a || *k >= b);
+                        }
+                        // Values released inside the statement (call arguments,
+                        // overwritten properties, ...) are destroyed by now too.
+                        release_point!('exec);
                         if freed {
-                            self.run_pending_destructors();
                             self.gc_maybe_auto();
                         }
                     }
@@ -14614,6 +14864,11 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // Temporaries consumed while computing the operand (e.g.
+                    // `echo (new Foo)->p`) are already destroyed in PHP.
+                    if !matches!(val, Value::Object(_)) {
+                        release_point!('exec);
+                    }
                     if matches!(val, Value::Array(_))
                         || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_)))
                     {
@@ -14703,6 +14958,11 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // The overwritten object loses this holder.
+                    let old_watch = match op.op1 {
+                        OperandType::Cv(i) => cvs.get(i as usize).and_then(crate::gc::dtor_watch),
+                        _ => None,
+                    };
                     // The previous CV slot's object id (if any) is recycled
                     // via PhpObject::drop when Rc<...> hits zero. Pushing here
                     // as well caused duplicates in the free pool and silent
@@ -14711,6 +14971,12 @@ impl Vm {
                     if let OperandType::Tmp(idx) = op.op2 {
                         if let Some(slot) = tmps.get_mut(idx as usize) {
                             *slot = Value::Undef;
+                        }
+                    }
+                    if !foreach_iter_handles.is_empty() {
+                        if let OperandType::Tmp(idx) = op.op1 {
+                            // FE_FREE of an iterator tmp releases its handle.
+                            foreach_iter_handles.remove(&idx);
                         }
                     }
                     if let OperandType::Tmp(r) = op.result {
@@ -14738,6 +15004,7 @@ impl Vm {
                             );
                         }
                     }
+                    crate::gc::dtor_watch_end(old_watch);
                     let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
                     if !had_exc && self.current_exception.is_some() {
@@ -15203,8 +15470,7 @@ impl Vm {
                         ),
                         Err(msg) => {
                             // Throw DivisionByZeroError
-                            let err_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let err_id = self.alloc_object_id();
                             let mut err_obj =
                                 PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
                             err_obj.set_property(
@@ -15320,8 +15586,7 @@ impl Vm {
                             &static_cv_keys,
                         ),
                         Err(msg) => {
-                            let err_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let err_id = self.alloc_object_id();
                             let mut err_obj =
                                 PhpObject::new(b"DivisionByZeroError".to_vec(), err_id);
                             err_obj.set_property(
@@ -21743,6 +22008,13 @@ impl Vm {
                                         });
                                     }
                                 }
+                                // zend_vm_stack_free_args(): the arguments are
+                                // released when the call returns.
+                                if !self.destructible_objects.is_empty() && !call.args.is_empty() {
+                                    call.args.clear();
+                                    self.current_line = op.line;
+                                    release_point!('exec);
+                                }
                                 self.write_operand(
                                     &op.result,
                                     result,
@@ -23119,6 +23391,13 @@ impl Vm {
                                 return Err(e);
                             }
                         };
+
+                        // The arguments are released when the call returns.
+                        if !self.destructible_objects.is_empty() && !call.args.is_empty() {
+                            call.args.clear();
+                            self.current_line = op.line;
+                            release_point!('exec);
+                        }
 
                         self.write_operand(
                             &op.result,
@@ -27109,8 +27388,7 @@ impl Vm {
                         Value::Object(o) => Value::Object(o),
                         Value::Array(arr) => {
                             let arr_borrow = arr.borrow();
-                            let obj_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let obj_id = self.alloc_object_id();
                             let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
                             for (key, value) in arr_borrow.iter() {
                                 let prop_name = match key {
@@ -27122,16 +27400,14 @@ impl Vm {
                             Value::Object(Rc::new(RefCell::new(obj)))
                         }
                         Value::Null | Value::Undef => {
-                            let obj_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let obj_id = self.alloc_object_id();
                             Value::Object(Rc::new(RefCell::new(PhpObject::new(
                                 b"stdClass".to_vec(),
                                 obj_id,
                             ))))
                         }
                         other => {
-                            let obj_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let obj_id = self.alloc_object_id();
                             let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
                             obj.set_property(b"scalar".to_vec(), other);
                             Value::Object(Rc::new(RefCell::new(obj)))
@@ -27365,11 +27641,34 @@ impl Vm {
                                 _ => None,
                             }
                         };
+                        // Overwriting an object/array element may release it.
+                        let may_release = !self.destructible_objects.is_empty()
+                            && match &existing_ref {
+                                Some(r) => {
+                                    matches!(&*r.borrow(), Value::Object(_) | Value::Array(_))
+                                }
+                                None => matches!(
+                                    arr.borrow().get(&key),
+                                    Some(Value::Object(_) | Value::Array(_))
+                                ),
+                            };
+                        let w = if may_release {
+                            match &existing_ref {
+                                Some(r) => crate::gc::dtor_watch(&r.borrow()),
+                                None => arr.borrow().get(&key).and_then(crate::gc::dtor_watch),
+                            }
+                        } else {
+                            None
+                        };
                         match existing_ref {
                             Some(r) => {
                                 *r.borrow_mut() = val;
                             }
                             None => arr.borrow_mut().set(key, val),
+                        }
+                        crate::gc::dtor_watch_end(w);
+                        if may_release {
+                            release_point!('exec);
                         }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array
@@ -28468,6 +28767,10 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                        if let OperandType::Tmp(t) = op.result {
+                            let h = self.foreach_iterator_handle();
+                            foreach_iter_handles.insert(t, h);
+                        }
                     } else if let Value::Object(obj) = &arr_val {
                         let class_lower: Vec<u8> = obj
                             .borrow()
@@ -28576,6 +28879,14 @@ impl Vm {
                         {
                             // IteratorAggregate: call getIterator() and iterate the result
                             let iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            if let (
+                                Some(Value::Object(_) | Value::Generator(_)),
+                                OperandType::Tmp(t),
+                            ) = (&iter_obj, op.result)
+                            {
+                                let h = self.foreach_iterator_handle();
+                                foreach_iter_handles.insert(t, h);
+                            }
                             if let Some(iter_val) = iter_obj {
                                 match &iter_val {
                                     Value::Object(_) => {
@@ -28636,6 +28947,10 @@ impl Vm {
                             } else {
                                 arr_val.clone()
                             };
+                            if let OperandType::Tmp(t) = op.result {
+                                let h = self.foreach_iterator_handle();
+                                foreach_iter_handles.insert(t, h);
+                            }
                             self.spl_call_method(&iter_obj, b"rewind", &[]);
                             self.write_operand(
                                 &op.result,
@@ -29802,6 +30117,11 @@ impl Vm {
                 OpCode::BindGlobal => {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
+                    // From a function, the symbol table entry becomes an
+                    // IS_REFERENCE, which shutdown's first phase skips.
+                    if !self.is_global_scope && !self.global_ref_names.contains(&name) {
+                        self.global_ref_names.insert(name.clone());
+                    }
                     // ZEND_BIND_GLOBAL: the CV becomes a reference to the
                     // symbol table entry (created as NULL when missing).
                     // `global ${expr}` names the local variable at runtime.
@@ -29866,8 +30186,14 @@ impl Vm {
                     };
 
                     if let OperandType::Cv(idx) = op.op1 {
+                        // BIND_STATIC releases the variable's previous value.
+                        let old_watch = cvs.get(idx as usize).and_then(crate::gc::dtor_watch);
                         if let Some(slot) = cvs.get_mut(idx as usize) {
                             *slot = cell;
+                        }
+                        if old_watch.is_some() {
+                            crate::gc::dtor_watch_end(old_watch);
+                            release_point!('exec);
                         }
                     }
                 }
@@ -31563,6 +31889,7 @@ impl Vm {
                             }
                         }
                     }
+                    release_point!('exec);
                 }
 
                 OpCode::StaticPropFetch | OpCode::StaticPropGetRef => {
@@ -32781,8 +33108,7 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
-                            let clone_id = self.next_object_id;
-                            self.next_object_id += 1;
+                            let clone_id = self.alloc_object_id();
                             let mut new_obj =
                                 PhpObject::new(obj_borrow.class_name.clone(), clone_id);
                             // Determine if we're cloning an ArrayObject-like class
@@ -32901,8 +33227,7 @@ impl Vm {
                                     // Deep-clone the proxy's real backing object
                                     if let Value::Object(inner) = value {
                                         let inner_b = inner.borrow();
-                                        let new_inner_id = self.next_object_id;
-                                        self.next_object_id += 1;
+                                        let new_inner_id = self.alloc_object_id();
                                         let mut cloned_inner = PhpObject::new(
                                             inner_b.class_name.clone(),
                                             new_inner_id,
@@ -32938,6 +33263,26 @@ impl Vm {
                             let original_oid = obj_borrow.object_id;
                             let is_weakmap = class_lower.as_slice() == b"weakmap";
                             let new_obj_val = Value::Object(Rc::new(RefCell::new(new_obj)));
+                            // The clone is an ordinary object: its destructor runs
+                            // once it is released (even when __clone throws).
+                            {
+                                let cl: Vec<u8> = obj_borrow
+                                    .class_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
+                                if self
+                                    .classes
+                                    .get(&cl)
+                                    .is_some_and(|c| c.get_method(b"__destruct").is_some())
+                                {
+                                    if let Value::Object(rc) = &new_obj_val {
+                                        rc.borrow_mut().remove_property(b"__ctor_pending");
+                                        rc.borrow_mut().remove_property(b"__destructed");
+                                    }
+                                    self.list_destructible(new_obj_val.clone());
+                                }
+                            }
                             if is_weakmap {
                                 let entries_copy: Vec<(
                                     u64,
@@ -33600,6 +33945,10 @@ impl Vm {
                 }
 
                 OpCode::UnsetCv => {
+                    let old_watch = match op.op1 {
+                        OperandType::Cv(i) => cvs.get(i as usize).and_then(crate::gc::dtor_watch),
+                        _ => None,
+                    };
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
                         if global_bound {
@@ -33707,6 +34056,7 @@ impl Vm {
                             }
                         }
                     }
+                    crate::gc::dtor_watch_end(old_watch);
                     let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
                     if !had_exc && self.current_exception.is_some() {
@@ -33748,12 +34098,16 @@ impl Vm {
                     };
                     if let Some(Value::Array(arr)) = arr_val {
                         let key = Self::value_to_array_key(key_val.clone());
+                        let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
                         arr.borrow_mut().remove(&key);
+                        crate::gc::dtor_watch_end(w);
                     } else if let Some(Value::Reference(r)) = arr_val {
                         let inner = r.borrow().clone();
                         if let Value::Array(arr) = inner {
                             let key = Self::value_to_array_key(key_val.clone());
+                            let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
                             arr.borrow_mut().remove(&key);
+                            crate::gc::dtor_watch_end(w);
                         }
                     } else if let Some(Value::Object(obj)) = arr_val.as_ref().map(|v| v.deref()).filter(|v| matches!(v, Value::Object(o) if native_handlers(o).and_then(|h| h.unset_dimension).is_some())) {
                         let f = native_handlers(&obj).and_then(|h| h.unset_dimension).unwrap();
@@ -33805,6 +34159,8 @@ impl Vm {
                             return Err(VmError { message: msg, line: op.line });
                         }
                     }
+                    // The removed element is released now.
+                    release_point!('exec);
                 }
 
                 OpCode::PropertyUnset => {
@@ -34407,6 +34763,7 @@ impl Vm {
                     if let Some((rid, pname)) = propagate_unset_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 3u8));
                     }
+                    release_point!('exec);
                 }
 
                 OpCode::VarVarGet => {
@@ -41331,7 +41688,7 @@ impl Vm {
                                     .set_property(b"__ctor_pending".to_vec(), Value::True);
                             }
                         }
-                        self.destructible_objects.push(obj_value.clone());
+                        self.list_destructible(obj_value.clone());
                     }
 
                     self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
@@ -41350,7 +41707,17 @@ impl Vm {
                             *slot = Value::Undef;
                         }
                     }
-                    let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // FETCH_OBJ_R consumes (frees) a temporary object operand,
+                    // so `(new Foo)->p` releases the object right after the read.
+                    let obj_val_raw = match op.op1 {
+                        OperandType::Tmp(t)
+                            if matches!(op.opcode, OpCode::PropertyGet)
+                                && matches!(tmps.get(t as usize), Some(Value::Object(_))) =>
+                        {
+                            std::mem::replace(&mut tmps[t as usize], Value::Undef)
+                        }
+                        _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                    };
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -42567,6 +42934,27 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // Only overwriting an object/array/reference (or a slot we
+                    // cannot see, e.g. mangled or magic) can release anything.
+                    let may_release = !self.destructible_objects.is_empty()
+                        && match &obj_val_raw {
+                            Value::Object(o) => match o.try_borrow() {
+                                Ok(b) => b
+                                    .properties
+                                    .iter()
+                                    .find(|(k, _)| k.as_slice() == prop_name.as_bytes())
+                                    .is_none_or(|(_, v)| {
+                                        matches!(
+                                            v,
+                                            Value::Object(_)
+                                                | Value::Array(_)
+                                                | Value::Reference(_)
+                                        )
+                                    }),
+                                Err(_) => true,
+                            },
+                            _ => true,
+                        };
                     // PHP refuses property names starting with NUL when the class has no __set
                     // (private/protected names internally use NUL prefixes). When __set exists,
                     // dispatch goes through it first; the inner $this->$prop access will then
@@ -43772,13 +44160,29 @@ impl Vm {
                     if let Some((rid, pname)) = propagate_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 2u8));
                     }
+                    // The overwritten property value is released now.
+                    if may_release {
+                        release_point!('exec);
+                    }
                 }
 
                 OpCode::InitMethodCall => {
-                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let method_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // INIT_METHOD_CALL consumes a temporary object operand: the
+                    // call frame owns it from now on, so `(new Foo)->m()` and
+                    // `f()->m()` release it with the call. `new` reuses its
+                    // result temporary for the constructor call, so keep that.
+                    let obj_val = match op.op1 {
+                        OperandType::Tmp(t)
+                            if matches!(tmps.get(t as usize), Some(Value::Object(_)))
+                                && !method_name.as_bytes().eq_ignore_ascii_case(b"__construct") =>
+                        {
+                            std::mem::replace(&mut tmps[t as usize], Value::Undef)
+                        }
+                        _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                    };
                     if obj_val.is_closure_obj() {
                         if let Err(msg) =
                             self.init_closure_method_call(&obj_val, method_name.as_bytes())
@@ -49077,8 +49481,7 @@ fn create_date_interval_from_timestamps(vm: &mut Vm, ts1: i64, ts2: i64, absolut
     };
 
     let total_days = abs_diff / 86400;
-    let obj_id = vm.next_object_id;
-    vm.next_object_id += 1;
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"DateInterval".to_vec(), obj_id);
     obj.set_property(b"y".to_vec(), Value::Long(years));
     obj.set_property(b"m".to_vec(), Value::Long(months));

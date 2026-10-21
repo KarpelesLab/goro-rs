@@ -72,6 +72,10 @@ thread_local! {
     static GC_COLLECTED: Cell<i64> = const { Cell::new(0) };
     static GC_THRESHOLD: Cell<usize> = const { Cell::new(10000) };
     static GC_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Objects with a pending destructor that just lost a holder, in release
+    /// order (see `note_dtor_candidate`).
+    static DTOR_CANDIDATES: RefCell<std::collections::VecDeque<Weak<RefCell<PhpObject>>>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 /// Register an object as a permanent cycle-collection candidate.
@@ -133,12 +137,60 @@ pub fn possible_root(v: &Value) {
         }
         Value::Object(o) => {
             if Rc::strong_count(o) > 1 {
+                note_dtor_candidate(o);
                 track_object(o);
                 push_root(WeakNode::Obj(Rc::downgrade(o)));
             }
         }
         _ => {}
     }
+}
+
+/// `o` is losing one holder: when the only other one is the VM's list of
+/// objects awaiting destruction, queue it so the next release point runs its
+/// destructor (regardless of where it sits in that list).
+#[inline]
+pub fn note_dtor_candidate(o: &Rc<RefCell<PhpObject>>) {
+    if Rc::strong_count(o) == 2 && o.try_borrow().map(|b| b.dtor_listed.get()).unwrap_or(false) {
+        DTOR_CANDIDATES.with(|c| c.borrow_mut().push_back(Rc::downgrade(o)));
+    }
+}
+
+/// Watch a value that is about to be overwritten or removed: returns a
+/// weak handle on it when it is an object awaiting destruction.
+#[inline]
+pub fn dtor_watch(v: &Value) -> Option<Weak<RefCell<PhpObject>>> {
+    match v {
+        Value::Object(o) => {
+            if o.try_borrow().map(|b| b.dtor_listed.get()).unwrap_or(false) {
+                Some(Rc::downgrade(o))
+            } else {
+                None
+            }
+        }
+        Value::Reference(r) => match r.try_borrow() {
+            Ok(inner) => match &*inner {
+                Value::Object(_) => dtor_watch(&inner),
+                _ => None,
+            },
+            Err(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// After the watched value was released: queue it as a destructor candidate
+/// when the destructible list is now its only holder.
+#[inline]
+pub fn dtor_watch_end(w: Option<Weak<RefCell<PhpObject>>>) {
+    if let Some(rc) = w.and_then(|w| w.upgrade()) {
+        note_dtor_candidate(&rc);
+    }
+}
+
+/// Next queued destructor candidate (oldest release first).
+pub fn pop_dtor_candidate() -> Option<Weak<RefCell<PhpObject>>> {
+    DTOR_CANDIDATES.with(|c| c.borrow_mut().pop_front())
 }
 
 /// True when the possible-root buffer reached the collection threshold.

@@ -419,6 +419,24 @@ impl PhpGenerator {
         vm.run_pending_destructors_pub();
     }
 
+    /// After a resume: the value sent in now lives in the frame, and a
+    /// finished generator's frame is freed (its locals are destroyed at the
+    /// caller's next release point).
+    fn release_finished_frame(&mut self) {
+        if !matches!(self.send_value, Value::Null) {
+            self.send_value = Value::Null;
+        }
+        if self.state == GeneratorState::Completed {
+            for t in self.tmps.iter_mut() {
+                *t = Value::Undef;
+            }
+            for c in self.cvs.iter_mut() {
+                *c = Value::Undef;
+            }
+            self.current_value = Value::Null;
+        }
+    }
+
     /// Resume execution of the generator until the next yield or return.
     /// Returns Ok(true) if a value was yielded, Ok(false) if the generator completed.
     /// Name of the generator function's frame in backtraces, and whether it
@@ -517,6 +535,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        self.release_finished_frame();
 
         // Pop the call_stack entry
         vm.call_stack.pop();
@@ -654,6 +673,15 @@ impl PhpGenerator {
                     // result = where to store the sent value (or Unused)
                     let yielded_value = if matches!(op.op1, OperandType::Unused) {
                         Value::Null
+                    } else if let OperandType::Tmp(t) = op.op1 {
+                        // YIELD consumes a temporary operand (the generator
+                        // holds the value from now on).
+                        match self.tmps.get_mut(t as usize) {
+                            Some(slot) if matches!(slot, Value::Object(_)) => {
+                                std::mem::replace(slot, Value::Undef)
+                            }
+                            _ => self.read_operand(&op.op1, &op_array.literals),
+                        }
                     } else {
                         self.read_operand(&op.op1, &op_array.literals)
                     };
@@ -2751,7 +2779,7 @@ impl PhpGenerator {
                     }
                     let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
                     if has_destruct {
-                        vm.destructible_objects.push(obj_val.clone());
+                        vm.list_destructible(obj_val.clone());
                     }
                     self.write_operand(&op.result, obj_val);
                     // Note: constructor call will be set up by the subsequent InitMethodCall opcode
@@ -2998,6 +3026,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        self.release_finished_frame();
 
         vm.call_stack.pop();
         if pushed_called {

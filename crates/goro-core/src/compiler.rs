@@ -93,6 +93,9 @@ struct LoopContext {
     finally_depth: usize,
     /// Number of enclosing try-with-finally bodies when the loop started
     try_finally_depth: usize,
+    /// Temporaries live during the loop (foreach iterator/value), released
+    /// when `return` / `break N` / `continue N` leaves it (FE_FREE).
+    free_tmps: Vec<u32>,
 }
 
 /// Compiles an AST into bytecode
@@ -1853,6 +1856,38 @@ impl Compiler {
         true
     }
 
+    /// Release the foreach temporaries of the loops `loop_stack[from..]`
+    /// (innermost first) that a return/break/continue leaves, except `keep`
+    /// (the returned operand).
+    fn emit_loop_frees(&mut self, from: usize, keep: OperandType, line: u32) {
+        // Loops outside the innermost try-with-finally are only released
+        // after its finally block ran (php-src emits their FE_FREE after
+        // the FAST_CALL), so a finally that throws keeps them running.
+        let depth = self.finally_targets.len();
+        let tmps: Vec<u32> = self
+            .loop_stack
+            .iter()
+            .skip(from)
+            .rev()
+            .take_while(|c| c.try_finally_depth >= depth)
+            .flat_map(|c| c.free_tmps.iter().copied())
+            .filter(|t| !matches!(keep, OperandType::Tmp(k) if k == *t))
+            .collect();
+        if tmps.is_empty() {
+            return;
+        }
+        let undef_const = self.op_array.add_literal(Value::Undef);
+        for t in tmps {
+            self.op_array.emit(Op {
+                opcode: OpCode::Assign,
+                op1: OperandType::Tmp(t),
+                op2: OperandType::Const(undef_const),
+                result: OperandType::Unused,
+                line,
+            });
+        }
+    }
+
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
         match &stmt.kind {
             StmtKind::Nop => Ok(()),
@@ -1996,6 +2031,7 @@ impl Compiler {
                     let idx = self.op_array.add_literal(Value::Null);
                     OperandType::Const(idx)
                 };
+                self.emit_loop_frees(0, operand, stmt.span.line);
                 // ZEND_RETURN_BY_REF of a non-variable (zend_compile_return):
                 // "Only variable references should be returned by reference".
                 if self.op_array.returns_by_ref && !self.op_array.is_generator {
@@ -2151,6 +2187,7 @@ impl Compiler {
                     is_switch: false,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
+                    free_tmps: Vec::new(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2200,6 +2237,7 @@ impl Compiler {
                     is_switch: false,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
+                    free_tmps: Vec::new(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2245,6 +2283,7 @@ impl Compiler {
                     is_switch: false,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
+                    free_tmps: Vec::new(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2363,12 +2402,19 @@ impl Compiler {
                     is_switch: false,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
+                    free_tmps: Vec::new(),
                 });
 
                 let loop_start = self.op_array.current_offset();
 
                 // Fetch next value (or jump to end if done)
                 let val_tmp = self.op_array.alloc_temp();
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.free_tmps = vec![val_tmp, iter_tmp];
+                    if let OperandType::Tmp(arr_tmp) = arr {
+                        ctx.free_tmps.push(arr_tmp);
+                    }
+                }
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
 
@@ -2503,6 +2549,17 @@ impl Compiler {
                     result: OperandType::Unused,
                     line: stmt.span.line,
                 });
+                // FE_FREE: the iterated temporary (e.g. an array literal or a
+                // call result) is released with the loop.
+                if let OperandType::Tmp(arr_tmp) = arr {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(arr_tmp),
+                        op2: OperandType::Const(undef_const),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
 
                 Ok(())
             }
@@ -2525,6 +2582,7 @@ impl Compiler {
                     is_switch: true,
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
+                    free_tmps: Vec::new(),
                 });
 
                 // Switch compilation strategy:
@@ -2654,6 +2712,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                self.emit_loop_frees(target_index + 1, OperandType::Unused, stmt.span.line);
                 // Check if we're inside a try-with-finally block that the
                 // jump leaves (the target loop started outside of it)
                 let leaves_try_finally =
@@ -2774,6 +2833,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                self.emit_loop_frees(target_index + 1, OperandType::Unused, stmt.span.line);
                 // Check if we're inside a try-with-finally block that the
                 // jump leaves (the target loop started outside of it)
                 let leaves_try_finally =
@@ -3777,6 +3837,15 @@ impl Compiler {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),
                             op2: OperandType::Tmp(exc_tmp),
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    } else {
+                        // `catch (E)` without a variable releases the exception.
+                        self.op_array.emit(Op {
+                            opcode: OpCode::FreeTmps,
+                            op1: OperandType::Tmp(exc_tmp),
+                            op2: OperandType::Tmp(exc_tmp + 1),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -10790,6 +10859,7 @@ impl Compiler {
                     result: OperandType::Tmp(arr_tmp),
                     line: expr.span.line,
                 });
+                let elems_tmp_start = self.op_array.temp_count;
 
                 for elem in elements {
                     if elem.key.is_none()
@@ -10905,6 +10975,19 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     }
+                }
+                // The element temporaries were copied into the array: release
+                // them so the array holds the only reference (PHP moves TMPs
+                // into ADD_ARRAY_ELEMENT).
+                let elems_tmp_end = self.op_array.temp_count;
+                if elems_tmp_end > elems_tmp_start {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FreeTmps,
+                        op1: OperandType::Tmp(elems_tmp_start),
+                        op2: OperandType::Tmp(elems_tmp_end),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                 }
 
                 Ok(OperandType::Tmp(arr_tmp))
@@ -11490,6 +11573,16 @@ impl Compiler {
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });
+                // INSTANCEOF frees a temporary operand.
+                if let OperandType::Tmp(t) = obj {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FreeTmps,
+                        op1: OperandType::Tmp(t),
+                        op2: OperandType::Tmp(t + 1),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
                 Ok(OperandType::Tmp(tmp))
             }
 

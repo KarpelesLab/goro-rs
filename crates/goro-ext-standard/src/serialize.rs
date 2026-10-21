@@ -1052,6 +1052,9 @@ fn unser_destroy(vm: &mut Vm, d: &Rc<RefCell<UnserData>>) {
         vm.current_line = saved_line;
         if vm.current_exception.is_some() {
             failed = true;
+        } else if let Value::Object(o) = &item.obj {
+            // The object is complete: its destructor is armed.
+            o.borrow_mut().remove_property(b"__ctor_pending");
         }
     }
 }
@@ -1772,7 +1775,16 @@ impl<'a> Parser<'a> {
                 Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
             );
         }
-        Some(Rc::new(RefCell::new(obj)))
+        // An unserialized object is destructed once released, like any other.
+        let has_destruct = vm
+            .classes
+            .get(class_lower)
+            .is_some_and(|c| c.get_method(b"__destruct").is_some());
+        let rc = Rc::new(RefCell::new(obj));
+        if has_destruct {
+            vm.register_destructible(Value::Object(rc.clone()));
+        }
+        Some(rc)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1861,6 +1873,13 @@ impl<'a> Parser<'a> {
         }
         let obj_val = Value::Object(obj.clone());
         slot_set(&self.d, slot, obj_val.clone());
+        // An object waiting for its delayed __wakeup()/__unserialize() is not
+        // destructed unless that call succeeds (php-src flags it
+        // IS_OBJ_DESTRUCTOR_CALLED when the call fails or never happens).
+        if has_unserialize || (!incomplete && has_user_method(vm, &class_lower, b"__wakeup")) {
+            obj.borrow_mut()
+                .set_property(b"__ctor_pending".to_vec(), Value::True);
+        }
 
         if has_unserialize {
             if elements >= 0x40000000 {

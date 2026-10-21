@@ -201,6 +201,9 @@ pub struct PhpObject {
     pub object_id: u64,
     /// Registered with the cycle collector (see gc.rs).
     pub gc_tracked: GcFlag,
+    /// Listed in the VM's objects awaiting destruction (a hint for
+    /// `gc::note_dtor_candidate`).
+    pub dtor_listed: GcFlag,
     /// For `Closure` instances: the underlying callable (the internal
     /// `__closure_N` name, a `[name, $this?, captures...]` array, a function
     /// name, or a bound-method `["Class::m", $obj]` array).
@@ -283,6 +286,7 @@ impl PhpObject {
             properties: Vec::new(),
             object_id,
             gc_tracked: GcFlag::default(),
+            dtor_listed: GcFlag::default(),
             closure: None,
             native: None,
         }
