@@ -347,6 +347,18 @@ pub fn nl_langinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(s(&cstr(p)))
 }
 
+/// strcoll() on two byte strings (each cut at its first NUL), as
+/// string_locale_compare_function does for SORT_LOCALE_STRING.
+pub(crate) fn locale_strcoll(a: &[u8], b: &[u8]) -> i32 {
+    let cut = |x: &[u8]| -> CString {
+        let end = x.iter().position(|&c| c == 0).unwrap_or(x.len());
+        CString::new(&x[..end]).unwrap_or_default()
+    };
+    let (ca, cb) = (cut(a), cut(b));
+    let r = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+    r.signum()
+}
+
 /// PHP_FUNCTION(strcoll)
 pub fn strcoll_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = args

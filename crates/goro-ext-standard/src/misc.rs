@@ -4378,10 +4378,15 @@ fn php_data_cmp(vm: &mut Vm, a: &Value, b: &Value, flags: i64) -> i32 {
             let y = sort_cmp_double(vm, b);
             three_way(x, y)
         }
-        SORT_STRING | SORT_LOCALE_STRING => {
+        SORT_LOCALE_STRING => {
             let x = sort_cmp_string(vm, a);
             let y = sort_cmp_string(vm, b);
-            if ci && base_flag == SORT_STRING {
+            crate::locale::locale_strcoll(&x, &y)
+        }
+        SORT_STRING => {
+            let x = sort_cmp_string(vm, a);
+            let y = sort_cmp_string(vm, b);
+            if ci {
                 let lx: Vec<u8> = x.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let ly: Vec<u8> = y.iter().map(|c| c.to_ascii_lowercase()).collect();
                 bytes_cmp(&lx, &ly)
@@ -4438,10 +4443,15 @@ fn php_key_cmp(vm: &mut Vm, a: &ArrayKey, b: &ArrayKey, flags: i64) -> i32 {
             };
             three_way(d(a), d(b))
         }
-        SORT_STRING | SORT_LOCALE_STRING => {
+        SORT_LOCALE_STRING => {
             let x = key_to_bytes(a);
             let y = key_to_bytes(b);
-            if ci && base_flag == SORT_STRING {
+            crate::locale::locale_strcoll(&x, &y)
+        }
+        SORT_STRING => {
+            let x = key_to_bytes(a);
+            let y = key_to_bytes(b);
+            if ci {
                 let lx: Vec<u8> = x.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let ly: Vec<u8> = y.iter().map(|c| c.to_ascii_lowercase()).collect();
                 bytes_cmp(&lx, &ly)
