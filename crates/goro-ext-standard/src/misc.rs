@@ -12399,6 +12399,14 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let arr_val = args.first().unwrap_or(&Value::Null);
     let callback = args.get(1).unwrap_or(&Value::Null);
     let extra_data = args.get(2).cloned();
+    if matches!(arr_val.deref(), Value::Object(_)) {
+        // Objects are walked over their properties like array_walk().
+        return array_walk(vm, args);
+    }
+    if !matches!(arr_val.deref(), Value::Array(_)) {
+        require_array_arg(vm, arr_val, "array_walk_recursive", "array", 1)?;
+        return Ok(Value::True);
+    }
 
     // Extract callback function name and captured vars
     let (func_name, captured) = match callback {

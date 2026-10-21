@@ -1856,16 +1856,26 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                             Ok(s) => s,
                             Err(_) => return false,
                         };
-                        // Anchored prefix match against actual.
-                        let anchored = format!("^(?:{})", regex_pat);
-                        let re = match regex::Regex::new(&anchored) {
+                        // PCRE accepts `\0` (NUL); Rust's regex needs `\x00`.
+                        let mut pat = String::with_capacity(regex_pat.len());
+                        let mut chars = regex_pat.chars().peekable();
+                        while let Some(c) = chars.next() {
+                            if c == '\\' {
+                                match chars.peek() {
+                                    Some('0') => { chars.next(); pat.push_str("\\x00"); continue; }
+                                    Some(_) => { pat.push(c); pat.push(chars.next().unwrap()); continue; }
+                                    None => {}
+                                }
+                            }
+                            pat.push(c);
+                        }
+                        // Anchored prefix match against actual (byte-based).
+                        let anchored = format!("(?-u)^(?:{})", pat);
+                        let re = match regex::bytes::Regex::new(&anchored) {
                             Ok(r) => r,
                             Err(_) => return false,
                         };
-                        let rest = match std::str::from_utf8(&ab[ai..]) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
+                        let rest = &ab[ai..];
                         // Try each match length, longest first, with backtracking.
                         let mut candidates: Vec<usize> = Vec::new();
                         if let Some(m) = re.find(rest) {
