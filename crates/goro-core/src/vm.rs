@@ -31144,8 +31144,16 @@ impl Vm {
                                 if !trait_def.is_trait {
                                     let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
                                     let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                    // zend_do_link_class throws (catchable) Error
+                                    let err_msg = format!("{} cannot use {} - it is not a trait", class_display, trait_display);
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
                                     return Err(VmError {
-                                        message: format!("{} cannot use {} - it is not a trait", class_display, trait_display),
+                                        message: format!("Uncaught Error: {}", err_msg),
                                         line: op.line,
                                     });
                                 }
@@ -31177,127 +31185,106 @@ impl Vm {
                             }
                         }
 
-                        // Validate trait adaptations: check for aliasing/precedence of nonexistent methods
-                        for adapt in &trait_adaptations {
-                            match adapt {
-                                crate::object::TraitAdaptation::Alias {
-                                    trait_name: alias_trait,
-                                    method: alias_method,
-                                    new_name,
-                                    new_visibility,
-                                } => {
-                                    let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    if let Some(tn) = alias_trait {
-                                        let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        // Check if this is actually a trait we're using
-                                        let is_trait = self.classes.get(&tn_lower).map(|c| c.is_trait).unwrap_or(false);
-                                        if !is_trait {
-                                            let tn_display = String::from_utf8_lossy(tn).to_string();
-                                            return Err(VmError {
-                                                message: format!("Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", tn_display),
-                                                line: op.line,
-                                            });
+                        // Validate trait adaptations (zend_traits_init_trait_structures)
+                        {
+                            let used_traits: Vec<Vec<u8>> = trait_names.iter()
+                                .map(|t| t.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                .collect();
+                            // Resolve a trait referenced by an adaptation: exists, is a trait, is used.
+                            let check_trait_ref = |vm: &Self, name: &[u8]| -> Result<Vec<u8>, String> {
+                                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let t = match vm.classes.get(&lower) {
+                                    Some(t) => t,
+                                    None => return Err(format!("Could not find trait {}", String::from_utf8_lossy(name))),
+                                };
+                                if !t.is_trait {
+                                    return Err(format!("Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", String::from_utf8_lossy(&t.name)));
+                                }
+                                if !used_traits.contains(&lower) {
+                                    return Err(format!("Required Trait {} wasn't added to {}", String::from_utf8_lossy(&t.name), String::from_utf8_lossy(&class.name)));
+                                }
+                                Ok(lower)
+                            };
+                            let mut excluded_seen: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                            let mut adapt_err: Option<String> = None;
+                            'adapts: for adapt in &trait_adaptations {
+                                match adapt {
+                                    crate::object::TraitAdaptation::Precedence { trait_name: prec_trait, method: prec_method, instead_of } => {
+                                        let tl = match check_trait_ref(self, prec_trait) {
+                                            Ok(t) => t,
+                                            Err(e) => { adapt_err = Some(e); break 'adapts; }
+                                        };
+                                        let method_lower: Vec<u8> = prec_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let tdef = self.classes.get(&tl).unwrap();
+                                        if !tdef.methods.contains_key(&method_lower) {
+                                            adapt_err = Some(format!("A precedence rule was defined for {}::{} but this method does not exist",
+                                                String::from_utf8_lossy(&tdef.name), String::from_utf8_lossy(prec_method)));
+                                            break 'adapts;
                                         }
-                                        // Check method exists in that trait
-                                        let method_exists = self.classes.get(&tn_lower)
-                                            .map(|t| t.methods.contains_key(&method_lower))
-                                            .unwrap_or(false);
-                                        if !method_exists {
-                                            let tn_display = String::from_utf8_lossy(tn).to_string();
-                                            let method_display = String::from_utf8_lossy(alias_method).to_string();
-                                            return Err(VmError {
-                                                message: format!("An alias was defined for {}::{} but this method does not exist", tn_display, method_display),
-                                                line: op.line,
-                                            });
-                                        }
-                                    } else {
-                                        // No trait specified - method must exist in at least one trait
-                                        let method_display = String::from_utf8_lossy(alias_method).to_string();
-                                        // Check how many traits have this method
-                                        let mut found_count = 0;
-                                        let mut found_traits: Vec<String> = Vec::new();
-                                        for tn in &trait_names {
-                                            let tn_lower: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            if let Some(t) = self.classes.get(&tn_lower) {
-                                                if t.methods.contains_key(&method_lower) {
-                                                    found_count += 1;
-                                                    found_traits.push(String::from_utf8_lossy(&t.name).to_string());
-                                                }
-                                            }
-                                        }
-                                        if found_count == 0 {
-                                            // Different error messages for visibility-only change vs actual alias
-                                            if new_name.is_none() && new_visibility.is_some() {
-                                                return Err(VmError {
-                                                    message: format!("The modifiers of the trait method {}() are changed, but this method does not exist. Error", method_display),
-                                                    line: op.line,
-                                                });
-                                            }
-                                            let alias_display = if let Some(nn) = new_name {
-                                                String::from_utf8_lossy(nn).to_string()
-                                            } else {
-                                                method_display.clone()
+                                        let tdef_name = tdef.name.clone();
+                                        for io in instead_of {
+                                            let el = match check_trait_ref(self, io) {
+                                                Ok(t) => t,
+                                                Err(e) => { adapt_err = Some(e); break 'adapts; }
                                             };
-                                            return Err(VmError {
-                                                message: format!("An alias ({}) was defined for method {}(), but this method does not exist", alias_display, method_display),
-                                                line: op.line,
-                                            });
-                                        }
-                                        if found_count > 1 {
-                                            return Err(VmError {
-                                                message: format!("An alias was defined for method {}(), which exists in both {}. Use {}::{} or {}::{} to resolve the ambiguity",
-                                                    method_display, found_traits.join(" and "),
-                                                    found_traits[0], method_display,
-                                                    found_traits[1], method_display),
-                                                line: op.line,
-                                            });
-                                        }
-                                    }
-                                }
-                                crate::object::TraitAdaptation::Precedence {
-                                    trait_name: prec_trait,
-                                    method: prec_method,
-                                    instead_of,
-                                } => {
-                                    let prec_trait_lower: Vec<u8> = prec_trait.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let method_lower: Vec<u8> = prec_method.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    // Check that the trait is actually a trait
-                                    let is_trait = self.classes.get(&prec_trait_lower).map(|c| c.is_trait).unwrap_or(false);
-                                    if !is_trait {
-                                        let tn_display = String::from_utf8_lossy(prec_trait).to_string();
-                                        if self.classes.contains_key(&prec_trait_lower) {
-                                            return Err(VmError {
-                                                message: format!("Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", tn_display),
-                                                line: op.line,
-                                            });
+                                            let ex_name = self.classes.get(&el).map(|c| c.name.clone()).unwrap_or_default();
+                                            if excluded_seen.iter().any(|(t, m)| *t == el && *m == method_lower) {
+                                                adapt_err = Some(format!("Failed to evaluate a trait precedence ({}). Method of trait {} was defined to be excluded multiple times",
+                                                    String::from_utf8_lossy(prec_method), String::from_utf8_lossy(&ex_name)));
+                                                break 'adapts;
+                                            }
+                                            excluded_seen.push((el.clone(), method_lower.clone()));
+                                            if el == tl {
+                                                adapt_err = Some(format!("Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
+                                                    String::from_utf8_lossy(prec_method), String::from_utf8_lossy(&tdef_name), String::from_utf8_lossy(&tdef_name)));
+                                                break 'adapts;
+                                            }
                                         }
                                     }
-                                    // Check method exists
-                                    let method_exists = self.classes.get(&prec_trait_lower)
-                                        .map(|t| t.methods.contains_key(&method_lower))
-                                        .unwrap_or(false);
-                                    if !method_exists {
-                                        let tn_display = String::from_utf8_lossy(prec_trait).to_string();
-                                        let method_display = String::from_utf8_lossy(prec_method).to_string();
-                                        return Err(VmError {
-                                            message: format!("A precedence rule was defined for {}::{} but this method does not exist", tn_display, method_display),
-                                            line: op.line,
-                                        });
-                                    }
-                                    // Check that the trait itself is not in the insteadof list
-                                    for io in instead_of {
-                                        let io_lower: Vec<u8> = io.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if io_lower == prec_trait_lower {
-                                            let tn_display = String::from_utf8_lossy(prec_trait).to_string();
-                                            let method_display = String::from_utf8_lossy(prec_method).to_string();
-                                            return Err(VmError {
-                                                message: format!("Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
-                                                    method_display, tn_display, tn_display),
-                                                line: op.line,
-                                            });
+                                    crate::object::TraitAdaptation::Alias { trait_name: alias_trait, method: alias_method, new_name, new_visibility } => {
+                                        let method_lower: Vec<u8> = alias_method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        if let Some(tn) = alias_trait {
+                                            let tl = match check_trait_ref(self, tn) {
+                                                Ok(t) => t,
+                                                Err(e) => { adapt_err = Some(e); break 'adapts; }
+                                            };
+                                            let tdef = self.classes.get(&tl).unwrap();
+                                            if !tdef.methods.contains_key(&method_lower) {
+                                                adapt_err = Some(format!("An alias was defined for {}::{} but this method does not exist",
+                                                    String::from_utf8_lossy(&tdef.name), String::from_utf8_lossy(alias_method)));
+                                                break 'adapts;
+                                            }
+                                        } else {
+                                            let found: Vec<Vec<u8>> = used_traits.iter()
+                                                .filter_map(|tl| self.classes.get(tl))
+                                                .filter(|t| t.methods.contains_key(&method_lower))
+                                                .map(|t| t.name.clone())
+                                                .collect();
+                                            if found.len() > 1 {
+                                                let m = String::from_utf8_lossy(alias_method);
+                                                let a0 = String::from_utf8_lossy(&found[0]);
+                                                let a1 = String::from_utf8_lossy(&found[1]);
+                                                adapt_err = Some(format!("An alias was defined for method {}(), which exists in both {} and {}. Use {}::{} or {}::{} to resolve the ambiguity",
+                                                    m, a0, a1, a0, m, a1, m));
+                                                break 'adapts;
+                                            }
+                                            if found.is_empty() {
+                                                adapt_err = Some(if let Some(nn) = new_name {
+                                                    format!("An alias ({}) was defined for method {}(), but this method does not exist",
+                                                        String::from_utf8_lossy(nn), String::from_utf8_lossy(alias_method))
+                                                } else {
+                                                    let _ = new_visibility;
+                                                    format!("The modifiers of the trait method {}() are changed, but this method does not exist. Error",
+                                                        String::from_utf8_lossy(alias_method))
+                                                });
+                                                break 'adapts;
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            if let Some(msg) = adapt_err {
+                                return Err(VmError { message: msg, line: op.line });
                             }
                         }
 
@@ -31525,12 +31512,78 @@ impl Vm {
                                         class.properties.push(p);
                                     }
                                 }
-                                // Copy trait constants (class's own constants take precedence)
+                                // Copy trait constants (zend_do_traits_constant_binding /
+                                // do_trait_constant_check): a constant already declared by the
+                                // class or an earlier trait must be identical.
+                                let cur_trait_idx = trait_names.iter().position(|t| t.eq_ignore_ascii_case(trait_name)).unwrap_or(0);
                                 for (const_name, const_val) in &trait_def.constants {
-                                    if !class.constants.contains_key(const_name) {
-                                        class
-                                            .constants
-                                            .insert(const_name.clone(), const_val.clone());
+                                    let t_meta = trait_def.constants_meta.get(const_name).cloned();
+                                    let existing_meta = class.constants_meta.get(const_name).cloned();
+                                    let existing_is_own = class.constants.contains_key(const_name)
+                                        && existing_meta.as_ref().map(|m| m.declaring_class == class_name_lower).unwrap_or(true);
+                                    if existing_is_own {
+                                        let ev = class.constants.get(const_name).cloned().unwrap_or(Value::Null);
+                                        let flags_differ = match (&t_meta, &existing_meta) {
+                                            (Some(a), Some(b)) => a.visibility != b.visibility || a.is_final != b.is_final,
+                                            _ => false,
+                                        };
+                                        let tt = t_meta.as_ref().and_then(|m| m.declared_type.clone());
+                                        let et = existing_meta.as_ref().and_then(|m| m.declared_type.clone());
+                                        let types_differ = match (&tt, &et) {
+                                            (None, None) => false,
+                                            (Some(a), Some(b)) => {
+                                                let tl = trait_def.name.clone();
+                                                !(self.variance_property_types(&class, &tl.iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<u8>>(), &Some(a.clone()), &Some(b.clone()), 0).0 != variance::Status::Error)
+                                            }
+                                            _ => true,
+                                        };
+                                        let resolve_binop = |vm: &Self, v: &Value, cl: &[u8], c: &ClassEntry| -> Option<Value> {
+                                            if let Value::String(sv) = v {
+                                                if sv.as_bytes().starts_with(b"__deferred_binop__::") {
+                                                    return vm.resolve_deferred_binop(sv.as_bytes(), cl, c);
+                                                }
+                                            }
+                                            None
+                                        };
+                                        let v1 = match resolve_binop(self, const_val, &trait_lower, &trait_def) {
+                                            Some(v) => v,
+                                            None => self.resolve_deferred_value(const_val),
+                                        };
+                                        let v2 = match resolve_binop(self, &ev, &class_name_lower, &class) {
+                                            Some(v) => v,
+                                            None => self.resolve_deferred_value(&ev),
+                                        };
+                                        if flags_differ || types_differ || !v1.identical(&v2) {
+                                            // First definition: an earlier trait declaring it, else the class.
+                                            let first_def = trait_names[..cur_trait_idx].iter().find_map(|tn| {
+                                                let tl: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                self.classes.get(&tl).filter(|t| t.constants.contains_key(const_name)).map(|t| t.name.clone())
+                                            }).unwrap_or_else(|| class.name.clone());
+                                            return Err(VmError {
+                                                message: format!("{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                    String::from_utf8_lossy(&first_def), String::from_utf8_lossy(&trait_def.name),
+                                                    String::from_utf8_lossy(const_name), String::from_utf8_lossy(&class.name)),
+                                                line: op.line,
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                    if let Some(pm) = existing_meta.as_ref() {
+                                        // Replaces an inherited constant: final parent constants cannot be overridden.
+                                        if pm.is_final {
+                                            let pdecl = self.classes.get(&pm.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| pm.declaring_class.clone());
+                                            return Err(VmError {
+                                                message: format!("{}::{} cannot override final constant {}::{}",
+                                                    String::from_utf8_lossy(&class.name), String::from_utf8_lossy(const_name),
+                                                    String::from_utf8_lossy(&pdecl), String::from_utf8_lossy(const_name)),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    class.constants.insert(const_name.clone(), const_val.clone());
+                                    if let Some(mut m) = t_meta {
+                                        m.declaring_class = class_name_lower.clone();
+                                        class.constants_meta.insert(const_name.clone(), m);
                                     }
                                 }
                                 // Copy trait static properties (class's own take precedence)
