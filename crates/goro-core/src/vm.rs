@@ -14795,6 +14795,14 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    let b = match &b {
+                        Value::Array(g) if Rc::ptr_eq(g, &self.globals) => self.dup_array_value(b),
+                        _ => b,
+                    };
+                    let a = match &a {
+                        Value::Array(g) if Rc::ptr_eq(g, &self.globals) => self.dup_array_value(a),
+                        _ => a,
+                    };
                     // Check for object operator overloading (e.g., GMP)
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
@@ -16768,6 +16776,13 @@ impl Vm {
                 OpCode::AssignAdd => {
                     let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // `$a += $GLOBALS` adds the variables' values.
+                    let rhs = match &rhs {
+                        Value::Array(a) if Rc::ptr_eq(a, &self.globals) => {
+                            self.dup_array_value(rhs)
+                        }
+                        _ => rhs,
+                    };
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&cv_val) || is_type(&rhs) {
@@ -27766,7 +27781,13 @@ impl Vm {
                                 // the missing entry, so a warning would be a
                                 // spurious "undefined" diagnostic for what is
                                 // really a brand-new initializer.
-                                if !is_rw {
+                                if !is_rw && Rc::ptr_eq(arr, &self.globals) {
+                                    // $GLOBALS['x'] is a FETCH of the global variable.
+                                    self.emit_warning_at(
+                                        &format!("Undefined global variable ${}", key),
+                                        op.line,
+                                    );
+                                } else if !is_rw {
                                     match &key {
                                         crate::array::ArrayKey::Int(i) => {
                                             self.emit_warning_at(
@@ -29604,7 +29625,19 @@ impl Vm {
                     let name = name_val.to_php_string().as_bytes().to_vec();
                     // ZEND_BIND_GLOBAL: the CV becomes a reference to the
                     // symbol table entry (created as NULL when missing).
-                    if let OperandType::Cv(cv_idx) = op.op1 {
+                    // `global ${expr}` names the local variable at runtime.
+                    let target = match op.op1 {
+                        OperandType::Unused => op_array
+                            .cv_names
+                            .iter()
+                            .position(|n| *n == name)
+                            .map(|i| OperandType::Cv(i as u32)),
+                        o => Some(o),
+                    };
+                    if target.is_none() {
+                        let _ = self.global_cell(&name);
+                    }
+                    if let Some(OperandType::Cv(cv_idx)) = target {
                         let same_cv =
                             global_bound && op_array.cv_names.get(cv_idx as usize) == Some(&name);
                         if !same_cv {
@@ -45552,8 +45585,9 @@ impl Vm {
                 let is_closure = matches!(copy.values().next(), Some(Value::String(s))
                             if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") });
                 // A copy of $GLOBALS sees the variables' values, not the
-                // cells that bind them to global-scope CVs.
-                let max_rc = if Rc::ptr_eq(arr, &self.globals) { 3 } else { 2 };
+                // cells that bind them to global-scope CVs (table + CV +
+                // frame binding + this copy).
+                let max_rc = if Rc::ptr_eq(arr, &self.globals) { 4 } else { 2 };
                 for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
                     let single = matches!(v, Value::Reference(r) if Rc::strong_count(r) <= max_rc);
                     if single {

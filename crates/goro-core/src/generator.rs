@@ -1845,7 +1845,15 @@ impl PhpGenerator {
                     let name_val = self.read_operand(&op.op2, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
                     // The CV becomes a reference to the global (ZEND_BIND_GLOBAL).
-                    if let OperandType::Cv(cv_idx) = op.op1 {
+                    let target = match op.op1 {
+                        OperandType::Unused => op_array
+                            .cv_names
+                            .iter()
+                            .position(|n| *n == name)
+                            .map(|i| OperandType::Cv(i as u32)),
+                        o => Some(o),
+                    };
+                    if let Some(OperandType::Cv(cv_idx)) = target {
                         let cell = vm.global_cell(&name);
                         if let Some(slot) = self.cvs.get_mut(cv_idx as usize) {
                             *slot = Value::Reference(cell);

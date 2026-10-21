@@ -2275,6 +2275,11 @@ impl Compiler {
                 body,
                 ..
             } => {
+                if matches!(&value.kind, ExprKind::Variable(n) if n == b"GLOBALS")
+                    || matches!(&value.kind, ExprKind::Array(elems) if Self::list_writes_globals(elems))
+                {
+                    return Err(CompileError { message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(), line: stmt.span.line });
+                }
                 // Check for $this in foreach target variables
                 if self.check_foreach_this_assign(value, stmt.span.line)? {
                     return Err(CompileError {
@@ -3411,6 +3416,33 @@ impl Compiler {
                 Ok(())
             }
 
+            StmtKind::GlobalDynamic(exprs) => {
+                for e in exprs {
+                    match &e.kind {
+                        ExprKind::Variable(name) => {
+                            let st = Statement {
+                                kind: StmtKind::Global(vec![name.clone()]),
+                                span: stmt.span,
+                            };
+                            self.compile_stmt(&st)?;
+                        }
+                        ExprKind::DynamicVariable(inner) => {
+                            // The local variable named by the expression is bound.
+                            let name_op = self.compile_expr(inner)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::BindGlobal,
+                                op1: OperandType::Unused,
+                                op2: name_op,
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+
             StmtKind::Unset(exprs) => {
                 for expr in exprs {
                     match &expr.kind {
@@ -3422,7 +3454,28 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
+                            // A missing intermediate dimension is not an error
+                            // (FETCH_DIM_UNSET).
+                            let nested = matches!(array.kind, ExprKind::ArrayAccess { .. });
+                            if nested {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ErrorSuppress,
+                                    op1: OperandType::Unused,
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: stmt.span.line,
+                                });
+                            }
                             let arr_operand = self.compile_expr(array)?;
+                            if nested {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ErrorRestore,
+                                    op1: OperandType::Unused,
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: stmt.span.line,
+                                });
+                            }
                             if let Some(idx_expr) = index {
                                 let idx_operand = self.compile_expr(idx_expr)?;
                                 self.op_array.emit(Op {
@@ -8305,6 +8358,15 @@ impl Compiler {
         op
     }
 
+    /// A list() / [] destructuring target that writes $GLOBALS itself.
+    fn list_writes_globals(elems: &[ArrayElement]) -> bool {
+        elems.iter().any(|e| match &e.value.kind {
+            ExprKind::Variable(n) => n == b"GLOBALS",
+            ExprKind::Array(sub) => Self::list_writes_globals(sub),
+            _ => false,
+        })
+    }
+
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
         elems.iter().any(|e| {
             e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub))
@@ -9018,6 +9080,29 @@ impl Compiler {
                 if matches!(&target.kind, ExprKind::Variable(name) if name == b"GLOBALS") {
                     return Err(CompileError {
                         message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
+                    });
+                }
+                let list_globals = match &target.kind {
+                    ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
+                        args.iter().any(
+                            |a| matches!(&a.value.kind, ExprKind::Variable(n) if n == b"GLOBALS"),
+                        )
+                    }
+                    _ => false,
+                };
+                if list_globals {
+                    return Err(CompileError { message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(), line: expr.span.line });
+                }
+                if let ExprKind::Array(elems) = &target.kind {
+                    if Self::list_writes_globals(elems) && !Self::list_has_ref(elems) {
+                        return Err(CompileError { message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(), line: expr.span.line });
+                    }
+                }
+                if matches!(&target.kind, ExprKind::ArrayAccess { array, index: None } if matches!(&array.kind, ExprKind::Variable(n) if n == b"GLOBALS"))
+                {
+                    return Err(CompileError {
+                        message: "Cannot append to $GLOBALS".into(),
                         line: expr.span.line,
                     });
                 }
@@ -11337,6 +11422,12 @@ impl Compiler {
                 // isset() returns true if all vars are set and not null
                 // Validate: isset() can only take variables, properties, array accesses
                 for check_expr in exprs {
+                    if matches!(check_expr.kind, ExprKind::ArrayAccess { index: None, .. }) {
+                        return Err(CompileError {
+                            message: "Cannot use [] for reading".into(),
+                            line: expr.span.line,
+                        });
+                    }
                     let is_valid = matches!(
                         check_expr.kind,
                         ExprKind::Variable(_)
@@ -13660,6 +13751,12 @@ impl Compiler {
                 if matches!(&target.kind, ExprKind::Variable(name) if name == b"GLOBALS") {
                     return Err(CompileError {
                         message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                        line: expr.span.line,
+                    });
+                }
+                if matches!(&value.kind, ExprKind::Variable(n) if n == b"GLOBALS") {
+                    return Err(CompileError {
+                        message: "Cannot acquire reference to $GLOBALS".into(),
                         line: expr.span.line,
                     });
                 }

@@ -1009,10 +1009,40 @@ impl Parser {
             TokenKind::Global => {
                 self.advance();
                 let mut vars = Vec::new();
+                let mut exprs: Vec<Expr> = Vec::new();
+                let mut dynamic = false;
                 loop {
                     if let TokenKind::Variable(name) = self.peek().clone() {
+                        let vspan = self.span();
                         self.advance();
+                        exprs.push(Expr {
+                            kind: ExprKind::Variable(name.clone()),
+                            span: vspan,
+                        });
                         vars.push(name);
+                    } else if matches!(
+                        self.peek(),
+                        TokenKind::DollarOpenBrace | TokenKind::VariableVariable(_)
+                    ) {
+                        // global ${expr}; / global $$name;
+                        let vspan = self.span();
+                        let inner = if let TokenKind::VariableVariable(name) = self.peek().clone() {
+                            self.advance();
+                            Expr {
+                                kind: ExprKind::Variable(name),
+                                span: vspan,
+                            }
+                        } else {
+                            self.advance();
+                            let e = self.parse_expression()?;
+                            self.expect(&TokenKind::CloseBrace)?;
+                            e
+                        };
+                        exprs.push(Expr {
+                            kind: ExprKind::DynamicVariable(Box::new(inner)),
+                            span: vspan,
+                        });
+                        dynamic = true;
                     } else {
                         return Err(ParseError {
                             message: "expected variable name after 'global'".into(),
@@ -1023,9 +1053,22 @@ impl Parser {
                         break;
                     }
                 }
+                if !matches!(self.peek(), TokenKind::Semicolon | TokenKind::CloseTag) {
+                    return Err(ParseError {
+                        message: format!(
+                            "syntax error, unexpected {}, expecting \",\" or \";\"",
+                            self.peek().to_php_unexpected()
+                        ),
+                        span: self.span(),
+                    });
+                }
                 self.expect_semicolon()?;
                 Ok(Statement {
-                    kind: StmtKind::Global(vars),
+                    kind: if dynamic {
+                        StmtKind::GlobalDynamic(exprs)
+                    } else {
+                        StmtKind::Global(vars)
+                    },
                     span,
                 })
             }

@@ -82,6 +82,7 @@ pub enum StmtKind {
     },
     Throw(Expr),
     Global(Vec<Vec<u8>>),
+    GlobalDynamic(Vec<Expr>),
     StaticVar(Vec<(Vec<u8>, Option<Expr>)>),
     Unset(Vec<Expr>),
     Declare {
