@@ -1195,6 +1195,7 @@ pub fn parse_dtd(public: Option<&str>, system: Option<&str>) -> (Option<NodeId>,
     };
     let (data, fname) = match load_external(public, sys, sys) {
         Ok((d, f)) => (prepare_external(d).0, f.unwrap_or_else(|| sys.to_string())),
+        Err(Some((crate::parser::EXT_LOAD_REPORTED, _))) => return (None, Vec::new()),
         Err(e) => {
             let (code, msg) = e.unwrap_or_else(|| {
                 (

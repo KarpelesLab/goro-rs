@@ -2043,9 +2043,41 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                             Ok(s) => s,
                             Err(_) => return false,
                         };
+                        // run-tests' strtr() also expands the %-placeholders
+                        // inside %r sections.
+                        let mut expanded = String::with_capacity(regex_pat.len());
+                        let rb = regex_pat.as_bytes();
+                        let mut k = 0;
+                        while k < rb.len() {
+                            if rb[k] == b'%' && k + 1 < rb.len() {
+                                let rep = match rb[k + 1] {
+                                    b'e' => Some("/"),
+                                    b's' => Some(r"[^\r\n]+"),
+                                    b'S' => Some(r"[^\r\n]*"),
+                                    b'a' => Some("(?s:.+?)"),
+                                    b'A' => Some("(?s:.*?)"),
+                                    b'w' => Some(r"\s*"),
+                                    b'i' => Some(r"[+-]?\d+"),
+                                    b'd' => Some(r"\d+"),
+                                    b'x' => Some("[0-9a-fA-F]+"),
+                                    b'f' => Some(r"[+-]?(?:\d+|\.\d)(?:\.\d+)?(?:[Ee][+-]?\d+)?"),
+                                    b'c' => Some("."),
+                                    b'0' => Some(r"\x00"),
+                                    _ => None,
+                                };
+                                if let Some(r) = rep {
+                                    expanded.push_str(r);
+                                    k += 2;
+                                    continue;
+                                }
+                            }
+                            let ch = regex_pat[k..].chars().next().unwrap_or('%');
+                            expanded.push(ch);
+                            k += ch.len_utf8();
+                        }
                         // PCRE accepts `\0` (NUL); Rust's regex needs `\x00`.
-                        let mut pat = String::with_capacity(regex_pat.len());
-                        let mut chars = regex_pat.chars().peekable();
+                        let mut pat = String::with_capacity(expanded.len());
+                        let mut chars = expanded.chars().peekable();
                         while let Some(c) = chars.next() {
                             if c == '\\' {
                                 match chars.peek() {

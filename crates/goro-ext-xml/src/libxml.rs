@@ -356,13 +356,29 @@ fn libxml_set_external_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Valu
             return Ok(Value::Null);
         }
     }
+    let set = !matches!(v, Value::Null | Value::Undef);
     STATE.with(|s| {
-        s.borrow_mut().entity_loader = if matches!(v, Value::Null | Value::Undef) {
-            None
-        } else {
-            Some(v)
-        };
+        s.borrow_mut().entity_loader = if set { Some(v) } else { None };
     });
+    if set {
+        // External loads done by the parser go to the user callback. The
+        // parser has no access to the VM, so the hook reaches it through the
+        // VM that installed it (the script's VM, alive for the whole run;
+        // parsing never uses its own `&mut Vm` while a load is running).
+        let vmp: *mut Vm = vm;
+        crate::parser::set_ext_loader(Some(Box::new(move |public, _system, url| {
+            let ctx = crate::parser::LOAD_CONTEXT.with(|c| c.borrow().clone());
+            // SAFETY: see above; the pointer targets the live script VM.
+            let vm = unsafe { &mut *vmp };
+            match user_entity_load(vm, public, Some(url), ctx) {
+                Some(Some(d)) => Ok((d, None)),
+                Some(None) => Err(Some((crate::parser::EXT_LOAD_REPORTED, String::new()))),
+                None => crate::parser::default_ext_load(url),
+            }
+        })));
+    } else {
+        crate::parser::set_ext_loader(None);
+    }
     Ok(Value::True)
 }
 

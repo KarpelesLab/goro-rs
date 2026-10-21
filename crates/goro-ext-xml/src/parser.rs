@@ -5937,6 +5937,16 @@ fn percent_decode_str(s: &str) -> String {
 
 /// Load an external resource through the installed hook (or the default
 /// loader).
+thread_local! {
+    /// The parser context of the load in progress (libxml2's
+    /// ctxt->directory, intSubName, extSubURI, extSubSystem), for loaders
+    /// that expose it (PHP's user entity loader).
+    pub static LOAD_CONTEXT: std::cell::RefCell<[Option<String>; 4]> = const { std::cell::RefCell::new([None, None, None, None]) };
+}
+
+/// Error code a loader returns when it already reported the failure.
+pub const EXT_LOAD_REPORTED: i32 = -1;
+
 pub fn load_external(public: Option<&str>, system: &str, url: &str) -> ExtLoadResult {
     let hook = EXT_LOADER.with(|c| c.borrow_mut().take());
     match hook {
@@ -6013,6 +6023,9 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     /// xmlCtxtErrIO for a failed external load.
     fn io_load_error(&mut self, url: &str, e: Option<(i32, String)>) {
+        if matches!(e, Some((EXT_LOAD_REPORTED, _))) {
+            return;
+        }
         let (code, msg) = e.unwrap_or_else(|| {
             (
                 XML_IO_ENOENT,
@@ -6039,7 +6052,16 @@ impl<'a, S: Sink> Parser<'a, S> {
         system: &str,
         url: &str,
     ) -> Option<(Vec<u8>, String)> {
-        match load_external(public, system, url) {
+        let ctx = [
+            self.st.directory.clone(),
+            self.int_sub_name.clone(),
+            self.ext_sub_uri.clone(),
+            self.ext_sub_system.clone(),
+        ];
+        let saved = LOAD_CONTEXT.with(|c| std::mem::replace(&mut *c.borrow_mut(), ctx));
+        let r = load_external(public, system, url);
+        LOAD_CONTEXT.with(|c| *c.borrow_mut() = saved);
+        match r {
             Ok((data, final_url)) => {
                 let (data, _) = prepare_external(data);
                 Some((data, final_url.unwrap_or_else(|| url.to_string())))
