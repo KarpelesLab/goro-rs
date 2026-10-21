@@ -101,6 +101,7 @@ fn is_not_serializable(vm: &Vm, class_name: &[u8]) -> bool {
         return true;
     }
     class_chain(vm, &lower(class_name)).iter().any(|c| not_serializable_builtin(c))
+        || goro_core::stubs::class_is_not_serializable(vm, &lower(class_name))
 }
 
 /// Builtin classes that provide native __serialize/__unserialize handlers.

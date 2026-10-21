@@ -7101,6 +7101,9 @@ impl Vm {
             b"reflectionfiber" => {
                 crate::reflection::reflection_fiber_method(self, method_lower, obj)
             }
+            b"reflectionreference" => {
+                crate::reflection::reflection_reference_method(self, method_lower, obj)
+            }
             b"splfileinfo" | b"directoryiterator" | b"filesystemiterator"
             | b"recursivedirectoryiterator" | b"globiterator" => {
                 self.spl_fs_call(class_lower, method_lower, obj, None)

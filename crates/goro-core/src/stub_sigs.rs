@@ -3111,7 +3111,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "AddressInfo", kind: 0, flags: 0x20, ext: "sockets",
+        name: "AddressInfo", kind: 0, flags: 0x800020, ext: "sockets",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3339,7 +3339,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Closure", kind: 0, flags: 0x20, ext: "Core",
+        name: "Closure", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3373,7 +3373,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "CURLFile", kind: 0, flags: 0x0, ext: "curl",
+        name: "CURLFile", kind: 0, flags: 0x800000, ext: "curl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: Some("\"\""), flags: 0x1 }, StubProp { name: "mime", ty: "string", default: Some("\"\""), flags: 0x1 }, StubProp { name: "postname", ty: "string", default: Some("\"\""), flags: 0x1 }],
@@ -3388,7 +3388,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "CurlHandle", kind: 0, flags: 0x20, ext: "curl",
+        name: "CurlHandle", kind: 0, flags: 0x800020, ext: "curl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3397,7 +3397,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "CurlMultiHandle", kind: 0, flags: 0x20, ext: "curl",
+        name: "CurlMultiHandle", kind: 0, flags: 0x800020, ext: "curl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3406,7 +3406,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "CurlShareHandle", kind: 0, flags: 0x20, ext: "curl",
+        name: "CurlShareHandle", kind: 0, flags: 0x800020, ext: "curl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3415,7 +3415,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "CurlSharePersistentHandle", kind: 0, flags: 0x20, ext: "curl",
+        name: "CurlSharePersistentHandle", kind: 0, flags: 0x800020, ext: "curl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "options", ty: "array", default: None, flags: 0x81 }],
@@ -3657,7 +3657,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "DeflateContext", kind: 0, flags: 0x20, ext: "zlib",
+        name: "DeflateContext", kind: 0, flags: 0x800020, ext: "zlib",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3685,7 +3685,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Directory", kind: 0, flags: 0x20, ext: "standard",
+        name: "Directory", kind: 0, flags: 0x800020, ext: "standard",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "path", ty: "string", default: None, flags: 0x81 }, StubProp { name: "handle", ty: "mixed", default: None, flags: 0x81 }],
@@ -3801,7 +3801,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Fiber", kind: 0, flags: 0x20, ext: "Core",
+        name: "Fiber", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3859,7 +3859,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Generator", kind: 0, flags: 0x20, ext: "Core",
+        name: "Generator", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &["Iterator"], backing: "",
         consts: &[],
         props: &[],
@@ -3924,7 +3924,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "InflateContext", kind: 0, flags: 0x20, ext: "zlib",
+        name: "InflateContext", kind: 0, flags: 0x800020, ext: "zlib",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -3933,7 +3933,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "InternalIterator", kind: 0, flags: 0x20, ext: "Core",
+        name: "InternalIterator", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &["Iterator"], backing: "",
         consts: &[],
         props: &[],
@@ -4242,7 +4242,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "OpenSSLAsymmetricKey", kind: 0, flags: 0x20, ext: "openssl",
+        name: "OpenSSLAsymmetricKey", kind: 0, flags: 0x800020, ext: "openssl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -4251,7 +4251,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "OpenSSLCertificate", kind: 0, flags: 0x20, ext: "openssl",
+        name: "OpenSSLCertificate", kind: 0, flags: 0x800020, ext: "openssl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -4260,7 +4260,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "OpenSSLCertificateSigningRequest", kind: 0, flags: 0x20, ext: "openssl",
+        name: "OpenSSLCertificateSigningRequest", kind: 0, flags: 0x800020, ext: "openssl",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -4429,7 +4429,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Random\\Engine\\Secure", kind: 0, flags: 0x20, ext: "random",
+        name: "Random\\Engine\\Secure", kind: 0, flags: 0x800020, ext: "random",
         parent: None, interfaces: &["Random\\CryptoSafeEngine"], backing: "",
         consts: &[],
         props: &[],
@@ -4651,7 +4651,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionAttribute", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionAttribute", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[StubConst { name: "IS_INSTANCEOF", ty: "int", value: None, flags: 0x1, ext: "" }],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -4668,7 +4668,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionClass", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionClass", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[StubConst { name: "IS_IMPLICIT_ABSTRACT", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_EXPLICIT_ABSTRACT", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_FINAL", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_READONLY", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "SKIP_INITIALIZATION_ON_SERIALIZE", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "SKIP_DESTRUCTOR", ty: "int", value: None, flags: 0x1, ext: "" }],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -4741,7 +4741,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionClassConstant", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionClassConstant", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[StubConst { name: "IS_PUBLIC", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PROTECTED", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PRIVATE", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_FINAL", ty: "int", value: None, flags: 0x1, ext: "" }],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }, StubProp { name: "class", ty: "string", default: None, flags: 0x1 }],
@@ -4767,7 +4767,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionConstant", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionConstant", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -4834,7 +4834,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionExtension", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionExtension", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -4857,7 +4857,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionFiber", kind: 0, flags: 0x20, ext: "Reflection",
+        name: "ReflectionFiber", kind: 0, flags: 0x800020, ext: "Reflection",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -4888,7 +4888,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionFunctionAbstract", kind: 0, flags: 0x40, ext: "Reflection",
+        name: "ReflectionFunctionAbstract", kind: 0, flags: 0x800040, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -4929,7 +4929,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionGenerator", kind: 0, flags: 0x20, ext: "Reflection",
+        name: "ReflectionGenerator", kind: 0, flags: 0x800020, ext: "Reflection",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5004,7 +5004,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionParameter", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionParameter", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -5036,7 +5036,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionProperty", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionProperty", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[StubConst { name: "IS_STATIC", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_READONLY", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PUBLIC", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PROTECTED", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PRIVATE", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_ABSTRACT", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PROTECTED_SET", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_PRIVATE_SET", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_VIRTUAL", ty: "int", value: None, flags: 0x1, ext: "" }, StubConst { name: "IS_FINAL", ty: "int", value: None, flags: 0x1, ext: "" }],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }, StubProp { name: "class", ty: "string", default: None, flags: 0x1 }],
@@ -5085,7 +5085,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionReference", kind: 0, flags: 0x20, ext: "Reflection",
+        name: "ReflectionReference", kind: 0, flags: 0x800020, ext: "Reflection",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5098,7 +5098,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionType", kind: 0, flags: 0x40, ext: "Reflection",
+        name: "ReflectionType", kind: 0, flags: 0x800040, ext: "Reflection",
         parent: None, interfaces: &["Stringable"], backing: "",
         consts: &[],
         props: &[],
@@ -5120,7 +5120,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "ReflectionZendExtension", kind: 0, flags: 0x0, ext: "Reflection",
+        name: "ReflectionZendExtension", kind: 0, flags: 0x800000, ext: "Reflection",
         parent: None, interfaces: &["Reflector"], backing: "",
         consts: &[],
         props: &[StubProp { name: "name", ty: "string", default: None, flags: 0x1 }],
@@ -5221,7 +5221,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "SensitiveParameterValue", kind: 0, flags: 0x20, ext: "Core",
+        name: "SensitiveParameterValue", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[StubProp { name: "value", ty: "mixed", default: None, flags: 0x84 }],
@@ -5296,7 +5296,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "SimpleXMLElement", kind: 0, flags: 0x0, ext: "SimpleXML",
+        name: "SimpleXMLElement", kind: 0, flags: 0x800000, ext: "SimpleXML",
         parent: None, interfaces: &["Stringable", "Countable", "RecursiveIterator"], backing: "",
         consts: &[],
         props: &[],
@@ -5336,7 +5336,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "Socket", kind: 0, flags: 0x20, ext: "sockets",
+        name: "Socket", kind: 0, flags: 0x800020, ext: "sockets",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5380,7 +5380,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "SplFileInfo", kind: 0, flags: 0x0, ext: "SPL",
+        name: "SplFileInfo", kind: 0, flags: 0x800000, ext: "SPL",
         parent: None, interfaces: &["Stringable"], backing: "",
         consts: &[],
         props: &[],
@@ -5893,7 +5893,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "WeakMap", kind: 0, flags: 0x20, ext: "Core",
+        name: "WeakMap", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &["ArrayAccess", "Countable", "IteratorAggregate"], backing: "",
         consts: &[],
         props: &[],
@@ -5908,7 +5908,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "WeakReference", kind: 0, flags: 0x20, ext: "Core",
+        name: "WeakReference", kind: 0, flags: 0x800020, ext: "Core",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],
@@ -5920,7 +5920,7 @@ pub static CLASSES: &[StubClass] = &[
         ],
     },
     StubClass {
-        name: "XMLParser", kind: 0, flags: 0x20, ext: "xml",
+        name: "XMLParser", kind: 0, flags: 0x800020, ext: "xml",
         parent: None, interfaces: &[], backing: "",
         consts: &[],
         props: &[],

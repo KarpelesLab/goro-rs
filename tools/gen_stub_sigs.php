@@ -53,6 +53,7 @@ const F_RETURNS_REF = 0x40000;
 const F_PROTECTED_SET = 0x100000;
 const F_PRIVATE_SET = 0x200000;
 const F_VIRTUAL = 0x400000;
+const F_NOT_SERIALIZABLE = 0x800000;
 
 $classes = [];
 $functions = [];
@@ -240,6 +241,9 @@ class Parser {
             'methods' => [], 'cases' => [], 'backing' => $backing,
             'deprecated' => $this->hasDeprecated($attrs, $this->docTags($doc)),
         ];
+        foreach ($this->docTags($doc) as $t) {
+            if ($t[0] === 'not-serializable') $cls['flags'] |= F_NOT_SERIALIZABLE;
+        }
         foreach ($attrs as $a) {
             if (preg_match('/^\\\\?Attribute\b/', $a)) $cls['is_attribute'] = true;
         }

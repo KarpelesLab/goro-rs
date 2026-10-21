@@ -4287,6 +4287,108 @@ fn eval_internal_default(vm: &mut Vm, def: &str) -> Option<Value> {
     vm.execute_op_array_pub(&op_array, cvs).ok()
 }
 
+
+/// ReflectionReference::fromArrayElement(array $array, int|string $key): ?ReflectionReference
+fn reflection_reference_from_array_element(vm: &mut Vm, args: &[Value], line: u32) -> Value {
+    let arr = match args.first().map(|v| v.deref()) {
+        Some(Value::Array(a)) => a,
+        Some(other) => {
+            let msg = format!(
+                "ReflectionReference::fromArrayElement(): Argument #1 ($array) must be of type array, {} given",
+                Vm::value_type_name(&other)
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Value::Null;
+        }
+        None => return Value::Null,
+    };
+    let key = match args.get(1).map(|v| v.deref()) {
+        Some(Value::Long(n)) => ArrayKey::Int(n),
+        Some(Value::String(s)) => match std::str::from_utf8(s.as_bytes()).ok().and_then(|t| t.parse::<i64>().ok()) {
+            Some(n) if n.to_string().as_bytes() == s.as_bytes() => ArrayKey::Int(n),
+            _ => ArrayKey::String(s),
+        },
+        Some(other) => {
+            let msg = format!(
+                "ReflectionReference::fromArrayElement(): Argument #2 ($key) must be of type string|int, {} given",
+                Vm::value_type_name(&other)
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Value::Null;
+        }
+        None => return Value::Null,
+    };
+    let item = arr.borrow().get(&key).cloned();
+    let item = match item {
+        Some(v) => v,
+        None => {
+            let exc = vm.create_exception(b"ReflectionException", "Array key not found", line);
+            vm.current_exception = Some(exc);
+            return Value::Null;
+        }
+    };
+    let rc = match item {
+        Value::Reference(rc) => rc,
+        _ => return Value::Null,
+    };
+    // A reference with a refcount of 1 is not a reference anymore, except
+    // for a directly self-referential array (bug #78263).
+    let self_ref = match &*rc.borrow() {
+        Value::Array(inner) => Rc::ptr_eq(inner, &arr),
+        _ => false,
+    };
+    if Rc::strong_count(&rc) <= 1 && !self_ref {
+        return Value::Null;
+    }
+    let id = Rc::as_ptr(&rc) as usize as u64;
+    let obj_id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"ReflectionReference".to_vec(), obj_id);
+    obj.set_property(b"__reflection_ref_id".to_vec(), Value::Long(id as i64));
+    Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// ReflectionReference instance methods.
+pub fn reflection_reference_method(vm: &mut Vm, method: &[u8], obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    match method {
+        b"__construct" => {
+            let scope = vm.current_class_scope().map(|c| {
+                let cl = c.to_ascii_lowercase();
+                rcls(vm, &cl).map(|ce| String::from_utf8_lossy(&ce.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&c).to_string())
+            });
+            let msg = match scope {
+                Some(sc) => format!("Call to private ReflectionReference::__construct() from scope {}", sc),
+                None => "Call to private ReflectionReference::__construct() from global scope".to_string(),
+            };
+            let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Some(Value::Null)
+        }
+        b"getid" => {
+            // PHP returns an opaque 20-byte binary id (a SHA1 of the
+            // reference address and a per-request key).
+            let id = obj.borrow().get_property(b"__reflection_ref_id").to_long() as u64;
+            let key: u64 = REF_ID_KEY.with(|k| *k);
+            let mut out = Vec::with_capacity(20);
+            let mut x = id ^ key;
+            for i in 0..20u64 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407 ^ i);
+                out.push((x >> 56) as u8);
+            }
+            Some(Value::String(PhpString::from_vec(out)))
+        }
+        _ => None,
+    }
+}
+
+thread_local! {
+    static REF_ID_KEY: u64 = {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+        t ^ 0x9E37_79B9_7F4A_7C15
+    };
+}
+
 /// ReflectionFunction no-arg method dispatch
 pub fn reflection_function_method(
     vm: &mut Vm,
@@ -7135,6 +7237,12 @@ pub fn reflection_static_call(vm: &mut Vm, class_lower: &str, method_lower: &str
                         Some(Value::Null)
                     }
                 }
+                _ => None,
+            }
+        }
+        "reflectionreference" => {
+            match method_lower {
+                "fromarrayelement" => Some(reflection_reference_from_array_element(vm, args, line)),
                 _ => None,
             }
         }

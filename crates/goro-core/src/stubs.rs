@@ -27,6 +27,7 @@ pub const F_RETURNS_REF: u32 = 0x40000;
 pub const F_PROTECTED_SET: u32 = 0x100000;
 pub const F_PRIVATE_SET: u32 = 0x200000;
 pub const F_VIRTUAL: u32 = 0x400000;
+pub const F_NOT_SERIALIZABLE: u32 = 0x800000;
 
 pub const A_BY_REF: u8 = 1;
 pub const A_PREFER_REF: u8 = 2;
@@ -519,4 +520,36 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
     }
     ce.filename = None;
     ce
+}
+
+/// Whether objects of the class can't be (un)serialized
+/// (ZEND_ACC_NOT_SERIALIZABLE, inherited from internal ancestors).
+pub fn class_is_not_serializable(vm: &crate::vm::Vm, class_lower: &[u8]) -> bool {
+    let mut cur = class_lower.to_ascii_lowercase();
+    for _ in 0..64 {
+        if let Some(ce) = vm.classes.get(&cur) {
+            match &ce.parent {
+                Some(p) => {
+                    cur = p.to_ascii_lowercase();
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        let mut c = match find_class(&cur) {
+            Some(c) => c,
+            None => return false,
+        };
+        for _ in 0..64 {
+            if c.flags & F_NOT_SERIALIZABLE != 0 {
+                return true;
+            }
+            match c.parent.and_then(|p| find_class(p.as_bytes())) {
+                Some(pc) => c = pc,
+                None => return false,
+            }
+        }
+        return false;
+    }
+    false
 }
