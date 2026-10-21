@@ -1153,6 +1153,36 @@ impl<'a> Lexer<'a> {
                     self.pos = saved;
                     self.line = saved_line;
                     TokenKind::Yield
+                } else if ident.eq_ignore_ascii_case(b"enum") {
+                    // `enum` is only a keyword when whitespace and a name
+                    // follow (other than extends/implements), like the
+                    // `"enum"{WHITESPACE_OR_COMMENTS}("extends"|"implements")`
+                    // rules of zend_language_scanner.
+                    let saved = self.pos;
+                    let saved_line = self.line;
+                    self.skip_whitespace();
+                    let moved = self.pos > saved;
+                    let rest = self.remaining();
+                    let word_is = |w: &[u8]| {
+                        rest.len() >= w.len()
+                            && rest[..w.len()].eq_ignore_ascii_case(w)
+                            && rest.get(w.len()).is_none_or(|c| {
+                                !c.is_ascii_alphanumeric() && *c != b'_' && *c < 0x80
+                            })
+                    };
+                    let is_kw = moved
+                        && rest
+                            .first()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_' || *c >= 0x80)
+                        && !word_is(b"extends")
+                        && !word_is(b"implements");
+                    self.pos = saved;
+                    self.line = saved_line;
+                    if is_kw {
+                        TokenKind::Enum
+                    } else {
+                        TokenKind::Identifier(ident.clone())
+                    }
                 } else {
                     keyword_or_identifier(&ident)
                 }

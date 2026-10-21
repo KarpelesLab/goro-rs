@@ -2134,27 +2134,48 @@ impl Parser {
         // For enums: capture `: type` backing type declaration
         let mut enum_backing_type: Option<Vec<u8>> = None;
         if self.eat(&TokenKind::Colon) {
-            // Capture the backing type name (e.g., string, int)
-            let backing = match self.peek() {
-                TokenKind::Identifier(name) => {
-                    let n = name.clone();
-                    self.advance();
-                    n
+            // Capture the backing type (validated by the compiler: int or
+            // string; anything else is reported as written).
+            fn render(t: &TypeHint) -> Vec<u8> {
+                match t {
+                    TypeHint::Simple(n) => n.clone(),
+                    TypeHint::Nullable(i) => [b"?".as_slice(), &render(i)].concat(),
+                    TypeHint::Union(ps) => {
+                        // zend_type_to_string() order: classes, then builtins.
+                        let rank = |t: &TypeHint| match t {
+                            TypeHint::Simple(n) => {
+                                let order: [&[u8]; 13] = [
+                                    b"static",
+                                    b"callable",
+                                    b"object",
+                                    b"array",
+                                    b"string",
+                                    b"int",
+                                    b"float",
+                                    b"bool",
+                                    b"false",
+                                    b"true",
+                                    b"void",
+                                    b"never",
+                                    b"null",
+                                ];
+                                order
+                                    .iter()
+                                    .position(|o| n.eq_ignore_ascii_case(o))
+                                    .map_or(0, |i| i + 1)
+                            }
+                            _ => 0,
+                        };
+                        let mut ps: Vec<&TypeHint> = ps.iter().collect();
+                        ps.sort_by_key(|t| rank(t));
+                        ps.into_iter().map(render).collect::<Vec<_>>().join(&b'|')
+                    }
+                    TypeHint::Intersection(ps) => {
+                        ps.iter().map(render).collect::<Vec<_>>().join(&b'&')
+                    }
                 }
-                _ if self.is_semi_reserved_keyword() => {
-                    // Handle keywords used as type names
-                    let name = match self.peek() {
-                        TokenKind::Array => b"array".to_vec(),
-                        _ => b"mixed".to_vec(),
-                    };
-                    self.advance();
-                    name
-                }
-                _ => {
-                    self.advance(); // skip unknown
-                    b"mixed".to_vec()
-                }
-            };
+            }
+            let backing = render(&self.parse_type_hint()?);
             if modifiers.is_enum {
                 enum_backing_type = Some(backing);
             }

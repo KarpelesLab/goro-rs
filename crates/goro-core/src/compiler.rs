@@ -4034,6 +4034,39 @@ impl Compiler {
 
             StmtKind::Unset(exprs) => {
                 for expr in exprs {
+                    // zend_compile_var_inner(): the base of an unset
+                    // property/dimension chain must be writable.
+                    let mut root = expr;
+                    loop {
+                        match &root.kind {
+                            ExprKind::ArrayAccess { array, .. } => root = array,
+                            ExprKind::PropertyAccess { object, .. } => root = object,
+                            _ => break,
+                        }
+                    }
+                    if !std::ptr::eq(root, expr)
+                        && matches!(
+                            root.kind,
+                            ExprKind::ClassConstAccess { .. }
+                                | ExprKind::DynamicClassConstAccess { .. }
+                                | ExprKind::ConstantAccess(_)
+                                | ExprKind::Identifier(_)
+                                | ExprKind::Int(_)
+                                | ExprKind::Float(_)
+                                | ExprKind::String(_)
+                                | ExprKind::InterpolatedString(_)
+                                | ExprKind::True
+                                | ExprKind::False
+                                | ExprKind::Null
+                                | ExprKind::Array(_)
+                                | ExprKind::New { .. }
+                        )
+                    {
+                        return Err(CompileError {
+                            message: "Cannot use temporary expression in write context".into(),
+                            line: stmt.span.line,
+                        });
+                    }
                     match &expr.kind {
                         ExprKind::ArrayAccess { array, index } => {
                             // unset($arr[$key]) - remove element from array
@@ -6496,8 +6529,7 @@ impl Compiler {
                                 ) {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"string"))
-                                            {
+                                            if !type_hint_admits(th, b"string") {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "{}::{}(): Parameter #1 (${}) must be of type string when declared",
@@ -6514,8 +6546,7 @@ impl Compiler {
                                 if matches!(mn_lower.as_slice(), b"__call" | b"__callstatic") {
                                     if let Some(param) = params.get(1) {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
-                                            {
+                                            if !type_hint_admits(th, b"array") {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "{}::{}(): Parameter #2 (${}) must be of type array when declared",
@@ -6532,8 +6563,7 @@ impl Compiler {
                                 if mn_lower == b"__unserialize" {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
-                                            {
+                                            if !type_hint_admits(th, b"array") {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "{}::__unserialize(): Parameter #1 (${}) must be of type array when declared",
@@ -6549,8 +6579,7 @@ impl Compiler {
                                 if mn_lower == b"__set_state" {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
-                                            {
+                                            if !type_hint_admits(th, b"array") {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "{}::__set_state(): Parameter #1 (${}) must be of type array when declared",
@@ -6577,6 +6606,7 @@ impl Compiler {
                                         | b"__call"
                                         | b"__tostring"
                                         | b"__debuginfo"
+                                        | b"__invoke"
                                 ) {
                                     if *is_static {
                                         return Err(CompileError {
@@ -6623,6 +6653,7 @@ impl Compiler {
                                         | b"__sleep"
                                         | b"__wakeup"
                                         | b"__set_state"
+                                        | b"__invoke"
                                 ) {
                                     if *visibility != Visibility::Public {
                                         push_compile_warning_tuple((
@@ -18760,6 +18791,21 @@ fn args_to_source_string(args: &[Argument]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// zend_check_magic_method_arg_type(): whether a declared parameter type
+/// admits `ty` ("string" or "array"), e.g. `mixed`, `?string`, `string|int`.
+fn type_hint_admits(th: &TypeHint, ty: &[u8]) -> bool {
+    match th {
+        TypeHint::Simple(n) => {
+            n.eq_ignore_ascii_case(ty)
+                || n.eq_ignore_ascii_case(b"mixed")
+                || (ty == b"array" && n.eq_ignore_ascii_case(b"iterable"))
+        }
+        TypeHint::Nullable(inner) => type_hint_admits(inner, ty),
+        TypeHint::Union(parts) => parts.iter().any(|p| type_hint_admits(p, ty)),
+        _ => false,
+    }
 }
 
 /// "Redefinition of parameter $x" for duplicate parameter names.

@@ -322,9 +322,18 @@ fn resolve_json_serializable_depth(
                 }
             }
             let obj_ref = obj.borrow();
-            // Skip enum cases
+            // Enum cases encode as their value, unless they implement
+            // JsonSerializable (php_json_encode_zval checks that first).
             if obj_ref.has_property(b"__enum_case") {
-                return val.clone();
+                let cl = obj_ref.class_name.to_ascii_lowercase();
+                let serializable = vm.classes.get(&cl).is_some_and(|c| {
+                    c.interfaces
+                        .iter()
+                        .any(|i| i.eq_ignore_ascii_case(b"JsonSerializable"))
+                });
+                if !serializable {
+                    return val.clone();
+                }
             }
             let class_lower: Vec<u8> = obj_ref
                 .class_name

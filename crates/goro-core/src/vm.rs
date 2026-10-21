@@ -39957,6 +39957,8 @@ impl Vm {
                             // declaration, just like for the parent class.
                             if !self.classes.contains_key(&iface_lower)
                                 && !self.is_known_builtin_class(&iface_lower)
+                                // implicit interfaces of enums are internal
+                                && !matches!(iface_lower.as_slice(), b"unitenum" | b"backedenum")
                             {
                                 self.try_autoload_class(iface_name);
                                 if let Some(e) = variance::take_autoload_fatal() {

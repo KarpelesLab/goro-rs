@@ -2182,7 +2182,9 @@ pub fn reflection_class_method(
                 names.push(Value::String(PhpString::from_vec(iface)));
             }
             // Add implicit Stringable interface for classes with __toString
-            if vm.class_implements_interface(&class_lower, b"stringable") {
+            // (traits implement no interfaces)
+            let is_trait = vm.classes.get(&class_lower).is_some_and(|c| c.is_trait);
+            if !is_trait && vm.class_implements_interface(&class_lower, b"stringable") {
                 let already_has = names.iter().any(|(_, v)| {
                     v.to_php_string()
                         .as_bytes()
@@ -2199,7 +2201,8 @@ pub fn reflection_class_method(
                 .into_iter()
                 .map(|n| n.into_bytes())
                 .collect();
-            if vm.class_implements_interface(&class_lower, b"stringable")
+            if !vm.classes.get(&class_lower).is_some_and(|c| c.is_trait)
+                && vm.class_implements_interface(&class_lower, b"stringable")
                 && !collected
                     .iter()
                     .any(|n| n.eq_ignore_ascii_case(b"Stringable"))
