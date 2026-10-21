@@ -21844,6 +21844,10 @@ impl Vm {
                         }
                         return Err(VmError { message: "Graceful exit".into(), line: op.line });
                     }
+                    // Catching an exception abandons any return/jump deferred
+                    // through a finally block it was thrown from.
+                    self.pending_return = None;
+                    self.pending_finally_jump = None;
                     // Store current exception into the CV
                     if let Some(exc) = self.current_exception.take() {
                         self.write_operand(&op.op1, exc, &mut cvs, &mut tmps, &static_cv_keys);
@@ -24746,6 +24750,19 @@ impl Vm {
                     // Save return value for deferred return (finally blocks)
                     // Use raw read for CVs to preserve Reference wrapper (for by-ref returns)
                     let val = if matches!(&op.op1, OperandType::Cv(_)) {
+                        // By-ref function: the deferred return binds to the variable
+                        // itself, so later writes (e.g. in the finally block) are seen.
+                        if op_array.returns_by_ref {
+                            if let OperandType::Cv(ci) = op.op1 {
+                                if let Some(slot) = cvs.get_mut(ci as usize) {
+                                    if !matches!(slot, Value::Reference(_)) {
+                                        let cur = std::mem::replace(slot, Value::Undef);
+                                        let cur = if matches!(cur, Value::Undef) { Value::Null } else { cur };
+                                        *slot = Value::Reference(Rc::new(RefCell::new(cur)));
+                                    }
+                                }
+                            }
+                        }
                         let raw = Self::read_operand_raw(&cvs, &op.op1);
                         if matches!(raw, Value::Undef) {
                             Value::Null
@@ -24769,6 +24786,10 @@ impl Vm {
                     self.pending_finally_jump = None;
                     // A return inside try-with-finally discards any pending exception
                     self.current_exception = None;
+                    // Leaving the try/catch region for its finally block: drop the
+                    // handlers of that try so an exception thrown inside the finally
+                    // propagates outward instead of re-entering the same finally.
+                    Self::pop_handlers_for_finally_jump(&mut exception_handlers, op_array.ops.get(ip));
                 }
 
                 OpCode::SaveJump => {
@@ -24776,6 +24797,7 @@ impl Vm {
                     if let OperandType::JmpTarget(target) = op.op1 {
                         self.pending_finally_jump = Some(target);
                     }
+                    Self::pop_handlers_for_finally_jump(&mut exception_handlers, op_array.ops.get(ip));
                     // A break/continue inside try-with-finally discards any pending exception
                     self.current_exception = None;
                 }
@@ -24787,6 +24809,12 @@ impl Vm {
                     } else {
                         0
                     };
+                    // An exception raised after the deferred return/jump was saved
+                    // (i.e. thrown inside a finally block) discards it.
+                    if self.current_exception.is_some() {
+                        self.pending_return = None;
+                        self.pending_finally_jump = None;
+                    }
                     // If there's a pending return, chain through outer finally blocks if any
                     if let Some(val) = self.pending_return.take() {
                         // Pop exception handlers that correspond to this finally block.
@@ -24794,7 +24822,7 @@ impl Vm {
                         // the handler for this finally's try block is still on the stack.
                         // That handler has finally_target == this_finally_start.
                         // Pop all handlers up to and including the one for this finally's try block.
-                        if this_finally_start > 0 {
+                        if this_finally_start > 0 && exception_handlers.iter().any(|h| h.1 == this_finally_start) {
                             while let Some(&(_catch_target, finally_target, _, _, _)) = exception_handlers.last() {
                                 exception_handlers.pop();
                                 if finally_target == this_finally_start {
@@ -33237,6 +33265,25 @@ impl Vm {
                 obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
                 obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
                 Err(VmError { message: msg, line: err_line })
+            }
+        }
+    }
+
+    /// For `SaveReturn`/`SaveJump` followed by `Jmp <finally_start>`: pop the
+    /// exception handlers up to and including the one whose finally block is
+    /// the jump target (no-op if there is none).
+    fn pop_handlers_for_finally_jump<T>(handlers: &mut Vec<(u32, u32, T, usize, usize)>, next: Option<&crate::opcode::Op>) {
+        let Some(next) = next else { return };
+        if next.opcode != OpCode::Jmp {
+            return;
+        }
+        let OperandType::JmpTarget(target) = next.op1 else { return };
+        if target == 0 || !handlers.iter().any(|h| h.1 == target) {
+            return;
+        }
+        while let Some(h) = handlers.pop() {
+            if h.1 == target {
+                break;
             }
         }
     }

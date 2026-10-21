@@ -3168,6 +3168,18 @@ impl Compiler {
                         self.compile_stmt(s)?;
                     }
 
+                    // Catch body completed normally: drop the finally guard
+                    // handler before entering the finally block.
+                    if finally_guard.is_some() {
+                        self.op_array.emit(Op {
+                            opcode: OpCode::TryEnd,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+
                     // Jump to finally/end after catch body
                     let jmp = self.op_array.emit(Op {
                         opcode: OpCode::Jmp,

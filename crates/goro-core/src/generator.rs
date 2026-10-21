@@ -331,6 +331,25 @@ impl PhpGenerator {
         result
     }
 
+    /// For `SaveReturn`/`SaveJump` followed by `Jmp <finally_start>`: pop the
+    /// exception handlers up to and including the one whose finally block is
+    /// the jump target, so exceptions thrown in the finally propagate outward.
+    fn pop_handlers_for_finally_jump(&mut self, next: Option<&crate::opcode::Op>) {
+        let Some(next) = next else { return };
+        if next.opcode != OpCode::Jmp {
+            return;
+        }
+        let OperandType::JmpTarget(target) = next.op1 else { return };
+        if target == 0 || !self.exception_handlers.iter().any(|h| h.1 == target) {
+            return;
+        }
+        while let Some(h) = self.exception_handlers.pop() {
+            if h.1 == target {
+                break;
+            }
+        }
+    }
+
     /// Inner resume implementation (depth check is done by the caller)
     fn resume_inner(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         let op_array = self.op_array.clone();
@@ -1444,6 +1463,8 @@ impl PhpGenerator {
                         self.ip = ip;
                         return Err(VmError { message: "Graceful exit".into(), line: op.line });
                     }
+                    self.pending_return = None;
+                    self.pending_finally_jump = None;
                     if let Some(exc) = vm.current_exception.take() {
                         self.write_operand(&op.op1, exc);
                     }
@@ -1455,6 +1476,7 @@ impl PhpGenerator {
                     self.pending_return = Some(val);
                     self.pending_finally_jump = None;
                     vm.current_exception = None;
+                    self.pop_handlers_for_finally_jump(op_array.ops.get(ip));
                 }
 
                 OpCode::SaveJump => {
@@ -1463,6 +1485,7 @@ impl PhpGenerator {
                         self.pending_finally_jump = Some(target);
                     }
                     vm.current_exception = None;
+                    self.pop_handlers_for_finally_jump(op_array.ops.get(ip));
                 }
 
                 OpCode::ReturnDeferred => {
@@ -1471,9 +1494,13 @@ impl PhpGenerator {
                     } else {
                         0
                     };
+                    if vm.current_exception.is_some() {
+                        self.pending_return = None;
+                        self.pending_finally_jump = None;
+                    }
                     if let Some(val) = self.pending_return.take() {
                         // Pop exception handlers for this finally block
-                        if this_finally_start > 0 {
+                        if this_finally_start > 0 && self.exception_handlers.iter().any(|h| h.1 == this_finally_start) {
                             while let Some(&(_catch_target, finally_target, _)) = self.exception_handlers.last() {
                                 self.exception_handlers.pop();
                                 if finally_target == this_finally_start {
