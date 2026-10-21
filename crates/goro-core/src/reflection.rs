@@ -8494,28 +8494,64 @@ pub fn create_reflection_attributes(
         // We'll evaluate it lazily when getArguments() is called
         // For now, eagerly evaluate it
         // Push class scope if the attribute was defined in a class context
-        let pushed_scope = if let Some(ref scope) = attr.args_op_array.scope_class {
-            vm.push_class_scope(scope.clone());
-            vm.called_class_stack.push(scope.clone());
-            true
-        } else {
-            false
-        };
-        let args_val = match vm.execute_op_array_pub(&attr.args_op_array, vec![]) {
-            Ok(v) => v,
-            Err(_) => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
-        };
-        if pushed_scope {
-            vm.pop_class_scope();
-            vm.called_class_stack.pop();
+        // Arguments are evaluated lazily (getArguments()/newInstance()),
+        // like PHP; __toString() renders them unevaluated.
+        let idx = ATTR_ARG_OPS.with(|r| {
+            let mut r = r.borrow_mut();
+            r.push(attr.args_op_array.clone());
+            r.len() - 1
+        });
+        obj.set_property(b"__attr_args_op".to_vec(), Value::Long(idx as i64));
+        let mut reprs = PhpArray::new();
+        for r in &attr.args_op_array.param_default_repr {
+            reprs.push(match r {
+                Some(s) => Value::String(PhpString::from_string(s.clone())),
+                None => Value::Null,
+            });
         }
-        obj.set_property(b"__attr_args".to_vec(), args_val);
+        obj.set_property(b"__attr_reprs".to_vec(), Value::Array(Rc::new(RefCell::new(reprs))));
         // Check if the attribute is repeated (count how many times this name appears)
         let repeat_count = attrs.iter().filter(|a| a.name.eq_ignore_ascii_case(&attr.name)).count();
         obj.set_property(b"__attr_repeated".to_vec(), if repeat_count > 1 { Value::True } else { Value::False });
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
+}
+
+
+thread_local! {
+    /// Argument op arrays of ReflectionAttribute objects, evaluated lazily.
+    static ATTR_ARG_OPS: RefCell<Vec<OpArray>> = RefCell::new(Vec::new());
+}
+
+/// The (lazily evaluated) arguments array of a ReflectionAttribute.
+/// None if evaluating them threw.
+fn attr_args_value(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    if matches!(obj.borrow().get_property(b"__attr_args_evaluated"), Value::True) {
+        return Some(obj.borrow().get_property(b"__attr_args"));
+    }
+    let idx = obj.borrow().get_property(b"__attr_args_op").to_long() as usize;
+    let op = ATTR_ARG_OPS.with(|r| r.borrow().get(idx).cloned())?;
+    let pushed_scope = if let Some(ref scope) = op.scope_class {
+        vm.push_class_scope(scope.clone());
+        vm.called_class_stack.push(scope.clone());
+        true
+    } else {
+        false
+    };
+    let r = vm.execute_op_array_pub(&op, vec![]);
+    if pushed_scope {
+        vm.pop_class_scope();
+        vm.called_class_stack.pop();
+    }
+    if vm.current_exception.is_some() {
+        return None;
+    }
+    let v = r.unwrap_or_else(|_| Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    let mut ob = obj.borrow_mut();
+    ob.set_property(b"__attr_args".to_vec(), v.clone());
+    ob.set_property(b"__attr_args_evaluated".to_vec(), Value::True);
+    Some(v)
 }
 
 /// Handle method calls on ReflectionAttribute objects
@@ -8541,7 +8577,11 @@ pub fn reflection_attribute_method(
             Some(name)
         }
         b"getarguments" => {
-            let args = ob.get_property(b"__attr_args");
+            drop(ob);
+            let args = match attr_args_value(vm, obj) {
+                Some(a) => a,
+                None => return Some(Value::Null),
+            };
             // Return the arguments array directly
             match &args {
                 Value::Array(arr) => {
@@ -8565,8 +8605,11 @@ pub fn reflection_attribute_method(
         }
         b"newinstance" => {
             let attr_name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
-            let args = ob.get_property(b"__attr_args");
             drop(ob);
+            let args = match attr_args_value(vm, obj) {
+                Some(a) => a,
+                None => return Some(Value::Null),
+            };
             // Capture the call-site line before any inner op-array execution
             // (e.g. evaluating #[Attribute(...)] args) overwrites self.current_line.
             let call_site_line = vm.current_line;
@@ -8821,7 +8864,37 @@ pub fn reflection_attribute_method(
         }
         b"__tostring" => {
             let name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
-            Some(Value::String(PhpString::from_string(format!("Attribute [ {} ]", name))))
+            let reprs: Vec<Value> = match ob.get_property(b"__attr_reprs") {
+                Value::Array(a) => a.borrow().values().cloned().collect(),
+                _ => Vec::new(),
+            };
+            drop(ob);
+            let mut out = format!("Attribute [ {} ]", name);
+            if reprs.is_empty() {
+                out.push('\n');
+            } else {
+                // Arguments without an AST rendering print their value.
+                let evaluated: Vec<Value> = if reprs.iter().any(|r| matches!(r, Value::Null)) {
+                    match attr_args_value(vm, obj) {
+                        Some(Value::Array(a)) => a.borrow().values().cloned().collect(),
+                        Some(_) => Vec::new(),
+                        None => return Some(Value::Null),
+                    }
+                } else {
+                    Vec::new()
+                };
+                out.push_str(" {\n");
+                out.push_str(&format!("  - Arguments [{}] {{\n", reprs.len()));
+                for (i, r) in reprs.iter().enumerate() {
+                    let text = match r {
+                        Value::String(s) => s.to_string_lossy(),
+                        _ => evaluated.get(i).map(format_default_value).unwrap_or_default(),
+                    };
+                    out.push_str(&format!("    Argument #{} [ {} ]\n", i, text));
+                }
+                out.push_str("  }\n}\n");
+            }
+            Some(Value::String(PhpString::from_string(out)))
         }
         _ => None,
     }

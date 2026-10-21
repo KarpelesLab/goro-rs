@@ -740,6 +740,13 @@ impl Compiler {
                 }
             }
             ac.op_array.emit(Op { opcode: OpCode::Return, op1: OperandType::Tmp(arr_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: 0 });
+            // Reflection's rendering of each argument (ReflectionAttribute::__toString).
+            ac.op_array.param_default_repr = attr.args.iter().map(|a| {
+                self.default_value_repr(&a.value).map(|r| match &a.name {
+                    Some(n) => format!("{} = {}", String::from_utf8_lossy(n), r),
+                    None => r,
+                })
+            }).collect();
             crate::object::RuntimeAttribute { name, args_op_array: ac.op_array }
         }).collect()
     }
