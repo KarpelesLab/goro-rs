@@ -913,6 +913,7 @@ impl<'a> HtmlParser<'a> {
                 line,
                 col,
                 formatted,
+                no_ctx: false,
             });
         }
         if level == ERR_FATAL {

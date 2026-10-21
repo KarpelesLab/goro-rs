@@ -15,6 +15,9 @@ struct State {
     internal: bool,
     errors: Vec<XmlError>,
     last: Option<XmlError>,
+    /// Text of messages not ended by a newline yet (PHP's error_buffer:
+    /// its handlers only emit complete lines).
+    pending: String,
     entity_loader: Option<Value>,
     streams_context: Option<Value>,
 }
@@ -164,14 +167,28 @@ pub fn report_ex(
         if internal || vm.current_exception.is_some() || silenced(e) {
             continue;
         }
+        let pending = STATE.with(|s| std::mem::take(&mut s.borrow_mut().pending));
         match style {
             Style::Generic => {
-                for chunk in &e.formatted {
-                    vm.emit_warning(&format!("{}(): {}", fname, chunk));
+                for (i, chunk) in e.formatted.iter().enumerate() {
+                    if i == 0 && !pending.is_empty() {
+                        vm.emit_warning(&format!("{}(): {}{}", fname, pending, chunk));
+                    } else {
+                        vm.emit_warning(&format!("{}(): {}", fname, chunk));
+                    }
                 }
             }
             Style::Ctx => {
-                let msg = e.message.trim_end_matches('\n');
+                if !e.message.ends_with('\n') {
+                    STATE.with(|s| s.borrow_mut().pending = format!("{}{}", pending, e.message));
+                    continue;
+                }
+                let full = format!("{}{}", pending, e.message);
+                let msg = full.trim_end_matches('\n');
+                if e.no_ctx {
+                    vm.emit_warning(&format!("{}(): {}", fname, msg));
+                    continue;
+                }
                 let loc = match &e.file {
                     Some(f) => format!("{} in {}, line: {}", msg, f, e.line),
                     None => format!("{} in Entity, line: {}", msg, e.line),

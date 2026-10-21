@@ -82,6 +82,7 @@ pub const XML_ERR_MISPLACED_CDATA_END: i32 = 62;
 pub const XML_ERR_CDATA_NOT_FINISHED: i32 = 63;
 pub const XML_ERR_RESERVED_XML_NAME: i32 = 64;
 pub const XML_ERR_SPACE_REQUIRED: i32 = 65;
+pub const XML_ERR_SEPARATOR_REQUIRED: i32 = 66;
 pub const XML_ERR_NMTOKEN_REQUIRED: i32 = 67;
 pub const XML_ERR_NAME_REQUIRED: i32 = 68;
 pub const XML_ERR_PCDATA_REQUIRED: i32 = 69;
@@ -202,6 +203,9 @@ pub struct XmlError {
     /// What libxml2's default (generic) error handler would print, split
     /// the way PHP's error handler groups it (one entry per warning).
     pub formatted: Vec<String>,
+    /// Raised while the parser context had no input (PHP's DOM handler
+    /// then prints the bare message, without "in Entity, line: N").
+    pub no_ctx: bool,
 }
 
 impl XmlError {
@@ -216,6 +220,7 @@ impl XmlError {
             line: 0,
             col: 0,
             formatted,
+            no_ctx: false,
         }
     }
 }
@@ -482,69 +487,227 @@ pub enum EntKind {
     Predefined = 6,
 }
 
-/// Element content model (for <!ELEMENT>).
+/// xmlElementContentType
+pub const CT_PCDATA: u8 = 1;
+pub const CT_ELEMENT: u8 = 2;
+pub const CT_SEQ: u8 = 3;
+pub const CT_OR: u8 = 4;
+/// xmlElementContentOccur
+pub const OC_ONCE: u8 = 1;
+pub const OC_OPT: u8 = 2;
+pub const OC_MULT: u8 = 3;
+pub const OC_PLUS: u8 = 4;
+
+/// One xmlElementContent node.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ContentModel {
-    PcData,
-    Elem(String, char),
-    Seq(Vec<ContentModel>, char),
-    Or(Vec<ContentModel>, char),
+pub struct CNode {
+    pub ctype: u8,
+    pub ocur: u8,
+    /// Local name (element nodes).
+    pub name: String,
+    pub prefix: Option<String>,
+    pub c1: Option<usize>,
+    pub c2: Option<usize>,
+    pub parent: Option<usize>,
 }
 
-impl ContentModel {
-    fn occur(c: char) -> String {
-        if c == '1' {
-            String::new()
-        } else {
-            c.to_string()
-        }
-    }
-    fn fmt_inner(&self, out: &mut String, top: bool) {
-        match self {
-            ContentModel::PcData => out.push_str("#PCDATA"),
-            ContentModel::Elem(n, o) => {
-                out.push_str(n);
-                out.push_str(&Self::occur(*o));
-            }
-            ContentModel::Seq(v, o) | ContentModel::Or(v, o) => {
-                let sep = if matches!(self, ContentModel::Seq(..)) {
-                    " , "
-                } else {
-                    " | "
-                };
-                let _ = top;
-                out.push('(');
-                for (i, c) in v.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(sep);
-                    }
-                    c.fmt_inner(out, false);
+/// Element content model (for <!ELEMENT>): libxml2's binary
+/// xmlElementContent tree, stored in an arena.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ElemContent {
+    pub nodes: Vec<CNode>,
+    pub root: usize,
+}
+
+impl ElemContent {
+    /// xmlNewDocElementContent (the name is split as a QName).
+    pub fn new_node(&mut self, ctype: u8, name: Option<&str>) -> usize {
+        let (prefix, local) = match name {
+            Some(n) => match n.find(':') {
+                Some(i) if i > 0 && i + 1 < n.len() => {
+                    (Some(n[..i].to_string()), n[i + 1..].to_string())
                 }
-                out.push(')');
-                out.push_str(&Self::occur(*o));
-            }
+                _ => (None, n.to_string()),
+            },
+            None => (None, String::new()),
+        };
+        self.nodes.push(CNode {
+            ctype,
+            ocur: OC_ONCE,
+            name: local,
+            prefix,
+            c1: None,
+            c2: None,
+            parent: None,
+        });
+        self.nodes.len() - 1
+    }
+
+    pub fn set_c1(&mut self, n: usize, c: usize) {
+        self.nodes[n].c1 = Some(c);
+        self.nodes[c].parent = Some(n);
+    }
+
+    pub fn set_c2(&mut self, n: usize, c: usize) {
+        self.nodes[n].c2 = Some(c);
+        self.nodes[c].parent = Some(n);
+    }
+
+    fn occur_str(o: u8) -> &'static str {
+        match o {
+            OC_OPT => "?",
+            OC_MULT => "*",
+            OC_PLUS => "+",
+            _ => "",
         }
     }
-    pub fn to_decl_string(&self) -> String {
-        let mut s = String::new();
-        match self {
-            ContentModel::PcData | ContentModel::Elem(..) => {
-                s.push('(');
-                self.fmt_inner(&mut s, true);
-                s.push(')');
-            }
-            _ => self.fmt_inner(&mut s, true),
+
+    fn qname(&self, n: usize) -> String {
+        let c = &self.nodes[n];
+        match &c.prefix {
+            Some(p) => format!("{}:{}", p, c.name),
+            None => c.name.clone(),
         }
-        s
+    }
+
+    /// xmlBufDumpElementContent (DTD serialization).
+    pub fn dump(&self) -> String {
+        let mut out = String::from("(");
+        let content = self.root;
+        let mut cur = content;
+        loop {
+            match self.nodes[cur].ctype {
+                CT_PCDATA => out.push_str("#PCDATA"),
+                CT_ELEMENT => out.push_str(&self.qname(cur)),
+                _ => {
+                    let c = &self.nodes[cur];
+                    if cur != content {
+                        if let Some(p) = c.parent {
+                            if c.ctype != self.nodes[p].ctype || c.ocur != OC_ONCE {
+                                out.push('(');
+                            }
+                        }
+                    }
+                    match c.c1 {
+                        Some(c1) => {
+                            cur = c1;
+                            continue;
+                        }
+                        None => return out,
+                    }
+                }
+            }
+            while cur != content {
+                let parent = match self.nodes[cur].parent {
+                    Some(p) => p,
+                    None => return out,
+                };
+                let c = &self.nodes[cur];
+                if (c.ctype == CT_OR || c.ctype == CT_SEQ)
+                    && (c.ctype != self.nodes[parent].ctype || c.ocur != OC_ONCE)
+                {
+                    out.push(')');
+                }
+                out.push_str(Self::occur_str(c.ocur));
+                if Some(cur) == self.nodes[parent].c1 {
+                    if self.nodes[parent].ctype == CT_SEQ {
+                        out.push_str(" , ");
+                    } else if self.nodes[parent].ctype == CT_OR {
+                        out.push_str(" | ");
+                    }
+                    match self.nodes[parent].c2 {
+                        Some(c2) => cur = c2,
+                        None => return out,
+                    }
+                    break;
+                }
+                cur = parent;
+            }
+            if cur == content {
+                break;
+            }
+        }
+        out.push(')');
+        out.push_str(Self::occur_str(self.nodes[content].ocur));
+        out
+    }
+
+    /// xmlSnprintfElementContent with a 5000 byte buffer.
+    pub fn snprintf(&self, englob: bool) -> String {
+        let mut buf = String::new();
+        self.snprintf_rec(&mut buf, 5000, Some(self.root), englob);
+        buf
+    }
+
+    fn snprintf_rec(&self, buf: &mut String, size: usize, content: Option<usize>, englob: bool) {
+        let n = match content {
+            Some(n) => n,
+            None => return,
+        };
+        let len = buf.len();
+        if size - len < 50 {
+            if size - len > 4 && !buf.ends_with('.') {
+                buf.push_str(" ...");
+            }
+            return;
+        }
+        if englob {
+            buf.push('(');
+        }
+        let c = &self.nodes[n];
+        match c.ctype {
+            CT_PCDATA => buf.push_str("#PCDATA"),
+            CT_ELEMENT => {
+                let mut qlen = c.name.len();
+                if let Some(p) = &c.prefix {
+                    qlen += p.len() + 1;
+                }
+                if size - len < qlen + 10 {
+                    buf.push_str(" ...");
+                    return;
+                }
+                buf.push_str(&self.qname(n));
+            }
+            CT_SEQ | CT_OR => {
+                let sep = if c.ctype == CT_SEQ { " , " } else { " | " };
+                let other = if c.ctype == CT_SEQ { CT_OR } else { CT_SEQ };
+                let c1g =
+                    c.c1.map(|x| matches!(self.nodes[x].ctype, CT_OR | CT_SEQ))
+                        .unwrap_or(false);
+                self.snprintf_rec(buf, size, c.c1, c1g);
+                let len = buf.len();
+                if size - len < 50 {
+                    if size - len > 4 && !buf.ends_with('.') {
+                        buf.push_str(" ...");
+                    }
+                    return;
+                }
+                buf.push_str(sep);
+                let c2g =
+                    c.c2.map(|x| {
+                        (self.nodes[x].ctype == other || self.nodes[x].ocur != OC_ONCE)
+                            && self.nodes[x].ctype != CT_ELEMENT
+                    })
+                    .unwrap_or(false);
+                self.snprintf_rec(buf, size, c.c2, c2g);
+            }
+            _ => {}
+        }
+        if size - buf.len() <= 2 {
+            return;
+        }
+        if englob {
+            buf.push(')');
+        }
+        buf.push_str(Self::occur_str(c.ocur));
     }
 }
-
 /// Element declaration type (XML_ELEMENT_TYPE_*): 1 EMPTY, 2 ANY, 3 MIXED, 4 ELEMENT
 #[derive(Clone, Debug)]
 pub struct ElementDecl {
     pub name: String,
     pub etype: u8,
-    pub content: Option<ContentModel>,
+    pub content: Option<ElemContent>,
 }
 
 #[derive(Clone, Debug)]
@@ -623,6 +786,49 @@ pub trait Sink {
     fn comment(&mut self, _p: &mut ParserState, _text: &str) {}
     fn pi(&mut self, _p: &mut ParserState, _target: &str, _data: Option<&str>) {}
     fn reference(&mut self, _p: &mut ParserState, _name: &str) {}
+    // Declaration callbacks with access to the parser state (for
+    // diagnostics); they default to the plain callbacks.
+    fn end_document_p(&mut self, _p: &mut ParserState, encoding: Option<&str>) {
+        self.end_document(encoding)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn entity_decl_p(
+        &mut self,
+        _p: &mut ParserState,
+        name: &str,
+        kind: EntKind,
+        public: Option<&str>,
+        system: Option<&str>,
+        content: Option<&str>,
+        orig: Option<&str>,
+    ) {
+        self.entity_decl(name, kind, public, system, content, orig)
+    }
+    fn unparsed_entity_decl_p(
+        &mut self,
+        _p: &mut ParserState,
+        name: &str,
+        public: Option<&str>,
+        system: Option<&str>,
+        notation: &str,
+    ) {
+        self.unparsed_entity_decl(name, public, system, notation)
+    }
+    fn notation_decl_p(
+        &mut self,
+        _p: &mut ParserState,
+        name: &str,
+        public: Option<&str>,
+        system: Option<&str>,
+    ) {
+        self.notation_decl(name, public, system)
+    }
+    fn element_decl_p(&mut self, _p: &mut ParserState, decl: &ElementDecl) {
+        self.element_decl(decl)
+    }
+    fn attribute_decl_p(&mut self, _p: &mut ParserState, decl: &AttrDeclInfo) {
+        self.attribute_decl(decl)
+    }
     /// Called on the first reference to an internal entity when entities are
     /// not substituted. Return true if the sink wants the entity content
     /// (subsequent events up to `end_entity_content` belong to the entity).
@@ -663,6 +869,12 @@ pub trait Sink {
     /// Error notification (the sink may collect or format it).
     fn error(&mut self, _err: &XmlError) {}
     /// Called when an ID attribute is found that is already defined
+    /// Whether the sink wants the external subset loaded and parsed (the
+    /// SAX2 externalSubset handler does so when validating or loading the
+    /// DTD).
+    fn wants_external_subset(&self) -> bool {
+        false
+    }
     fn wants_line_numbers(&self) -> bool {
         true
     }
@@ -757,6 +969,8 @@ pub struct PEntity {
     pub notation: Option<String>,
     pub parsed: bool,
     pub expanding: bool,
+    /// Resolved URI of an external entity (ent->URI).
+    pub uri: Option<String>,
 }
 
 struct NsEntry {
@@ -802,6 +1016,10 @@ pub struct ParserState {
     /// Call `Sink::get_entity` on general entity references (a SAX
     /// getEntity callback with XML_PARSE_OLDSAX, as ext/xml installs).
     pub sax_get_entity: bool,
+    /// Base URI for resolving system ids when the input has no filename
+    /// (ctxt->directory; PHP's DOM sets it to the current directory when
+    /// loading from memory).
+    pub directory: Option<String>,
 }
 
 impl ParserState {
@@ -830,6 +1048,22 @@ impl ParserState {
 
     /// Report an error (xmlCtxtVErr).
     pub fn report(&mut self, domain: i32, code: i32, level: i32, msg: String) -> Option<XmlError> {
+        self.report_node(domain, code, level, msg, None, false)
+    }
+
+    /// xmlCtxtVErr with a node (validity errors): the node supplies the
+    /// "element X:" prefix of the generic output and the file/line when
+    /// the input has none. `no_input` emulates a NULL ctxt->input (as
+    /// xmlValidateDocumentFinal arranges): no position, no context lines.
+    pub fn report_node(
+        &mut self,
+        domain: i32,
+        code: i32,
+        level: i32,
+        msg: String,
+        node: Option<&NodeRef>,
+        no_input: bool,
+    ) -> Option<XmlError> {
         if self.stop {
             return None;
         }
@@ -871,23 +1105,44 @@ impl ParserState {
             entity_idx = Some(idx);
             idx = n - 2;
         }
-        let (file, line, col) = if n > 0 {
+        let (mut file, mut line, col) = if n > 0 && !no_input {
             let pos = self.inputs[idx].pos;
             let (l, c) = self.inputs[idx].line_col(pos);
             (self.inputs[idx].filename.clone(), l as i32, c as i32)
         } else {
             (None, 0, 0)
         };
-        let f = format_generic(
-            &self.inputs,
-            idx,
-            entity_idx,
-            domain,
-            code,
-            level,
-            line,
-            &msg,
-        );
+        if let Some(nr) = node {
+            if file.is_none() {
+                file = nr.url.clone();
+            }
+            if line == 0 {
+                line = nr.line;
+            }
+        }
+        let ename = node.and_then(|nr| nr.elem_name.as_deref());
+        let f = if no_input || n == 0 {
+            vec![format_no_input(
+                file.as_deref(),
+                line,
+                ename,
+                domain,
+                level,
+                &msg,
+            )]
+        } else {
+            format_generic(
+                &self.inputs,
+                idx,
+                entity_idx,
+                domain,
+                code,
+                level,
+                line,
+                ename,
+                &msg,
+            )
+        };
         let e = XmlError {
             domain,
             code,
@@ -897,6 +1152,7 @@ impl ParserState {
             line,
             col,
             formatted: f,
+            no_ctx: no_input,
         };
         if !silent {
             self.errors.push(e.clone());
@@ -905,6 +1161,56 @@ impl ParserState {
             None
         }
     }
+}
+
+/// Node information attached to a (validity) error.
+#[derive(Clone, Debug, Default)]
+pub struct NodeRef {
+    /// Name of the element the error is about (xmlFormatError prints
+    /// "element NAME: " for element nodes).
+    pub elem_name: Option<String>,
+    /// The node's document URL.
+    pub url: Option<String>,
+    /// The node's line.
+    pub line: i32,
+}
+
+fn domain_str(domain: i32) -> &'static str {
+    match domain {
+        FROM_PARSER => "parser ",
+        FROM_NAMESPACE => "namespace ",
+        FROM_DTD | FROM_VALID => "validity ",
+        FROM_IO => "I/O ",
+        _ => "",
+    }
+}
+
+/// xmlFormatError when the parser context has no input.
+pub fn format_no_input(
+    file: Option<&str>,
+    line: i32,
+    ename: Option<&str>,
+    domain: i32,
+    level: i32,
+    msg: &str,
+) -> String {
+    let mut f = String::new();
+    if let Some(fname) = file {
+        f.push_str(&format!("{}:{}: ", fname, line));
+    } else if line != 0 && (domain == FROM_PARSER || domain == FROM_DTD) {
+        f.push_str(&format!("Entity: line {}: ", line));
+    }
+    if let Some(n) = ename {
+        f.push_str(&format!("element {}: ", n));
+    }
+    f.push_str(domain_str(domain));
+    f.push_str(if level == ERR_WARNING {
+        "warning : "
+    } else {
+        "error : "
+    });
+    f.push_str(msg.trim_end_matches('\n'));
+    f
 }
 
 /// xmlFormatError output, chunked per generic-channel line as PHP sees it.
@@ -917,6 +1223,7 @@ fn format_generic(
     code: i32,
     level: i32,
     line: i32,
+    ename: Option<&str>,
     msg: &str,
 ) -> Vec<String> {
     let mut chunks = Vec::new();
@@ -928,13 +1235,10 @@ fn format_generic(
             f.push_str(&format!("Entity: line {}: ", line));
         }
     }
-    f.push_str(match domain {
-        FROM_PARSER => "parser ",
-        FROM_NAMESPACE => "namespace ",
-        FROM_DTD | FROM_VALID => "validity ",
-        FROM_IO => "I/O ",
-        _ => "",
-    });
+    if let Some(n) = ename {
+        f.push_str(&format!("element {}: ", n));
+    }
+    f.push_str(domain_str(domain));
     f.push_str(match level {
         ERR_WARNING => "warning : ",
         _ => "error : ",
@@ -1121,6 +1425,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             last_err_level: 0,
             sax1: false,
             sax_get_entity: false,
+            directory: None,
         };
         Parser {
             st,
@@ -1564,13 +1869,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             self.st.in_subset = 2;
             if self.sax_ok() {
-                let (n, s, u) = (
-                    self.int_sub_name.clone(),
-                    self.ext_sub_system.clone(),
-                    self.ext_sub_uri.clone(),
-                );
-                self.sink
-                    .external_subset(n.as_deref(), s.as_deref(), u.as_deref());
+                self.load_external_subset();
             }
             self.st.in_subset = 0;
             self.clean_special_attr();
@@ -1592,7 +1891,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
         }
         let enc = self.st.encoding.clone();
-        self.sink.end_document(enc.as_deref());
+        self.sink.end_document_p(&mut self.st, enc.as_deref());
         if !self.st.well_formed {
             self.st.valid = false;
             return false;
@@ -2328,7 +2627,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     inp.entity = Some(name);
                     self.st.inputs.push(inp);
                 } else {
-                    // external parameter entity: not loaded
+                    self.push_external_pe(&e);
                 }
             }
         }
@@ -2379,12 +2678,37 @@ impl<'a, S: Sink> Parser<'a, S> {
                 }
                 if j < b.len() && b[j] == b';' {
                     let name = String::from_utf8_lossy(&b[i + 1..j]).into_owned();
-                    if self.st.in_subset == 1 {
+                    if self.st.in_subset == 1 && self.st.inputs.len() == 1 {
                         self.fatal(88, None);
                         return None;
                     }
-                    if let Some(e) = self.pentities.get(&name) {
-                        out.extend_from_slice(e.content.as_bytes());
+                    if let Some(e) = self.pentities.get(&name).cloned() {
+                        if e.kind == EntKind::ExternalParameter && !e.parsed {
+                            if self.st.options & XML_PARSE_NO_XXE == 0
+                                && (self.st.replace_entities
+                                    || self.st.options & XML_PARSE_DTDVALID != 0)
+                            {
+                                let content = self
+                                    .load_entity_content(&e)
+                                    .map(|c| c.0)
+                                    .unwrap_or_default();
+                                if let Some(pe) = self.pentities.get_mut(&name) {
+                                    pe.content = content.clone();
+                                    pe.parsed = true;
+                                }
+                                out.extend_from_slice(content.as_bytes());
+                            } else {
+                                self.warning(
+                                    XML_ERR_ENTITY_PROCESSING,
+                                    format!(
+                                        "not validating will not read content for PE entity {}\n",
+                                        name
+                                    ),
+                                );
+                            }
+                        } else {
+                            out.extend_from_slice(e.content.as_bytes());
+                        }
                     }
                     i = j + 1;
                     continue;
@@ -2504,6 +2828,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                         notation: None,
                         parsed: false,
                         expanding: false,
+                        uri: None,
                     });
                 }
             } else {
@@ -2525,6 +2850,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                             notation: None,
                             parsed: false,
                             expanding: false,
+                            uri: None,
                         });
                     }
                 }
@@ -2541,6 +2867,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: None,
                     parsed: false,
                     expanding: false,
+                    uri: None,
                 });
             }
         } else {
@@ -2578,6 +2905,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: ndata,
                     parsed: false,
                     expanding: false,
+                    uri: None,
                 });
             } else {
                 new_ent = Some(PEntity {
@@ -2590,6 +2918,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     notation: None,
                     parsed: false,
                     expanding: false,
+                    uri: None,
                 });
             }
         }
@@ -2602,6 +2931,11 @@ impl<'a, S: Sink> Parser<'a, S> {
             // libxml2 stops here (xmlHaltParser in some versions)
         } else {
             self.skip(1);
+        }
+        if let Some(e) = new_ent.as_mut() {
+            if let Some(sys) = e.system.clone() {
+                e.uri = Some(self.resolve_uri(&sys, true));
+            }
         }
         if let Some(e) = new_ent {
             if !self.sax_ok() {
@@ -2642,7 +2976,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             match e.kind {
                 EntKind::ExternalGeneralUnparsed => {
-                    self.sink.unparsed_entity_decl(
+                    self.sink.unparsed_entity_decl_p(
+                        &mut self.st,
                         &e.name,
                         e.public.as_deref(),
                         e.system.as_deref(),
@@ -2658,7 +2993,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                     } else {
                         None
                     };
-                    self.sink.entity_decl(
+                    self.sink.entity_decl_p(
+                        &mut self.st,
                         &e.name,
                         e.kind,
                         e.public.as_deref(),
@@ -2708,7 +3044,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.skip(1);
             if self.sax_ok() {
                 self.sink
-                    .notation_decl(&name, public.as_deref(), sys.as_deref());
+                    .notation_decl_p(&mut self.st, &name, public.as_deref(), sys.as_deref());
             }
         } else {
             self.fatal(XML_ERR_NOTATION_NOT_FINISHED, None);
@@ -2787,144 +3123,269 @@ impl<'a, S: Sink> Parser<'a, S> {
                 etype,
                 content,
             };
-            self.sink.element_decl(&d);
+            self.sink.element_decl_p(&mut self.st, &d);
         }
     }
 
-    /// Returns (etype, model)
-    fn parse_element_content_decl(&mut self) -> Option<(u8, ContentModel)> {
-        // at '('
+    /// xmlParseElementContentDecl, at '('. Returns (etype, model).
+    fn parse_element_content_decl(&mut self) -> Option<(u8, ElemContent)> {
         self.skip(1);
         self.skip_blanks_pe();
+        let mut ec = ElemContent::default();
         if self.cmp(b"#PCDATA") {
-            self.skip(7);
-            self.skip_blanks_pe();
-            let mut items = vec![ContentModel::PcData];
-            if self.cur() == b')' {
+            let r = self.parse_mixed_content(&mut ec)?;
+            ec.root = r;
+            return Some((3, ec));
+        }
+        let r = self.parse_children_content(&mut ec, 0)?;
+        ec.root = r;
+        Some((4, ec))
+    }
+
+    /// xmlParseElementMixedContentDecl, at "#PCDATA".
+    fn parse_mixed_content(&mut self, ec: &mut ElemContent) -> Option<usize> {
+        self.skip(7);
+        self.skip_blanks_pe();
+        if self.cur() == b')' {
+            self.skip(1);
+            let r = ec.new_node(CT_PCDATA, None);
+            if self.cur() == b'*' {
+                ec.nodes[r].ocur = OC_MULT;
                 self.skip(1);
-                let occ = if self.cur() == b'*' {
-                    self.skip(1);
-                    '*'
-                } else {
-                    '1'
-                };
-                return Some((3, ContentModel::Or(items, occ)));
             }
-            while self.cur() == b'|' {
-                self.skip(1);
-                self.skip_blanks_pe();
-                match self.parse_name() {
-                    Some(n) => items.push(ContentModel::Elem(n, '1')),
-                    None => {
-                        self.fatal_msg(
-                            XML_ERR_NAME_REQUIRED,
-                            "xmlParseElementMixedContentDecl : Name expected\n".into(),
-                        );
-                        return None;
+            return Some(r);
+        }
+        let mut ret = None;
+        let mut cur = None;
+        let mut elem: Option<String> = None;
+        if self.cur() == b'(' || self.cur() == b'|' {
+            let n = ec.new_node(CT_PCDATA, None);
+            ret = Some(n);
+            cur = Some(n);
+        }
+        while self.cur() == b'|' && !self.stopped() {
+            self.skip(1);
+            let n = ec.new_node(CT_OR, None);
+            match &elem {
+                None => {
+                    if let Some(c) = cur {
+                        ec.set_c1(n, c);
                     }
+                    ret = Some(n);
+                    cur = Some(n);
                 }
-                self.skip_blanks_pe();
+                Some(e) => {
+                    if let Some(c) = cur {
+                        ec.set_c2(c, n);
+                    }
+                    let x = ec.new_node(CT_ELEMENT, Some(e));
+                    ec.set_c1(n, x);
+                    cur = Some(n);
+                }
             }
-            if self.cur() == b')' && self.nxt(1) == b'*' {
-                self.skip(2);
-                return Some((3, ContentModel::Or(items, '*')));
+            self.skip_blanks_pe();
+            elem = self.parse_name();
+            if elem.is_none() {
+                self.fatal_msg(
+                    XML_ERR_NAME_REQUIRED,
+                    "xmlParseElementMixedContentDecl : Name expected\n".into(),
+                );
+                return None;
             }
+            self.skip_blanks_pe();
+        }
+        if self.cur() == b')' && self.nxt(1) == b'*' {
+            if let (Some(e), Some(c)) = (&elem, cur) {
+                let x = ec.new_node(CT_ELEMENT, Some(e));
+                ec.set_c2(c, x);
+            }
+            if let Some(r) = ret {
+                ec.nodes[r].ocur = OC_MULT;
+            }
+            self.skip(2);
+        } else {
             self.fatal(XML_ERR_MIXED_NOT_STARTED, None);
             return None;
         }
-        let m = self.parse_children_content(0)?;
-        Some((4, m))
+        ret
     }
 
-    /// Parse children content after the opening '(' was consumed.
-    fn parse_children_content(&mut self, depth: usize) -> Option<ContentModel> {
-        if depth > 128 {
+    fn parse_occur_code(&mut self) -> u8 {
+        match self.cur() {
+            b'?' => {
+                self.skip(1);
+                OC_OPT
+            }
+            b'*' => {
+                self.skip(1);
+                OC_MULT
+            }
+            b'+' => {
+                self.skip(1);
+                OC_PLUS
+            }
+            _ => OC_ONCE,
+        }
+    }
+
+    /// xmlParseElementChildrenContentDeclPriv, after the opening '('.
+    fn parse_children_content(&mut self, ec: &mut ElemContent, depth: usize) -> Option<usize> {
+        let max_depth = if self.st.options & XML_PARSE_HUGE != 0 {
+            2048
+        } else {
+            256
+        };
+        if depth > max_depth {
             self.fatal_msg(
-                XML_ERR_ELEMCONTENT_NOT_FINISHED,
-                "xmlParseElementChildrenContentDecl : depth too deep\n".into(),
+                XML_ERR_RESOURCE_LIMIT,
+                format!(
+                    "xmlParseElementChildrenContentDecl : depth {} too deep, use XML_PARSE_HUGE\n",
+                    depth
+                ),
             );
             return None;
         }
-        let mut items: Vec<ContentModel> = Vec::new();
-        let mut sep: Option<u8> = None;
-        loop {
+        self.skip_blanks_pe();
+        let mut ret;
+        let mut cur;
+        let mut last: Option<usize> = None;
+        let mut typ: u8 = 0;
+        if self.cur() == b'(' {
+            self.skip(1);
             self.skip_blanks_pe();
-            let item = if self.cur() == b'(' {
+            let r = self.parse_children_content(ec, depth + 1)?;
+            ret = r;
+            cur = r;
+            self.skip_blanks_pe();
+        } else {
+            let name = match self.parse_name() {
+                Some(n) => n,
+                None => {
+                    self.fatal(XML_ERR_ELEMCONTENT_NOT_STARTED, None);
+                    return None;
+                }
+            };
+            let r = ec.new_node(CT_ELEMENT, Some(&name));
+            ec.nodes[r].ocur = self.parse_occur_code();
+            ret = r;
+            cur = r;
+        }
+        self.skip_blanks_pe();
+        while self.cur() != b')' && !self.stopped() {
+            let c = self.cur();
+            if c == b',' || c == b'|' {
+                if typ == 0 {
+                    typ = c;
+                } else if typ != c {
+                    self.fatal_msg(
+                        XML_ERR_SEPARATOR_REQUIRED,
+                        format!(
+                            "xmlParseElementChildrenContentDecl : '{}' expected\n",
+                            typ as char
+                        ),
+                    );
+                    return None;
+                }
                 self.skip(1);
-                self.parse_children_content(depth + 1)?
-            } else {
-                match self.parse_name() {
-                    Some(n) => {
-                        let occ = self.parse_occur();
-                        ContentModel::Elem(n, occ)
+                let op = ec.new_node(if c == b',' { CT_SEQ } else { CT_OR }, None);
+                match last {
+                    None => {
+                        ec.set_c1(op, ret);
+                        ret = op;
+                        cur = op;
                     }
+                    Some(l) => {
+                        ec.set_c2(cur, op);
+                        ec.set_c1(op, l);
+                        cur = op;
+                    }
+                }
+            } else {
+                self.fatal(XML_ERR_ELEMCONTENT_NOT_FINISHED, None);
+                return None;
+            }
+            self.skip_blanks_pe();
+            if self.cur() == b'(' {
+                self.skip(1);
+                self.skip_blanks_pe();
+                last = Some(self.parse_children_content(ec, depth + 1)?);
+                self.skip_blanks_pe();
+            } else {
+                let name = match self.parse_name() {
+                    Some(n) => n,
                     None => {
                         self.fatal(XML_ERR_ELEMCONTENT_NOT_STARTED, None);
                         return None;
                     }
-                }
-            };
-            items.push(item);
+                };
+                let l = ec.new_node(CT_ELEMENT, Some(&name));
+                ec.nodes[l].ocur = self.parse_occur_code();
+                last = Some(l);
+            }
             self.skip_blanks_pe();
-            let c = self.cur();
-            if c == b')' {
-                self.skip(1);
-                break;
-            }
-            if c == b',' || c == b'|' {
-                if let Some(s) = sep {
-                    if s != c {
-                        self.fatal_msg(
-                            XML_ERR_ELEMCONTENT_NOT_FINISHED,
-                            format!(
-                                "xmlParseElementChildrenContentDecl : '{}' expected\n",
-                                s as char
-                            ),
-                        );
-                        return None;
-                    }
-                }
-                sep = Some(c);
-                self.skip(1);
-                continue;
-            }
-            self.fatal(XML_ERR_ELEMCONTENT_NOT_FINISHED, None);
-            return None;
         }
-        let occ = self.parse_occur();
-        if items.len() == 1 && sep.is_none() {
-            // single item group
-            let it = items.pop().unwrap();
-            return Some(match it {
-                ContentModel::Elem(n, o) if occ == '1' => {
-                    ContentModel::Seq(vec![ContentModel::Elem(n, o)], '1')
-                }
-                other => ContentModel::Seq(vec![other], occ),
-            });
+        if let Some(l) = last {
+            ec.set_c2(cur, l);
         }
-        Some(if sep == Some(b'|') {
-            ContentModel::Or(items, occ)
-        } else {
-            ContentModel::Seq(items, occ)
-        })
-    }
-
-    fn parse_occur(&mut self) -> char {
+        self.skip(1);
         match self.cur() {
             b'?' => {
+                let o = ec.nodes[ret].ocur;
+                ec.nodes[ret].ocur = if o == OC_PLUS || o == OC_MULT {
+                    OC_MULT
+                } else {
+                    OC_OPT
+                };
                 self.skip(1);
-                '?'
             }
             b'*' => {
+                ec.nodes[ret].ocur = OC_MULT;
+                // (a | b* | c?)* == (a | b | c)*
+                let mut c = Some(ret);
+                while let Some(n) = c {
+                    if ec.nodes[n].ctype != CT_OR {
+                        break;
+                    }
+                    for k in [ec.nodes[n].c1, ec.nodes[n].c2].into_iter().flatten() {
+                        if ec.nodes[k].ocur == OC_OPT || ec.nodes[k].ocur == OC_MULT {
+                            ec.nodes[k].ocur = OC_ONCE;
+                        }
+                    }
+                    c = ec.nodes[n].c2;
+                }
                 self.skip(1);
-                '*'
             }
             b'+' => {
+                let o = ec.nodes[ret].ocur;
+                ec.nodes[ret].ocur = if o == OC_OPT || o == OC_MULT {
+                    OC_MULT
+                } else {
+                    OC_PLUS
+                };
+                // (a | b*)+ == (a | b)* -- note: libxml2 walks from the
+                // last operator here, not from the top of the group
+                let mut found = false;
+                let mut c = Some(cur);
+                while let Some(n) = c {
+                    if ec.nodes[n].ctype != CT_OR {
+                        break;
+                    }
+                    for k in [ec.nodes[n].c1, ec.nodes[n].c2].into_iter().flatten() {
+                        if ec.nodes[k].ocur == OC_OPT || ec.nodes[k].ocur == OC_MULT {
+                            ec.nodes[k].ocur = OC_ONCE;
+                            found = true;
+                        }
+                    }
+                    c = ec.nodes[n].c2;
+                }
+                if found {
+                    ec.nodes[ret].ocur = OC_MULT;
+                }
                 self.skip(1);
-                '+'
             }
-            _ => '1',
+            _ => {}
         }
+        Some(ret)
     }
 
     fn parse_attribute_list_decl(&mut self) {
@@ -3003,7 +3464,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                     default: default.clone(),
                     tree,
                 };
-                self.sink.attribute_decl(&d);
+                self.sink.attribute_decl_p(&mut self.st, &d);
             }
             if let Some(dv) = &default {
                 if def != 2 && def != 3 {
@@ -3244,6 +3705,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             notation: None,
             parsed: true,
             expanding: false,
+            uri: None,
         });
         if self.st.sax_get_entity && self.st.in_subset == 0 {
             // XML_PARSE_OLDSAX: the SAX getEntity callback is asked first,
@@ -4503,16 +4965,41 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             return;
         }
+        let mut ent = ent;
+        let mut efile: Option<String> = None;
         if ent.kind != EntKind::InternalGeneral {
-            // external parsed entity: not loaded (no XXE)
-            if self.sax_ok() && !self.st.replace_entities {
-                self.sink.reference(&mut self.st, &name);
+            // external parsed entity: loaded when substituting or
+            // validating (xmlCtxtParseEntity), unless XXE is disabled
+            let load = self.st.options & XML_PARSE_NO_XXE == 0
+                && (self.st.replace_entities || self.st.options & XML_PARSE_DTDVALID != 0);
+            let loaded = if load && ent.orig.is_none() {
+                let r = self.load_entity_content(&ent);
+                if let Some(pe) = self.entities.get_mut(&name) {
+                    // remember the outcome (content, file) in `orig`/`notation`
+                    match &r {
+                        Some((c, f)) => {
+                            pe.content = c.clone();
+                            pe.orig = Some(f.clone());
+                        }
+                        None => pe.orig = Some(String::new()),
+                    }
+                }
+                r.is_some()
+            } else {
+                load && ent.orig.as_deref().map(|f| !f.is_empty()).unwrap_or(false)
+            };
+            if !loaded {
+                if self.sax_ok() && !self.st.replace_entities {
+                    self.sink.reference(&mut self.st, &name);
+                }
+                return;
             }
-            return;
+            ent = self.entities.get(&name).cloned().unwrap_or(ent);
+            efile = ent.orig.clone();
         }
         if self.st.replace_entities {
             // parse the entity content inline
-            self.parse_entity_content(&name, &ent.content, true);
+            self.parse_entity_content_file(&name, &ent.content, true, efile);
             return;
         }
         // first reference: parse content into the entity
@@ -4522,7 +5009,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             let wants = self.sink.builds_tree() && self.sink.begin_entity_content(&name);
             if wants {
-                self.parse_entity_content(&name, &ent.content, false);
+                self.parse_entity_content_file(&name, &ent.content, false, efile);
                 self.sink.end_entity_content(&name);
             } else {
                 // still check well-formedness of the content
@@ -4538,7 +5025,15 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_entity_content_check(&mut self, _name: &str, _content: &str) {}
 
-    fn parse_entity_content(&mut self, name: &str, content: &str, inline: bool) {
+    /// Parse entity content as a new input (named `file` for external
+    /// entities, so diagnostics point into it).
+    fn parse_entity_content_file(
+        &mut self,
+        name: &str,
+        content: &str,
+        inline: bool,
+        file: Option<String>,
+    ) {
         if self
             .entities
             .get(name)
@@ -4555,7 +5050,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         if let Some(e) = self.entities.get_mut(name) {
             e.expanding = true;
         }
-        let mut inp = Input::new(Rc::new(content.as_bytes().to_vec()), None);
+        let mut inp = Input::new(Rc::new(content.as_bytes().to_vec()), file);
         inp.entity = Some(name.to_string());
         self.st.inputs.push(inp);
         let old_min = self.ns_min;
@@ -4633,6 +5128,7 @@ fn dummy_state() -> ParserState {
         last_err_level: 0,
         sax1: false,
         sax_get_entity: false,
+        directory: None,
     }
 }
 
@@ -4863,7 +5359,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     /// xmlFinishDocument
     fn finish_document(&mut self) {
         let enc = self.st.encoding.clone();
-        self.sink.end_document(enc.as_deref());
+        self.sink.end_document_p(&mut self.st, enc.as_deref());
     }
 
     /// xmlParseChunk: feed `chunk`; parse as far as complete constructs
@@ -5156,13 +5652,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn end_doctype(&mut self) {
         self.st.in_subset = 2;
         if self.sax_ok() {
-            let (n, s, u) = (
-                self.int_sub_name.clone(),
-                self.ext_sub_system.clone(),
-                self.ext_sub_uri.clone(),
-            );
-            self.sink
-                .external_subset(n.as_deref(), s.as_deref(), u.as_deref());
+            self.load_external_subset();
         }
         self.st.in_subset = 0;
         self.clean_special_attr();
@@ -5370,5 +5860,411 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         self.names.pop();
         self.space.pop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External resources (external subset, external parameter and general
+// entities)
+
+pub const XML_IO_UNKNOWN: i32 = 1500;
+pub const XML_IO_ENOENT: i32 = 1524;
+pub const XML_IO_NETWORK_ATTEMPT: i32 = 1543;
+pub const XML_ERR_EXT_SUBSET_NOT_FINISHED: i32 = 60;
+pub const XML_ERR_CONDSEC_NOT_FINISHED: i32 = 59;
+pub const XML_ERR_CONDSEC_INVALID: i32 = 83;
+pub const XML_ERR_CONDSEC_INVALID_KEYWORD: i32 = 95;
+pub const XML_ERR_XMLDECL_NOT_STARTED: i32 = 56;
+pub const XML_ERR_ENTITY_PROCESSING: i32 = 104;
+
+/// What an external resource load produced: the bytes and optionally the
+/// final URL (used as the input's file name), or an error to report as
+/// an I/O error (None: libxml2's "failed to load \"URL\": No such file or
+/// directory").
+pub type ExtLoadResult = Result<(Vec<u8>, Option<String>), Option<(i32, String)>>;
+
+/// External entity loader hook (xmlExternalEntityLoader): called with the
+/// public id, the system id as written and the URL resolved against the
+/// current base.
+pub type ExtLoader = Box<dyn FnMut(Option<&str>, &str, &str) -> ExtLoadResult>;
+
+thread_local! {
+    static EXT_LOADER: std::cell::RefCell<Option<ExtLoader>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install (or remove with None) the external entity loader used by the
+/// parser; returns the previous one. Without a hook resources are read
+/// from the file system.
+pub fn set_ext_loader(l: Option<ExtLoader>) -> Option<ExtLoader> {
+    EXT_LOADER.with(|c| std::mem::replace(&mut *c.borrow_mut(), l))
+}
+
+/// The default loader: local files (plain paths or file:// URLs).
+pub fn default_ext_load(url: &str) -> ExtLoadResult {
+    let path = if let Some(rest) = url.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        percent_decode_str(rest)
+    } else if url.contains("://") {
+        return Err(None);
+    } else {
+        url.to_string()
+    };
+    match std::fs::read(&path) {
+        Ok(d) => Ok((d, None)),
+        Err(_) => Err(None),
+    }
+}
+
+fn percent_decode_str(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Load an external resource through the installed hook (or the default
+/// loader).
+pub fn load_external(public: Option<&str>, system: &str, url: &str) -> ExtLoadResult {
+    let hook = EXT_LOADER.with(|c| c.borrow_mut().take());
+    match hook {
+        Some(mut h) => {
+            let r = h(public, system, url);
+            EXT_LOADER.with(|c| {
+                let mut b = c.borrow_mut();
+                if b.is_none() {
+                    *b = Some(h);
+                }
+            });
+            r
+        }
+        None => default_ext_load(url),
+    }
+}
+
+/// Convert the raw bytes of an external entity to UTF-8 when a BOM says
+/// so (the text declaration's encoding is applied while parsing it).
+pub fn prepare_external(data: Vec<u8>) -> (Vec<u8>, bool) {
+    if data.len() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+        return (data[3..].to_vec(), true);
+    }
+    if data.len() >= 2
+        && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF))
+    {
+        let enc = if data[0] == 0xFF {
+            "UTF-16LE"
+        } else {
+            "UTF-16BE"
+        };
+        return (decode_to_utf8(&data[2..], enc).unwrap_or_default(), true);
+    }
+    if data.len() >= 4 && data[0] == b'<' && data[1] == 0 && data[2] == b'?' && data[3] == 0 {
+        return (decode_to_utf8(&data, "UTF-16LE").unwrap_or_default(), true);
+    }
+    if data.len() >= 4 && data[0] == 0 && data[1] == b'<' && data[2] == 0 && data[3] == b'?' {
+        return (decode_to_utf8(&data, "UTF-16BE").unwrap_or_default(), true);
+    }
+    (data, false)
+}
+
+impl<'a, S: Sink> Parser<'a, S> {
+    /// ctxt->validate || ctxt->loadsubset, and external entities allowed.
+    fn loads_dtd(&self) -> bool {
+        self.st.options & XML_PARSE_NO_XXE == 0
+            && self.st.options & (XML_PARSE_DTDVALID | XML_PARSE_DTDLOAD | XML_PARSE_DTDATTR) != 0
+    }
+
+    /// Base URI: the current input's file name (or, with `nearest`, the
+    /// innermost input having one), else ctxt->directory.
+    fn resolve_base(&self, nearest: bool) -> Option<String> {
+        if nearest {
+            for i in self.st.inputs.iter().rev() {
+                if let Some(f) = &i.filename {
+                    return Some(f.clone());
+                }
+            }
+        } else if let Some(f) = self.st.inputs.last().and_then(|i| i.filename.clone()) {
+            return Some(f);
+        }
+        self.st.directory.clone()
+    }
+
+    fn resolve_uri(&self, system: &str, nearest: bool) -> String {
+        let base = self.resolve_base(nearest);
+        match base {
+            Some(b) => {
+                crate::uri::build_uri(system, Some(&b)).unwrap_or_else(|| system.to_string())
+            }
+            None => system.to_string(),
+        }
+    }
+
+    /// xmlCtxtErrIO for a failed external load.
+    fn io_load_error(&mut self, url: &str, e: Option<(i32, String)>) {
+        let (code, msg) = e.unwrap_or_else(|| {
+            (
+                XML_IO_ENOENT,
+                format!("failed to load \"{}\": No such file or directory\n", url),
+            )
+        });
+        let level =
+            if code == XML_IO_ENOENT || code == XML_IO_NETWORK_ATTEMPT || code == XML_IO_UNKNOWN {
+                if self.st.options & XML_PARSE_DTDVALID != 0 {
+                    ERR_ERROR
+                } else {
+                    ERR_WARNING
+                }
+            } else {
+                ERR_FATAL
+            };
+        self.err_full(FROM_IO, code, level, msg);
+    }
+
+    /// Load an external entity's bytes, reporting failures.
+    fn fetch_external(
+        &mut self,
+        public: Option<&str>,
+        system: &str,
+        url: &str,
+    ) -> Option<(Vec<u8>, String)> {
+        match load_external(public, system, url) {
+            Ok((data, final_url)) => {
+                let (data, _) = prepare_external(data);
+                Some((data, final_url.unwrap_or_else(|| url.to_string())))
+            }
+            Err(e) => {
+                self.io_load_error(url, e);
+                None
+            }
+        }
+    }
+
+    /// xmlParseTextDecl, on the current (external) input. The declared
+    /// encoding converts the rest of that input.
+    fn parse_text_decl(&mut self) {
+        if !(self.cmp(b"<?xml") && is_blank(self.nxt(5))) {
+            self.fatal(XML_ERR_XMLDECL_NOT_STARTED, None);
+            return;
+        }
+        let saved = (
+            self.st.encoding.take(),
+            self.st.input_encoding.take(),
+            self.conv_enc.take(),
+            self.st.version.clone(),
+        );
+        self.skip(5);
+        if self.skip_blanks() == 0 {
+            self.fatal_msg(
+                XML_ERR_SPACE_REQUIRED,
+                "Space needed after '<?xml'\n".into(),
+            );
+        }
+        if self.parse_version_info().is_some() && self.skip_blanks() == 0 {
+            self.fatal_msg(XML_ERR_SPACE_REQUIRED, "Space needed here\n".into());
+        }
+        self.parse_encoding_decl();
+        self.skip_blanks();
+        if self.cur() == b'?' && self.nxt(1) == b'>' {
+            self.skip(2);
+        } else if self.cur() == b'>' {
+            self.fatal(XML_ERR_XMLDECL_NOT_FINISHED, None);
+            self.skip(1);
+        } else {
+            self.fatal(XML_ERR_XMLDECL_NOT_FINISHED, None);
+            while !self.stopped() && !self.at_end() {
+                let c = self.cur();
+                self.skip(1);
+                if c == b'>' {
+                    break;
+                }
+            }
+        }
+        self.st.encoding = saved.0;
+        self.st.input_encoding = saved.1;
+        self.conv_enc = saved.2;
+        self.st.version = saved.3;
+    }
+
+    /// xmlSAX2ExternalSubset: fetch and parse the external subset when
+    /// validating or loading the DTD.
+    fn load_external_subset(&mut self) {
+        let sys = match self.ext_sub_uri.clone() {
+            Some(s) => s,
+            None => return,
+        };
+        if !self.sink.wants_external_subset() || !self.loads_dtd() || !self.st.well_formed {
+            return;
+        }
+        let public = self.ext_sub_system.clone();
+        let name = self.int_sub_name.clone();
+        let url = self.resolve_uri(&sys, false);
+        let (data, fname) = match self.fetch_external(public.as_deref(), &sys, &url) {
+            Some(x) => x,
+            None => return,
+        };
+        self.sink
+            .external_subset(name.as_deref(), public.as_deref(), Some(&sys));
+        let saved = std::mem::take(&mut self.st.inputs);
+        self.st.inputs.push(Input::new(Rc::new(data), Some(fname)));
+        let old_sub = self.st.in_subset;
+        self.st.in_subset = 2;
+        self.parse_external_subset();
+        self.st.in_subset = old_sub;
+        self.st.inputs = saved;
+    }
+
+    /// xmlParseExternalSubset on the current input.
+    pub fn parse_external_subset(&mut self) {
+        if self.cmp(b"<?xml") {
+            self.parse_text_decl();
+        }
+        self.st.in_subset = 2;
+        let old_nr = self.st.inputs.len();
+        self.skip_blanks_pe();
+        while (self.cur() != 0 || self.st.inputs.len() > old_nr) && !self.stopped() {
+            if self.at_end() && self.st.inputs.len() > old_nr {
+                self.st.inputs.pop();
+                self.skip_blanks_pe();
+                continue;
+            }
+            if self.cmp(b"<![") {
+                self.parse_conditional_sections();
+            } else if self.cur() == b'<' && (self.nxt(1) == b'!' || self.nxt(1) == b'?') {
+                self.parse_markup_decl();
+            } else {
+                self.fatal(XML_ERR_EXT_SUBSET_NOT_FINISHED, None);
+                self.st.disable_sax = 2;
+                return;
+            }
+            self.skip_blanks_pe();
+        }
+        while self.st.inputs.len() > old_nr {
+            self.st.inputs.pop();
+        }
+        if self.cur() != 0 {
+            self.fatal(XML_ERR_EXT_SUBSET_NOT_FINISHED, None);
+        }
+    }
+
+    /// xmlParseConditionalSections
+    fn parse_conditional_sections(&mut self) {
+        let mut depth = 0usize;
+        while !self.stopped() {
+            if self.cmp(b"<![") {
+                self.skip(3);
+                self.skip_blanks_pe();
+                if self.cmp(b"INCLUDE") {
+                    self.skip(7);
+                    self.skip_blanks_pe();
+                    if self.cur() != b'[' {
+                        self.fatal(XML_ERR_CONDSEC_INVALID, None);
+                        self.st.disable_sax = 2;
+                        return;
+                    }
+                    self.skip(1);
+                    depth += 1;
+                } else if self.cmp(b"IGNORE") {
+                    self.skip(6);
+                    self.skip_blanks_pe();
+                    if self.cur() != b'[' {
+                        self.fatal(XML_ERR_CONDSEC_INVALID, None);
+                        self.st.disable_sax = 2;
+                        return;
+                    }
+                    self.skip(1);
+                    let mut ignore_depth = 0usize;
+                    while !self.stopped() {
+                        if self.at_end() {
+                            self.fatal(XML_ERR_CONDSEC_NOT_FINISHED, None);
+                            return;
+                        }
+                        if self.cmp(b"<![") {
+                            self.skip(3);
+                            ignore_depth += 1;
+                        } else if self.cmp(b"]]>") {
+                            self.skip(3);
+                            if ignore_depth == 0 {
+                                break;
+                            }
+                            ignore_depth -= 1;
+                        } else {
+                            self.skip(1);
+                        }
+                    }
+                } else {
+                    self.fatal(XML_ERR_CONDSEC_INVALID_KEYWORD, None);
+                    self.st.disable_sax = 2;
+                    return;
+                }
+            } else if depth > 0 && self.cmp(b"]]>") {
+                depth -= 1;
+                self.skip(3);
+            } else if self.cur() == b'<' && (self.nxt(1) == b'!' || self.nxt(1) == b'?') {
+                self.parse_markup_decl();
+            } else {
+                self.fatal(XML_ERR_EXT_SUBSET_NOT_FINISHED, None);
+                self.st.disable_sax = 2;
+                return;
+            }
+            if depth == 0 {
+                break;
+            }
+            self.skip_blanks_pe();
+        }
+    }
+
+    /// Push an external parameter entity's content as a new input
+    /// (xmlParsePEReference for XML_EXTERNAL_PARAMETER_ENTITY).
+    fn push_external_pe(&mut self, e: &PEntity) {
+        if self.st.options & XML_PARSE_NO_XXE != 0
+            || (!self.loads_dtd()
+                && !self.st.replace_entities
+                && self.st.options & XML_PARSE_DTDVALID == 0)
+        {
+            return;
+        }
+        let sys = match &e.system {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let url = e.uri.clone().unwrap_or_else(|| sys.clone());
+        if let Some((data, fname)) = self.fetch_external(e.public.as_deref(), &sys, &url) {
+            let mut inp = Input::new(Rc::new(data), Some(fname));
+            inp.entity = Some(e.name.clone());
+            self.st.inputs.push(inp);
+            if self.cmp(b"<?xml") && is_blank(self.nxt(5)) {
+                self.parse_text_decl();
+            }
+        }
+    }
+
+    /// xmlLoadEntityContent: the replacement text of an external entity
+    /// (text declaration removed). None if it could not be loaded.
+    fn load_entity_content(&mut self, e: &PEntity) -> Option<(String, String)> {
+        let sys = e.system.clone()?;
+        let url = e.uri.clone().unwrap_or_else(|| sys.clone());
+        let (data, fname) = self.fetch_external(e.public.as_deref(), &sys, &url)?;
+        let mut inp = Input::new(Rc::new(data), Some(fname.clone()));
+        inp.entity = Some(e.name.clone());
+        self.st.inputs.push(inp);
+        if self.cmp(b"<?xml") && is_blank(self.nxt(5)) {
+            self.parse_text_decl();
+        }
+        let pos = self.pos();
+        let rest = String::from_utf8_lossy(&self.inp().data[pos..]).into_owned();
+        self.st.inputs.pop();
+        Some((rest, fname))
     }
 }

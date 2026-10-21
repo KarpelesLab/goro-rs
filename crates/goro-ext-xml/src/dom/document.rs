@@ -730,7 +730,28 @@ fn valid_file_path(source: &str) -> Option<String> {
         };
         return Some(match std::fs::canonicalize(&abs) {
             Ok(c) => c.to_string_lossy().into_owned(),
-            Err(_) => abs.to_string_lossy().into_owned(),
+            Err(_) => {
+                // lexical normalization (expand_filepath)
+                let mut parts: Vec<std::ffi::OsString> = Vec::new();
+                for c in abs.components() {
+                    match c {
+                        std::path::Component::ParentDir => {
+                            parts.pop();
+                        }
+                        std::path::Component::Normal(x) => parts.push(x.to_os_string()),
+                        _ => {}
+                    }
+                }
+                let mut s = String::new();
+                for x in parts {
+                    s.push('/');
+                    s.push_str(&x.to_string_lossy());
+                }
+                if s.is_empty() {
+                    s.push('/');
+                }
+                s
+            }
         });
     }
     Some(src)
@@ -835,7 +856,8 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     if recover {
         vm.error_reporting |= 2;
     }
-    let out = crate::sax2::parse_doc(&data, url.as_deref(), opts);
+    let dir = if url.is_none() { cwd_url() } else { None };
+    let out = crate::sax2::parse_doc_ex(&data, url.as_deref(), opts, dir.as_deref());
     crate::libxml::report(vm, &fname, &out.errors, crate::libxml::Style::Ctx);
     if recover {
         vm.error_reporting = saved_er;
@@ -854,9 +876,6 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
                     }
                 }
             });
-            if opts & XML_PARSE_DTDVALID != 0 {
-                validate_doc(vm, d, &fname);
-            }
             finish_loading(vm, o, d);
             Ok(Value::True)
         }
@@ -1158,9 +1177,8 @@ fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 
 /// DTD validation (DOMDocument::validate)
 pub fn validate_doc(vm: &mut Vm, d: NodeId, fname: &str) -> bool {
-    let errors = crate::valid::validate_document(d);
-    let ok = errors.iter().all(|e| e.level < ERR_ERROR);
-    crate::libxml::report(vm, fname, &errors, crate::libxml::Style::Ctx);
+    let (ok, errors) = crate::valid::validate_document_ex(d);
+    crate::libxml::report(vm, fname, &errors, crate::libxml::Style::Generic);
     ok
 }
 

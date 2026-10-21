@@ -81,6 +81,27 @@ pub struct DtdInfo {
     /// Raw text of the internal subset (for serialization of declarations we
     /// do not model precisely).
     pub attr_defaults: Vec<AttrDecl>,
+    /// Element declaration table (dtd->elements), including the
+    /// XML_ELEMENT_TYPE_UNDEFINED placeholders created by ATTLIST.
+    pub elements: Vec<ElemDecl>,
+}
+
+/// xmlElement: an element declaration as kept in the DTD hash table.
+#[derive(Clone, Debug, Default)]
+pub struct ElemDecl {
+    /// Local name.
+    pub name: String,
+    pub prefix: Option<String>,
+    /// 0 UNDEFINED, 1 EMPTY, 2 ANY, 3 MIXED, 4 ELEMENT
+    pub etype: u8,
+    pub content: Option<crate::parser::ElemContent>,
+    /// Attribute declarations of this element (elem->attributes, nexth
+    /// order) as (dtd node, index in that dtd's attr_defaults).
+    pub attrs: Vec<(NodeId, usize)>,
+    /// The ElementDecl node linked in the DTD.
+    pub node: Option<NodeId>,
+    /// Compiled content model (elem->contModel).
+    pub model: Option<std::rc::Rc<crate::valid::ContModel>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -93,6 +114,14 @@ pub struct AttrDecl {
     /// #REQUIRED, #IMPLIED, #FIXED or empty
     pub def: String,
     pub default: Option<String>,
+    /// XML_ATTRIBUTE_* type (1 CDATA .. 10 NOTATION)
+    pub atype_n: u8,
+    /// XML_ATTRIBUTE_* default (1 NONE, 2 REQUIRED, 3 IMPLIED, 4 FIXED)
+    pub def_n: u8,
+    /// Enumerated values.
+    pub tree: Vec<String>,
+    /// The AttributeDecl node linked in the DTD.
+    pub node: Option<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1353,13 +1382,30 @@ impl Tree {
                             }
                         }
                     }
-                    let (notations, defs) = self
+                    let (notations, mut defs, mut elems) = self
                         .dtd_info(id)
-                        .map(|d| (d.notations.clone(), d.attr_defaults.clone()))
+                        .map(|d| {
+                            (
+                                d.notations.clone(),
+                                d.attr_defaults.clone(),
+                                d.elements.clone(),
+                            )
+                        })
                         .unwrap_or_default();
+                    for a in defs.iter_mut() {
+                        a.node = None;
+                    }
+                    for e in elems.iter_mut() {
+                        e.node = None;
+                        e.attrs.retain(|(dd, _)| *dd == id);
+                        for a in e.attrs.iter_mut() {
+                            a.0 = n;
+                        }
+                    }
                     if let Some(d) = self.dtd_info_mut(n) {
                         d.notations = notations;
                         d.attr_defaults = defs;
+                        d.elements = elems;
                     }
                 }
                 return n;

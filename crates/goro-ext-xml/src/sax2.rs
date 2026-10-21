@@ -2,6 +2,7 @@
 
 use crate::parser::*;
 use crate::tree::{self, AttrDecl, EntityType, Extra, NType, NodeId, Tree};
+use crate::valid::{self, Cx, Out, Validator};
 
 pub struct TreeBuilder {
     pub doc: Option<NodeId>,
@@ -14,6 +15,10 @@ pub struct TreeBuilder {
     pub errors: Vec<XmlError>,
     pub in_entity: Vec<NodeId>,
     pub url: Option<String>,
+    /// ctxt->validate (XML_PARSE_DTDVALID; cleared when there is no DTD).
+    pub validate: bool,
+    /// Validation state (vctxt) for parse-time validation.
+    pub validator: Validator,
 }
 
 impl TreeBuilder {
@@ -27,6 +32,8 @@ impl TreeBuilder {
             errors: Vec::new(),
             in_entity: Vec::new(),
             url: None,
+            validate: options & XML_PARSE_DTDVALID != 0,
+            validator: Validator::default(),
         }
     }
 
@@ -86,8 +93,14 @@ impl TreeBuilder {
         }
     }
 
-    fn dtd(&self, t: &Tree) -> Option<NodeId> {
-        self.doc.and_then(|d| t.int_subset(d))
+    /// The subset declarations currently go to (ctxt->inSubset).
+    fn subset_for(&self, t: &Tree, in_subset: u8) -> Option<NodeId> {
+        let d = self.doc?;
+        if in_subset == 2 {
+            t.doc_info(d).and_then(|i| i.ext_subset)
+        } else {
+            t.int_subset(d)
+        }
     }
 }
 
@@ -119,7 +132,20 @@ impl Sink for TreeBuilder {
         self.doc = Some(d);
     }
 
-    fn end_document(&mut self, encoding: Option<&str>) {
+    fn end_document_p(&mut self, p: &mut ParserState, encoding: Option<&str>) {
+        if let Some(d) = self.doc {
+            if self.validate && p.well_formed && self.chunk_root.is_none() {
+                let v = &mut self.validator;
+                tree::with(|t| {
+                    if t.int_subset(d).is_some() {
+                        let mut cx = Cx::new(t, v, Out::Parser(p), d);
+                        if !cx.validate_document_final() {
+                            p.valid = false;
+                        }
+                    }
+                });
+            }
+        }
         if let (Some(d), Some(e)) = (self.doc, encoding) {
             tree::with(|t| {
                 if let Some(di) = t.doc_info_mut(d) {
@@ -143,8 +169,32 @@ impl Sink for TreeBuilder {
         });
     }
 
-    fn entity_decl(
+    fn external_subset(&mut self, name: Option<&str>, ext_id: Option<&str>, sys_id: Option<&str>) {
+        // xmlNewDtd(doc, ...): the external subset is not linked in the tree
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return,
+        };
+        tree::with(|t| {
+            let id = t.new_node(Some(doc), NType::Dtd, name.unwrap_or(""));
+            t.nodes[id].extra = Extra::Dtd(Box::new(tree::DtdInfo {
+                external_id: ext_id.map(|s| s.to_string()),
+                system_id: sys_id.map(|s| s.to_string()),
+                ..Default::default()
+            }));
+            if let Some(di) = t.doc_info_mut(doc) {
+                di.ext_subset = Some(id);
+            }
+        });
+    }
+
+    fn wants_external_subset(&self) -> bool {
+        true
+    }
+
+    fn entity_decl_p(
         &mut self,
+        p: &mut ParserState,
         name: &str,
         kind: EntKind,
         public: Option<&str>,
@@ -152,7 +202,7 @@ impl Sink for TreeBuilder {
         content: Option<&str>,
         orig: Option<&str>,
     ) {
-        let dtd = match tree::with(|t| self.dtd(t)) {
+        let dtd = match tree::with(|t| self.subset_for(t, p.in_subset)) {
             Some(d) => d,
             None => return,
         };
@@ -173,14 +223,15 @@ impl Sink for TreeBuilder {
         });
     }
 
-    fn unparsed_entity_decl(
+    fn unparsed_entity_decl_p(
         &mut self,
+        p: &mut ParserState,
         name: &str,
         public: Option<&str>,
         system: Option<&str>,
         notation: &str,
     ) {
-        let dtd = match tree::with(|t| self.dtd(t)) {
+        let dtd = match tree::with(|t| self.subset_for(t, p.in_subset)) {
             Some(d) => d,
             None => return,
         };
@@ -199,101 +250,313 @@ impl Sink for TreeBuilder {
         });
     }
 
-    fn notation_decl(&mut self, name: &str, public: Option<&str>, system: Option<&str>) {
+    fn notation_decl_p(
+        &mut self,
+        p: &mut ParserState,
+        name: &str,
+        public: Option<&str>,
+        system: Option<&str>,
+    ) {
+        if public.is_none() && system.is_none() {
+            return;
+        }
+        let in_subset = p.in_subset;
+        let dup = tree::with(|t| {
+            let dtd = self.subset_for(t, in_subset)?;
+            let d = t.dtd_info_mut(dtd)?;
+            if d.notations.iter().any(|(n, _, _)| n == name) {
+                return Some(true);
+            }
+            d.notations.push((
+                name.to_string(),
+                public.map(|s| s.to_string()),
+                system.map(|s| s.to_string()),
+            ));
+            Some(false)
+        });
+        if dup == Some(true) {
+            let _ = p.report(
+                FROM_VALID,
+                valid::XML_DTD_NOTATION_REDEFINED,
+                ERR_ERROR,
+                format!("xmlAddNotationDecl: {} already defined\n", name),
+            );
+            p.valid = false;
+        }
+    }
+
+    fn element_decl_p(&mut self, p: &mut ParserState, decl: &ElementDecl) {
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return,
+        };
+        let in_subset = p.in_subset;
+        let validate = self.validate;
+        let v = &mut self.validator;
         tree::with(|t| {
-            if let Some(dtd) = self.dtd(t) {
-                if let Some(d) = t.dtd_info_mut(dtd) {
-                    if !d.notations.iter().any(|(n, _, _)| n == name) {
-                        d.notations.push((
-                            name.to_string(),
-                            public.map(|s| s.to_string()),
-                            system.map(|s| s.to_string()),
-                        ));
+            let (int, ext) = valid::subsets(t, doc);
+            let dtd = match if in_subset == 2 { ext } else { int } {
+                Some(d) => d,
+                None => return,
+            };
+            let (prefix, local) = match decl.name.find(':') {
+                Some(i) if i > 0 => (
+                    Some(decl.name[..i].to_string()),
+                    decl.name[i + 1..].to_string(),
+                ),
+                _ => (None, decl.name.clone()),
+            };
+            // attributes declared (in the internal subset) before the
+            // element was declared in the external one
+            let mut old_attrs = Vec::new();
+            if let Some(isub) = int.filter(|i| *i != dtd) {
+                if let Some(i) = valid::find_elem(t, Some(isub), &local, prefix.as_deref()) {
+                    let d = t.dtd_info_mut(isub).unwrap();
+                    if d.elements[i].etype == valid::ET_UNDEFINED {
+                        old_attrs = std::mem::take(&mut d.elements[i].attrs);
+                        d.elements.remove(i);
                     }
                 }
             }
-        });
-    }
-
-    fn element_decl(&mut self, decl: &ElementDecl) {
-        tree::with(|t| {
-            if let Some(dtd) = self.dtd(t) {
-                // duplicates are ignored
-                for c in t.children_of(dtd) {
-                    if t.nodes[c].t == NType::ElementDecl && t.nodes[c].name == decl.name {
+            let idx = match valid::find_elem(t, Some(dtd), &local, prefix.as_deref()) {
+                Some(i) => {
+                    if t.dtd_info(dtd).unwrap().elements[i].etype != valid::ET_UNDEFINED {
+                        let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                        cx.err(
+                            Some(dtd),
+                            valid::XML_DTD_ELEM_REDEFINED,
+                            ERR_ERROR,
+                            format!("Redefinition of element {}\n", decl.name),
+                        );
+                        p.valid = false;
                         return;
                     }
+                    i
                 }
-                let doc = self.doc;
-                let n = t.new_node(doc, NType::ElementDecl, &decl.name);
-                let content = match decl.etype {
-                    1 => "EMPTY".to_string(),
-                    2 => "ANY".to_string(),
-                    _ => decl
-                        .content
-                        .as_ref()
-                        .map(|c| c.to_decl_string())
-                        .unwrap_or_default(),
-                };
-                t.nodes[n].atype = decl.etype;
-                t.nodes[n].extra = Extra::ElementDecl(content);
-                t.link_child_raw(dtd, n);
+                None => {
+                    let d = t.dtd_info_mut(dtd).unwrap();
+                    d.elements.push(tree::ElemDecl {
+                        name: local.clone(),
+                        prefix: prefix.clone(),
+                        attrs: old_attrs,
+                        ..Default::default()
+                    });
+                    d.elements.len() - 1
+                }
+            };
+            let n = t.new_node(Some(doc), NType::ElementDecl, &decl.name);
+            let content = match decl.etype {
+                1 => "EMPTY".to_string(),
+                2 => "ANY".to_string(),
+                _ => decl.content.as_ref().map(|c| c.dump()).unwrap_or_default(),
+            };
+            t.nodes[n].atype = decl.etype;
+            t.nodes[n].extra = Extra::ElementDecl(content);
+            t.link_child_raw(dtd, n);
+            {
+                let e = &mut t.dtd_info_mut(dtd).unwrap().elements[idx];
+                e.etype = decl.etype;
+                e.content = decl.content.clone();
+                e.node = Some(n);
+                e.model = None;
+            }
+            if validate && p.well_formed && int.is_some() {
+                let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                if !cx.validate_element_decl((dtd, idx)) {
+                    p.valid = false;
+                }
             }
         });
     }
 
-    fn attribute_decl(&mut self, decl: &AttrDeclInfo) {
+    fn attribute_decl_p(&mut self, p: &mut ParserState, decl: &AttrDeclInfo) {
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return,
+        };
+        if decl.name == "xml:id" && decl.atype != valid::AT_ID {
+            let ok = p.valid;
+            let _ = p.report(
+                FROM_DTD,
+                valid::XML_DTD_XMLID_TYPE,
+                ERR_ERROR,
+                "xml:id : attribute type should be ID\n".into(),
+            );
+            p.valid = ok;
+        }
+        let in_subset = p.in_subset;
+        let validate = self.validate;
+        let v = &mut self.validator;
         tree::with(|t| {
-            if let Some(dtd) = self.dtd(t) {
-                let (prefix, name) = match decl.name.find(':') {
-                    Some(i) => (
-                        Some(decl.name[..i].to_string()),
-                        decl.name[i + 1..].to_string(),
+            let (int, ext) = valid::subsets(t, doc);
+            let dtd = match if in_subset == 2 { ext } else { int } {
+                Some(d) => d,
+                None => return,
+            };
+            let (prefix, name) = match decl.name.find(':') {
+                Some(i) => (
+                    Some(decl.name[..i].to_string()),
+                    decl.name[i + 1..].to_string(),
+                ),
+                None => (None, decl.name.clone()),
+            };
+            let mut default = decl.default.clone();
+            if let Some(dv) = &default {
+                if !valid::validate_attribute_value(decl.atype, dv) {
+                    let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                    cx.err(
+                        Some(dtd),
+                        valid::XML_DTD_ATTRIBUTE_DEFAULT,
+                        ERR_ERROR,
+                        format!(
+                            "Attribute {} of {}: invalid default value\n",
+                            decl.elem, name
+                        ),
+                    );
+                    default = None;
+                    p.valid = false;
+                }
+            }
+            if int.is_some()
+                && Some(dtd) == ext
+                && valid::find_attr(t, int, &decl.elem, &name, prefix.as_deref()).is_some()
+            {
+                return;
+            }
+            // the element entry (possibly XML_ELEMENT_TYPE_UNDEFINED)
+            let (eprefix, elocal) = match decl.elem.find(':') {
+                Some(i) if i > 0 => (
+                    Some(decl.elem[..i].to_string()),
+                    decl.elem[i + 1..].to_string(),
+                ),
+                _ => (None, decl.elem.clone()),
+            };
+            let eidx = match valid::find_elem(t, Some(dtd), &elocal, eprefix.as_deref()) {
+                Some(i) => i,
+                None => {
+                    let d = t.dtd_info_mut(dtd).unwrap();
+                    d.elements.push(tree::ElemDecl {
+                        name: elocal.clone(),
+                        prefix: eprefix.clone(),
+                        ..Default::default()
+                    });
+                    d.elements.len() - 1
+                }
+            };
+            if valid::find_attr(t, Some(dtd), &decl.elem, &name, prefix.as_deref()).is_some() {
+                let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                cx.err(
+                    Some(dtd),
+                    valid::XML_DTD_ATTRIBUTE_REDEFINED,
+                    ERR_WARNING,
+                    format!(
+                        "Attribute {} of element {}: already defined\n",
+                        name, decl.elem
                     ),
-                    None => (None, decl.name.clone()),
-                };
-                if let Some(d) = t.dtd_info(dtd) {
-                    if d.attr_defaults
-                        .iter()
-                        .any(|a| a.elem == decl.elem && a.name == name && a.prefix == prefix)
-                    {
-                        return;
+                );
+                return;
+            }
+            if decl.atype == valid::AT_ID {
+                // xmlScanIDAttributeDecl(ctxt, elemDef, 1)
+                let ids: Vec<String> = t.dtd_info(dtd).unwrap().elements[eidx]
+                    .attrs
+                    .iter()
+                    .filter_map(|(d, i)| t.dtd_info(*d).map(|x| &x.attr_defaults[*i]))
+                    .filter(|a| a.atype_n == valid::AT_ID)
+                    .map(|a| a.name.clone())
+                    .collect();
+                if !ids.is_empty() {
+                    let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                    for (k, an) in ids.iter().enumerate() {
+                        if k >= 1 {
+                            cx.err(
+                                Some(dtd),
+                                valid::XML_DTD_MULTIPLE_ID,
+                                ERR_ERROR,
+                                format!(
+                                    "Element {} has too many ID attributes defined : {}\n",
+                                    elocal, an
+                                ),
+                            );
+                        }
                     }
+                    cx.err(
+                        Some(dtd),
+                        valid::XML_DTD_MULTIPLE_ID,
+                        ERR_ERROR,
+                        format!(
+                            "Element {} has too may ID attributes defined : {}\n",
+                            decl.elem, name
+                        ),
+                    );
+                    p.valid = false;
                 }
-                let atype = match decl.atype {
-                    1 => "CDATA".to_string(),
-                    2 => "ID".to_string(),
-                    3 => "IDREF".to_string(),
-                    4 => "IDREFS".to_string(),
-                    5 => "ENTITY".to_string(),
-                    6 => "ENTITIES".to_string(),
-                    7 => "NMTOKEN".to_string(),
-                    8 => "NMTOKENS".to_string(),
-                    9 => format!("({})", decl.tree.join(" | ")),
-                    _ => format!("NOTATION ({})", decl.tree.join(" | ")),
-                };
-                let def = match decl.def {
-                    2 => "#REQUIRED",
-                    3 => "#IMPLIED",
-                    4 => "#FIXED",
-                    _ => "",
+            }
+            let atype = match decl.atype {
+                1 => "CDATA".to_string(),
+                2 => "ID".to_string(),
+                3 => "IDREF".to_string(),
+                4 => "IDREFS".to_string(),
+                5 => "ENTITY".to_string(),
+                6 => "ENTITIES".to_string(),
+                7 => "NMTOKEN".to_string(),
+                8 => "NMTOKENS".to_string(),
+                9 => format!("({})", decl.tree.join(" | ")),
+                _ => format!("NOTATION ({})", decl.tree.join(" | ")),
+            };
+            let def = match decl.def {
+                2 => "#REQUIRED",
+                3 => "#IMPLIED",
+                4 => "#FIXED",
+                _ => "",
+            }
+            .to_string();
+            let n = t.new_node(Some(doc), NType::AttributeDecl, &name);
+            let ad = AttrDecl {
+                elem: decl.elem.clone(),
+                name: name.clone(),
+                prefix: prefix.clone(),
+                atype,
+                def,
+                default,
+                atype_n: decl.atype,
+                def_n: decl.def,
+                tree: decl.tree.clone(),
+                node: Some(n),
+            };
+            t.nodes[n].atype = decl.atype;
+            t.nodes[n].extra = Extra::AttributeDecl(Box::new(ad.clone()));
+            t.link_child_raw(dtd, n);
+            let aidx = {
+                let d = t.dtd_info_mut(dtd).unwrap();
+                d.attr_defaults.push(ad);
+                d.attr_defaults.len() - 1
+            };
+            // elem->attributes: namespace declarations first
+            let is_xmlns = name == "xmlns" || prefix.as_deref() == Some("xmlns");
+            let names: Vec<String> = t.dtd_info(dtd).unwrap().elements[eidx]
+                .attrs
+                .iter()
+                .map(|(d, i)| {
+                    t.dtd_info(*d)
+                        .map(|x| x.attr_defaults[*i].name.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let list = &mut t.dtd_info_mut(dtd).unwrap().elements[eidx].attrs;
+            if is_xmlns || list.is_empty() {
+                list.insert(0, (dtd, aidx));
+            } else {
+                let mut k = 0;
+                while names[k] == "xmlns" && k + 1 < names.len() {
+                    k += 1;
                 }
-                .to_string();
-                let ad = AttrDecl {
-                    elem: decl.elem.clone(),
-                    name: name.clone(),
-                    prefix: prefix.clone(),
-                    atype,
-                    def,
-                    default: decl.default.clone(),
-                };
-                let doc = self.doc;
-                let n = t.new_node(doc, NType::AttributeDecl, &name);
-                t.nodes[n].atype = decl.atype;
-                t.nodes[n].extra = Extra::AttributeDecl(Box::new(ad.clone()));
-                t.link_child_raw(dtd, n);
-                if let Some(d) = t.dtd_info_mut(dtd) {
-                    d.attr_defaults.push(ad);
+                list.insert(k + 1, (dtd, aidx));
+            }
+            if validate && p.well_formed && int.is_some() {
+                let mut cx = Cx::new(t, v, Out::Parser(p), doc);
+                if !cx.validate_attribute_decl((dtd, aidx)) {
+                    p.valid = false;
                 }
             }
         });
@@ -315,8 +578,42 @@ impl Sink for TreeBuilder {
         let replace = p.replace_entities;
         let opts = self.options;
         let html = self.html;
-        let mut id_errors: Vec<String> = Vec::new();
+        if self.validate {
+            // "First check on validity"
+            let no_dtd = tree::with(|t| {
+                let d = match doc {
+                    Some(d) => d,
+                    None => return false,
+                };
+                let (int, ext) = valid::subsets(t, d);
+                if ext.is_some() {
+                    return false;
+                }
+                match int.and_then(|i| t.dtd_info(i)) {
+                    None => true,
+                    Some(di) => {
+                        di.notations.is_empty()
+                            && di.elements.is_empty()
+                            && di.attr_defaults.is_empty()
+                            && di.entities.is_empty()
+                    }
+                }
+            });
+            if no_dtd {
+                let _ = p.report(
+                    FROM_DTD,
+                    valid::XML_DTD_NO_DTD,
+                    ERR_ERROR,
+                    "Validation failed: no DTD found !".into(),
+                );
+                p.valid = false;
+                self.validate = false;
+            }
+        }
+        let in_entity = p.inputs.last().map(|i| i.entity.is_some()).unwrap_or(false);
         let mut warn_undef: Option<String> = None;
+        let validate = self.validate && !html;
+        let v = &mut self.validator;
         let el = tree::with(|t| {
             let name = if prefix.is_some() && uri.is_none() {
                 format!("{}:{}", prefix.unwrap(), localname)
@@ -325,6 +622,20 @@ impl Sink for TreeBuilder {
             };
             let el = t.new_element(doc, &name);
             t.nodes[el].line = line;
+            let has_int = doc.and_then(|d| t.int_subset(d)).is_some();
+            for (pref, u) in nsdecls {
+                let ns = t.new_ns_raw(u, pref.as_deref(), Some(el));
+                t.nodes[el].ns_def.push(ns);
+                if uri.is_some() && pref.as_deref() == prefix {
+                    t.nodes[el].ns = Some(ns);
+                }
+                if validate && p.well_formed && has_int {
+                    let mut cx = Cx::new(t, v, Out::Parser(p), doc.unwrap());
+                    if !cx.validate_one_namespace(el, prefix, ns, u) {
+                        p.valid = false;
+                    }
+                }
+            }
             match parent {
                 None => {
                     if let Some(d) = doc {
@@ -333,13 +644,6 @@ impl Sink for TreeBuilder {
                 }
                 Some(pn) => {
                     t.link_child_raw(pn, el);
-                }
-            }
-            for (pref, u) in nsdecls {
-                let ns = t.new_ns_raw(u, pref.as_deref(), Some(el));
-                t.nodes[el].ns_def.push(ns);
-                if uri.is_some() && pref.as_deref() == prefix {
-                    t.nodes[el].ns = Some(ns);
                 }
             }
             if uri.is_some() && t.nodes[el].ns.is_none() {
@@ -353,6 +657,14 @@ impl Sink for TreeBuilder {
                         warn_undef = Some(prefix.unwrap_or("").to_string());
                     }
                 }
+            }
+            if let Some(pfx) = warn_undef.take() {
+                let _ = p.report(
+                    FROM_NAMESPACE,
+                    XML_NS_ERR_UNDEFINED_NAMESPACE,
+                    ERR_WARNING,
+                    format!("Namespace prefix {} was not found\n", pfx),
+                );
             }
             let nb = if nb_defaulted != 0 && opts & XML_PARSE_DTDATTR == 0 {
                 attrs.len() - nb_defaulted
@@ -379,65 +691,96 @@ impl Sink for TreeBuilder {
                     let tx = t.new_text(doc, &a.value);
                     t.link_child_raw(at, tx);
                 }
-                // IDs
+                let d = match doc {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if validate && p.well_formed && has_int {
+                    // the value with entities substituted (and normalized
+                    // again if declared non-CDATA)
+                    let mut value = a.value.clone();
+                    let mut cx = Cx::new(t, v, Out::Parser(p), d);
+                    if !replace && a.value.contains('&') {
+                        value = cx.t.node_get_content(at);
+                        let full = match &a.prefix {
+                            Some(pr) => format!("{}:{}", pr, a.localname),
+                            None => a.localname.clone(),
+                        };
+                        if let Some(nv) = cx.normalize_attribute_value(el, &full, &value) {
+                            value = nv;
+                        }
+                    }
+                    let ok = cx.validate_one_attribute(el, at, &value) && cx.valid;
+                    if !ok {
+                        p.valid = false;
+                    }
+                    continue;
+                }
+                // IDs (non-validating)
                 let single_text = {
                     let c = t.nodes[at].children;
                     c.is_some()
                         && t.nodes[c.unwrap()].t == NType::Text
                         && t.nodes[c.unwrap()].next.is_none()
                 };
-                if single_text {
+                if single_text && !in_entity {
                     let content = t.node_get_content(at);
                     let is_xml_id = a.prefix.as_deref() == Some("xml") && a.localname == "id";
+                    if is_xml_id && !is_valid_ncname(&content) {
+                        let _ = p.report(
+                            FROM_DTD,
+                            valid::XML_DTD_XMLID_VALUE,
+                            ERR_ERROR,
+                            format!("xml:id : attribute value {} is not an NCName\n", content),
+                        );
+                        p.valid = false;
+                    }
                     let is_id = is_xml_id || is_id_attr(t, doc, el, at, html);
                     if is_id {
-                        if let Some(d) = doc {
-                            t.nodes[at].atype = 2;
-                            let exists = t
-                                .doc_info(d)
-                                .map(|di| di.ids.contains_key(&content))
-                                .unwrap_or(false);
-                            if exists {
-                                id_errors.push(content.clone());
-                            } else if let Some(di) = t.doc_info_mut(d) {
-                                di.ids.insert(content, at);
-                            }
-                        }
+                        let mut cx = Cx::new(t, v, Out::Parser(p), d);
+                        cx.add_id(at, &content);
                     }
                 }
             }
             el
         });
-        if let Some(pfx) = warn_undef {
-            let _ = p
-                .report(
-                    FROM_NAMESPACE,
-                    XML_NS_ERR_UNDEFINED_NAMESPACE,
-                    ERR_WARNING,
-                    format!("Namespace prefix {} was not found\n", pfx),
-                )
-                .map(|e| self.errors.push(e));
-        }
-        for v in id_errors {
-            if let Some(e) = p.report(
-                FROM_VALID,
-                XML_DTD_ID_REDEFINED,
-                ERR_ERROR,
-                format!("ID {} already defined\n", v),
-            ) {
-                self.errors.push(e);
+        if self.validate && !self.validator.dtd_validated {
+            if let Some(d) = doc {
+                let v = &mut self.validator;
+                tree::with(|t| {
+                    let mut cx = Cx::new(t, v, Out::Parser(p), d);
+                    let chk = cx.validate_dtd_final();
+                    let root_ok = cx.validate_root();
+                    if !chk || !root_ok {
+                        p.valid = false;
+                    }
+                });
             }
+            self.validator.dtd_validated = true;
         }
         self.stack.push(el);
     }
 
     fn end_element(
         &mut self,
-        _p: &mut ParserState,
+        p: &mut ParserState,
         _localname: &str,
         _prefix: Option<&str>,
         _uri: Option<&str>,
     ) {
+        if self.validate && p.well_formed {
+            if let (Some(d), Some(cur)) = (self.doc, self.node()) {
+                let v = &mut self.validator;
+                tree::with(|t| {
+                    if t.int_subset(d).is_some() {
+                        let mut cx = Cx::new(t, v, Out::Parser(p), d);
+                        if !cx.validate_one_element(cur) {
+                            p.valid = false;
+                        }
+                    }
+                });
+            }
+        }
         self.stack.pop();
     }
 
@@ -711,10 +1054,22 @@ pub struct ParseOutcome {
 /// Parse a whole document into the tree. The document is returned even if
 /// not well-formed (callers decide; with RECOVER it is kept).
 pub fn parse_doc(data: &[u8], url: Option<&str>, options: i64) -> ParseOutcome {
+    parse_doc_ex(data, url, options, None)
+}
+
+/// `parse_doc` with a base directory for resolving external identifiers
+/// when there is no URL (ctxt->directory).
+pub fn parse_doc_ex(
+    data: &[u8],
+    url: Option<&str>,
+    options: i64,
+    directory: Option<&str>,
+) -> ParseOutcome {
     let mut b = TreeBuilder::new(options);
     b.url = url.map(|s| s.to_string());
     let (wf, nswf, errors) = {
         let mut p = Parser::new(&mut b, data.to_vec(), url.map(|s| s.to_string()), options);
+        p.st.directory = directory.map(|s| s.to_string());
         let ok = p.parse_document();
         (ok, p.st.ns_well_formed, std::mem::take(&mut p.st.errors))
     };
@@ -783,6 +1138,7 @@ pub fn parse_in_context(
                                     notation: None,
                                     parsed: t.nodes[*e].children.is_some(),
                                     expanding: false,
+                                    uri: None,
                                 });
                             }
                         }
@@ -826,4 +1182,49 @@ pub fn parse_in_context(
     } else {
         (None, errors)
     }
+}
+
+/// xmlParseDTD(ExternalID, SystemID): load and parse a DTD as an external
+/// subset. Returns the (unlinked) DTD node, owned by a scratch document,
+/// and the diagnostics (formatted as libxml2's generic handler prints
+/// them).
+pub fn parse_dtd(public: Option<&str>, system: Option<&str>) -> (Option<NodeId>, Vec<XmlError>) {
+    let sys = match system {
+        Some(s) => s,
+        None => return (None, Vec::new()),
+    };
+    let (data, fname) = match load_external(public, sys, sys) {
+        Ok((d, f)) => (prepare_external(d).0, f.unwrap_or_else(|| sys.to_string())),
+        Err(e) => {
+            let (code, msg) = e.unwrap_or_else(|| {
+                (
+                    XML_IO_ENOENT,
+                    format!("failed to load \"{}\": No such file or directory\n", sys),
+                )
+            });
+            let mut err = XmlError::simple(FROM_IO, code, ERR_WARNING, msg.clone());
+            err.formatted = vec![format_no_input(None, 0, None, FROM_IO, ERR_WARNING, &msg)];
+            return (None, vec![err]);
+        }
+    };
+    let mut b = TreeBuilder::new(0);
+    let doc = tree::with(|t| {
+        let d = t.new_doc(Some("1.0"));
+        t.create_int_subset(Some(d), "none", public, system);
+        d
+    });
+    b.doc = Some(doc);
+    b.external_subset(Some("none"), public, system);
+    let (wf, errors) = {
+        let mut p = Parser::new(&mut b, data, Some(fname), 0);
+        p.st.in_subset = 2;
+        p.parse_external_subset();
+        (p.st.well_formed, std::mem::take(&mut p.st.errors))
+    };
+    let dtd = if wf {
+        tree::with(|t| t.doc_info(doc).and_then(|d| d.ext_subset))
+    } else {
+        None
+    };
+    (dtd, errors)
 }
