@@ -3,6 +3,8 @@ use crate::token::Span;
 pub struct Attribute {
     pub name: Vec<Vec<u8>>,
     pub args: Vec<Argument>,
+    /// Line of the attribute name.
+    pub line: u32,
 }
 #[derive(Debug, Clone)]
 pub struct Program {

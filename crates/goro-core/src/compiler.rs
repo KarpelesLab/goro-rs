@@ -985,6 +985,10 @@ impl Compiler {
                 ac.use_const_map = self.use_const_map.clone();
                 ac.source_file = self.source_file.clone();
                 ac.op_array.strict_types = self.op_array.strict_types;
+                // Where the attribute is used: newInstance() calls the
+                // constructor from there.
+                ac.op_array.decl_line = attr.line;
+                ac.op_array.filename = self.source_file.clone();
                 if let Some(cls) = &self.current_class {
                     ac.current_class = Some(cls.clone());
                     ac.op_array.scope_class =

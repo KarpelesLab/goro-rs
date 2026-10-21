@@ -517,6 +517,7 @@ impl Parser {
             self.advance();
             loop {
                 let mut parts = Vec::new();
+                let line = self.span().line;
                 // A fully qualified name keeps its leading backslash.
                 let fq = self.eat(&TokenKind::Backslash);
                 let fq_prefix = |n: Vec<u8>| {
@@ -574,7 +575,11 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                attrs.push(Attribute { name: parts, args });
+                attrs.push(Attribute {
+                    name: parts,
+                    args,
+                    line,
+                });
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }

@@ -744,6 +744,82 @@ pub(crate) fn run_snippet_in_scope(
     r.ok()
 }
 
+/// Compile and run `src` as if it were code at `file`:`line` with the given
+/// strict_types (the dummy frame of zend_get_attribute_object()).
+pub(crate) fn run_snippet_at(
+    vm: &mut Vm,
+    src: &str,
+    vars: &[(&str, Value)],
+    file: Option<Vec<u8>>,
+    line: u32,
+    strict: bool,
+) -> Option<Value> {
+    let source = format!("<?php {}", src).into_bytes();
+    let mut lexer = goro_parser::Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    let mut parser = goro_parser::Parser::new(tokens);
+    let program = parser.parse().ok()?;
+    let compiler = crate::compiler::Compiler::new();
+    let (mut op_array, _, _) = compiler.compile(&program).ok()?;
+    for op in op_array.ops.iter_mut() {
+        op.line = line;
+    }
+    op_array.strict_types = strict;
+    if let Some(f) = &file {
+        op_array.filename = f.clone();
+    }
+    let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
+    for (name, val) in vars {
+        if let Some(i) = op_array
+            .cv_names
+            .iter()
+            .position(|n| n.as_slice() == name.as_bytes())
+        {
+            cvs[i] = val.clone();
+        }
+    }
+    let saved_file = file.map(|f| {
+        std::mem::replace(
+            &mut vm.current_file,
+            String::from_utf8_lossy(&f).to_string(),
+        )
+    });
+    let saved_line = std::mem::replace(&mut vm.current_line, line);
+    vm.called_class_stack.push(Vec::new());
+    vm.push_class_scope(Vec::new());
+    let r = vm.execute_op_array_pub(&op_array, cvs);
+    vm.called_class_stack.pop();
+    vm.pop_class_scope();
+    if let Some(f) = saved_file {
+        vm.current_file = f;
+    }
+    vm.current_line = saved_line;
+    if vm.current_exception.is_some() {
+        return None;
+    }
+    r.ok()
+}
+
+/// File, line and strict_types of the place an attribute is used.
+fn attr_use_site(obj: &Rc<RefCell<PhpObject>>) -> (Option<Vec<u8>>, Option<u32>, bool) {
+    let idx = obj
+        .borrow()
+        .get_property(b"__reflection_attr_args_op")
+        .to_long() as usize;
+    ATTR_ARG_OPS.with(|r| {
+        r.borrow()
+            .get(idx)
+            .map(|op| {
+                (
+                    (!op.filename.is_empty()).then(|| op.filename.clone()),
+                    (op.decl_line > 0).then_some(op.decl_line),
+                    op.strict_types,
+                )
+            })
+            .unwrap_or((None, None, false))
+    })
+}
+
 /// Record a closure's bound `$this`, scope and called class on its
 /// ReflectionFunction. A bound `$this` travels as the first captured value
 /// when the closure's first CV is `$this`; it's removed from `captured`.
@@ -12300,6 +12376,9 @@ pub fn reflection_attribute_method(
                     .unwrap_or(Value::Null);
                 // Restore the call-site line after the inner op-array updated it.
                 vm.current_line = call_site_line;
+                if vm.current_exception.is_some() {
+                    return Some(Value::Null);
+                }
                 if let Value::Array(arr) = &args_val {
                     let arr_b = arr.borrow();
                     if let Some((_, flag_val)) = arr_b.iter().next() {
@@ -12397,128 +12476,23 @@ pub fn reflection_attribute_method(
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
-            // Build argument list from args array
-            let mut call_args = Vec::new();
-            let mut named_args = Vec::new();
-            if let Value::Array(arr) = &args {
-                for (key, val) in arr.borrow().iter() {
-                    match key {
-                        ArrayKey::String(name) => {
-                            named_args.push((name.as_bytes().to_vec(), val.clone()));
-                        }
-                        ArrayKey::Int(_) => {
-                            call_args.push(val.clone());
-                        }
-                    }
-                }
-            }
-            // Create the object and call its constructor
-            let obj_id = vm.alloc_object_id();
-            let ce = rcls(vm, &class_lower).unwrap().clone();
-            // Pre-flight: validate constructor visibility and argument count.
-            let construct_lower = b"__construct".to_vec();
-            if let Some(constructor) = ce.get_method(&construct_lower) {
-                use crate::object::Visibility;
-                if matches!(constructor.visibility, Visibility::Private) {
-                    let err_msg = format!(
-                        "Call to private {}::__construct() from global scope",
-                        std::str::from_utf8(&ce.name).unwrap_or("")
-                    );
-                    let exc = vm.create_exception(b"Error", &err_msg, 0);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                if matches!(constructor.visibility, Visibility::Protected) {
-                    let err_msg = format!(
-                        "Call to protected {}::__construct() from global scope",
-                        std::str::from_utf8(&ce.name).unwrap_or("")
-                    );
-                    let exc = vm.create_exception(b"Error", &err_msg, 0);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                // Build effective argument count after merging positional and
-                // named arguments against parameter names.
-                let op = &constructor.op_array;
-                let required = op.required_param_count as usize;
-                let positional = call_args.len();
-                // Count distinct CV indices satisfied via positional + named.
-                let mut satisfied = vec![false; op.cv_names.len()];
-                // Param CVs follow $this, so start at offset 1 for non-static.
-                let skip = 1usize;
-                for i in 0..positional {
-                    if i + skip < satisfied.len() {
-                        satisfied[i + skip] = true;
-                    }
-                }
-                for (name, _) in &named_args {
-                    for (ci, cv_name) in op.cv_names.iter().enumerate() {
-                        if cv_name == name {
-                            if ci < satisfied.len() {
-                                satisfied[ci] = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-                let mut filled_required = 0usize;
-                for i in 0..required {
-                    if i + skip < satisfied.len() && satisfied[i + skip] {
-                        filled_required += 1;
-                    }
-                }
-                if filled_required < required {
-                    let err_msg = format!(
-                        "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
-                        std::str::from_utf8(&ce.name).unwrap_or(""),
-                        positional + named_args.len(),
-                        required,
-                        if (op.param_count as usize) > required {
-                            "at least"
-                        } else {
-                            "exactly"
-                        }
-                    );
-                    let exc = vm.create_exception(b"ArgumentCountError", &err_msg, 0);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-            }
-            let mut new_obj = PhpObject::new(ce.name.clone(), obj_id);
-            // Initialize properties from class definition
-            for prop in &ce.properties {
-                if !prop.is_static && !matches!(prop.default, Value::Undef) {
-                    new_obj.set_property(prop.name.clone(), prop.default.clone());
-                }
-            }
-            let instance = Value::Object(Rc::new(RefCell::new(new_obj)));
-            // Call __construct if it exists
-            if let Some(constructor) = ce.get_method(&construct_lower) {
-                let op = constructor.op_array.clone();
-                let mut cvs = vec![Value::Undef; op.cv_names.len()];
-                if !constructor.is_static && !cvs.is_empty() {
-                    cvs[0] = instance.clone();
-                }
-                let skip = if !constructor.is_static { 1 } else { 0 };
-                for (i, arg) in call_args.iter().enumerate() {
-                    if i + skip < cvs.len() {
-                        cvs[i + skip] = arg.clone();
-                    }
-                }
-                // Resolve named args
-                for (name, val) in &named_args {
-                    for (ci, cv_name) in op.cv_names.iter().enumerate() {
-                        if cv_name == name {
-                            if ci < cvs.len() {
-                                cvs[ci] = val.clone();
-                            }
-                            break;
-                        }
-                    }
-                }
-                let _ = vm.execute_op_array_pub(&op, cvs);
-            }
-            Some(instance)
+            // zend_get_attribute_object(): the constructor is called (with
+            // the usual argument checks and named-argument handling) from a
+            // frame at the attribute's file and line, with the use-site
+            // strict_types.
+            let site = attr_use_site(obj);
+            let ce_name = rcls(vm, &class_lower)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| attr_name.to_string());
+            let v = run_snippet_at(
+                vm,
+                &format!("return new \\{}(...$__a);", ce_name),
+                &[("__a", args)],
+                site.0,
+                site.1.unwrap_or(call_site_line),
+                site.2,
+            );
+            Some(v.unwrap_or(Value::Null))
         }
         b"__tostring" => {
             let name = ob

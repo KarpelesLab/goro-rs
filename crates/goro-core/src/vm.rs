@@ -2338,7 +2338,7 @@ impl Vm {
             // For constructors, PHP omits "method "; for other methods, it includes "method "
             let is_constructor = member_name.eq_ignore_ascii_case("__construct");
             let method_word = if is_constructor { "" } else { "method " };
-            let scope = if let Some(caller_bytes) = caller {
+            let scope = if let Some(caller_bytes) = caller.filter(|c| !c.is_empty()) {
                 format!("scope {}", String::from_utf8_lossy(caller_bytes))
             } else {
                 "global scope".to_string()
