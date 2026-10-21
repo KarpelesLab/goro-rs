@@ -122,6 +122,43 @@ impl PhpString {
         h
     }
 
+    /// `$s .= $extra` without copying: when this is the only handle on the
+    /// string (refcount 1, like zend_string_extend() on a non-interned
+    /// string) the bytes are appended in place, so building a string with
+    /// repeated `.=` is amortized O(1) per append instead of O(n).
+    ///
+    /// Returns false, leaving the string untouched, when it is shared; the
+    /// caller then builds a new string as before.
+    ///
+    /// Memory accounting ends up exactly as if the result had been built
+    /// with `from_vec(old + extra)`.  Going over memory_limit leaves the
+    /// string unchanged and records the pending fatal (reported with the
+    /// size of the whole new string, like the copying path), which the VM
+    /// raises before the next opcode.
+    pub fn append_in_place(&mut self, extra: &[u8]) -> bool {
+        let Some(inner) = Rc::get_mut(&mut self.inner) else {
+            return false;
+        };
+        if extra.is_empty() {
+            return true;
+        }
+        let new_len = inner.data.len() + extra.len();
+        // An untracked string (empty / interned) becomes a tracked one, as
+        // a freshly built string would be.
+        let charge = if inner.tracked_bytes == 0 {
+            new_len + STRING_OVERHEAD
+        } else {
+            extra.len()
+        };
+        if !crate::value::memory_alloc_reporting(charge, new_len + STRING_OVERHEAD) {
+            return true;
+        }
+        inner.tracked_bytes += charge;
+        inner.data.extend_from_slice(extra);
+        inner.hash.set(None);
+        true
+    }
+
     /// Lossy conversion to a Rust String (for display purposes)
     pub fn to_string_lossy(&self) -> String {
         String::from_utf8_lossy(&self.inner.data).into_owned()

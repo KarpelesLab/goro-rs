@@ -6,6 +6,7 @@ pub mod compiler;
 pub mod crypto;
 pub mod csv;
 pub mod errdisplay;
+pub mod fastpath;
 pub mod fetch_w;
 pub mod fiber;
 pub mod foreach_obj;

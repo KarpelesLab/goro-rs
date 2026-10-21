@@ -15541,6 +15541,31 @@ impl Vm {
                 }
             };
 
+            // Plain int/float arithmetic, comparisons, jumps, scalar
+            // assignments and in-place `.=` (see fastpath.rs); anything
+            // unusual falls through to the general handlers below.  A pending
+            // exception (left by a builtin that called back into user code)
+            // is dispatched by the general handlers, so it disables this.
+            if typed_ref_watch.is_none() && self.current_exception.is_none() {
+                let refs_ok = !typed_ref::any();
+                let no_release = !self.has_release_work();
+                match crate::fastpath::fast_op(
+                    op,
+                    cvs.as_mut_slice(),
+                    tmps.as_mut_slice(),
+                    &op_array.literals,
+                    refs_ok,
+                    no_release,
+                ) {
+                    crate::fastpath::Fast::No => {}
+                    crate::fastpath::Fast::Done => continue 'exec,
+                    crate::fastpath::Fast::Jump(t) => {
+                        ip = t;
+                        continue 'exec;
+                    }
+                }
+            }
+
             match op.opcode {
                 OpCode::Nop => {}
 

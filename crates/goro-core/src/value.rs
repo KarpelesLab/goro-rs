@@ -60,6 +60,13 @@ pub fn take_memory_exhausted() -> usize {
 
 /// Track a memory allocation. Returns false if over limit.
 pub fn memory_alloc(bytes: usize) -> bool {
+    memory_alloc_reporting(bytes, bytes)
+}
+
+/// Like memory_alloc(), but a failure reports `reported` bytes as the size
+/// that could not be allocated (growing a block in place reports the size
+/// of the whole new block).
+pub fn memory_alloc_reporting(bytes: usize, reported: usize) -> bool {
     MEMORY_USAGE.with(|m| {
         let current = m.get();
         let limit = MEMORY_LIMIT.with(|l| l.get());
@@ -67,7 +74,7 @@ pub fn memory_alloc(bytes: usize) -> bool {
         if limit > 0 && new_total > limit {
             MEMORY_EXHAUSTED.with(|c| {
                 if c.get() == 0 {
-                    c.set(bytes.max(1));
+                    c.set(reported.max(1));
                 }
             });
             return false;
