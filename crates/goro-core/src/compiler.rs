@@ -10055,7 +10055,14 @@ impl Compiler {
                     ExprKind::DynamicVariable(inner) => simple(inner),
                     _ => false,
                 };
-                if !result_discarded && matches!(val, OperandType::Cv(_)) && target_simple {
+                // `$s[i] = v` used as a value is the byte written when $s is
+                // a string: ArraySet stores it into the value's tmp.
+                let dim_result = !result_discarded
+                    && matches!(target.kind, ExprKind::ArrayAccess { index: Some(_), .. })
+                    && !matches!(val, OperandType::Tmp(_));
+                if dim_result
+                    || (!result_discarded && matches!(val, OperandType::Cv(_)) && target_simple)
+                {
                     let t = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::Assign,
@@ -14872,7 +14879,7 @@ impl Compiler {
                                 v
                             }
                         };
-                        let obj = self.compile_expr(object)?;
+                        let obj = self.compile_obj_write_base(object)?;
                         let name = self.compile_property_name(property)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertySetRef,

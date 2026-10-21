@@ -436,6 +436,15 @@ pub struct Vm {
     /// Call depth of a by-ref function whose result is fetched for writing
     /// (`$x = &f()`): that frame returns the reference itself.
     pub(crate) keep_ref_depth: Option<u32>,
+    /// Where a string fetched for writing (`$a[k][0] = c`, `$o->s[0] = c`)
+    /// lives: (result tmp, call depth, location), so that the string offset
+    /// write is stored back (see fetch_w::StrWb).
+    pub(crate) str_offset_wb: Option<(u32, u32, crate::fetch_w::StrWb)>,
+    /// The location found by the dimension fetch in progress.
+    pub(crate) str_wb_pending: Option<crate::fetch_w::StrWb>,
+    /// The dimension fetch in progress is the container of a property
+    /// access (zend_wrong_string_offset() names "an object" then).
+    pub(crate) str_wb_obj_ctx: bool,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -770,6 +779,9 @@ impl Vm {
             global_ref_names: std::collections::HashSet::new(),
             bind_next_frame: false,
             keep_ref_depth: None,
+            str_offset_wb: None,
+            str_wb_pending: None,
+            str_wb_obj_ctx: false,
             functions: HashMap::new(),
             builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
@@ -28258,127 +28270,74 @@ impl Vm {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
-                    } else if matches!(arr_val, Value::String(_)) {
-                        // String offset write: $str[n] = 'x'.
-                        // Validate the offset type the same way zend_check_string_offset
-                        // does: arrays/objects/non-integer strings throw TypeError;
-                        // double/bool/null get a "String offset cast occurred" warning.
-                        let key_inner = match &key_val {
-                            Value::Reference(r) => r.borrow().clone(),
-                            other => other.clone(),
-                        };
-                        match &key_inner {
-                            Value::Double(_) | Value::True | Value::False | Value::Null => {
-                                self.emit_warning_at("String offset cast occurred", op.line);
-                            }
-                            _ => {}
-                        }
-                        let illegal_offset: Option<String> = match &key_inner {
-                            Value::String(key_str) => {
-                                let (numeric, trailing) =
-                                    Vm::is_numeric_string_with_trailing(key_str.as_bytes());
-                                if !numeric {
-                                    Some("string".to_string())
-                                } else {
-                                    if trailing {
-                                        self.emit_warning_at(
-                                            &format!(
-                                                "Illegal string offset \"{}\"",
-                                                key_str.to_string_lossy()
-                                            ),
-                                            op.line,
-                                        );
-                                    }
-                                    None
-                                }
-                            }
-                            Value::Array(_) => Some("array".to_string()),
-                            Value::Object(o) => {
-                                Some(crate::value::display_class_name(&o.borrow().class_name))
-                            }
-                            Value::Resource(_) => Some("resource".to_string()),
+                    } else if let Value::String(cur_s) = &arr_val {
+                        // String offset write `$str[n] = 'x'`
+                        // (zend_assign_to_string_offset). A string fetched into a
+                        // tmp by a write fetch is stored back where it lives.
+                        let wb = match op.op1 {
+                            OperandType::Tmp(t) => match self.str_offset_wb.take() {
+                                Some((wt, d, loc)) if wt == t && d == self.call_depth => Some(loc),
+                                _ => None,
+                            },
                             _ => None,
                         };
-                        if let Some(t) = illegal_offset {
-                            let msg = format!("Cannot access offset of type {} on string", t);
-                            let exc = self.create_exception(b"TypeError", &msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                let ct = *catch_target;
-                                ip = ct as usize;
-                                continue;
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", msg),
-                                line: op.line,
-                            });
-                        }
-                        let idx = key_val.to_long();
-                        let replacement = val.to_php_string();
-                        let replace_byte = replacement.as_bytes().first().copied().unwrap_or(b'\0');
-
-                        // Read the CV directly to modify the string
-                        if let OperandType::Cv(cv_idx) = &op.op1 {
-                            let i = *cv_idx as usize;
-                            if let Some(cv_val) = cvs.get_mut(i) {
-                                let actual_val = match cv_val {
-                                    Value::Reference(r) => {
-                                        let mut inner = r.borrow_mut();
-                                        if let Value::String(s) = &*inner {
-                                            let mut bytes = s.as_bytes().to_vec();
-                                            let actual_idx = if idx < 0 {
-                                                let p = (-idx) as usize;
-                                                if p <= bytes.len() {
-                                                    bytes.len() - p
-                                                } else {
-                                                    continue;
-                                                }
-                                            } else {
-                                                idx as usize
-                                            };
-                                            if actual_idx < bytes.len() {
-                                                bytes[actual_idx] = replace_byte;
-                                            } else {
-                                                // Extend with spaces
-                                                while bytes.len() < actual_idx {
-                                                    bytes.push(b' ');
-                                                }
-                                                bytes.push(replace_byte);
-                                            }
-                                            *inner = Value::String(PhpString::from_vec(bytes));
+                        let result_slot = match op.op2 {
+                            OperandType::Tmp(t) => Some(t as usize),
+                            _ => None,
+                        };
+                        match self.assign_string_offset(cur_s.as_bytes(), &key_val, &val, op.line) {
+                            crate::fetch_w::StrOffsetAssign::Written(bytes, ch) => {
+                                let nv = Value::String(PhpString::from_vec(bytes));
+                                match op.op1 {
+                                    OperandType::Cv(i) => match cvs.get_mut(i as usize) {
+                                        Some(Value::Reference(r)) => *r.borrow_mut() = nv,
+                                        Some(slot) => *slot = nv,
+                                        None => {}
+                                    },
+                                    OperandType::Tmp(t) => {
+                                        if let Some(loc) = &wb {
+                                            self.str_wb_store(loc, nv.clone());
                                         }
-                                        continue;
-                                    }
-                                    Value::String(s) => {
-                                        let mut bytes = s.as_bytes().to_vec();
-                                        let actual_idx = if idx < 0 {
-                                            let p = (-idx) as usize;
-                                            if p <= bytes.len() {
-                                                bytes.len() - p
-                                            } else {
-                                                continue;
-                                            }
-                                        } else {
-                                            idx as usize
-                                        };
-                                        if actual_idx < bytes.len() {
-                                            bytes[actual_idx] = replace_byte;
-                                        } else {
-                                            while bytes.len() < actual_idx {
-                                                bytes.push(b' ');
-                                            }
-                                            bytes.push(replace_byte);
+                                        if let Some(slot) = tmps.get_mut(t as usize) {
+                                            *slot = nv;
                                         }
-                                        Some(Value::String(PhpString::from_vec(bytes)))
                                     }
-                                    _ => None,
-                                };
-                                if let Some(new_val) = actual_val {
-                                    *cv_val = new_val;
+                                    _ => {}
                                 }
+                                if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
+                                    *slot = ch;
+                                }
+                            }
+                            crate::fetch_w::StrOffsetAssign::Skipped => {
+                                if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
+                                    *slot = Value::Null;
+                                }
+                            }
+                            crate::fetch_w::StrOffsetAssign::Threw => {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                let msg = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        let ob = o.borrow();
+                                        format!(
+                                            "Uncaught {}: {}",
+                                            String::from_utf8_lossy(&ob.class_name),
+                                            ob.get_property(b"message")
+                                                .to_php_string()
+                                                .to_string_lossy()
+                                        )
+                                    }
+                                    _ => "Uncaught exception".to_string(),
+                                };
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
                             }
                         }
                     }
@@ -28830,6 +28789,19 @@ impl Vm {
                         if actual_idx < bytes.len() {
                             Value::String(PhpString::from_bytes(&[bytes[actual_idx]]))
                         } else {
+                            self.emit_warning_at(
+                                &format!("Uninitialized string offset {}", idx),
+                                op.line,
+                            );
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                            }
                             Value::String(PhpString::empty())
                         }
                     } else if let Value::Object(obj) = &arr_val {
@@ -32582,6 +32554,27 @@ impl Vm {
                         op.line,
                     ) {
                         Ok(v) => {
+                            if mode == SpFetch::W {
+                                // A string fetched for writing: remember the slot
+                                // so a string offset write is stored back.
+                                self.str_offset_wb = match (&v, op.result) {
+                                    (Value::String(_), OperandType::Tmp(t)) => self
+                                        .static_prop_class_idx(&class_v, prop_name.as_bytes())
+                                        .ok()
+                                        .and_then(|i| self.classes.get_index(i))
+                                        .map(|(k, _)| {
+                                            (
+                                                t,
+                                                self.call_depth,
+                                                crate::fetch_w::StrWb::Static(
+                                                    k.clone(),
+                                                    prop_name.as_bytes().to_vec(),
+                                                ),
+                                            )
+                                        }),
+                                    _ => None,
+                                };
+                            }
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys)
                         }
                         Err(e) => {
@@ -35972,6 +35965,35 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                    } else if matches!(arr_val, Value::String(_)) {
+                        // zend_wrong_string_offset(): a string offset is not a
+                        // referenceable place.
+                        if self.check_string_offset_w(
+                            &key_val,
+                            crate::fetch_w::DimFetch::W,
+                            op.line,
+                        ) && self.current_exception.is_none()
+                        {
+                            let exc = self.create_exception(
+                                b"Error",
+                                "Cannot create references to/from string offsets",
+                                op.line,
+                            );
+                            self.current_exception = Some(exc);
+                        }
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message:
+                                "Uncaught Error: Cannot create references to/from string offsets"
+                                    .into(),
+                            line: op.line,
+                        });
                     } else if let Value::Object(obj) = &arr_val {
                         // Type-check the offset for ArrayObject-family. PHP raises
                         // "Cannot access offset of type <t> on ArrayObject" when
@@ -36120,6 +36142,12 @@ impl Vm {
                             }
                         }
                     }
+                    self.str_wb_pending = None;
+                    self.str_wb_obj_ctx = mode == crate::fetch_w::DimFetch::Unset
+                        && matches!(
+                            op_array.ops.get(ip).map(|o| o.opcode),
+                            Some(OpCode::PropertyUnset)
+                        );
                     let fetched = match op.op1 {
                         OperandType::Cv(ci) => {
                             let i = ci as usize;
@@ -36146,6 +36174,18 @@ impl Vm {
                             let mut v = self.read_operand(&other, &cvs, &tmps, &op_array.literals);
                             self.fetch_dim_for_write(&mut v, key, mode, None, op.line)
                         }
+                    };
+                    // A fetched string element: remember where it lives so a
+                    // string offset write into the result is stored back.
+                    self.str_wb_obj_ctx = false;
+                    let pend = self.str_wb_pending.take();
+                    self.str_offset_wb = match (pend, op.result) {
+                        (Some(loc), OperandType::Tmp(t))
+                            if matches!(fetched, Some(Value::String(_))) =>
+                        {
+                            Some((t, self.call_depth, loc))
+                        }
+                        _ => None,
                     };
                     match fetched {
                         Some(v) => {
@@ -44347,6 +44387,30 @@ impl Vm {
                     };
                     if let Some((rid, pname)) = propagate_get_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 0u8));
+                    }
+                    // A string property fetched for writing: remember its slot
+                    // so a string offset write into the result is stored back.
+                    if is_w_fetch {
+                        self.str_offset_wb = match (&obj_val_raw, op.result) {
+                            (Value::Object(o), OperandType::Tmp(t))
+                                if matches!(result.deref(), Value::String(_)) =>
+                            {
+                                let pn = prop_name.as_bytes();
+                                let slot_ref =
+                                    o.borrow().properties.iter().find_map(|(n, v)| match v {
+                                        Value::Reference(r) if n.as_slice() == pn => {
+                                            Some(r.clone())
+                                        }
+                                        _ => None,
+                                    });
+                                let loc = match slot_ref {
+                                    Some(r) => crate::fetch_w::StrWb::Ref(r),
+                                    None => crate::fetch_w::StrWb::Prop(o.clone(), pn.to_vec()),
+                                };
+                                Some((t, self.call_depth, loc))
+                            }
+                            _ => None,
+                        };
                     }
                     self.write_operand(
                         &op.result,

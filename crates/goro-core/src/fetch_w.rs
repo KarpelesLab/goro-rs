@@ -27,7 +27,160 @@ pub(crate) enum DimFetch {
     Obj,
 }
 
+/// Where a string handed out by a write fetch lives. Strings are values, so
+/// the fetch result is a copy; a string offset write into it is stored back
+/// here (php-src writes through the INDIRECT zval instead).
+pub(crate) enum StrWb {
+    /// An array element.
+    Elem(Rc<RefCell<PhpArray>>, crate::array::ArrayKey),
+    /// A reference cell (a referenced element or property).
+    Ref(Rc<RefCell<Value>>),
+    /// An object property slot.
+    Prop(Rc<RefCell<crate::object::PhpObject>>, Vec<u8>),
+    /// A static property (lowercase class key, name).
+    Static(Vec<u8>, Vec<u8>),
+}
+
+/// Outcome of zend_assign_to_string_offset().
+pub(crate) enum StrOffsetAssign {
+    /// The new string and the expression's value (the byte written).
+    Written(Vec<u8>, Value),
+    /// Nothing written (a warning was raised); the expression is null.
+    Skipped,
+    /// An exception is pending.
+    Threw,
+}
+
 impl Vm {
+    /// zend_assign_to_string_offset(): `s[dim] = value`.
+    pub(crate) fn assign_string_offset(
+        &mut self,
+        s: &[u8],
+        dim: &Value,
+        value: &Value,
+        line: u32,
+    ) -> StrOffsetAssign {
+        let dim = dim.deref();
+        let offset = match &dim {
+            Value::Long(n) => *n,
+            other => {
+                if !self.check_string_offset_w(other, DimFetch::W, line) {
+                    return StrOffsetAssign::Threw;
+                }
+                if self.current_exception.is_some() {
+                    return StrOffsetAssign::Threw;
+                }
+                match other {
+                    Value::String(k) => {
+                        let t = k.as_bytes();
+                        let t = t
+                            .iter()
+                            .position(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+                            .map(|p| &t[p..])
+                            .unwrap_or(b"");
+                        let end = t
+                            .iter()
+                            .enumerate()
+                            .position(|(i, b)| {
+                                !(b.is_ascii_digit() || (i == 0 && matches!(b, b'-' | b'+')))
+                            })
+                            .unwrap_or(t.len());
+                        std::str::from_utf8(&t[..end])
+                            .ok()
+                            .and_then(|x| x.parse::<i64>().ok())
+                            .unwrap_or(0)
+                    }
+                    Value::Double(d) => {
+                        if d.is_finite() && crate::value::php_double_fits_long(*d) {
+                            *d as i64
+                        } else {
+                            0
+                        }
+                    }
+                    Value::True => 1,
+                    _ => 0,
+                }
+            }
+        };
+        let len = s.len() as i64;
+        if offset < -len {
+            self.emit_warning_at(&format!("Illegal string offset {}", offset), line);
+            return if self.current_exception.is_some() {
+                StrOffsetAssign::Threw
+            } else {
+                StrOffsetAssign::Skipped
+            };
+        }
+        let offset = if offset < 0 { offset + len } else { offset } as usize;
+        let value = value.deref();
+        let bytes = match &value {
+            Value::String(v) => v.as_bytes().to_vec(),
+            other => match self.value_to_string_checked(other) {
+                Ok(v) => v.as_bytes().to_vec(),
+                Err(_) => return StrOffsetAssign::Threw,
+            },
+        };
+        if self.current_exception.is_some() {
+            return StrOffsetAssign::Threw;
+        }
+        if bytes.is_empty() {
+            self.throw_error_msg(b"Error", "Cannot assign an empty string to a string offset");
+            return StrOffsetAssign::Threw;
+        }
+        if bytes.len() > 1 {
+            self.emit_warning_at(
+                "Only the first byte will be assigned to the string offset",
+                line,
+            );
+            if self.current_exception.is_some() {
+                return StrOffsetAssign::Threw;
+            }
+        }
+        let c = bytes[0];
+        let mut out = s.to_vec();
+        if offset >= out.len() {
+            out.resize(offset, b' ');
+            out.push(c);
+        } else {
+            out[offset] = c;
+        }
+        StrOffsetAssign::Written(
+            out,
+            Value::String(crate::string::PhpString::from_vec(vec![c])),
+        )
+    }
+
+    /// Store a string back where a write fetch found it.
+    pub(crate) fn str_wb_store(&mut self, loc: &StrWb, v: Value) {
+        match loc {
+            StrWb::Elem(arr, k) => {
+                let mut a = arr.borrow_mut();
+                match a.get_mut(k) {
+                    Some(Value::Reference(r)) => *r.borrow_mut() = v,
+                    Some(slot) => *slot = v,
+                    None => a.set(k.clone(), v),
+                }
+            }
+            StrWb::Ref(r) => *r.borrow_mut() = v,
+            StrWb::Static(class_key, name) => {
+                self.static_prop_put_raw(class_key, name, v);
+            }
+            StrWb::Prop(o, name) => {
+                let mut ob = o.borrow_mut();
+                if let Some(slot) = ob
+                    .properties
+                    .iter_mut()
+                    .find(|(n, _)| n.as_slice() == name.as_slice())
+                {
+                    match &mut slot.1 {
+                        Value::Reference(r) => *r.borrow_mut() = v,
+                        s => *s = v,
+                    }
+                }
+            }
+        }
+    }
+
     /// Fetch `slot[key]` (`key == None` is `slot[]`) for a nested write.
     /// `slot` is the container: a CV slot (possibly holding a reference) or a
     /// tmp holding an earlier fetch. `undef_cv` names the CV for the
@@ -96,7 +249,12 @@ impl Vm {
                     None => self.throw_error_msg(b"Error", "[] operator not supported for strings"),
                     Some(k) => {
                         if self.check_string_offset_w(&k, mode, line) {
-                            self.throw_error_msg(b"Error", "Cannot use string offset as an array");
+                            let msg = if mode == DimFetch::Obj || self.str_wb_obj_ctx {
+                                "Cannot use string offset as an object"
+                            } else {
+                                "Cannot use string offset as an array"
+                            };
+                            self.throw_error_msg(b"Error", msg);
                         }
                     }
                 }
@@ -590,7 +748,12 @@ impl Vm {
                             Some(Value::Array(rc))
                         }
                     }
-                    other => Some(other),
+                    other => {
+                        if matches!(other, Value::String(_)) && mode != DimFetch::Unset {
+                            self.str_wb_pending = Some(StrWb::Ref(r.clone()));
+                        }
+                        Some(other)
+                    }
                 }
             }
             Some(Value::Array(rc)) => {
@@ -604,7 +767,12 @@ impl Vm {
                     Some(Value::Array(rc))
                 }
             }
-            Some(other) => Some(other),
+            Some(other) => {
+                if matches!(other, Value::String(_)) && mode != DimFetch::Unset {
+                    self.str_wb_pending = Some(StrWb::Elem(arr.clone(), k));
+                }
+                Some(other)
+            }
         }
     }
 
