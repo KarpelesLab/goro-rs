@@ -78,10 +78,20 @@ fn check_access(vm: &Vm, ce_name: &[u8], m: &goro_core::object::MethodDef) -> Re
 
 /// Resolve a static "Class::method" / ["Class", "method"] callable.
 fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, String> {
-    // self/parent/static resolve against the caller's scope (deprecated).
-    let scope = vm.current_class_scope().map(|s| lower(&s));
-    let class = vm.callable_class_relative(class, scope.as_deref())?;
-    let class = class.as_slice();
+    // self/parent/static resolve against the caller's scope (the argument
+    // check already raised the deprecation).
+    let resolved: Option<Vec<u8>> = match lower(class).as_slice() {
+        b"self" => vm.current_class_scope(),
+        b"parent" => vm
+            .current_class_scope()
+            .and_then(|s| vm.classes.get(&lower(&s)).and_then(|c| c.parent.clone())),
+        b"static" => vm.called_class_stack.last().cloned(),
+        _ => None,
+    };
+    let class: &[u8] = match &resolved {
+        Some(r) => r.as_slice(),
+        None => class.strip_prefix(b"\\").unwrap_or(class),
+    };
     let cl = lower(class);
     if !vm.classes.contains_key(&cl) {
         vm.try_autoload_class(class);
