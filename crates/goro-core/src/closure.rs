@@ -421,10 +421,50 @@ impl Vm {
         }
     }
 
+    /// The called class (static::) of a closure, if any.
+    pub fn closure_called_class(&self, closure: &Value) -> Option<Vec<u8>> {
+        if let Some(Value::Object(o)) = self.closure_this(closure) {
+            return Some(o.borrow().class_name.clone());
+        }
+        let inner = closure.closure_inner()?;
+        let (name, _) = closure_parts(&inner);
+        let l = lower(&name);
+        let target = if name.starts_with(b"__closure_fcc_") {
+            self.user_functions
+                .get(&l)
+                .and_then(|o| o.fcc_target_name.clone())
+                .unwrap_or_default()
+        } else {
+            name.clone()
+        };
+        if let Some(p) = target.windows(2).position(|w| w == b"::") {
+            let cl = lower(&target[..p]);
+            return Some(
+                self.classes
+                    .get(&cl)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| target[..p].to_vec()),
+            );
+        }
+        let op = self.user_functions.get(&l)?;
+        if let Some(c) = &op.closure_called_class {
+            return Some(c.clone());
+        }
+        self.closure_scope(closure)
+    }
+
     /// The scope class (canonical name) of a closure, if any.
     pub fn closure_scope(&self, closure: &Value) -> Option<Vec<u8>> {
         let inner = closure.closure_inner()?;
         let (name, _) = closure_parts(&inner);
+        let name = if name.starts_with(b"__closure_fcc_tramp_") {
+            self.user_functions
+                .get(&lower(&name))
+                .and_then(|o| o.fcc_target_name.clone())
+                .unwrap_or(name)
+        } else {
+            name
+        };
         let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let scope_lower: Vec<u8> = if let Some(p) = lower.windows(2).position(|w| w == b"::") {
             let cl = lower[..p].to_vec();

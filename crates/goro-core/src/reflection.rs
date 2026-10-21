@@ -5169,6 +5169,27 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
             .collect();
         drop(ob);
 
+        // Closure::__invoke on a closure object: call / return the closure.
+        if class_lower == b"closure" && method_lower_bytes.as_bytes() == b"__invoke" {
+            if let Some(target) = args.get(1).filter(|t| t.is_closure_obj()).cloned() {
+                match method {
+                    b"invoke" => {
+                        let a: Vec<Value> = args.iter().skip(2).cloned().collect();
+                        return Some(vm.call_callback(&target, &a).unwrap_or(Value::Null));
+                    }
+                    b"invokeargs" => {
+                        let a: Vec<Value> = match args.get(2) {
+                            Some(Value::Array(arr)) => arr.borrow().values().cloned().collect(),
+                            _ => Vec::new(),
+                        };
+                        return Some(vm.call_callback(&target, &a).unwrap_or(Value::Null));
+                    }
+                    b"getclosure" => return Some(target.deref()),
+                    _ => {}
+                }
+            }
+        }
+
         match method {
             b"invoke" => {
                 // invoke($object, ...$args)
@@ -6291,10 +6312,7 @@ pub fn reflection_function_method(
         {
             let c = obj.borrow().get_property(b"__reflection_closure_obj");
             let scope = if method == b"getclosurecalledclass" {
-                match vm.closure_this(&c) {
-                    Some(Value::Object(o)) => Some(o.borrow().class_name.clone()),
-                    _ => vm.closure_scope(&c),
-                }
+                vm.closure_called_class(&c)
             } else {
                 vm.closure_scope(&c)
             };
