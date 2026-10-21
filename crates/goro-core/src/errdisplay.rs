@@ -292,14 +292,34 @@ impl Vm {
 
     /// php_error_cb() for a fatal error (the caller bails out afterwards).
     pub fn fatal_error_cb(&mut self, ty: i64, msg: &str, file: &str, line: u32) {
+        self.fatal_error_cb_ex(ty, msg, file, line, true);
+    }
+
+    /// fatal_error_cb(); `backtrace` false is zend_error_cb() called
+    /// directly (no EG(last_fatal_error_backtrace)), as zend_exception_error()
+    /// does for an uncaught ParseError / CompileError.
+    pub fn fatal_error_cb_ex(
+        &mut self,
+        ty: i64,
+        msg: &str,
+        file: &str,
+        line: u32,
+        backtrace: bool,
+    ) {
         self.last_error = Some((ty, msg.to_string(), file.to_string(), line));
         // zend_error_zstr_at(): EG(last_fatal_error_backtrace)
-        self.last_error_trace =
-            if ini_bool(self, b"fatal_error_backtraces") && !msg.starts_with("Uncaught ") {
-                Some(self.build_exception_trace())
-            } else {
-                None
-            };
+        self.last_error_trace = if backtrace
+            && ini_bool(self, b"fatal_error_backtraces")
+            && !msg.starts_with("Uncaught ")
+        {
+            Some(self.build_exception_trace())
+        } else if backtrace {
+            None
+        } else {
+            // Some(non-array): known to have no backtrace (display_error
+            // must not take one either).
+            Some(Value::Null)
+        };
         // Engine-internal silencing never hides fatal errors.
         let er = if self.error_reporting == ER_SILENT {
             E_FATAL_ERRORS
@@ -440,6 +460,7 @@ impl Vm {
         {
             // The backtrace taken when the error was raised (fatal_error_cb).
             match self.last_error_trace.clone() {
+                Some(Value::Null) => String::new(),
                 Some(t) => format!(
                     "\nStack trace:\n{}",
                     Vm::format_exception_trace_value(&t, "", self.exception_string_param_max_len)

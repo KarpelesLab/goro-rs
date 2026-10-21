@@ -110,6 +110,35 @@ impl Vm {
                     self.current_exception = None;
                 }
             }
+            // zend_exception_error(): an uncaught ParseError / CompileError
+            // (exactly those classes) is reported as E_PARSE / E_COMPILE_ERROR
+            // with its own message, file and line.
+            if let Value::Object(obj) = &exc {
+                let cl = obj.borrow().class_name.to_ascii_lowercase();
+                if cl == b"parseerror" || cl == b"compileerror" {
+                    let (file, line, msg) = {
+                        let o = obj.borrow();
+                        (
+                            o.get_property(b"file").to_php_string().to_string_lossy(),
+                            o.get_property(b"line").to_long() as u32,
+                            o.get_property(b"message").deref(),
+                        )
+                    };
+                    let msg = match self.value_to_string_checked(&msg) {
+                        Ok(s) => s.to_string_lossy(),
+                        Err(_) => String::new(),
+                    };
+                    self.current_exception = None;
+                    let ty = if cl == b"parseerror" {
+                        crate::errdisplay::E_PARSE
+                    } else {
+                        crate::errdisplay::E_COMPILE_ERROR
+                    };
+                    self.fatal_error_cb_ex(ty, &msg, &file, line, false);
+                    self.fatal_emitted = true;
+                    return;
+                }
+            }
             // Messages may be objects with __toString().
             let mut msg_strings: Vec<(usize, String)> = Vec::new();
             {

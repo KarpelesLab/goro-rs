@@ -15570,7 +15570,7 @@ fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 ArrayKey::String(PhpString::from_bytes(b"line")),
                 Value::Long(line as i64),
             );
-            if let Some(t) = vm.last_error_trace.clone() {
+            if let Some(t @ Value::Array(_)) = vm.last_error_trace.clone() {
                 arr.set(ArrayKey::String(PhpString::from_bytes(b"trace")), t);
             }
             Ok(Value::Array(Rc::new(RefCell::new(arr))))

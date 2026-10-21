@@ -34171,34 +34171,31 @@ impl Vm {
                                         "syntax error".to_string()
                                     };
                                     self.current_file = old_file.clone();
+                                    let exc =
+                                        self.create_exception(b"ParseError", &msg, e.span.line);
+                                    if let Value::Object(ref obj) = exc {
+                                        let mut ob = obj.borrow_mut();
+                                        ob.set_property(
+                                            b"file".to_vec(),
+                                            Value::String(PhpString::from_string(abs_path.clone())),
+                                        );
+                                        ob.set_property(
+                                            b"line".to_vec(),
+                                            Value::Long(e.span.line as i64),
+                                        );
+                                    }
+                                    self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
                                     {
-                                        let exc =
-                                            self.create_exception(b"ParseError", &msg, e.span.line);
-                                        if let Value::Object(ref obj) = exc {
-                                            let mut ob = obj.borrow_mut();
-                                            ob.set_property(
-                                                b"file".to_vec(),
-                                                Value::String(PhpString::from_string(
-                                                    abs_path.clone(),
-                                                )),
-                                            );
-                                            ob.set_property(
-                                                b"line".to_vec(),
-                                                Value::Long(e.span.line as i64),
-                                            );
-                                        }
-                                        self.current_exception = Some(exc);
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
                                         continue;
                                     }
-                                    self.display_error("Parse error", &msg, &abs_path, e.span.line);
-                                    self.fatal_emitted = true;
+                                    // Uncaught here: propagates to the callers.
                                     return Err(VmError {
-                                        message: msg,
-                                        line: e.span.line,
+                                        message: format!("Uncaught ParseError: {}", msg),
+                                        line: op.line,
                                     });
                                 }
                             }
@@ -34383,19 +34380,35 @@ impl Vm {
                                     Err(e) => {
                                         // Errors php-src throws as CompileError are catchable.
                                         if is_compile_error_exception(&e.message) {
+                                            let exc = self.create_exception(
+                                                b"CompileError",
+                                                &e.message,
+                                                e.line,
+                                            );
+                                            if let Value::Object(ref obj) = exc {
+                                                obj.borrow_mut().set_property(
+                                                    b"file".to_vec(),
+                                                    Value::String(PhpString::from_string(format!(
+                                                        "{}({}) : eval()'d code",
+                                                        self.current_file, op.line
+                                                    ))),
+                                                );
+                                            }
+                                            self.current_exception = Some(exc);
                                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                                 exception_handlers.last().copied()
                                             {
-                                                let exc = self.create_exception(
-                                                    b"CompileError",
-                                                    &e.message,
-                                                    e.line,
-                                                );
-                                                self.current_exception = Some(exc);
                                                 pending_calls_catch_depth = Some(eh_pc_depth);
                                                 ip = catch_target as usize;
                                                 continue;
                                             }
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught CompileError: {}",
+                                                    e.message
+                                                ),
+                                                line: op.line,
+                                            });
                                         }
                                         // Compile error in eval - determine error type
                                         // Semantic errors like "Cannot use [] for reading" are Fatal errors
@@ -34470,26 +34483,17 @@ impl Vm {
                                     ip = *catch_target as usize;
                                     continue;
                                 }
-                                // No exception handler - output as parse error
-                                let err_msg = if compile_exc || is_php_parse_message(&e.message) {
-                                    e.message.clone()
-                                } else {
-                                    "syntax error".to_string()
-                                };
-                                let msg = format!(
-                                    "\n{}: {} in {}({}) : eval()'d code on line {}\n",
-                                    if compile_exc {
-                                        "Fatal error"
-                                    } else {
-                                        "Parse error"
-                                    },
-                                    err_msg,
-                                    self.current_file,
-                                    op.line,
-                                    e.span.line
-                                );
-                                self.write_output(msg.as_bytes());
-                                Value::False
+                                // Uncaught here: it propagates to the callers like
+                                // any exception (reported as E_PARSE/E_COMPILE_ERROR
+                                // when nothing catches it).
+                                return Err(VmError {
+                                    message: format!(
+                                        "Uncaught {}: {}",
+                                        String::from_utf8_lossy(exc_class),
+                                        msg
+                                    ),
+                                    line: op.line,
+                                });
                             }
                         }
                     };
