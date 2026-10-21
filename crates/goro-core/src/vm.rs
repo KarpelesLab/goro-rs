@@ -32662,6 +32662,9 @@ impl Vm {
                     );
                 }
             }
+            Value::Resource(id) => {
+                self.emit_warning_at(&format!("Resource ID#{} used as offset, casting to integer ({})", id, id), line);
+            }
             _ => {}
         }
         Self::value_to_array_key(val.clone())

@@ -12071,6 +12071,10 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    if let Value::Resource(id) = key_deref {
+        vm.emit_warning(&format!("Resource ID#{} used as offset, casting to integer ({})", id, id));
+    }
+
     // Check for invalid key types (array, object)
     match &key_deref {
         Value::Array(_) => {
