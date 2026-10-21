@@ -7728,6 +7728,108 @@ pub(crate) fn extract_param_default(
     None
 }
 
+/// Evaluate the default value of the parameter at `cv_idx` by running its
+/// compiled prelude (`if ($p === UNDEF) { <expr>; $p = <value>; }`) on its
+/// own, in the scope of `scope` (lowercase class name), like
+/// zend_get_default_from_internal_arg_info()/zval_update_constant_ex() do for
+/// the RECV_INIT constant AST. None if no prelude was found; on an exception
+/// (e.g. an undefined constant) the exception is left pending.
+pub(crate) fn eval_param_default_prelude(
+    vm: &mut Vm,
+    op_array: &crate::opcode::OpArray,
+    cv_idx: u32,
+    scope: Option<&[u8]>,
+) -> Option<Value> {
+    use crate::opcode::{Op, OpCode, OperandType};
+    let ops = &op_array.ops;
+    let is_undef_lit = |o: &OperandType| match o {
+        OperandType::Const(l) => matches!(op_array.literals.get(*l as usize), Some(Value::Undef)),
+        _ => false,
+    };
+    for i in 0..ops.len().saturating_sub(1) {
+        let op = &ops[i];
+        if op.opcode != OpCode::Identical
+            || op.op1 != OperandType::Cv(cv_idx)
+            || !is_undef_lit(&op.op2)
+        {
+            continue;
+        }
+        let jz = &ops[i + 1];
+        if jz.opcode != OpCode::JmpZ || jz.op1 != op.result {
+            continue;
+        }
+        let after = match jz.op2 {
+            OperandType::JmpTarget(t) => t as usize,
+            _ => continue,
+        };
+        let start = i + 2;
+        if after <= start || after > ops.len() {
+            continue;
+        }
+        let last = &ops[after - 1];
+        if last.opcode != OpCode::Assign || last.op1 != OperandType::Cv(cv_idx) {
+            continue;
+        }
+        let rebase = |o: OperandType| match o {
+            OperandType::JmpTarget(t) if t as usize >= start => {
+                OperandType::JmpTarget(t - start as u32)
+            }
+            o => o,
+        };
+        let mut sub = op_array.clone();
+        sub.ops = ops[start..after - 1]
+            .iter()
+            .map(|o| Op {
+                opcode: o.opcode,
+                op1: rebase(o.op1),
+                op2: rebase(o.op2),
+                result: rebase(o.result),
+                line: o.line,
+            })
+            .collect();
+        let line = last.line;
+        sub.ops.push(Op {
+            opcode: OpCode::Return,
+            op1: last.op2,
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
+        sub.is_generator = false;
+        sub.return_type = None;
+        sub.returns_by_ref = false;
+        let cvs = vec![Value::Undef; sub.cv_names.len()];
+        let saved_line = vm.current_line;
+        let pushed = if let Some(s) = scope {
+            vm.called_class_stack.push(s.to_vec());
+            vm.push_class_scope(s.to_vec());
+            true
+        } else {
+            false
+        };
+        let r = vm.execute_op_array_pub(&sub, cvs);
+        if pushed {
+            vm.called_class_stack.pop();
+            vm.pop_class_scope();
+        }
+        vm.current_line = saved_line;
+        if vm.current_exception.is_some() {
+            return Some(Value::Null);
+        }
+        return match r {
+            Ok(Value::Reference(r)) => Some(r.borrow().clone()),
+            Ok(Value::Undef) => Some(Value::Null),
+            Ok(v) => Some(v),
+            Err(e) => {
+                let exc = vm.create_exception(b"Error", &e.message, e.line);
+                vm.current_exception = Some(exc);
+                Some(Value::Null)
+            }
+        };
+    }
+    None
+}
+
 /// Identify the kind of default value for the parameter at `cv_idx`.
 /// Returns Some("global:<NAME>") for a global constant default
 /// (emitted by ConstLookup), Some("class:<Class>::<CONST>") for a class
@@ -8059,6 +8161,19 @@ pub fn reflection_parameter_method(
                                 _ => {}
                             }
                         }
+                    }
+                    // Any other constant expression: evaluate its prelude.
+                    let scope = op_array.scope_class.clone().or_else(|| {
+                        let pc = obj
+                            .borrow()
+                            .get_property(b"__reflection_param_class")
+                            .to_php_string();
+                        (!pc.as_bytes().is_empty()).then(|| pc.as_bytes().to_ascii_lowercase())
+                    });
+                    if let Some(v) =
+                        eval_param_default_prelude(vm, op_array, type_idx as u32, scope.as_deref())
+                    {
+                        return Some(v);
                     }
                 }
             }
@@ -12581,13 +12696,11 @@ pub(crate) fn format_default_value(v: &Value) -> String {
         }
         Value::Object(o) => {
             let ob = o.borrow();
-            if ob.has_property(b"__enum_name") {
+            if ob.has_property(b"__enum_case") {
                 format!(
                     "{}::{}",
                     String::from_utf8_lossy(&ob.class_name),
-                    ob.get_property(b"__enum_name")
-                        .to_php_string()
-                        .to_string_lossy()
+                    ob.get_property(b"name").to_php_string().to_string_lossy()
                 )
             } else {
                 format!("object({})", String::from_utf8_lossy(&ob.class_name))
@@ -12652,6 +12765,36 @@ fn class_is_iterateable(vm: &Vm, class_lower: &[u8]) -> bool {
     false
 }
 
+/// format_default_value() for a default that may still be an unevaluated
+/// constant expression (a compiler marker): that is shown as its AST export,
+/// like php-src does for an IS_CONSTANT_AST zval.
+pub(crate) fn deferred_default_display(vm: &Vm, v: &Value, declaring_class: &[u8]) -> String {
+    if let Value::String(s) = v {
+        let b = s.as_bytes();
+        if let Some(name) = b.strip_prefix(b"__deferred_thunk__::") {
+            let decl = declaring_class.to_ascii_lowercase();
+            let find = |c: &crate::object::ClassEntry| {
+                c.const_closures
+                    .iter()
+                    .find(|op| op.name == name)
+                    .map(|op| match op.param_default_repr.first() {
+                        Some(Some(r)) => r.clone(),
+                        _ => String::from_utf8_lossy(&op.display_name).to_string(),
+                    })
+            };
+            if let Some(r) = rcls(vm, &decl)
+                .and_then(find)
+                .or_else(|| vm.classes.values().find_map(find))
+            {
+                return r;
+            }
+        } else if let Some(name) = b.strip_prefix(b"__deferred_global_const__::") {
+            return String::from_utf8_lossy(name).to_string();
+        }
+    }
+    format_default_value(v)
+}
+
 /// Port of `_property_string()` for a declared property.
 pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &str) -> String {
     let mut s = String::new();
@@ -12668,7 +12811,11 @@ pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &
         None if p.is_readonly && p.visibility == Visibility::Public => Some(Visibility::Protected),
         None => None,
     };
-    if p.is_abstract {
+    // Interface properties (hooked) are implicitly abstract.
+    let in_interface = rcls(vm, &p.declaring_class.to_ascii_lowercase())
+        .map(|c| c.is_interface)
+        .unwrap_or(false);
+    if p.is_abstract || in_interface {
         s.push_str("abstract ");
     }
     if p.is_final || set_vis == Some(Visibility::Private) {
@@ -12701,7 +12848,11 @@ pub(crate) fn property_string(vm: &Vm, p: &crate::object::PropertyDef, indent: &
     s.push_str(&String::from_utf8_lossy(&p.name));
     if !p.is_virtual && !matches!(p.default, Value::Undef) {
         s.push_str(" = ");
-        s.push_str(&format_default_value(&p.default));
+        s.push_str(&deferred_default_display(
+            vm,
+            &p.default,
+            &p.declaring_class,
+        ));
     }
     if p.has_get_hook || p.has_set_hook {
         s.push_str(" {");

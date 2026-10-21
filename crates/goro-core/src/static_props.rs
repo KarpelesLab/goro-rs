@@ -1083,6 +1083,47 @@ impl Vm {
                 }
             }
         }
+        // Defaults that are a bare global constant, once it is defined.
+        const GC: &[u8] = b"__deferred_global_const__::";
+        let globals: Vec<(usize, Value)> = self
+            .classes
+            .get(class_lower)
+            .map(|c| {
+                c.properties
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| {
+                        matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
+                    })
+                    .map(|(i, p)| (i, p.default.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (i, marker) in globals {
+            let name = match &marker {
+                Value::String(s) => s.as_bytes()[GC.len()..].to_vec(),
+                _ => continue,
+            };
+            let short = name
+                .rsplit(|&b| b == b'\\')
+                .next()
+                .unwrap_or(&name)
+                .to_vec();
+            if !self.constants.contains_key(&name) && !self.constants.contains_key(&short) {
+                continue;
+            }
+            let v = self.resolve_deferred_value(&marker);
+            if self.current_exception.is_some() {
+                return Err(());
+            }
+            if let Some(p) = self
+                .classes
+                .get_mut(class_lower)
+                .and_then(|c| c.properties.get_mut(i))
+            {
+                p.default = v;
+            }
+        }
         // Static property defaults declared by this class.
         let statics: Vec<(Vec<u8>, Vec<u8>)> = self
             .classes

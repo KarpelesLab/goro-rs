@@ -5691,6 +5691,25 @@ impl Parser {
                             span: class_span,
                         }
                     }
+                    // `new namespace\Foo`: a namespace-relative name.
+                    TokenKind::Namespace
+                        if matches!(self.peek_at(1), TokenKind::Backslash)
+                            && matches!(self.peek_at(2), TokenKind::Identifier(_)) =>
+                    {
+                        self.advance();
+                        let mut full_name = b"namespace".to_vec();
+                        while self.eat(&TokenKind::Backslash) {
+                            if let TokenKind::Identifier(part) = self.peek().clone() {
+                                self.advance();
+                                full_name.push(b'\\');
+                                full_name.extend_from_slice(&part);
+                            }
+                        }
+                        Expr {
+                            kind: ExprKind::Identifier(full_name),
+                            span: class_span,
+                        }
+                    }
                     TokenKind::Static => {
                         self.advance();
                         Expr {

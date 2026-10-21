@@ -1059,6 +1059,9 @@ impl Compiler {
         // The expression's source: thunks of trait / class constants are
         // compared by it.
         tc.op_array.display_name = expr_to_source_string(expr).into_bytes();
+        // Its AST export, shown by reflection while it is unevaluated.
+        let repr = self.default_value_repr_scoped(expr, None);
+        tc.op_array.set_param_default_repr(0, repr);
         tc.keep_relative_class_names = true;
         tc.in_const_expr = true;
         // A bare global constant is looked up directly (no AST evaluation,
@@ -3955,6 +3958,22 @@ impl Compiler {
                             .op_array
                             .set_param_default_repr(cv, self.default_value_repr(default_expr));
                         // Emit: if param is Undef, set to default
+                        let null_idx = func_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = func_compiler.op_array.alloc_temp();
+                        func_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(null_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = func_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
                         let default_val = func_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
@@ -3988,22 +4007,6 @@ impl Compiler {
                             }
                         }
                         // Check if CV is Undef (null check + type check)
-                        let null_idx = func_compiler.op_array.add_literal(Value::Undef);
-                        let check_tmp = func_compiler.op_array.alloc_temp();
-                        func_compiler.op_array.emit(Op {
-                            opcode: OpCode::Identical,
-                            op1: OperandType::Cv(cv),
-                            op2: OperandType::Const(null_idx),
-                            result: OperandType::Tmp(check_tmp),
-                            line: 0,
-                        });
-                        let jmp_skip = func_compiler.op_array.emit(Op {
-                            opcode: OpCode::JmpZ,
-                            op1: OperandType::Tmp(check_tmp),
-                            op2: OperandType::JmpTarget(0),
-                            result: OperandType::Unused,
-                            line: 0,
-                        });
                         func_compiler.op_array.emit(Op {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),
@@ -7763,6 +7766,23 @@ impl Compiler {
                                         method_compiler
                                             .op_array
                                             .set_param_default_repr(cv, default_repr);
+                                        let undef_idx =
+                                            method_compiler.op_array.add_literal(Value::Undef);
+                                        let check_tmp = method_compiler.op_array.alloc_temp();
+                                        method_compiler.op_array.emit(Op {
+                                            opcode: OpCode::Identical,
+                                            op1: OperandType::Cv(cv),
+                                            op2: OperandType::Const(undef_idx),
+                                            result: OperandType::Tmp(check_tmp),
+                                            line: 0,
+                                        });
+                                        let jmp_skip = method_compiler.op_array.emit(Op {
+                                            opcode: OpCode::JmpZ,
+                                            op1: OperandType::Tmp(check_tmp),
+                                            op2: OperandType::JmpTarget(0),
+                                            result: OperandType::Unused,
+                                            line: 0,
+                                        });
                                         let default_val = method_compiler
                                             .compile_const_expr_value(default_expr)?;
                                         if !matches!(default_expr.kind, ExprKind::Null) {
@@ -7799,23 +7819,6 @@ impl Compiler {
                                                 }
                                             }
                                         }
-                                        let undef_idx =
-                                            method_compiler.op_array.add_literal(Value::Undef);
-                                        let check_tmp = method_compiler.op_array.alloc_temp();
-                                        method_compiler.op_array.emit(Op {
-                                            opcode: OpCode::Identical,
-                                            op1: OperandType::Cv(cv),
-                                            op2: OperandType::Const(undef_idx),
-                                            result: OperandType::Tmp(check_tmp),
-                                            line: 0,
-                                        });
-                                        let jmp_skip = method_compiler.op_array.emit(Op {
-                                            opcode: OpCode::JmpZ,
-                                            op1: OperandType::Tmp(check_tmp),
-                                            op2: OperandType::JmpTarget(0),
-                                            result: OperandType::Unused,
-                                            line: 0,
-                                        });
                                         method_compiler.op_array.emit(Op {
                                             opcode: OpCode::Assign,
                                             op1: OperandType::Cv(cv),
@@ -8055,26 +8058,26 @@ impl Compiler {
                                     for param in params {
                                         if let Some(default_expr) = &param.default {
                                             let cv = dc.op_array.get_or_create_cv(&param.name);
+                                            let undef_idx = dc.op_array.add_literal(Value::Undef);
+                                            let check_tmp = dc.op_array.alloc_temp();
+                                            let mark = dc.op_array.ops.len();
+                                            dc.op_array.emit(Op {
+                                                opcode: OpCode::Identical,
+                                                op1: OperandType::Cv(cv),
+                                                op2: OperandType::Const(undef_idx),
+                                                result: OperandType::Tmp(check_tmp),
+                                                line: 0,
+                                            });
+                                            let jmp_skip = dc.op_array.emit(Op {
+                                                opcode: OpCode::JmpZ,
+                                                op1: OperandType::Tmp(check_tmp),
+                                                op2: OperandType::JmpTarget(0),
+                                                result: OperandType::Unused,
+                                                line: 0,
+                                            });
                                             if let Ok(default_val) =
                                                 dc.compile_const_expr_value(default_expr)
                                             {
-                                                let undef_idx =
-                                                    dc.op_array.add_literal(Value::Undef);
-                                                let check_tmp = dc.op_array.alloc_temp();
-                                                dc.op_array.emit(Op {
-                                                    opcode: OpCode::Identical,
-                                                    op1: OperandType::Cv(cv),
-                                                    op2: OperandType::Const(undef_idx),
-                                                    result: OperandType::Tmp(check_tmp),
-                                                    line: 0,
-                                                });
-                                                let jmp_skip = dc.op_array.emit(Op {
-                                                    opcode: OpCode::JmpZ,
-                                                    op1: OperandType::Tmp(check_tmp),
-                                                    op2: OperandType::JmpTarget(0),
-                                                    result: OperandType::Unused,
-                                                    line: 0,
-                                                });
                                                 dc.op_array.emit(Op {
                                                     opcode: OpCode::Assign,
                                                     op1: OperandType::Cv(cv),
@@ -8084,6 +8087,8 @@ impl Compiler {
                                                 });
                                                 let after = dc.op_array.current_offset();
                                                 dc.op_array.patch_jump(jmp_skip, after);
+                                            } else {
+                                                dc.op_array.ops.truncate(mark);
                                             }
                                         }
                                     }
@@ -14206,6 +14211,22 @@ impl Compiler {
                         closure_compiler
                             .op_array
                             .set_param_default_repr(cv, self.default_value_repr(default_expr));
+                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = closure_compiler.op_array.alloc_temp();
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
                         let default_val =
                             closure_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
@@ -14241,22 +14262,6 @@ impl Compiler {
                                 }
                             }
                         }
-                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
-                        let check_tmp = closure_compiler.op_array.alloc_temp();
-                        closure_compiler.op_array.emit(Op {
-                            opcode: OpCode::Identical,
-                            op1: OperandType::Cv(cv),
-                            op2: OperandType::Const(undef_idx),
-                            result: OperandType::Tmp(check_tmp),
-                            line: 0,
-                        });
-                        let jmp_skip = closure_compiler.op_array.emit(Op {
-                            opcode: OpCode::JmpZ,
-                            op1: OperandType::Tmp(check_tmp),
-                            op2: OperandType::JmpTarget(0),
-                            result: OperandType::Unused,
-                            line: 0,
-                        });
                         closure_compiler.op_array.emit(Op {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),
@@ -14544,6 +14549,22 @@ impl Compiler {
 
                     // Compile default value
                     if let Some(default_expr) = &param.default {
+                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
+                        let check_tmp = closure_compiler.op_array.alloc_temp();
+                        closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Tmp(check_tmp),
+                            line: 0,
+                        });
+                        let jmp_skip = closure_compiler.op_array.emit(Op {
+                            opcode: OpCode::JmpZ,
+                            op1: OperandType::Tmp(check_tmp),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: 0,
+                        });
                         let default_val =
                             closure_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
@@ -14579,22 +14600,6 @@ impl Compiler {
                                 }
                             }
                         }
-                        let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
-                        let check_tmp = closure_compiler.op_array.alloc_temp();
-                        closure_compiler.op_array.emit(Op {
-                            opcode: OpCode::Identical,
-                            op1: OperandType::Cv(cv),
-                            op2: OperandType::Const(undef_idx),
-                            result: OperandType::Tmp(check_tmp),
-                            line: 0,
-                        });
-                        let jmp_skip = closure_compiler.op_array.emit(Op {
-                            opcode: OpCode::JmpZ,
-                            op1: OperandType::Tmp(check_tmp),
-                            op2: OperandType::JmpTarget(0),
-                            result: OperandType::Unused,
-                            line: 0,
-                        });
                         closure_compiler.op_array.emit(Op {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),

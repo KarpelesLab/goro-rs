@@ -934,17 +934,29 @@ fn default_display(oa: &OpArray, cv: u32) -> String {
             return d.to_string();
         }
     }
-    // Default prelude: <default expr ops>; Identical(Cv(cv), Undef); JmpZ; Assign(Cv(cv), val)
+    // Default prelude: Identical(Cv(cv), Undef); JmpZ after; <default expr ops>;
+    // Assign(Cv(cv), val); after:
     let ops = &oa.ops;
-    for (i, op) in ops.iter().enumerate() {
+    for (k, op) in ops.iter().enumerate() {
         if op.opcode != OpCode::Identical || op.op1 != OperandType::Cv(cv) {
             continue;
         }
         let is_undef = matches!(op.op2, OperandType::Const(c) if matches!(oa.literals.get(c as usize), Some(Value::Undef)));
-        if !is_undef || i + 2 >= ops.len() {
+        if !is_undef || k + 2 >= ops.len() {
             continue;
         }
-        let asg = &ops[i + 2];
+        let i = match ops[k + 1].op2 {
+            OperandType::JmpTarget(t)
+                if ops[k + 1].opcode == OpCode::JmpZ && t as usize > k + 2 =>
+            {
+                t as usize - 1
+            }
+            _ => continue,
+        };
+        let asg = match ops.get(i) {
+            Some(a) => a,
+            None => continue,
+        };
         if asg.opcode != OpCode::Assign || asg.op1 != OperandType::Cv(cv) {
             continue;
         }
