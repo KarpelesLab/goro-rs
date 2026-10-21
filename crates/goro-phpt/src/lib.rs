@@ -1726,7 +1726,11 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     }
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
-    collect_phpt_files(dir, &mut files);
+    if dir.is_file() {
+        files.push(dir.to_path_buf());
+    } else {
+        collect_phpt_files(dir, &mut files);
+    }
     files.sort();
 
     // If any of the tests live under ext/mysqli/, try to spin up an embedded
