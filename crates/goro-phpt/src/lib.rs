@@ -2252,6 +2252,10 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
         }
     }
 
+    // __FILE__ / __DIR__ are absolute (php-src resolves the script path), so
+    // a relative test path is resolved first.
+    let dir_abs = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let dir = dir_abs.as_path();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     if dir.is_file() {
         files.push(dir.to_path_buf());
