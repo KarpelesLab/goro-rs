@@ -14823,8 +14823,11 @@ impl Vm {
                 }
                 // For mixed return type, implicit return (no explicit return statement) is an error
                 // because mixed means "must return a value" even though it accepts any type
+                // zend_verify_missing_return_type: falling off the end is
+                // "none returned" for any type but void (even a nullable one).
                 let mixed_implicit_mismatch = implicit_return
-                    && matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed"));
+                    && !op_array.is_generator
+                    && !matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
                 if mixed_implicit_mismatch
                     || !self.value_matches_return_type(val, ret_type, op_array.strict_types)
                 {

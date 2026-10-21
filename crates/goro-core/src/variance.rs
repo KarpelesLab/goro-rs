@@ -1074,7 +1074,15 @@ pub(crate) fn function_declaration(
         }
         if i >= a.required && !is_variadic {
             s.push_str(" = ");
-            s.push_str(&default_display(oa, cv as u32));
+            // Internal functions show the stub's default expression.
+            match oa
+                .internal_sig
+                .and_then(|f| f.args.get(i))
+                .and_then(|arg| arg.default)
+            {
+                Some(d) => s.push_str(d),
+                None => s.push_str(&default_display(oa, cv as u32)),
+            }
         }
         if i + 1 < a.num {
             s.push_str(", ");
