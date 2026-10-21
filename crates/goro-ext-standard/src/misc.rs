@@ -13505,170 +13505,15 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
 
 
 fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ini_str = match args.first() {
-        Some(Value::String(s)) => s.to_string_lossy(),
-        Some(v) => v.to_php_string().to_string_lossy(),
+    let data = match args.first().map(|v| v.deref()) {
+        Some(v) => v.to_php_string().as_bytes().to_vec(),
         None => return Ok(Value::False),
     };
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0); // INI_SCANNER_NORMAL=0
-    // INI_SCANNER_RAW=1, INI_SCANNER_TYPED=2
-    let is_raw = scanner_mode == 1;
-    let is_typed = scanner_mode == 2;
-
-    let mut result = PhpArray::new();
-    let mut current_section: Option<String> = None;
-
-    // Pre-process to handle multi-line quoted values: collapse them by
-    // scanning lines and detecting unclosed quotes.
-    let raw_lines: Vec<&str> = ini_str.split('\n').collect();
-    let mut lines: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < raw_lines.len() {
-        let mut buf = raw_lines[i].trim_end_matches('\r').to_string();
-        // Check if this line has an unterminated double-quoted value.
-        let mut in_quote = false;
-        let bytes = buf.as_bytes();
-        let mut bi = 0;
-        // Skip past key= portion if present.
-        if let Some(eq) = buf.find('=') {
-            bi = eq + 1;
-        }
-        while bi < bytes.len() {
-            if bytes[bi] == b'"' {
-                in_quote = !in_quote;
-            }
-            bi += 1;
-        }
-        // If still in quote, join with next lines.
-        while in_quote && i + 1 < raw_lines.len() {
-            i += 1;
-            buf.push('\n');
-            let next = raw_lines[i].trim_end_matches('\r');
-            buf.push_str(next);
-            for c in next.bytes() {
-                if c == b'"' { in_quote = !in_quote; }
-            }
-        }
-        lines.push(buf);
-        i += 1;
-    }
-
-    for line in &lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        // Section header
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if process_sections {
-                let section_name = trimmed[1..trimmed.len()-1].to_string();
-                let section_key = if let Ok(n) = section_name.parse::<i64>() {
-                    if !section_name.starts_with('0') || section_name == "0" {
-                        ArrayKey::Int(n)
-                    } else {
-                        ArrayKey::String(PhpString::from_string(section_name.clone()))
-                    }
-                } else {
-                    ArrayKey::String(PhpString::from_string(section_name.clone()))
-                };
-                // Ensure section exists in result as an empty array if not yet
-                // present, so empty sections are still represented.
-                if result.get(&section_key).is_none() {
-                    result.set(section_key, Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                }
-                current_section = Some(section_name);
-            }
-            continue;
-        }
-        // Key=value
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().to_string();
-            let val_raw = trimmed[eq_pos+1..].trim_start();
-
-            // In NORMAL/TYPED mode: process semicolons as comments unless inside quotes.
-            // In RAW mode: only strip an unquoted ; if outside string.
-            // Then handle quoted strings: " allows constants/escape, ' is literal.
-            let (val_str, was_quoted) = process_ini_value(val_raw, is_raw, is_typed, vm);
-
-            let value = if is_typed {
-                if was_quoted {
-                    Value::String(PhpString::from_string(val_str.clone()))
-                } else {
-                    match val_str.to_ascii_lowercase().as_str() {
-                        "true" | "on" | "yes" => Value::True,
-                        "false" | "off" | "no" | "none" => Value::False,
-                        "null" => Value::Null,
-                        _ => {
-                            // Try numeric
-                            if let Ok(n) = val_str.parse::<i64>() {
-                                // Only treat as int if string representation matches
-                                if n.to_string() == val_str {
-                                    Value::Long(n)
-                                } else {
-                                    Value::String(PhpString::from_string(val_str.clone()))
-                                }
-                            } else {
-                                Value::String(PhpString::from_string(val_str.clone()))
-                            }
-                        }
-                    }
-                }
-            } else if is_raw {
-                Value::String(PhpString::from_string(val_str.clone()))
-            } else {
-                // NORMAL
-                if was_quoted {
-                    Value::String(PhpString::from_string(val_str.clone()))
-                } else {
-                    match val_str.to_ascii_lowercase().as_str() {
-                        "true" | "on" | "yes" => Value::String(PhpString::from_bytes(b"1")),
-                        "false" | "off" | "no" | "none" | "" => Value::String(PhpString::empty()),
-                        "null" => Value::String(PhpString::empty()),
-                        _ => Value::String(PhpString::from_string(val_str.clone())),
-                    }
-                }
-            };
-
-            let arr_key = ArrayKey::String(PhpString::from_string(key));
-            if process_sections {
-                if let Some(ref section) = current_section {
-                    let section_key = if let Ok(n) = section.parse::<i64>() {
-                        if !section.starts_with('0') || section == "0" {
-                            ArrayKey::Int(n)
-                        } else {
-                            ArrayKey::String(PhpString::from_string(section.clone()))
-                        }
-                    } else {
-                        ArrayKey::String(PhpString::from_string(section.clone()))
-                    };
-                    let section_arr = if let Some(existing) = result.get(&section_key) {
-                        if let Value::Array(arr) = existing {
-                            arr.clone()
-                        } else {
-                            Rc::new(RefCell::new(PhpArray::new()))
-                        }
-                    } else {
-                        Rc::new(RefCell::new(PhpArray::new()))
-                    };
-                    section_arr.borrow_mut().set(arr_key, value);
-                    result.set(section_key, Value::Array(section_arr));
-                } else {
-                    result.set(arr_key, value);
-                }
-            } else {
-                result.set(arr_key, value);
-            }
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(crate::ini_parser::SCANNER_NORMAL);
+    Ok(crate::ini_parser::parse_ini(vm, &data, process_sections, scanner_mode, "Unknown"))
 }
 
-/// Process an INI value: strip surrounding quotes (single = literal, double =
-/// expand constants), handle inline comments, and in NORMAL/TYPED mode
-/// substitute constants for bareword values.
-/// Returns (value, was_quoted). When was_quoted is true, the caller MUST NOT
-/// apply boolean/null keyword interpretation.
 fn process_ini_value(raw: &str, is_raw: bool, _is_typed: bool, vm: &Vm) -> (String, bool) {
     let raw = raw.trim_end();
     if raw.is_empty() {
@@ -14258,6 +14103,9 @@ fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    if path.as_bytes().is_empty() {
+        return Err(throw_value_error_in(vm, "parse_ini_file", args, "parse_ini_file(): Argument #1 ($filename) must not be empty"));
+    }
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
 
@@ -14283,12 +14131,7 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     match read_result {
         Ok(content) => {
-            let ini_args = vec![
-                Value::String(PhpString::from_string(content)),
-                if process_sections { Value::True } else { Value::False },
-                Value::Long(scanner_mode),
-            ];
-            parse_ini_string_fn(vm, &ini_args)
+            Ok(crate::ini_parser::parse_ini(vm, content.as_bytes(), process_sections, scanner_mode, &path_str))
         }
         Err(_) => {
             vm.emit_warning(&format!(

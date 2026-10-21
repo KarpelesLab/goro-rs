@@ -1,6 +1,7 @@
 pub mod basedir_guard;
 pub mod filters;
 pub mod html;
+pub mod ini_parser;
 pub(crate) mod html_tables;
 pub mod math;
 pub mod misc;

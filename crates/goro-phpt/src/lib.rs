@@ -212,6 +212,7 @@ pub enum TestResult {
 /// Run a PHPT test against the goro engine
 thread_local! {
     static TEST_ARGS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static TEST_ENV: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Split --ARGS-- like a POSIX shell would (whitespace, single/double quotes).
@@ -267,6 +268,7 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     }
     // --ARGS-- are passed to the script as $argv (inherited by the forked child).
     TEST_ARGS.with(|a| *a.borrow_mut() = test.sections.get("ARGS").map(|s| s.trim().to_string()));
+    TEST_ENV.with(|a| *a.borrow_mut() = test.sections.get("ENV").map(|s| s.to_string()));
 
     // Check goro skip-list: tests that depend on infrastructure goro doesn't have
     // (JIT, phpdbg, CLI server, real MySQL, external php spawn, real network, live curl).
@@ -1499,6 +1501,18 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         );
     }
 
+    // --ENV-- variables (we run in the forked child, so this is isolated).
+    if let Some(env) = TEST_ENV.with(|a| a.borrow().clone()) {
+        for line in env.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                // run-tests.php does not export empty variables.
+                if !k.is_empty() && !v.is_empty() {
+                    unsafe { std::env::set_var(k, v); }
+                }
+            }
+        }
+    }
     if let Some(args) = TEST_ARGS.with(|a| a.borrow().clone()) {
         use goro_core::array::{ArrayKey, PhpArray};
         let mut argv = PhpArray::new();
