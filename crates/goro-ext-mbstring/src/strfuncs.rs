@@ -327,42 +327,58 @@ fn mb_substr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// mbfl_strcut fallback for encodings without cut/mblen/fixed width
-/// (stateful encodings like UTF-7 or ISO-2022-*): take whole characters
-/// starting at the character containing byte `from`, re-encoded, such that
-/// the result fits in `len` bytes.
+/// (stateful encodings like UTF-7 or ISO-2022-*). libmbfl feeds the input
+/// byte by byte through conversion filters, re-encoding the characters
+/// completed after byte `from`, and keeps the longest output (including
+/// any closing escape sequence) which fits in `len` bytes. We emulate
+/// "characters completed after byte k" with the longest common prefix of
+/// the decoding of s[..k] and the decoding of the whole string.
 fn strcut_generic(s: &[u8], from: usize, len: usize, enc: &Encoding) -> Vec<u8> {
-    let to_wchar = match enc.to_wchar {
-        Some(f) => f,
-        None => return s[from.min(s.len())..(from + len).min(s.len())].to_vec(),
+    let (to_wchar, from_wchar) = match (enc.to_wchar, enc.from_wchar) {
+        (Some(t), Some(f)) => (t, f),
+        _ => return s[from.min(s.len())..(from + len).min(s.len())].to_vec(),
     };
-    let from = from.min(s.len());
-    let mut w_before = Vec::new();
-    let mut st = 0u32;
-    to_wchar(&s[..from], &mut w_before, &mut st);
-    let all = to_wchars(enc, s);
-    let start_idx = w_before.len().min(all.len());
-    let (repl, mode) = state::illegal_settings();
-    // Binary search the largest prefix whose encoding fits
-    let mut lo = start_idx;
-    let mut hi = all.len();
-    let mut best: Vec<u8> = Vec::new();
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        let (bytes, _) = enc.encode(&all[start_idx..mid], repl, mode);
-        if bytes.len() <= len {
-            best = bytes;
-            lo = mid;
-        } else {
-            hi = mid - 1;
+    let n = s.len();
+    let from = from.min(n);
+    let len = len.min(n - from);
+    let full = to_wchars(enc, s);
+    let decode_prefix = |k: usize| -> Vec<u32> {
+        let mut w = Vec::new();
+        let mut st = 0u32;
+        to_wchar(&s[..k], &mut w, &mut st);
+        w
+    };
+    // A trailing error marker is only emitted by the old filters once the
+    // next byte arrives (or at the final flush, where it is dropped)
+    let lcp = |w: &[u32]| -> usize {
+        let w = if w.last() == Some(&MBFL_BAD_INPUT) { &w[..w.len() - 1] } else { w };
+        w.iter().zip(full.iter()).take_while(|(a, b)| a == b).count()
+    };
+    let start = lcp(&decode_prefix(from));
+    let encode = |w: &[u32], end: bool| -> Vec<u8> {
+        let mut buf = mbfl::ConvBuf::new(w.len() * 2, b'?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR);
+        from_wchar(w, &mut buf, end);
+        if end && w.is_empty() {
+            return Vec::new();
         }
+        buf.out
+    };
+    let mut bk = start; // number of completed chars in the accepted output
+    let mut e = from;
+    while e < n {
+        e += 1;
+        let pref = decode_prefix(e);
+        let done = lcp(&pref).max(start);
+        if encode(&full[start..done], false).len() > len {
+            break;
+        }
+        let flushed: Vec<u32> = if pref.len() > start { pref[start..].to_vec() } else { Vec::new() };
+        if encode(&flushed, true).len() > len {
+            break;
+        }
+        bk = done;
     }
-    if lo == start_idx {
-        return Vec::new();
-    }
-    if best.is_empty() {
-        best = enc.encode(&all[start_idx..lo], repl, mode).0;
-    }
-    best
+    encode(&full[start..bk], true)
 }
 
 fn mb_strcut(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

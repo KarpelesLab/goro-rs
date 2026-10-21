@@ -79,7 +79,7 @@ struct MbRex {
     default_mbctype: usize,
     current_mbctype: usize,
     current_mbfl: Option<&'static Encoding>,
-    cache: HashMap<(Vec<u8>, u32, Syntax, usize), Rc<Regex>>,
+    cache: HashMap<Vec<u8>, (Rc<Regex>, u32, Syntax, usize)>,
     search_str: Option<Vec<u8>>,
     search_pos: usize,
     search_re: Option<Rc<Regex>>,
@@ -160,15 +160,23 @@ fn compile_pattern(vm: &mut Vm, func: &str, pattern: &[u8], options: u32, syntax
         vm.emit_warning(&format!("{}(): Pattern is not valid under {} encoding", func, mbctype_name(idx)));
         return None;
     }
-    let key = (pattern.to_vec(), options, syntax, idx);
-    if let Some(r) = with(|m| m.cache.get(&key).cloned()) {
-        return Some(r);
+    let cached = with(|m| m.cache.get(pattern).cloned());
+    if let Some((r, o, sy, i)) = &cached {
+        if *o == options && *sy == syntax && *i == idx {
+            return Some(r.clone());
+        }
     }
     match onig::compile(pattern, options, enc, syntax) {
         Ok(re) => {
             let re = Rc::new(re);
             with(|m| {
-                m.cache.insert(key, re.clone());
+                if let Some((old, ..)) = &cached {
+                    if m.search_re.as_ref().map(|s| Rc::ptr_eq(s, old)).unwrap_or(false) {
+                        // see bug #72399
+                        m.search_re = None;
+                    }
+                }
+                m.cache.insert(pattern.to_vec(), (re.clone(), options, syntax, idx));
             });
             Some(re)
         }
@@ -249,7 +257,8 @@ fn new_array(a: PhpArray) -> Value {
 
 /// Add named groups (C: mb_regex_groups_iter)
 fn add_named_groups(arr: &mut PhpArray, re: &Regex, s: &[u8], region: &Region) {
-    for (name, _) in &re.names {
+    for idx in re.names_foreach_order() {
+        let name = &re.names[idx].0;
         let gn = re.name_to_backref_number(name, Some(region)).unwrap_or(0);
         let key = ArrayKey::String(PhpString::from_vec(name.clone()));
         match (region.beg.get(gn).copied().flatten(), region.end.get(gn).copied().flatten()) {

@@ -1807,8 +1807,63 @@ fn resolve(n: Node, map: &dyn Fn(usize) -> usize, names: &[(Vec<u8>, Vec<usize>)
     })
 }
 
+/// Translate POSIX basic / GNU basic syntaxes (where `\(`, `\{`, ... are
+/// the operators and the bare characters are literals) to the extended
+/// form understood by the parser.
+fn translate_basic(codes: &[u32], syntax: Syntax) -> Vec<u32> {
+    let gnu = matches!(syntax, Syntax::Grep | Syntax::Emacs);
+    let swap: &[u8] = if gnu { b"(){}|+?" } else { b"(){}" };
+    let lit: &[u8] = if gnu { b"" } else { b"|+?" };
+    let mut out = Vec::with_capacity(codes.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < codes.len() {
+        let c = codes[i];
+        if in_class {
+            out.push(c);
+            if c == b']' as u32 {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'[' as u32 {
+            in_class = true;
+            out.push(c);
+            if codes.get(i + 1) == Some(&(b'^' as u32)) {
+                out.push(codes[i + 1]);
+                i += 1;
+            }
+            if codes.get(i + 1) == Some(&(b']' as u32)) {
+                out.push(codes[i + 1]);
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\\' as u32 && i + 1 < codes.len() {
+            let n = codes[i + 1];
+            if n < 0x80 && swap.contains(&(n as u8)) {
+                out.push(n);
+            } else {
+                out.push(c);
+                out.push(n);
+            }
+            i += 2;
+            continue;
+        }
+        if c < 0x80 && (swap.contains(&(c as u8)) || lit.contains(&(c as u8))) {
+            out.push(b'\\' as u32);
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 pub fn compile(pattern: &[u8], options: u32, enc: RegEnc, syntax: Syntax) -> Result<Regex, String> {
     let (codes, _) = enc.decode_all(pattern);
+    let codes = if matches!(syntax, Syntax::PosixBasic | Syntax::Grep | Syntax::Emacs) { translate_basic(&codes, syntax) } else { codes };
     let mut parser = Parser { p: &codes, pos: 0, enc, syntax, ngroups: 0, names: Vec::new(), has_numbered_backref: false, depth: 0 };
     let mut opts = options;
     let ast = parser.parse_alt(&mut opts, false).map_err(|e| e.0)?;
@@ -2181,6 +2236,52 @@ pub struct Region {
 impl Regex {
     pub fn options(&self) -> u32 {
         self.options
+    }
+
+    /// Names in the order onig_foreach_name visits them: Oniguruma keeps
+    /// names in an st hash table (11 bins initially, entries prepended to
+    /// their bin, rehashed when the density exceeds 5).
+    pub fn names_foreach_order(&self) -> Vec<usize> {
+        fn hash(s: &[u8]) -> u32 {
+            let mut val: u32 = 0;
+            for &b in s {
+                val = val.wrapping_mul(997).wrapping_add(b as u32);
+            }
+            val.wrapping_add(val >> 5)
+        }
+        const PRIMES: [usize; 8] = [11, 19, 37, 67, 131, 283, 521, 1033];
+        fn new_size(size: usize) -> usize {
+            let mut ns = 8;
+            for p in PRIMES {
+                if ns > size {
+                    return p;
+                }
+                ns <<= 1;
+            }
+            size * 2 + 1
+        }
+        let mut num_bins = new_size(5);
+        let mut bins: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
+        let mut entries = 0usize;
+        for (i, (name, _)) in self.names.iter().enumerate() {
+            let h = hash(name) as usize;
+            if entries / num_bins > 5 {
+                let nb = new_size(num_bins + 1);
+                let mut newbins: Vec<Vec<usize>> = vec![Vec::new(); nb];
+                for bin in &bins {
+                    // C walks each old bin head-first, prepending to the new bins
+                    for &e in bin.iter() {
+                        let hh = hash(&self.names[e].0) as usize % nb;
+                        newbins[hh].insert(0, e);
+                    }
+                }
+                bins = newbins;
+                num_bins = nb;
+            }
+            bins[h % num_bins].insert(0, i);
+            entries += 1;
+        }
+        bins.into_iter().flatten().collect()
     }
 
     /// onig_name_to_backref_number: the last matched group for a name
