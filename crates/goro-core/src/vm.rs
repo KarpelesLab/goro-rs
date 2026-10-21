@@ -6200,7 +6200,7 @@ impl Vm {
         None
     }
 
-    fn dispatch_spl_method(
+    pub(crate) fn dispatch_spl_method(
         &mut self,
         class_lower: &[u8],
         method_lower: &[u8],
@@ -9089,7 +9089,7 @@ impl Vm {
     }
 
     /// Check if this is an SPL method that needs call arguments
-    fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
+    pub(crate) fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
         if let Some(h) = self.native_class_handlers.get(class) {
             return (h.has_method)(class, method, false);
         }
@@ -18478,6 +18478,30 @@ impl Vm {
                         || func_name_lower == b"datetimeimmutable::getlasterrors" {
                         // Return false (no errors)
                         self.write_operand(&op.result, Value::False, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if func_name_lower.starts_with(b"__splx::") {
+                        // Deferred SPL method call (see spl_deferred_call).
+                        let method_orig = call.name.as_bytes()[8..].to_vec();
+                        let result = self.spl_deferred_call(&method_orig, &call.args, &call.named_args, op.line);
+                        if let Some(exc_val) = self.current_exception.take() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let catch_target = *catch_target;
+                                self.current_exception = Some(exc_val);
+                                ip = catch_target as usize;
+                                continue;
+                            } else {
+                                let msg = if let Value::Object(o) = &exc_val {
+                                    let ob = o.borrow();
+                                    format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name),
+                                        ob.get_property(b"message").to_php_string().to_string_lossy())
+                                } else {
+                                    "Unknown exception".to_string()
+                                };
+                                self.current_exception = Some(exc_val);
+                                return Err(VmError { message: msg, line: op.line });
+                            }
+                        }
+                        self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower.starts_with(b"__spl::") {
                         // SPL method call with args
                         let spl_path = &func_name_lower[7..]; // skip "__spl::"
@@ -34019,6 +34043,18 @@ impl Vm {
                             }
                         }
 
+                        // SPL methods: defer to call time so arguments are
+                        // evaluated first (named args, arity, stack frame).
+                        if !has_user_method && self.spl_should_defer(&class_name_lower, &method_name_lower) {
+                            let mut nm = b"__splx::".to_vec();
+                            nm.extend_from_slice(method_name.as_bytes());
+                            self.pending_calls.push(PendingCall {
+                                name: PhpString::from_vec(nm),
+                                args: vec![obj_val.clone()],
+                                named_args: Vec::new(),
+                            });
+                            continue;
+                        }
                         let builtin_result = if is_throwable && !has_user_method {
                             let obj_borrow = obj.borrow();
                             match method_name_lower.as_slice() {

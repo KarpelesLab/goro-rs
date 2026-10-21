@@ -100,6 +100,173 @@ impl Vm {
         None
     }
 
+    /// Like spl_stub_lookup but also returns the declaring class (lowercase).
+    pub(crate) fn spl_stub_lookup_decl(&self, class_lower: &[u8], method_lower: &[u8]) -> Option<(Vec<u8>, &'static crate::spl_stubs::StubMethod)> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..16 {
+            if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
+                return Some((cur, m));
+            }
+            match crate::vm::get_builtin_parent(&cur) {
+                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// The built-in SPL class an object's class derives from (or is).
+    pub(crate) fn spl_builtin_base(&self, class_lower: &[u8]) -> Option<&'static [u8]> {
+        // Most-derived first so the walk stops at the nearest built-in.
+        self.spl_find_base(class_lower, SPL_CLASSES)
+    }
+
+    /// Whether a method call on an object of `class_lower` should be
+    /// dispatched as a deferred SPL call (see spl_deferred_call).
+    pub(crate) fn spl_should_defer(&self, class_lower: &[u8], method_lower: &[u8]) -> bool {
+        if method_lower.starts_with(b"__") {
+            return false;
+        }
+        match self.spl_builtin_base(class_lower) {
+            Some(base) => self.spl_stub_lookup(base, method_lower).is_some(),
+            None => false,
+        }
+    }
+
+    /// Execute a deferred SPL method call: `args[0]` is $this. Maps named
+    /// arguments, checks arity against the stub signature, pushes a stack
+    /// frame (`Class->method`) and runs the built-in implementation.
+    /// Exceptions are left in current_exception.
+    pub(crate) fn spl_deferred_call(
+        &mut self,
+        method_orig: &[u8],
+        args: &[Value],
+        named: &[(Vec<u8>, Value)],
+        line: u32,
+    ) -> Value {
+        let obj = match args.first() {
+            Some(Value::Object(o)) => o.clone(),
+            _ => return Value::Null,
+        };
+        let class_lower = obj_class_lower(&obj);
+        let method_lower: Vec<u8> = method_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let base = match self.spl_builtin_base(&class_lower) {
+            Some(b) => b,
+            None => return Value::Null,
+        };
+        let (decl, stub) = match self.spl_stub_lookup_decl(base, &method_lower) {
+            Some(x) => x,
+            None => return Value::Null,
+        };
+        let decl_disp = self.builtin_canonical_name(&decl);
+        let method_disp = String::from_utf8_lossy(method_orig).to_string();
+        let mut call_args: Vec<Value> = args.to_vec();
+        if !named.is_empty() && !self.spl_map_named_args(base, &method_lower, &mut call_args, named) {
+            return Value::Null;
+        }
+        // Drop trailing skipped (Undef) optionals.
+        while call_args.len() > 1 && matches!(call_args.last(), Some(Value::Undef)) {
+            call_args.pop();
+        }
+        let given = call_args.len() - 1;
+        let max = stub.params.len();
+        if given < stub.required || (!stub.variadic && given > max) {
+            let (word, n) = if stub.required == max && !stub.variadic {
+                ("exactly", max)
+            } else if given < stub.required {
+                ("at least", stub.required)
+            } else {
+                ("at most", max)
+            };
+            let msg = format!(
+                "{}::{}() expects {} {} argument{}, {} given",
+                decl_disp,
+                method_disp,
+                word,
+                n,
+                if n == 1 { "" } else { "s" },
+                given
+            );
+            self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
+            self.spl_throw(b"ArgumentCountError", &msg);
+            self.call_stack.pop();
+            return Value::Null;
+        }
+        self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
+        let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
+        self.call_stack.pop();
+        match r {
+            Some(v) => v,
+            None => {
+                if self.current_exception.is_none() {
+                    let msg = format!(
+                        "Call to undefined method {}::{}()",
+                        crate::value::display_class_name(&obj.borrow().class_name),
+                        method_disp
+                    );
+                    self.spl_throw(b"Error", &msg);
+                }
+                Value::Null
+            }
+        }
+    }
+
+    /// Run a built-in SPL method over the class chain. With user arguments
+    /// the argument-taking implementation is preferred.
+    fn spl_invoke_builtin(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        let mut chain: Vec<Vec<u8>> = vec![class_lower.to_vec()];
+        let mut cur = class_lower.to_vec();
+        for _ in 0..50 {
+            let next: Option<Vec<u8>> = self
+                .classes
+                .get(&cur)
+                .and_then(|c| c.parent.clone())
+                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                .or_else(|| crate::vm::get_builtin_parent(&cur).map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+            match next {
+                Some(n) => {
+                    chain.push(n.clone());
+                    cur = n;
+                }
+                None => break,
+            }
+        }
+        let has_args = args.len() > 1;
+        let try_args = |vm: &mut Vm| -> Option<Value> {
+            for c in &chain {
+                if vm.is_spl_args_method(c, method_lower) {
+                    if let Some(r) = vm.handle_spl_docall(c, method_lower, args) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        };
+        if has_args {
+            if let Some(r) = try_args(self) {
+                return Some(r);
+            }
+        }
+        for c in &chain {
+            if let Some(r) = self.dispatch_spl_method(c, method_lower, obj) {
+                return Some(r);
+            }
+            if self.current_exception.is_some() {
+                return Some(Value::Null);
+            }
+        }
+        if !has_args {
+            return try_args(self);
+        }
+        None
+    }
+
     /// Place named arguments of an SPL method call at their positions
     /// (`args[0]` is $this). Skipped optional parameters become Undef.
     /// Returns false with an Error set on unknown/duplicate names.
@@ -245,6 +412,21 @@ impl Vm {
         }
     }
 }
+
+/// All built-in SPL classes (lowercase).
+pub(crate) const SPL_CLASSES: &[&[u8]] = &[
+    b"arrayobject", b"arrayiterator", b"recursivearrayiterator",
+    b"splfixedarray", b"spldoublylinkedlist", b"splqueue", b"splstack",
+    b"splheap", b"splminheap", b"splmaxheap", b"splpriorityqueue",
+    b"splobjectstorage", b"multipleiterator",
+    b"splfileinfo", b"directoryiterator", b"filesystemiterator",
+    b"recursivedirectoryiterator", b"globiterator", b"splfileobject", b"spltempfileobject",
+    b"emptyiterator", b"iteratoriterator", b"recursiveiteratoriterator", b"recursivetreeiterator",
+    b"filteriterator", b"recursivefilteriterator", b"callbackfilteriterator",
+    b"recursivecallbackfilteriterator", b"parentiterator", b"limititerator",
+    b"cachingiterator", b"recursivecachingiterator", b"norewinditerator",
+    b"appenditerator", b"infiniteiterator", b"regexiterator", b"recursiveregexiterator",
+];
 
 pub(crate) fn mangle_private(class: &[u8], name: &[u8]) -> Vec<u8> {
     let mut m = Vec::with_capacity(class.len() + name.len() + 2);
