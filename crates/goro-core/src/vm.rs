@@ -18078,8 +18078,22 @@ impl Vm {
 
                 // Compound assignments
                 OpCode::AssignAdd => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // `$a += $GLOBALS` adds the variables' values.
                     let rhs = match &rhs {
                         Value::Array(a) if Rc::ptr_eq(a, &self.globals) => {
@@ -18150,8 +18164,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignSub => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&cv_val) || is_type(&rhs) {
@@ -18215,8 +18243,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignMul => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&cv_val) || is_type(&rhs) {
@@ -18280,8 +18322,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignDiv => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "/")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -18323,8 +18379,22 @@ impl Vm {
                     }
                 }
                 OpCode::AssignMod => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "%")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -18378,8 +18448,22 @@ impl Vm {
                     }
                 }
                 OpCode::AssignPow => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) =
                         Self::check_unsupported_operand_types(&cv_val, &rhs, "**")
                     {
@@ -18405,8 +18489,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignConcat => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if matches!(&cv_val, Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
@@ -18426,8 +18524,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignBitwiseAnd => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "&")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -18476,8 +18588,22 @@ impl Vm {
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignBitwiseOr => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "|")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -18532,8 +18658,22 @@ impl Vm {
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignBitwiseXor => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "^")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -18582,8 +18722,22 @@ impl Vm {
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::AssignShiftLeft => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // Check for unsupported operand types
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, "<<") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
@@ -18635,8 +18789,22 @@ impl Vm {
                     );
                 }
                 OpCode::AssignShiftRight => {
-                    let cv_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let rhs = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let cv_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // Check for unsupported operand types
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, ">>") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
@@ -18694,7 +18862,14 @@ impl Vm {
 
                 // Increment / Decrement
                 OpCode::PreIncrement => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // GMP increment
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
@@ -18759,7 +18934,14 @@ impl Vm {
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PreDecrement => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&val) {
@@ -18820,7 +19002,14 @@ impl Vm {
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostIncrement => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&val) {
@@ -18875,7 +19064,14 @@ impl Vm {
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::PostDecrement => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
@@ -30012,7 +30208,14 @@ impl Vm {
                     // Like ArrayGet but for list() destructuring: emits "Cannot use X as array"
                     // instead of "Trying to access array offset on X", and strings are not indexable.
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val.clone());
                         match arr.borrow().get(&key).cloned() {
@@ -35853,7 +36056,14 @@ impl Vm {
 
                 OpCode::ArrayUnset => {
                     // Remove element from array: op1 = array CV, op2 = key
-                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // Read the array reference directly
                     let arr_val = match &op.op1 {
                         OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
@@ -36613,7 +36823,14 @@ impl Vm {
                 }
 
                 OpCode::VarVarGet => {
-                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let name_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     let name = name_val.to_php_string();
                     let name_bytes = name.as_bytes();
                     let mut found = Value::Null;
@@ -37097,7 +37314,14 @@ impl Vm {
                 OpCode::ArrayGetRef => {
                     // Get or create a reference to an array element: $arr[key]
                     // op1 = array CV, op2 = key, result = tmp to store Reference
-                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
 
                     // Get the array, working through references
                     let arr_val = if let OperandType::Cv(ai) = &op.op1 {
@@ -37956,7 +38180,12 @@ impl Vm {
                     if let OperandType::Cv(idx) = &op.op1 {
                         if let Some(slot) = cvs.get_mut(*idx as usize) {
                             if !matches!(slot, Value::Reference(_)) {
-                                let current = std::mem::replace(slot, Value::Null);
+                                // A reference never holds UNDEF: binding an
+                                // undefined variable defines it as null.
+                                let mut current = std::mem::replace(slot, Value::Null);
+                                if matches!(current, Value::Undef) {
+                                    current = Value::Null;
+                                }
                                 *slot = Value::Reference(Rc::new(RefCell::new(current)));
                             }
                         }
