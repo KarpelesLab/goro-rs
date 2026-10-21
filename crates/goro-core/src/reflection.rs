@@ -969,6 +969,34 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         a[1] = closure_legacy_arg(&args[1]);
         return reflection_method_construct(vm, &a, line);
     }
+    // zpp: object|string $objectOrMethod, ?string $method.
+    let is_closure_arr = |v: &Value| match v {
+        Value::Array(a) => matches!(a.borrow().get_int(0), Some(Value::String(s))
+            if s.as_bytes().starts_with(b"__closure_")
+                || s.as_bytes().starts_with(b"__arrow_")
+                || s.as_bytes().starts_with(b"__bound_closure_")),
+        _ => false,
+    };
+    if let Some(a @ Value::Array(_)) = args.get(1) {
+        if !is_closure_arr(a) {
+            let exc = vm.create_exception(
+                b"TypeError",
+                "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be of type object|string, array given",
+                line,
+            );
+            vm.current_exception = Some(exc);
+            return false;
+        }
+    }
+    if let Some(Value::Array(_)) = args.get(2) {
+        let exc = vm.create_exception(
+            b"TypeError",
+            "ReflectionMethod::__construct(): Argument #2 ($method) must be of type ?string, array given",
+            line,
+        );
+        vm.current_exception = Some(exc);
+        return false;
+    }
     // Extract the closure's underlying function name, if any, from the
     // first argument. Supports string-form closures and array callables of
     // the form [closure_obj, 'method'] that flatten to a string closure.
@@ -1765,6 +1793,15 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
                 vm.user_functions
                     .get(&func_lower)
                     .and_then(|op| op.cv_names.iter().position(|n| n == name))
+                    .or_else(|| {
+                        // Internal functions: the stub's parameter names.
+                        rfunc(vm, &func_lower).and_then(|op| {
+                            op.cv_names
+                                .iter()
+                                .take(op.param_count as usize)
+                                .position(|n| n == name)
+                        })
+                    })
             }
         }
         Value::Long(i) => {
@@ -1869,8 +1906,21 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
             Value::Long(param_idx as i64),
         );
     } else if let Some(idx) = param_idx_opt {
-        // No function found - still set enough for later calls.
+        // No userland function - still set enough for later calls.
+        let internal_name = rfunc(vm, &func_lower).and_then(|op| op.cv_names.get(idx).cloned());
         let mut obj = this.borrow_mut();
+        if let Some(n) = internal_name {
+            obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(n)));
+        }
+        // Forget what an earlier __construct() call reflected.
+        obj.properties.retain(|(k, _)| {
+            !matches!(
+                k.as_slice(),
+                b"__reflection_param_class"
+                    | b"__reflection_param_method"
+                    | b"__reflection_param_cv_offset"
+            )
+        });
         obj.set_property(
             b"__reflection_func".to_vec(),
             Value::String(PhpString::from_vec(func_lower)),
@@ -2298,9 +2348,19 @@ pub fn reflection_class_method(
                     } = adapt
                     {
                         if let Some(alias) = new_name {
+                            // An alias without a trait name names the used
+                            // trait that declares the method.
+                            let ml = method.to_ascii_lowercase();
                             let trait_str = trait_name
-                                .as_ref()
-                                .map(|t| String::from_utf8_lossy(t).to_string())
+                                .clone()
+                                .or_else(|| {
+                                    ce.traits.iter().find_map(|t| {
+                                        rcls(vm, &t.to_ascii_lowercase())
+                                            .filter(|tc| tc.methods.contains_key(&ml))
+                                            .map(|tc| tc.name.clone())
+                                    })
+                                })
+                                .map(|t| String::from_utf8_lossy(&t).to_string())
                                 .unwrap_or_default();
                             let method_str = String::from_utf8_lossy(method).to_string();
                             let alias_str = String::from_utf8_lossy(alias).to_string();
@@ -5016,7 +5076,12 @@ pub fn reflection_method_method(
                                         let var_name = &key_bytes[prefix.len()..];
                                         // Get current value (or default)
                                         let val = if let Some(v) = vm.static_vars().get(key_bytes) {
-                                            v.deref()
+                                            match v {
+                                                Value::Reference(r) if Rc::strong_count(r) > 1 => {
+                                                    Value::Reference(r.clone())
+                                                }
+                                                v => v.deref(),
+                                            }
                                         } else {
                                             // No invocation yet -> use the default literal.
                                             if let OperandType::Const(d_idx) = op.op2 {
@@ -5026,7 +5091,8 @@ pub fn reflection_method_method(
                                                     .cloned()
                                                     .unwrap_or(Value::Null)
                                             } else {
-                                                Value::Null
+                                                eval_static_const_init(vm, &op_array, op)
+                                                    .unwrap_or(Value::Null)
                                             }
                                         };
                                         result.set(
@@ -5524,6 +5590,24 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 }
             }
             b"invokeargs" => {
+                // reflection_method_invoke(): the abstract check comes
+                // before argument parsing.
+                if let Some(m) = rmethod(vm, &class_lower, method_lower_bytes.as_bytes())
+                    .filter(|m| m.is_abstract)
+                    .cloned()
+                {
+                    let canonical = rcls(vm, &class_lower)
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                    let msg = format!(
+                        "Trying to invoke abstract method {}::{}()",
+                        canonical,
+                        String::from_utf8_lossy(&m.name)
+                    );
+                    let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let target_obj = args.get(1)?.clone();
                 if !matches!(&target_obj, Value::Object(_) | Value::Null) {
                     let msg = format!(
@@ -6178,8 +6262,15 @@ pub fn reflection_function_method(
                         continue;
                     };
                     // Prefer runtime value; fall back to the literal default.
+                    // A static bound by the running function stays a
+                    // reference (zval_add_ref keeps refcount > 1 refs).
                     let val = if let Some(v) = vm.static_vars().get(&key_bytes) {
-                        v.deref()
+                        match v {
+                            Value::Reference(r) if Rc::strong_count(r) > 1 => {
+                                Value::Reference(r.clone())
+                            }
+                            v => v.deref(),
+                        }
                     } else {
                         match op.op2 {
                             crate::opcode::OperandType::Const(idx) => op_array
@@ -6187,7 +6278,7 @@ pub fn reflection_function_method(
                                 .get(idx as usize)
                                 .cloned()
                                 .unwrap_or(Value::Null),
-                            _ => Value::Null,
+                            _ => eval_static_const_init(vm, &op_array, op).unwrap_or(Value::Null),
                         }
                     };
                     result.set(ArrayKey::String(PhpString::from_vec(var_name)), val);
@@ -6361,7 +6452,12 @@ pub fn reflection_function_method(
                 Some(Value::False)
             }
         }
-        b"isdisabled" => Some(Value::False),
+        b"isdisabled" => {
+            vm.emit_deprecated(
+                "Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions",
+            );
+            Some(Value::False)
+        }
         b"innamespace" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
@@ -8031,6 +8127,101 @@ pub(crate) fn eval_param_default_prelude(
         };
     }
     None
+}
+
+/// The value a not-yet-run `static $v = <constant expression>;` reports
+/// (php-src evaluates constant-expression initializers at compile time):
+/// the guarded initializer ops are run on their own when they only build a
+/// constant value. None for other initializers (they stay uninitialized).
+fn eval_static_const_init(
+    vm: &mut Vm,
+    op_array: &crate::opcode::OpArray,
+    init: &crate::opcode::Op,
+) -> Option<Value> {
+    use crate::opcode::{Op, OpCode, OperandType};
+    let ops = &op_array.ops;
+    let at = ops.iter().position(|o| std::ptr::eq(o, init))?;
+    let pure_op = |o: &Op| {
+        !matches!(o.op1, OperandType::Cv(_))
+            && !matches!(o.op2, OperandType::Cv(_))
+            && matches!(
+                o.opcode,
+                OpCode::ArrayNew
+                    | OpCode::ArrayAppend
+                    | OpCode::ArraySet
+                    | OpCode::StaticPropGet
+                    | OpCode::ConstLookup
+                    | OpCode::QmAssign
+                    | OpCode::Add
+                    | OpCode::Sub
+                    | OpCode::Mul
+                    | OpCode::Div
+                    | OpCode::Mod
+                    | OpCode::Pow
+                    | OpCode::Concat
+                    | OpCode::Negate
+                    | OpCode::UnaryPlus
+                    | OpCode::BitwiseAnd
+                    | OpCode::BitwiseOr
+                    | OpCode::BitwiseXor
+                    | OpCode::BitwiseNot
+                    | OpCode::ShiftLeft
+                    | OpCode::ShiftRight
+                    | OpCode::BooleanNot
+                    | OpCode::FreeTmps
+                    | OpCode::Nop
+            )
+    };
+    // A non-constant initializer is guarded by StaticVarInitOrJmp; a
+    // constant one is compiled right before the StaticVarInit.
+    let start = match (0..at).rev().find(|&j| {
+        ops[j].opcode == OpCode::StaticVarInitOrJmp
+            && ops[j].op1 == init.op1
+            && ops[j].result == init.result
+    }) {
+        Some(g) => g + 1,
+        None => {
+            let mut s = at;
+            while s > 0 && pure_op(&ops[s - 1]) {
+                s -= 1;
+            }
+            s
+        }
+    };
+    let body = &ops[start..at];
+    if !body.iter().all(pure_op) {
+        return None;
+    }
+    let mut sub = op_array.clone();
+    sub.ops = body.to_vec();
+    sub.ops.push(Op {
+        opcode: OpCode::Return,
+        op1: init.op2,
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line: init.line,
+    });
+    sub.is_generator = false;
+    sub.return_type = None;
+    sub.returns_by_ref = false;
+    let cvs = vec![Value::Undef; sub.cv_names.len()];
+    let scope = op_array.scope_class.clone();
+    if let Some(s) = &scope {
+        vm.called_class_stack.push(s.clone());
+        vm.push_class_scope(s.clone());
+    }
+    let saved_line = vm.current_line;
+    let r = vm.execute_op_array_pub(&sub, cvs);
+    vm.current_line = saved_line;
+    if scope.is_some() {
+        vm.called_class_stack.pop();
+        vm.pop_class_scope();
+    }
+    if vm.current_exception.is_some() {
+        vm.current_exception = None;
+        return None;
+    }
+    r.ok().map(|v| v.deref())
 }
 
 /// Identify the kind of default value for the parameter at `cv_idx`.
@@ -11069,6 +11260,13 @@ pub fn create_reflection_type_scoped(
     // `self` resolves to the declaring class; `parent` resolves to that class's
     // direct parent (canonical name preserved). `static` is left literal.
     fn resolve_name(vm: &Vm, name: &[u8], scope: Option<&[u8]>) -> Vec<u8> {
+        // zend_compile_typename() keeps self/parent of anonymous classes
+        // (GH-18373).
+        if scope.is_some_and(|s| {
+            s.contains(&0) || s.starts_with(b"class@anonymous") || s.starts_with(b"__anonymous")
+        }) {
+            return name.to_vec();
+        }
         if name == b"self" {
             if let Some(s) = scope {
                 return s.to_vec();
