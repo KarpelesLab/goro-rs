@@ -2601,8 +2601,13 @@ impl Compiler {
                 let loop_start = self.op_array.current_offset();
 
                 // Condition
-                let jmp_false = if !condition.is_empty() {
-                    let cond = self.compile_expr(&condition[0])?;
+                // `for (;a, b;)`: every condition expression is evaluated, the
+                // last one decides.
+                let jmp_false = if let Some((last, rest)) = condition.split_last() {
+                    for expr in rest {
+                        self.compile_expr(expr)?;
+                    }
+                    let cond = self.compile_expr(last)?;
                     Some(self.op_array.emit(Op {
                         opcode: OpCode::JmpZ,
                         op1: cond,
