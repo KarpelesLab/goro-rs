@@ -12322,7 +12322,13 @@ impl Vm {
             b"uri\\whatwg\\invalidurlexception" => "Uri\\WhatWg\\InvalidUrlException",
             b"uri\\invaliduriexception" => "Uri\\InvalidUriException",
             b"uri\\uricomparisonmode" => "Uri\\UriComparisonMode",
-            _ => return String::from_utf8_lossy(class_lower).to_string(),
+            _ => {
+                return self
+                    .classes
+                    .get(class_lower)
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string());
+            }
         };
         canonical.to_string()
     }

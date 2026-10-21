@@ -5,6 +5,7 @@ pub mod chardata;
 pub mod document;
 pub mod element;
 pub mod lists;
+pub mod modern;
 pub mod node;
 pub mod xpathobj;
 
@@ -125,6 +126,16 @@ pub enum ListKind {
     },
     /// static list of nodes (XPath results, etc.)
     Static(Vec<Value>),
+    /// element children (Dom\ParentNode::$children)
+    ChildElements(Obj),
+    /// Dom getElementsByTagName: qualified name matching ("*" = any)
+    ByQName { base: Obj, qname: String },
+    /// getElementsByClassName: every class must be present
+    ByClass {
+        base: Obj,
+        classes: Vec<String>,
+        quirks: bool,
+    },
     /// entity reference children / empty
     Empty,
 }
@@ -146,10 +157,20 @@ pub enum Kind {
     Implementation,
     /// DOMNodeList / DOMNamedNodeMap iterator
     Iter(RefCell<lists::IterState>),
+    /// Dom\TokenList and other modern-only objects
+    Modern(modern::MKind),
 }
 
 pub struct DomData {
     pub kind: RefCell<Kind>,
+    /// Cached property objects ([SameObject] attributes such as
+    /// Dom\Element::$classList or Dom\Document::$implementation).
+    pub cache: RefCell<Vec<(&'static str, CacheEntry)>>,
+}
+
+pub enum CacheEntry {
+    Strong(Obj),
+    Weak(Weak<RefCell<PhpObject>>),
 }
 
 thread_local! {
@@ -256,9 +277,38 @@ pub fn attach(o: &Obj, kind: Kind) {
     o.borrow_mut().native = Some(NativeData {
         data: Rc::new(DomData {
             kind: RefCell::new(kind),
+            cache: RefCell::new(Vec::new()),
         }) as Rc<dyn Any>,
         handlers: &HANDLERS,
     });
+}
+
+/// Attach native data with a specific handler table (modern DOM objects).
+pub fn attach_with(o: &Obj, kind: Kind, handlers: &'static NativeObjectHandlers) {
+    o.borrow_mut().native = Some(NativeData {
+        data: Rc::new(DomData {
+            kind: RefCell::new(kind),
+            cache: RefCell::new(Vec::new()),
+        }) as Rc<dyn Any>,
+        handlers,
+    });
+}
+
+/// Dispatch helpers shared with the modern handler tables.
+pub fn h_read_property_pub(vm: &mut Vm, o: &Obj, name: &[u8], mode: u8) -> Option<Value> {
+    h_read_property(vm, o, name, mode)
+}
+pub fn h_write_property_pub(vm: &mut Vm, o: &Obj, name: &[u8], v: &Value) -> bool {
+    h_write_property(vm, o, name, v)
+}
+pub fn h_has_property_pub(vm: &mut Vm, o: &Obj, name: &[u8], check_empty: u8) -> Option<bool> {
+    h_has_property(vm, o, name, check_empty)
+}
+pub fn h_unset_property_pub(vm: &mut Vm, o: &Obj, name: &[u8]) -> bool {
+    h_unset_property(vm, o, name)
+}
+pub fn h_get_properties_pub(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
+    h_get_properties(vm, o, purpose)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +336,38 @@ pub enum Base {
     NamedNodeMap,
     XPath,
     Iterator,
+    // modern (Dom\ namespace) classes
+    MNode,
+    MDocument,
+    MXmlDocument,
+    MHtmlDocument,
+    MDocumentFragment,
+    MElement,
+    MHtmlElement,
+    MAttr,
+    MCharacterData,
+    MText,
+    MComment,
+    MCdataSection,
+    MDocumentType,
+    MNotation,
+    MEntity,
+    MEntityReference,
+    MProcessingInstruction,
+    MImplementation,
+    MNodeList,
+    MNamedNodeMap,
+    MDtdNamedNodeMap,
+    MHtmlCollection,
+    MXPath,
+    MTokenList,
+}
+
+impl Base {
+    /// Is this one of the Dom\ (spec-compliant) classes?
+    pub fn is_modern(self) -> bool {
+        (self as u32) >= (Base::MNode as u32)
+    }
 }
 
 pub const CLASSES: &[(&str, Base, Option<&str>)] = &[
@@ -316,6 +398,54 @@ pub const CLASSES: &[(&str, Base, Option<&str>)] = &[
     ("DOMNodeList", Base::NodeList, None),
     ("DOMNamedNodeMap", Base::NamedNodeMap, None),
     ("DOMXPath", Base::XPath, None),
+    ("Dom\\Node", Base::MNode, None),
+    ("Dom\\Document", Base::MDocument, Some("Dom\\Node")),
+    (
+        "Dom\\XMLDocument",
+        Base::MXmlDocument,
+        Some("Dom\\Document"),
+    ),
+    (
+        "Dom\\HTMLDocument",
+        Base::MHtmlDocument,
+        Some("Dom\\Document"),
+    ),
+    (
+        "Dom\\DocumentFragment",
+        Base::MDocumentFragment,
+        Some("Dom\\Node"),
+    ),
+    ("Dom\\Element", Base::MElement, Some("Dom\\Node")),
+    ("Dom\\HTMLElement", Base::MHtmlElement, Some("Dom\\Element")),
+    ("Dom\\Attr", Base::MAttr, Some("Dom\\Node")),
+    (
+        "Dom\\CharacterData",
+        Base::MCharacterData,
+        Some("Dom\\Node"),
+    ),
+    ("Dom\\Text", Base::MText, Some("Dom\\CharacterData")),
+    ("Dom\\Comment", Base::MComment, Some("Dom\\CharacterData")),
+    ("Dom\\CDATASection", Base::MCdataSection, Some("Dom\\Text")),
+    ("Dom\\DocumentType", Base::MDocumentType, Some("Dom\\Node")),
+    ("Dom\\Notation", Base::MNotation, Some("Dom\\Node")),
+    ("Dom\\Entity", Base::MEntity, Some("Dom\\Node")),
+    (
+        "Dom\\EntityReference",
+        Base::MEntityReference,
+        Some("Dom\\Node"),
+    ),
+    (
+        "Dom\\ProcessingInstruction",
+        Base::MProcessingInstruction,
+        Some("Dom\\CharacterData"),
+    ),
+    ("Dom\\Implementation", Base::MImplementation, None),
+    ("Dom\\NodeList", Base::MNodeList, None),
+    ("Dom\\NamedNodeMap", Base::MNamedNodeMap, None),
+    ("Dom\\DtdNamedNodeMap", Base::MDtdNamedNodeMap, None),
+    ("Dom\\HTMLCollection", Base::MHtmlCollection, None),
+    ("Dom\\XPath", Base::MXPath, None),
+    ("Dom\\TokenList", Base::MTokenList, None),
 ];
 
 pub fn base_name(b: Base) -> &'static str {
@@ -391,6 +521,8 @@ pub struct DocProps {
     pub recover: bool,
     /// registerNodeClass: base class lower -> user class name
     pub classmap: HashMap<String, Vec<u8>>,
+    /// php_libxml_class_type: 0 unset, 1 legacy (DOMNode), 2 modern (Dom\Node)
+    pub class_type: u8,
 }
 
 impl Default for DocProps {
@@ -404,6 +536,7 @@ impl Default for DocProps {
             strict_error_checking: true,
             recover: false,
             classmap: HashMap::new(),
+            class_type: 0,
         }
     }
 }
@@ -482,6 +615,15 @@ pub fn node_obj(vm: &mut Vm, n: NodeId) -> Value {
         None
     };
     let doc = doc_of_node(n);
+    let modern_doc = doc
+        .map(|d| doc_props(Some(d)).class_type == 2)
+        .unwrap_or(false)
+        || tree::with(|t| t.nodes[n].flags & tree::F_MODERN != 0);
+    let base = if modern_doc {
+        modern::modern_base_for(n, base)
+    } else {
+        base
+    };
     let mut class: Vec<u8> = base_name(base).as_bytes().to_vec();
     if let Some(d) = doc {
         let p = doc_props(Some(d));
@@ -490,7 +632,11 @@ pub fn node_obj(vm: &mut Vm, n: NodeId) -> Value {
         }
     }
     let o = new_object(vm, &class);
-    attach(&o, Kind::Node(n));
+    if base.is_modern() {
+        attach_with(&o, Kind::Node(n), &modern::NODE_HANDLERS);
+    } else {
+        attach(&o, Kind::Node(n));
+    }
     if let Some(p) = ns_parent {
         o.borrow_mut().set_property(b"__dom_parent".to_vec(), p);
     }
@@ -1009,6 +1155,7 @@ fn build_tables() {
         Rc::new(owned(xpathobj::xpath_props(), "DOMXPath")),
     );
     t.insert(Base::Implementation, Rc::new(Vec::new()));
+    modern::build_tables(&mut t);
     PROP_TABLES.with(|p| *p.borrow_mut() = t);
 }
 
@@ -1028,13 +1175,15 @@ fn prop_target(vm: &mut Vm, o: &Obj) -> R<NodeId> {
     match data_of(o) {
         Some(d) => match &*d.kind.borrow() {
             Kind::Node(n) => return Ok(*n),
-            Kind::List(_) | Kind::Map(_) | Kind::XPath(_) | Kind::Iter(_) => return Ok(usize::MAX),
+            Kind::List(_) | Kind::Map(_) | Kind::XPath(_) | Kind::Iter(_) | Kind::Modern(_) => {
+                return Ok(usize::MAX);
+            }
             _ => {}
         },
         None => {}
     }
     // DOMXPath property readers check their own state
-    if base_of(vm, o) == Some(Base::XPath) {
+    if matches!(base_of(vm, o), Some(Base::XPath) | Some(Base::MXPath)) {
         return Ok(usize::MAX);
     }
     throw_dom(vm, INVALID_STATE_ERR, true);
@@ -1207,8 +1356,8 @@ fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
     let target = match data_of(o) {
         Some(d) => match &*d.kind.borrow() {
             Kind::Node(n) => Some(*n),
-            Kind::List(_) | Kind::Map(_) | Kind::XPath(_) => Some(usize::MAX),
-            _ if b == Base::XPath => Some(usize::MAX),
+            Kind::List(_) | Kind::Map(_) | Kind::XPath(_) | Kind::Modern(_) => Some(usize::MAX),
+            _ if b == Base::XPath || b == Base::MXPath => Some(usize::MAX),
             _ => None,
         },
         None => None,
@@ -1312,6 +1461,9 @@ fn h_clone(vm: &mut Vm, src: &Obj, dst: &Obj) {
 pub type MethodFn = fn(&mut Vm, &Obj, &[Value]) -> R<Value>;
 
 fn method_table(b: Base) -> Vec<(&'static str, MethodFn)> {
+    if b.is_modern() {
+        return modern::method_table(b);
+    }
     let mut v: Vec<(&'static str, MethodFn)> = Vec::new();
     let node_methods = node::node_methods();
     match b {
@@ -1356,8 +1508,14 @@ fn method_table(b: Base) -> Vec<(&'static str, MethodFn)> {
         Base::Implementation => v.extend(chardata::implementation_methods()),
         Base::NodeList | Base::NamedNodeMap | Base::Iterator => v.extend(lists::list_methods()),
         Base::XPath => v.extend(xpathobj::xpath_methods()),
+        _ => {}
     }
     v
+}
+
+/// Methods of a DOM class family (lowercase name -> fn).
+pub fn methods_of_pub(b: Base) -> Rc<HashMap<String, MethodFn>> {
+    methods_of(b)
 }
 
 thread_local! {
@@ -1393,6 +1551,7 @@ fn has_ctor(b: Base) -> bool {
             | Base::EntityReference
             | Base::DocumentFragment
             | Base::XPath
+            | Base::MXPath
     )
 }
 
@@ -1408,7 +1567,13 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
         }
     };
     let m = String::from_utf8_lossy(method).to_ascii_lowercase();
-    if is_static && b == Base::XPath && m == "quote" {
+    if is_static && (b == Base::XPath || b == Base::MXPath) && m == "quote" {
+        return true;
+    }
+    if is_static && modern::is_static_method(b, &m) {
+        return true;
+    }
+    if b.is_modern() && m == "__construct" && modern::is_node_base(b) {
         return true;
     }
     // non-static methods called statically error out in call_method
@@ -1429,6 +1594,9 @@ fn method_display(b: Base, m: &str) -> String {
 }
 
 fn declaring_class(b: Base, m: &str) -> &'static str {
+    if b.is_modern() {
+        return modern::declaring_class(b, m);
+    }
     let lm = m.to_ascii_lowercase();
     let in_tbl =
         |tbl: Vec<(&'static str, MethodFn)>| tbl.iter().any(|(n, _)| n.eq_ignore_ascii_case(&lm));
@@ -1482,6 +1650,10 @@ fn call_method(
                     drop(d);
                     return lists::iter_method(vm, o, method).unwrap_or(Value::Null);
                 }
+                if matches!(&*d.kind.borrow(), Kind::Modern(_)) {
+                    drop(d);
+                    return modern::tokenlist::iter_method(vm, o, method).unwrap_or(Value::Null);
+                }
             }
         }
         if let Some(h) = DATE_ITER_HANDLER.with(|c| c.get()) {
@@ -1495,8 +1667,18 @@ fn call_method(
     };
     let m = String::from_utf8_lossy(method).to_ascii_lowercase();
     if this.is_none() {
-        if b == Base::XPath && m == "quote" {
-            return xpathobj::quote(vm, args).unwrap_or(Value::Null);
+        if (b == Base::XPath || b == Base::MXPath) && m == "quote" {
+            let prev = CURRENT_FN.with(|c| c.replace(Some(format!("{}::quote", base_name(b)))));
+            let r = xpathobj::quote(vm, args).unwrap_or(Value::Null);
+            CURRENT_FN.with(|c| *c.borrow_mut() = prev);
+            return r;
+        }
+        if modern::is_static_method(b, &m) {
+            let name = format!("{}::{}", base_name(b), modern::static_display(&m));
+            let prev = CURRENT_FN.with(|c| c.replace(Some(name)));
+            let r = modern::call_static(vm, b, &m, args);
+            CURRENT_FN.with(|c| *c.borrow_mut() = prev);
+            return r.unwrap_or(Value::Null);
         }
         if methods_of(b).contains_key(&m) {
             let name = method_display(b, &m);
@@ -1512,6 +1694,18 @@ fn call_method(
         Some(Value::Object(o)) => o.clone(),
         _ => return Value::Null,
     };
+    if m == "__construct" && b.is_modern() && modern::is_node_base(b) {
+        let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+        throw_error(
+            vm,
+            b"Error",
+            &format!(
+                "Cannot directly construct {}, use document methods instead",
+                cn
+            ),
+        );
+        return Value::Null;
+    }
     if m == "__construct" && has_ctor(b) {
         // explicit $obj->__construct(...) re-initializes the object
         let mut full = vec![Value::Object(o.clone())];
@@ -1560,7 +1754,7 @@ fn construct(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
         | Base::ProcessingInstruction
         | Base::EntityReference
         | Base::DocumentFragment => chardata::construct(vm, &this, b, &args[1..]),
-        Base::XPath => xpathobj::construct(vm, &this, &args[1..]),
+        Base::XPath | Base::MXPath => xpathobj::construct(vm, &this, &args[1..]),
         _ => Ok(()),
     };
     CURRENT_FN.with(|c| *c.borrow_mut() = prev);
@@ -1584,9 +1778,14 @@ fn construct(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
     }
 }
 
-fn create_object(_vm: &mut Vm, o: &Obj) {
+fn create_object(vm: &mut Vm, o: &Obj) {
     if o.borrow().native.is_none() {
-        attach(o, Kind::None);
+        let modern = base_of(vm, o).map(|b| b.is_modern()).unwrap_or(false);
+        if modern {
+            attach_with(o, Kind::None, &modern::NODE_HANDLERS);
+        } else {
+            attach(o, Kind::None);
+        }
     }
 }
 
@@ -1617,6 +1816,9 @@ pub fn register(vm: &mut Vm) {
     vm.classes.insert(b"domexception".to_vec(), exc);
 
     for (name, b, parent) in CLASSES {
+        if b.is_modern() {
+            continue;
+        }
         let ifaces: &[&str] = match b {
             Base::Document | Base::DocumentFragment => &["DOMParentNode"],
             Base::Element => &["DOMParentNode", "DOMChildNode"],
@@ -1644,6 +1846,7 @@ pub fn register(vm: &mut Vm) {
             .insert(name.to_ascii_lowercase().into_bytes(), ce);
     }
 
+    modern::register_classes(vm);
     let h = NativeClassHandler {
         has_method,
         call: call_method,
@@ -1669,6 +1872,7 @@ pub fn register(vm: &mut Vm) {
                 | Base::EntityReference
                 | Base::DocumentFragment
                 | Base::XPath
+                | Base::MXPath
         ) {
             vm.object_construct_handlers.insert(l, construct);
         }
@@ -1742,10 +1946,16 @@ pub fn register(vm: &mut Vm) {
         chardata::dom_import_simplexml,
         &[b"node"],
     );
+    modern::register_rest(vm);
 }
 
 fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str]> {
     let b = base_from_lower(class)?;
+    if b.is_modern() {
+        if let Some(p) = modern::param_names(b, method) {
+            return Some(p);
+        }
+    }
     Some(match (b, method) {
         (Base::Document, b"__construct") => &["version", "encoding"],
         (Base::Element, b"__construct") => &["qualifiedName", "value", "namespace"],

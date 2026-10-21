@@ -71,6 +71,11 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         return r;
     }
     let path = strip_file_scheme(filename);
+    let lower = filename.to_ascii_lowercase();
+    if lower == "php://memory" || lower.starts_with("php://temp") {
+        // a fresh memory stream is always empty
+        return Some(Vec::new());
+    }
     if path.contains("://") || path.starts_with("php://") || path.starts_with("data:") {
         // go through file_get_contents (stream wrappers)
         let f = vm.functions.get(&b"file_get_contents"[..]).copied()?;

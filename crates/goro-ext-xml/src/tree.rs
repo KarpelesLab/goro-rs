@@ -18,6 +18,9 @@ pub const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 /// Node flag: the content pointer is NULL (e.g. `new DOMComment()`), as
 /// opposed to an empty string; such comments are not serialized.
 pub const F_NULL_CONTENT: u32 = 1;
+/// Node flag: created by the modern (Dom\) API without a document; its
+/// wrapper uses the Dom\ classes.
+pub const F_MODERN: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NType {

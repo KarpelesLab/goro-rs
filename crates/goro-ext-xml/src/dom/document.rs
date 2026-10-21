@@ -691,7 +691,7 @@ fn m_normalize_document(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn cwd_url() -> Option<String> {
+pub fn cwd_url() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let mut s = cwd.to_string_lossy().into_owned();
     if !s.ends_with('/') {
@@ -701,7 +701,7 @@ fn cwd_url() -> Option<String> {
 }
 
 /// Resolve a load() path like dom_get_valid_file_path.
-fn valid_file_path(source: &str) -> Option<String> {
+pub fn valid_file_path(source: &str) -> Option<String> {
     if source.len() >= 4096 {
         return None;
     }

@@ -24,6 +24,7 @@ pub const XML_PARSE_NOCDATA: i64 = 16384;
 pub const XML_PARSE_COMPACT: i64 = 65536;
 pub const XML_PARSE_OLD10: i64 = 131072;
 pub const XML_PARSE_HUGE: i64 = 524288;
+pub const XML_PARSE_IGNORE_ENC: i64 = 1 << 21;
 pub const XML_PARSE_BIG_LINES: i64 = 1 << 22;
 pub const XML_PARSE_NO_XXE: i64 = 1 << 23;
 
@@ -344,6 +345,13 @@ pub fn decode_to_utf8(data: &[u8], enc: &str) -> Option<Vec<u8>> {
             }
             Some(out)
         }
+        "WINDOWS-1251" | "CP1251" => {
+            let mut out = Vec::with_capacity(data.len());
+            for &b in data {
+                push_char(&mut out, cp1251(b));
+            }
+            Some(out)
+        }
         "ISO-8859-15" | "ISO_8859-15" | "LATIN-9" | "LATIN9" => {
             let mut out = Vec::with_capacity(data.len());
             for &b in data {
@@ -381,6 +389,21 @@ pub fn decode_to_utf8(data: &[u8], enc: &str) -> Option<Vec<u8>> {
             Some(s.into_bytes())
         }
         _ => None,
+    }
+}
+
+fn cp1251(b: u8) -> u32 {
+    const T: [u32; 64] = [
+        0x402, 0x403, 0x201A, 0x453, 0x201E, 0x2026, 0x2020, 0x2021, 0x20AC, 0x2030, 0x409, 0x2039,
+        0x40A, 0x40C, 0x40B, 0x40F, 0x452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+        0xFFFD, 0x2122, 0x459, 0x203A, 0x45A, 0x45C, 0x45B, 0x45F, 0xA0, 0x40E, 0x45E, 0x408, 0xA4,
+        0x490, 0xA6, 0xA7, 0x401, 0xA9, 0x404, 0xAB, 0xAC, 0xAD, 0xAE, 0x407, 0xB0, 0xB1, 0x406,
+        0x456, 0x491, 0xB5, 0xB6, 0xB7, 0x451, 0x2116, 0x454, 0xBB, 0x458, 0x405, 0x455, 0x457,
+    ];
+    match b {
+        0..=0x7F => b as u32,
+        0x80..=0xBF => T[(b - 0x80) as usize],
+        _ => 0x410 + (b - 0xC0) as u32,
     }
 }
 
@@ -435,6 +458,20 @@ pub fn encode_from_utf8(s: &str, enc: &str) -> Option<Vec<u8>> {
                 if v < 0x80 || (0xA0..0x100).contains(&v) {
                     out.push(v as u8);
                 } else if let Some(b) = (0x80u8..0xA0).find(|b| cp1252(*b) == v) {
+                    out.push(b);
+                } else {
+                    out.extend_from_slice(format!("&#{};", v).as_bytes());
+                }
+            }
+            Some(out)
+        }
+        "WINDOWS-1251" | "CP1251" => {
+            let mut out = Vec::new();
+            for c in s.chars() {
+                let v = c as u32;
+                if v < 0x80 {
+                    out.push(v as u8);
+                } else if let Some(b) = (0x80u8..=0xFF).find(|b| cp1251(*b) == v && v != 0xFFFD) {
                     out.push(b);
                 } else {
                     out.extend_from_slice(format!("&#{};", v).as_bytes());
@@ -1816,6 +1853,10 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     /// Switch the remaining input to a declared encoding.
     fn set_declared_encoding(&mut self, enc: &str) {
+        if self.st.options & XML_PARSE_IGNORE_ENC != 0 {
+            // the caller already converted the input (overrideEncoding)
+            return;
+        }
         self.st.encoding = Some(enc.to_string());
         if self.st.input_encoding.is_some() {
             // BOM-detected encoding wins (UTF-16 documents declare UTF-16)

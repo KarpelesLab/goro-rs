@@ -26,6 +26,17 @@ enum LK {
     },
     Static(Vec<Value>),
     Empty,
+    /// modern collections (Dom\HTMLCollection)
+    ChildElements(NodeId),
+    ByQName {
+        base: NodeId,
+        qname: String,
+    },
+    ByClass {
+        base: NodeId,
+        classes: Vec<String>,
+        quirks: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -55,6 +66,26 @@ fn map_ref(o: &Obj) -> Option<MapRef> {
             },
             ListKind::Static(v) => LK::Static(v.clone()),
             ListKind::Empty => LK::Empty,
+            ListKind::ChildElements(b) => node_of(b).map(LK::ChildElements).unwrap_or(LK::Empty),
+            ListKind::ByQName { base, qname } => match node_of(base) {
+                Some(n) => LK::ByQName {
+                    base: n,
+                    qname: qname.clone(),
+                },
+                None => LK::Empty,
+            },
+            ListKind::ByClass {
+                base,
+                classes,
+                quirks,
+            } => match node_of(base) {
+                Some(n) => LK::ByClass {
+                    base: n,
+                    classes: classes.clone(),
+                    quirks: *quirks,
+                },
+                None => LK::Empty,
+            },
         })),
         Kind::Map(m) => Some(MapRef::Map(match m {
             MapKind::Attributes(b) => node_of(b).map(MK::Attributes).unwrap_or(MK::Empty),
@@ -131,6 +162,7 @@ pub fn list_length(o: &Obj) -> i64 {
             }
             LK::Static(v) => v.len() as i64,
             LK::Empty => 0,
+            l => tree::with(|t| modern_nodes(t, &l, usize::MAX).len() as i64),
         },
         Some(MapRef::Map(m)) => tree::with(|t| match m {
             MK::Attributes(n) => {
@@ -189,6 +221,7 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
             }),
             LK::Static(v) => return v.get(idx).cloned().unwrap_or(Value::Null),
             LK::Empty => None,
+            l => tree::with(|t| modern_nodes(t, &l, idx + 1).get(idx).copied()),
         },
         Some(MapRef::Map(m)) => tree::with(|t| match m {
             MK::Attributes(n) => {
@@ -207,7 +240,83 @@ pub fn get_item(vm: &mut Vm, o: &Obj, index: i64) -> Value {
         }),
         None => None,
     };
+    mark_modern_notation(vm, o, node);
     node_obj_opt(vm, node)
+}
+
+/// Notation nodes are created on the fly without a document: give them the
+/// class flavour of the map they come from.
+fn mark_modern_notation(vm: &Vm, o: &Obj, node: Option<NodeId>) {
+    if let Some(n) = node {
+        if base_of(vm, o).map(|b| b.is_modern()).unwrap_or(false) {
+            tree::with(|t| {
+                if t.nodes[n].t == NType::Notation {
+                    t.nodes[n].flags |= tree::F_MODERN;
+                }
+            });
+        }
+    }
+}
+
+/// Items of a modern collection (up to `limit`).
+fn modern_nodes(t: &Tree, l: &LK, limit: usize) -> Vec<NodeId> {
+    use super::modern::collections as mc;
+    match l {
+        LK::ChildElements(n) => {
+            let mut v = mc::child_elements(t, *n);
+            v.truncate(limit);
+            v
+        }
+        LK::ByQName { base, qname } => {
+            mc::filtered(t, *base, limit, &|t, x| mc::qname_matches(t, x, qname))
+        }
+        LK::ByClass {
+            base,
+            classes,
+            quirks,
+        } => {
+            if classes.is_empty() {
+                return Vec::new();
+            }
+            mc::filtered(t, *base, limit, &|t, x| {
+                mc::class_matches(t, x, classes, *quirks)
+            })
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The nodes of a list (up to `limit`), for named lookups.
+pub fn list_nodes(o: &Obj, limit: usize) -> Vec<NodeId> {
+    match map_ref(o) {
+        Some(MapRef::List(LK::ByTag { base, ns, local })) => {
+            tree::with(|t| by_tag(t, base, ns.as_deref(), &local, limit))
+        }
+        Some(MapRef::List(LK::Children(n))) => tree::with(|t| {
+            let mut v = t.children_of(n);
+            v.truncate(limit);
+            v
+        }),
+        Some(MapRef::List(l)) => tree::with(|t| modern_nodes(t, &l, limit)),
+        _ => Vec::new(),
+    }
+}
+
+/// getNamedItem(NS) of a map object (modern maps: notations get the
+/// modern class flavour).
+pub fn map_named(o: &Obj, name: &str, ns: Option<&str>) -> Option<NodeId> {
+    let r = match map_ref(o) {
+        Some(MapRef::Map(m)) => tree::with(|t| named_item(t, &m, name, ns)),
+        _ => None,
+    };
+    if let Some(n) = r {
+        tree::with(|t| {
+            if t.nodes[n].t == NType::Notation {
+                t.nodes[n].flags |= tree::F_MODERN;
+            }
+        });
+    }
+    r
 }
 
 /// getNamedItem(NS) for maps.
@@ -432,6 +541,7 @@ pub fn iter_method(vm: &mut Vm, it: &Obj, method: &[u8]) -> Option<Value> {
         }
         _ => return None,
     };
+    let modern = base_of(vm, &map).map(|b| b.is_modern()).unwrap_or(false);
     let set = |index: i64, cur: Value| {
         if let Kind::Iter(st) = &*d.kind.borrow() {
             let mut st = st.borrow_mut();
@@ -456,7 +566,11 @@ pub fn iter_method(vm: &mut Vm, it: &Obj, method: &[u8]) -> Option<Value> {
                 match &cur {
                     Value::Object(co) => match node_of(co) {
                         Some(n) => Some(Value::String(PhpString::from_string(tree::with(|t| {
-                            t.nodes[n].name.clone()
+                            if modern && t.nodes[n].t == NType::Attribute {
+                                t.qname(n)
+                            } else {
+                                t.nodes[n].name.clone()
+                            }
                         })))),
                         None => Some(Value::Null),
                     },
@@ -469,7 +583,7 @@ pub fn iter_method(vm: &mut Vm, it: &Obj, method: &[u8]) -> Option<Value> {
                 return Some(Value::Null);
             }
             let ni = index + 1;
-            let next = if uses_next_pointer(&map) {
+            let next = if !modern && uses_next_pointer(&map) {
                 let cn = match &cur {
                     Value::Object(co) => node_of(co),
                     _ => None,
