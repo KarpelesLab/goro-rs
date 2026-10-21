@@ -11,6 +11,8 @@ pub mod tree;
 pub mod uri;
 pub mod valid;
 pub mod xinclude;
+pub mod xmlregexp;
+pub mod xmlunicode;
 pub mod xpath;
 
 /// The XML node behind a DOM object (for simplexml_import_dom).
