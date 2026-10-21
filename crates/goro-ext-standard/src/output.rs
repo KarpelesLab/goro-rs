@@ -231,7 +231,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         vm.write_output(
-                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                            &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat(),
                         );
                     }
                 }
@@ -376,7 +376,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                                 vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
                             }
                             goro_core::array::ArrayKey::String(s) => {
-                                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
@@ -648,7 +648,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                             }
                             goro_core::array::ArrayKey::String(s) => {
                                 vm.write_output(
-                                    format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                                    &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat(),
                                 );
                             }
                         }
@@ -738,10 +738,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                                             vm.write_output(format!("{}  [\"{}\":\"{}\":private]=>\n", prefix, name_str, cls_str).as_bytes());
                                         }
                                     } else {
-                                        vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                        vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
                                     }
                                 } else {
-                                    vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                                    vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
                                 }
                             }
                         }
@@ -1082,7 +1082,7 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         vm.write_output(
-                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                            &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat(),
                         );
                     }
                 }
@@ -1360,9 +1360,9 @@ fn print_r_value_inner(
                         buf.extend_from_slice(format!("{}    [{}] => ", prefix, n).as_bytes());
                     }
                     goro_core::array::ArrayKey::String(s) => {
-                        buf.extend_from_slice(
-                            format!("{}    [{}] => ", prefix, s.to_string_lossy()).as_bytes(),
-                        );
+                        buf.extend_from_slice(format!("{}    [", prefix).as_bytes());
+                        buf.extend_from_slice(s.as_bytes());
+                        buf.extend_from_slice(b"] => ");
                     }
                 }
                 print_r_value(value, buf, indent + 8, classes, closure_info_table);
@@ -1474,7 +1474,7 @@ fn print_r_value_inner(
                             }
                             goro_core::array::ArrayKey::String(s) => {
                                 buf.extend_from_slice(
-                                    format!("{}    [{}] => ", prefix, s.to_string_lossy()).as_bytes(),
+                                    &[prefix.as_bytes(), b"    [", s.as_bytes(), b"] => "].concat(),
                                 );
                             }
                         }
