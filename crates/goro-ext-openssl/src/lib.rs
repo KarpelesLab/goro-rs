@@ -21,7 +21,7 @@ std::thread_local! {
     /// FIFO queue of openssl error strings produced by this extension.
     /// `openssl_error_string()` pops one at a time.
     pub static OPENSSL_ERROR_QUEUE: std::cell::RefCell<std::collections::VecDeque<String>> =
-        std::cell::RefCell::new(std::collections::VecDeque::new());
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(crate) fn push_openssl_error(msg: impl Into<String>) {
@@ -405,7 +405,7 @@ const DIGEST_METHODS: &[&str] = &["md5", "sha1", "sha256", "sha384", "sha512"];
 const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub(crate) fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -445,7 +445,7 @@ pub(crate) fn base64_decode(data: &str) -> Option<Vec<u8>> {
     if clean.is_empty() {
         return Some(Vec::new());
     }
-    if clean.len() % 4 != 0 {
+    if !clean.len().is_multiple_of(4) {
         return None;
     }
 
@@ -569,6 +569,7 @@ fn md5_hash(data: &[u8]) -> [u8; 16] {
     result
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
 fn sha1_hash(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x67452301;
     let mut h1: u32 = 0xEFCDAB89;
@@ -886,9 +887,7 @@ fn openssl_encrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let iv_len = method.iv_length();
     if iv_len > 0 && iv.as_bytes().len() != iv_len {
         if iv.as_bytes().is_empty() {
-            vm.emit_warning(&format!(
-                "openssl_encrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended"
-            ));
+            vm.emit_warning("openssl_encrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended");
         } else if iv.as_bytes().len() < iv_len {
             vm.emit_warning(&format!(
                 "openssl_encrypt(): IV passed is only {} bytes long, cipher expects an IV of precisely {} bytes, padding with \\0",
@@ -966,9 +965,7 @@ fn openssl_decrypt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let iv_len = method.iv_length();
     if iv_len > 0 && iv.as_bytes().len() != iv_len {
         if iv.as_bytes().is_empty() {
-            vm.emit_warning(&format!(
-                "openssl_decrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended"
-            ));
+            vm.emit_warning("openssl_decrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended");
         } else if iv.as_bytes().len() < iv_len {
             vm.emit_warning(&format!(
                 "openssl_decrypt(): IV passed is only {} bytes long, cipher expects an IV of precisely {} bytes, padding with \\0",
@@ -1151,10 +1148,6 @@ fn openssl_error_string(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 
 fn openssl_stub_false(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
-}
-
-fn openssl_stub_null(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
 }
 
 fn openssl_stub_long_neg1(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

@@ -170,15 +170,12 @@ const OID_SHA1: &str = "1.3.14.3.2.26";
 const OID_SHA256: &str = "2.16.840.1.101.3.4.2.1";
 // RSA
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
-const OID_SHA1_RSA: &str = "1.2.840.113549.1.1.5";
-const OID_SHA256_RSA: &str = "1.2.840.113549.1.1.11";
 // AES
 const OID_AES_128_CBC: &str = "2.16.840.1.101.3.4.1.2";
 const OID_AES_192_CBC: &str = "2.16.840.1.101.3.4.1.22";
 const OID_AES_256_CBC: &str = "2.16.840.1.101.3.4.1.42";
 
 // PKCS#12 specific
-const OID_PKCS12_PFX: &str = "1.2.840.113549.1.12.10.1.1"; // keyBag
 const OID_KEY_BAG: &str = "1.2.840.113549.1.12.10.1.1";
 const OID_PKCS8_SHROUDED_KEY_BAG: &str = "1.2.840.113549.1.12.10.1.2";
 const OID_CERT_BAG: &str = "1.2.840.113549.1.12.10.1.3";
@@ -191,22 +188,6 @@ fn deref(v: &Value) -> Value {
     match v {
         Value::Reference(r) => r.borrow().clone(),
         other => other.clone(),
-    }
-}
-
-/// Resolve a value (possibly file:// prefixed) into raw bytes.
-/// Returns None on empty/missing file/string.
-fn read_value_or_file(v: &Value) -> Option<Vec<u8>> {
-    let v = deref(v);
-    let s = v.to_php_string();
-    let bytes = s.as_bytes();
-    if bytes.starts_with(b"file://") {
-        let path = std::str::from_utf8(&bytes[7..]).ok()?;
-        std::fs::read(path).ok()
-    } else if !bytes.is_empty() {
-        Some(bytes.to_vec())
-    } else {
-        None
     }
 }
 
@@ -295,7 +276,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
     // If this is a multipart S/MIME message, handle that path first so we
     // don't pick up the wrong embedded PEM block (e.g. a CERTIFICATE in a
     // separate part).
-    let is_multipart = s.map_or(false, |s| {
+    let is_multipart = s.is_some_and(|s| {
         let lc = s.to_ascii_lowercase();
         lc.contains("multipart/signed") || lc.contains("multipart/mixed")
     });
@@ -325,7 +306,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
                 if let Some(stripped) = after.strip_prefix('"') {
                     stripped.find('"').map(|q| &stripped[..q])
                 } else {
-                    after.find(|c: char| c == '\r' || c == '\n' || c == ';' || c == ' ')
+                    after.find(['\r', '\n', ';', ' '])
                         .map(|q| &after[..q])
                 }
             });
@@ -343,11 +324,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
                         if ct_line.contains("pkcs7-signature") || ct_line.contains("pkcs7-mime") {
                             let sep_info = if let Some(p) = part.find("\r\n\r\n") {
                                 Some((p, 4))
-                            } else if let Some(p) = part.find("\n\n") {
-                                Some((p, 2))
-                            } else {
-                                None
-                            };
+                            } else { part.find("\n\n").map(|p| (p, 2)) };
                             if let Some((sep, sep_len)) = sep_info {
                                 let body = &part[sep + sep_len..];
                                 let body = body.trim_end_matches('-').trim_end();
@@ -372,11 +349,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
     if let Some(s) = s {
         let sep_info = if let Some(p) = s.find("\r\n\r\n") {
             Some((p, 4))
-        } else if let Some(p) = s.find("\n\n") {
-            Some((p, 2))
-        } else {
-            None
-        };
+        } else { s.find("\n\n").map(|p| (p, 2)) };
         if let Some((sep, sep_len)) = sep_info {
             let body = &s[sep + sep_len..];
             let cleaned: String = body
@@ -403,7 +376,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
 /// Parse a ContentInfo DER and return (content_type_oid, content_bytes).
 fn parse_content_info(der: &[u8]) -> Option<(String, Vec<u8>)> {
     // ContentInfo = SEQUENCE { OID, [0] EXPLICIT content }
-    let mut r = SliceReader::new(der).ok()?;
+    let r = SliceReader::new(der).ok()?;
     let header = r.peek_header().ok()?;
     if header.tag != Tag::Sequence {
         return None;
@@ -541,10 +514,7 @@ fn extract_signed_data_certs(signed_data_der: &[u8]) -> Vec<Vec<u8>> {
         };
         if tag == 0xA0 {
             // CertificateSet -- iterate inner items
-            let inner = match read_explicit_body(&tlv) {
-                Some(b) => b,
-                None => Vec::new(),
-            };
+            let inner = read_explicit_body(&tlv).unwrap_or_default();
             let mut p = inner.as_slice();
             while !p.is_empty() {
                 let (item, r) = match take_tlv(p) {
@@ -1401,10 +1371,8 @@ fn pkcs7_or_cms_verify_impl(
     // Extract content (embedded) or use detached source.
     let content_bytes = if let Some(src_path) = &detached_content {
         std::fs::read(src_path).unwrap_or_default()
-    } else if let Some(c) = extract_signed_data_content(&signed_data) {
-        c
     } else {
-        Vec::new()
+        extract_signed_data_content(&signed_data).unwrap_or_default()
     };
 
     // Output content file if requested.
@@ -1545,13 +1513,13 @@ fn pkcs12_kdf(password: &str, salt: &[u8], iter: u32, out_len: usize, purpose: u
     let d_block: Vec<u8> = (0..v).map(|_| purpose).collect();
 
     // S = salt repeated to fill v*ceil(|salt|/v) bytes
-    let s_len = ((salt.len() + v - 1) / v) * v;
+    let s_len = salt.len().div_ceil(v) * v;
     let mut s_block = vec![0u8; s_len];
     for i in 0..s_len {
         s_block[i] = salt[i % salt.len()];
     }
     // P = password repeated to fill v*ceil(|p|/v) bytes
-    let p_len = ((p_bytes.len() + v - 1) / v) * v;
+    let p_len = p_bytes.len().div_ceil(v) * v;
     let mut p_block = vec![0u8; p_len];
     for i in 0..p_len {
         p_block[i] = p_bytes[i % p_bytes.len()];
@@ -1561,7 +1529,7 @@ fn pkcs12_kdf(password: &str, salt: &[u8], iter: u32, out_len: usize, purpose: u
     i_block.extend_from_slice(&s_block);
     i_block.extend_from_slice(&p_block);
 
-    let n_blocks = (out_len + u - 1) / u;
+    let n_blocks = out_len.div_ceil(u);
     let mut output = Vec::with_capacity(n_blocks * u);
 
     for _ in 0..n_blocks {
@@ -1626,7 +1594,7 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
 
     let mut h2 = Sha1::new();
     Digest::update(&mut h2, &opad);
-    Digest::update(&mut h2, &inner);
+    Digest::update(&mut h2, inner);
     h2.finalize().into()
 }
 

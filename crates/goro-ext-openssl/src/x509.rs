@@ -212,7 +212,7 @@ fn base64_decode_strict(s: &str) -> Result<Vec<u8>, ()> {
     if clean.is_empty() {
         return Ok(Vec::new());
     }
-    if clean.len() % 4 != 0 {
+    if !clean.len().is_multiple_of(4) {
         return Err(());
     }
     let dec = |c: u8| -> Option<u8> {
@@ -376,18 +376,15 @@ fn decode_any_string(any: &Any) -> Option<String> {
         0x1e => {
             // BMPString: 16-bit big-endian
             let body = any.value();
-            if body.len() % 2 != 0 {
+            if !body.len().is_multiple_of(2) {
                 return None;
             }
             let mut out = String::new();
             for chunk in body.chunks(2) {
                 let cp = ((chunk[0] as u32) << 8) | chunk[1] as u32;
-                if let Some(c) = char::from_u32(cp) {
-                    if c != '\0' {
-                        out.push(c);
-                    }
-                } else {
-                    return None;
+                let c = char::from_u32(cp)?;
+                if c != '\0' {
+                    out.push(c);
                 }
             }
             return Some(out);
@@ -860,7 +857,7 @@ fn format_extension(oid: &ObjectIdentifier, value: &[u8]) -> String {
             // best-effort decode. The value is a SEQUENCE with optional
             // [0] keyIdentifier (OCTET STRING IMPLICIT), [1] GeneralNames
             // IMPLICIT, [2] serialNumber INTEGER IMPLICIT.
-            return decode_authority_key_identifier(value);
+            decode_authority_key_identifier(value)
         }
         _ => value
             .iter()
@@ -971,8 +968,8 @@ fn parse_der_length(data: &[u8]) -> Option<(&[u8], &[u8])> {
             return None;
         }
         let mut len = 0usize;
-        for i in 1..=n {
-            len = (len << 8) | data[i] as usize;
+        for &b in &data[1..=n] {
+            len = (len << 8) | b as usize;
         }
         (len, 1 + n)
     };

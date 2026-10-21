@@ -1,4 +1,4 @@
-/// Block cipher modes: ECB, CBC, CTR with PKCS7 padding support.
+//! Block cipher modes: ECB, CBC, CTR with PKCS7 padding support.
 
 use crate::aes::{AesKey, AesKeySize};
 
@@ -70,13 +70,13 @@ impl CipherMethod {
 fn pkcs7_pad(data: &[u8]) -> Vec<u8> {
     let pad_len = BLOCK_SIZE - (data.len() % BLOCK_SIZE);
     let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
     padded
 }
 
 /// Remove PKCS7 padding. Returns None if padding is invalid.
 fn pkcs7_unpad(data: &[u8]) -> Option<Vec<u8>> {
-    if data.is_empty() || data.len() % BLOCK_SIZE != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(BLOCK_SIZE) {
         return None;
     }
     let pad_byte = *data.last().unwrap();
@@ -179,7 +179,7 @@ pub fn decrypt(
 /// ECB encryption
 fn encrypt_ecb(aes_key: &AesKey, data: &[u8], zero_padding: bool) -> Result<Vec<u8>, &'static str> {
     let padded = if zero_padding {
-        if data.len() % BLOCK_SIZE != 0 {
+        if !data.len().is_multiple_of(BLOCK_SIZE) {
             return Err("data length is not a multiple of block size");
         }
         data.to_vec()
@@ -199,7 +199,7 @@ fn encrypt_ecb(aes_key: &AesKey, data: &[u8], zero_padding: bool) -> Result<Vec<
 
 /// ECB decryption
 fn decrypt_ecb(aes_key: &AesKey, data: &[u8], zero_padding: bool) -> Result<Vec<u8>, &'static str> {
-    if data.is_empty() || data.len() % BLOCK_SIZE != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(BLOCK_SIZE) {
         return Err("data length is not a multiple of block size");
     }
 
@@ -226,7 +226,7 @@ fn encrypt_cbc(
     zero_padding: bool,
 ) -> Result<Vec<u8>, &'static str> {
     let padded = if zero_padding {
-        if data.len() % BLOCK_SIZE != 0 {
+        if !data.len().is_multiple_of(BLOCK_SIZE) {
             return Err("data length is not a multiple of block size");
         }
         data.to_vec()
@@ -259,7 +259,7 @@ fn decrypt_cbc(
     iv: &[u8],
     zero_padding: bool,
 ) -> Result<Vec<u8>, &'static str> {
-    if data.is_empty() || data.len() % BLOCK_SIZE != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(BLOCK_SIZE) {
         return Err("data length is not a multiple of block size");
     }
 

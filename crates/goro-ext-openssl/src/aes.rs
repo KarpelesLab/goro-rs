@@ -1,5 +1,5 @@
-/// AES block cipher implementation (FIPS 197)
-/// Supports AES-128, AES-192, and AES-256.
+//! AES block cipher implementation (FIPS 197)
+//! Supports AES-128, AES-192, and AES-256.
 
 const BLOCK_SIZE: usize = 16;
 

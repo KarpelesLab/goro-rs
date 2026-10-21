@@ -41,6 +41,7 @@ const OPENSSL_PKCS1_PSS_PADDING: i64 = 6;
 /// Stored key kind: either we have a private key (which contains the public)
 /// or only a public key.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // few live keys; boxing would churn every match
 pub enum StoredKey {
     Private(RsaPrivateKey),
     Public(RsaPublicKey),
@@ -749,7 +750,7 @@ pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
-        OPENSSL_PKCS1_PADDING | _ => match algo {
+        _ /* OPENSSL_PKCS1_PADDING and default */ => match algo {
             OPENSSL_ALGO_SHA1 => {
                 let signing = SigningKey::<Sha1>::new(priv_key);
                 let sig: PkcsSig = signing.sign(data.as_bytes());
