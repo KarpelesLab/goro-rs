@@ -16,6 +16,11 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::Vm;
 
+thread_local! {
+    /// Set when unserialization hit a fatal error (zend_bailout).
+    pub static BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn lower(b: &[u8]) -> Vec<u8> {
     b.iter().map(|c| c.to_ascii_lowercase()).collect()
 }
@@ -748,7 +753,13 @@ fn unser(vm: &mut Vm, p: &mut P, st: &mut UnserializeState, loc: Loc, depth: usi
                 cl.remove(0);
             }
             if !vm.classes.contains_key(&cl) && !vm.is_known_builtin_class(&cl) {
+                let was_fatal = vm.fatal_emitted;
                 vm.try_autoload_class(&name);
+                if vm.fatal_emitted && !was_fatal {
+                    // A fatal error inside the autoloader: bailout.
+                    BAILOUT.with(|b| b.set(true));
+                    return None;
+                }
             }
             let known = vm.classes.contains_key(&cl) || vm.is_known_builtin_class(&cl);
             if known && !is_user_class(vm, &cl) {

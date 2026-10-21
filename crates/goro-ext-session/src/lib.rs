@@ -1035,7 +1035,17 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
 
 /// php_session_decode
 fn session_decode_data(vm: &mut Vm, data: &[u8]) -> R<bool> {
-    if !serializer_decode(vm, data) {
+    let ok = serializer_decode(vm, data);
+    if var::BAILOUT.with(|b| b.replace(false)) {
+        // zend_catch: cancel the decode, then continue the bailout.
+        let _ = session_destroy_internal(vm);
+        track_init(vm);
+        if vm.error_reporting & E_WARNING != 0 {
+            vm.display_error("Warning", "Unknown: Failed to decode session object. Session has been destroyed", "Unknown", 0);
+        }
+        return Err(VmError { message: "bailout".into(), line: vm.current_line });
+    }
+    if !ok {
         // php_session_cancel_decode
         session_destroy_internal(vm)?;
         track_init(vm);
