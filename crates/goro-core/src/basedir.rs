@@ -114,7 +114,8 @@ pub fn check_open_basedir_ex(vm: &mut Vm, func_name: &str, path: &str, warn: boo
     let path = match path.strip_prefix("file://") {
         Some(p) => p,
         None => {
-            if path.contains("://") {
+            // Wrapper URLs (and data:, which needs no "//") are not files.
+            if path.contains("://") || path.starts_with("data:") {
                 return true;
             }
             path

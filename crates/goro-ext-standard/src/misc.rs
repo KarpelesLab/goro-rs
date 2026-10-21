@@ -7812,24 +7812,10 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // data: and data:// URIs: route through fopen (which already handles
     // base64-decoding, urldecoding, etc.) to avoid duplicating the logic.
     // Reject datafoo: and similar malformed schemes.
-    if (path_str.starts_with("data:") || path_str.starts_with("data://"))
-        && (path_str.starts_with("data:,")
-            || path_str.starts_with("data:;")
-            || path_str.starts_with("data:text")
-            || path_str.starts_with("data:application")
-            || path_str.starts_with("data:image")
-            || path_str.starts_with("data:audio")
-            || path_str.starts_with("data:video")
-            || path_str.starts_with("data:font")
-            || path_str.starts_with("data:model")
-            || path_str.starts_with("data:message")
-            || path_str.starts_with("data:multipart")
-            || path_str.starts_with("data:base64,")
-            || path_str.starts_with("data://"))
-    {
+    if path.as_bytes().starts_with(b"data:") {
         let inner_args = vec![
-            Value::String(PhpString::from_string(path_str.to_string())),
-            Value::String(PhpString::from_bytes(b"r")),
+            Value::String(path.clone()),
+            Value::String(PhpString::from_bytes(b"rb")),
         ];
         let fp = fopen_fn(vm, &inner_args)?;
         let fid = match fp {
@@ -8239,6 +8225,22 @@ fn http_fetch_once(
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if !vm.check_open_basedir("file_put_contents", &path.to_string_lossy()) {
+        return Ok(Value::False);
+    }
+    // data: streams have no write op.
+    if path.as_bytes().starts_with(b"data:") {
+        let fp = fopen_fn(
+            vm,
+            &[
+                Value::String(path.clone()),
+                Value::String(PhpString::from_bytes(b"wb")),
+            ],
+        )?;
+        if let Value::Resource(fid) = fp {
+            let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+            let line = vm.current_line;
+            vm.emit_notice_at("file_put_contents(): Stream is not writable", line);
+        }
         return Ok(Value::False);
     }
     let data_val = args.get(1).unwrap_or(&Value::Null);
@@ -10264,6 +10266,8 @@ struct FileHandle {
     pub sock: Option<xp_socket::SockData>,
     /// stream->fatal_error: a read filter failed.
     pub fatal_error: bool,
+    /// data: streams: the RFC 2397 meta data (stream_get_meta_data()).
+    pub data_meta: Option<Vec<(Vec<u8>, Value)>>,
 }
 
 impl FileHandle {
@@ -10436,6 +10440,7 @@ fn register_std_streams() {
                     user_scheme: None,
                     sock: None,
                     fatal_error: false,
+                    data_meta: None,
                 },
             );
         }
@@ -10473,15 +10478,17 @@ fn alloc_file_handle_special_uri(
             match special {
                 // Memory/temp streams are always read-write ("w+b"),
                 // whatever mode they were opened with.
+                // php_stream_mode_from_str() / _php_stream_mode_to_str():
+                // read-only, append or read-write.
                 SpecialStream::Memory => {
                     fh.wrapper_type = "PHP".to_string();
                     fh.stream_type = "MEMORY".to_string();
-                    fh.mode = "w+b".to_string();
+                    fh.mode = temp_stream_mode(mode).to_string();
                 }
                 SpecialStream::Temp => {
                     fh.wrapper_type = "PHP".to_string();
                     fh.stream_type = "TEMP".to_string();
-                    fh.mode = "w+b".to_string();
+                    fh.mode = temp_stream_mode(mode).to_string();
                 }
                 SpecialStream::Stdin
                 | SpecialStream::Stdout
@@ -10496,6 +10503,175 @@ fn alloc_file_handle_special_uri(
         }
     });
     fid
+}
+
+/// php_stream_url_wrap_rfc2397(): parse a data: URL into its meta data
+/// (mediatype, parameters, base64) and decoded contents.
+fn parse_rfc2397(url: &[u8]) -> Result<(Vec<(Vec<u8>, Value)>, Vec<u8>), &'static str> {
+    let mut path = &url[5..];
+    // C strings end at NUL.
+    if let Some(p) = path.iter().position(|&c| c == 0) {
+        path = &path[..p];
+    }
+    if path.starts_with(b"//") {
+        path = &path[2..];
+    }
+    let comma = path
+        .iter()
+        .position(|&c| c == b',')
+        .ok_or("rfc2397: no comma in URL")?;
+    let mut meta: Vec<(Vec<u8>, Value)> = Vec::new();
+    let set = |meta: &mut Vec<(Vec<u8>, Value)>, k: &[u8], v: Value| {
+        if let Some(e) = meta.iter_mut().find(|(n, _)| n == k) {
+            e.1 = v;
+        } else {
+            meta.push((k.to_vec(), v));
+        }
+    };
+    let mut base64 = false;
+    if comma != 0 {
+        let mut m = &path[..comma];
+        let semi = m.iter().position(|&c| c == b';');
+        let sep = m.iter().position(|&c| c == b'/');
+        if semi.is_none() && sep.is_none() {
+            return Err("rfc2397: illegal media type");
+        }
+        match (semi, sep) {
+            (None, _) => {
+                set(
+                    &mut meta,
+                    b"mediatype",
+                    Value::String(PhpString::from_bytes(m)),
+                );
+                m = &[];
+            }
+            (Some(sm), Some(sp)) if sp < sm => {
+                set(
+                    &mut meta,
+                    b"mediatype",
+                    Value::String(PhpString::from_bytes(&m[..sm])),
+                );
+                m = &m[sm..];
+            }
+            (Some(sm), _) => {
+                if sm != 0 || m != b";base64" {
+                    return Err("rfc2397: illegal media type");
+                }
+            }
+        }
+        // Parameters and ";base64".
+        while m.first() == Some(&b';') {
+            m = &m[1..];
+            let eq = m.iter().position(|&c| c == b'=');
+            let semi = m.iter().position(|&c| c == b';');
+            match eq {
+                Some(e) if semi.is_none_or(|s| s > e) => {
+                    let name = &m[..e];
+                    let vend = semi.unwrap_or(m.len());
+                    let val = &m[e + 1..vend];
+                    if name != b"mediatype" {
+                        set(&mut meta, name, Value::String(PhpString::from_bytes(val)));
+                    }
+                    m = &m[vend..];
+                }
+                _ => {
+                    if m != b"base64" {
+                        return Err("rfc2397: illegal parameter");
+                    }
+                    base64 = true;
+                    m = &[];
+                    break;
+                }
+            }
+        }
+        if !m.is_empty() {
+            return Err("rfc2397: illegal URL");
+        }
+    }
+    set(
+        &mut meta,
+        b"base64",
+        if base64 { Value::True } else { Value::False },
+    );
+    let data = &path[comma + 1..];
+    let bytes = if base64 {
+        // php_base64_decode_ex(..., strict = 1)
+        match base64_decode_strict(data) {
+            Some(b) => b,
+            None => return Err("rfc2397: unable to decode"),
+        }
+    } else {
+        data_uri_urldecode(data)
+    };
+    Ok((meta, bytes))
+}
+
+/// php_base64_decode_ex() in strict mode.
+fn base64_decode_strict(input: &[u8]) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut n = 0usize;
+    let mut padding = 0usize;
+    for &c in input {
+        if c == b'=' {
+            padding += 1;
+            continue;
+        }
+        let v = match val(c) {
+            Some(v) => v,
+            None => {
+                if matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
+                    continue;
+                }
+                return None;
+            }
+        };
+        if padding > 0 {
+            return None;
+        }
+        acc = (acc << 6) | v;
+        n += 1;
+        if n.is_multiple_of(4) {
+            out.push((acc >> 16) as u8);
+            out.push((acc >> 8) as u8);
+            out.push(acc as u8);
+            acc = 0;
+        }
+    }
+    match n % 4 {
+        0 => {}
+        1 => return None,
+        2 => out.push((acc >> 4) as u8),
+        _ => {
+            out.push((acc >> 10) as u8);
+            out.push((acc >> 2) as u8);
+        }
+    }
+    if padding > 0 && (padding > 2 || !(n + padding).is_multiple_of(4)) {
+        return None;
+    }
+    Some(out)
+}
+
+/// Mode string of a php://memory / php://temp stream opened with `mode`.
+fn temp_stream_mode(mode: &str) -> &'static str {
+    if mode.contains('a') {
+        "a+b"
+    } else if mode.contains('w') || mode.contains('+') {
+        "w+b"
+    } else {
+        "rb"
+    }
 }
 
 /// Helper used by file functions to validate that the first argument is an
@@ -10547,55 +10723,12 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     user_scheme: None,
                     sock: None,
                     fatal_error: false,
+                    data_meta: None,
                 },
             );
         });
         fid
     })
-}
-
-fn data_uri_base64_decode(input: &[u8]) -> Vec<u8> {
-    let mut filtered = Vec::with_capacity(input.len());
-    for &b in input {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=' => filtered.push(b),
-            _ => {}
-        }
-    }
-    while filtered.len() % 4 != 0 {
-        filtered.push(b'=');
-    }
-    let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
-    let mut i = 0;
-    while i + 4 <= filtered.len() {
-        let mut n: u32 = 0;
-        let mut pad = 0u32;
-        for j in 0..4 {
-            let c = filtered[i + j];
-            let v: u32 = match c {
-                b'A'..=b'Z' => (c - b'A') as u32,
-                b'a'..=b'z' => (c - b'a' + 26) as u32,
-                b'0'..=b'9' => (c - b'0' + 52) as u32,
-                b'+' => 62,
-                b'/' => 63,
-                b'=' => {
-                    pad += 1;
-                    0
-                }
-                _ => 0,
-            };
-            n = (n << 6) | v;
-        }
-        out.push(((n >> 16) & 0xff) as u8);
-        if pad < 2 {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if pad < 1 {
-            out.push((n & 0xff) as u8);
-        }
-        i += 4;
-    }
-    out
 }
 
 fn data_uri_urldecode(input: &[u8]) -> Vec<u8> {
@@ -10861,41 +10994,43 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Resource(inner_fid));
     }
 
-    // Handle data: URLs: data:[mediatype][;base64],<data> (both data: and
-    // data:// forms — only the latter is canonical for PHP wrappers but
-    // RFC2397 uses the former).
-    let data_rest = filename
-        .strip_prefix("data://")
-        .or_else(|| filename.strip_prefix("data:"));
-    if let Some(rest) = data_rest {
-        // Optional mediatype and ;base64 prefix.
-        let (header, _) = rest.split_once(',').unwrap_or(("", rest));
-        let is_base64 = header.split(';').any(|p| p == "base64");
-        let raw_rest = raw_name
-            .strip_prefix(b"data://")
-            .or_else(|| raw_name.strip_prefix(b"data:"))
-            .unwrap_or(&[]);
-        let payload: &[u8] = match raw_rest.iter().position(|&c| c == b',') {
-            Some(p) => &raw_rest[p + 1..],
-            None => raw_rest,
-        };
-        let bytes: Vec<u8> = if is_base64 {
-            data_uri_base64_decode(payload)
-        } else {
-            data_uri_urldecode(payload)
-        };
-        let mut tmp = match tempfile::tempfile() {
-            Ok(f) => f,
-            Err(_) => return Ok(Value::False),
-        };
-        use std::io::{Seek, SeekFrom, Write};
-        if tmp.write_all(&bytes).is_err() {
-            return Ok(Value::False);
+    // data: URLs (php_stream_url_wrap_rfc2397).
+    if raw_name.starts_with(b"data:") {
+        let func = vm
+            .current_builtin_name()
+            .unwrap_or_else(|| "fopen".to_string());
+        match parse_rfc2397(&raw_name) {
+            Ok((meta, bytes)) => {
+                let mut tmp = match tempfile::tempfile() {
+                    Ok(f) => f,
+                    Err(_) => return Ok(Value::False),
+                };
+                use std::io::{Seek, SeekFrom, Write};
+                if tmp.write_all(&bytes).is_err() {
+                    return Ok(Value::False);
+                }
+                let _ = tmp.seek(SeekFrom::Start(0));
+                let fid = alloc_file_handle_special_uri(tmp, &mode, SpecialStream::Temp, &filename);
+                FILE_HANDLES.with(|h| {
+                    if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                        fh.wrapper_type = "RFC2397".to_string();
+                        fh.stream_type = "RFC2397".to_string();
+                        // "enforce exact mode"
+                        fh.mode = mode.chars().take(15).collect();
+                        fh.data_meta = Some(meta);
+                    }
+                });
+                goro_core::value::register_resource(fid, b"stream");
+                return Ok(Value::Resource(fid));
+            }
+            Err(e) => {
+                vm.emit_warning(&format!(
+                    "{}({}): Failed to open stream: {}",
+                    func, filename, e
+                ));
+                return Ok(Value::False);
+            }
         }
-        let _ = tmp.seek(SeekFrom::Start(0));
-        let fid = alloc_file_handle(tmp, &mode);
-        goro_core::value::register_resource(fid, b"stream");
-        return Ok(Value::Resource(fid));
     }
 
     // Handle php:// wrapper paths. php://stdout, php://stderr, php://output
@@ -11607,6 +11742,17 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // Streams without a write op (data:): "Stream is not writable".
+    if FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .map(|fh| fh.data_meta.is_some())
+            .unwrap_or(false)
+    }) {
+        let line = vm.current_line;
+        vm.emit_notice_at("fwrite(): Stream is not writable", line);
+        return Ok(Value::False);
+    }
     // _php_stream_write(): invalidate the read buffer of a seekable stream
     // so the data lands at the logical position.
     FILE_HANDLES.with(|h| {
@@ -14730,6 +14876,39 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if resolve_rel(&from_str) == resolve_rel(&to_str) {
         return Ok(Value::False);
     }
+    // php_copy_file_ctx() through the stream layer for data:/php:// sources.
+    let fb = from.as_bytes();
+    if fb.starts_with(b"data:") || (fb.len() > 6 && fb[..6].eq_ignore_ascii_case(b"php://")) {
+        let fp = fopen_fn(
+            vm,
+            &[
+                Value::String(from.clone()),
+                Value::String(PhpString::from_bytes(b"rb")),
+            ],
+        )?;
+        let fid = match fp {
+            Value::Resource(n) => n,
+            _ => return Ok(Value::False),
+        };
+        let data = stream_get_contents_fn(vm, &[Value::Resource(fid)])?;
+        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        if !vm.check_open_basedir("copy", &to_str) {
+            return Ok(Value::False);
+        }
+        return Ok(
+            match std::fs::write(&*to_str, data.to_php_string().as_bytes()) {
+                Ok(_) => Value::True,
+                Err(e) => {
+                    vm.emit_warning(&format!(
+                        "copy({}): Failed to open stream: {}",
+                        to_str,
+                        strip_os_error(&e.to_string())
+                    ));
+                    Value::False
+                }
+            },
+        );
+    }
     let from_path = std::path::Path::new(&*from_str);
     if !from_path.exists() {
         vm.emit_warning(&format!(
@@ -14859,7 +15038,9 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_str = resolve_with_include_path(vm, &path_str, use_inc);
     // php:// streams (php://filter, php://memory, ...) go through the
     // stream layer.
-    let content = if path_str.len() > 6 && path_str[..6].eq_ignore_ascii_case("php://") {
+    let content = if (path_str.len() > 6 && path_str[..6].eq_ignore_ascii_case("php://"))
+        || path.as_bytes().starts_with(b"data:")
+    {
         let mut oargs = vec![
             Value::String(path.clone()),
             Value::String(PhpString::from_bytes(b"rb")),
@@ -19042,6 +19223,37 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             // Order matches PHP's _php_stream_populate_meta_data():
             // timed_out, blocked, eof, [wrapper_data], wrapper_type, stream_type,
             // mode, unread_bytes, seekable, uri.
+            // data: streams report their RFC 2397 meta data instead of
+            // timed_out/blocked/eof.
+            if let Some(dm) = &fh.data_meta {
+                for (k, v) in dm {
+                    arr.set(ArrayKey::String(PhpString::from_bytes(k)), v.clone());
+                }
+                let mut put =
+                    |k: &[u8], v: Value| arr.set(ArrayKey::String(PhpString::from_bytes(k)), v);
+                put(
+                    b"wrapper_type",
+                    Value::String(PhpString::from_string(fh.wrapper_type.clone())),
+                );
+                put(
+                    b"stream_type",
+                    Value::String(PhpString::from_string(fh.stream_type.clone())),
+                );
+                put(
+                    b"mode",
+                    Value::String(PhpString::from_string(fh.mode.clone())),
+                );
+                put(
+                    b"unread_bytes",
+                    Value::Long(fh.filter_read_ready.len() as i64),
+                );
+                put(b"seekable", Value::True);
+                put(
+                    b"uri",
+                    Value::String(PhpString::from_string(fh.uri.clone())),
+                );
+                return;
+            }
             // PHP_STREAM_OPTION_META_DATA_API: sockets report their own
             // state; descriptor-backed STDIO streams read O_NONBLOCK.
             let (timed_out, blocked) = match xp_socket::meta(fh) {
