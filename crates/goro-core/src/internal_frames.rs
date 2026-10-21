@@ -186,6 +186,118 @@ impl Vm {
     }
 }
 
+impl Vm {
+    /// Call builtin `f` (lowercase name `lname`) from PHP code run outside
+    /// the main executor (generator bodies), at `line`: named arguments,
+    /// the generic zpp checks and a frame, as the main DoFCall does.
+    pub(crate) fn call_builtin_at(
+        &mut self,
+        f: crate::vm::BuiltinFn,
+        lname: &[u8],
+        mut args: Vec<Value>,
+        named: Vec<(Vec<u8>, Value)>,
+        strict: bool,
+        line: u32,
+    ) -> Result<Value, crate::vm::VmError> {
+        let is_ucf = lname == b"call_user_func" || lname == b"call_user_func_array";
+        let special = named.is_empty() && compiled_special(lname, &args);
+        let mut err = None;
+        if !named.is_empty() {
+            if is_ucf || lname == b"forward_static_call" || lname == b"forward_static_call_array" {
+                self.pending_named_args = named;
+            } else if let Some(info) = crate::arginfo::lookup(lname) {
+                if let Err(e) = self.zpp_resolve_named(info, &mut args, named) {
+                    err = Some((e, false));
+                }
+            }
+        }
+        let mut orig = None;
+        if err.is_none() {
+            if let Some((info, flags)) = self.zpp_info(lname) {
+                if let Err(e) = self.zpp_check(info, flags, &mut args, &mut orig, strict, line) {
+                    err = Some((e, true));
+                }
+            }
+        }
+        if let Some((e, in_call)) = err {
+            if let crate::arginfo::ZppError::Throw(cls, msg) = e {
+                let shown = orig.unwrap_or_else(|| args.clone());
+                let in_call = in_call && !special;
+                if in_call {
+                    self.push_builtin_frame(lname, &shown, line);
+                }
+                let exc = self.create_exception(cls, &msg, line);
+                if in_call {
+                    self.pop_builtin_frame();
+                }
+                self.current_exception = Some(exc);
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        let own_frame = !is_ucf && !special;
+        let shown = orig.unwrap_or_default();
+        if own_frame {
+            let frame_args: &[Value] = if shown.is_empty() { &args } else { &shown };
+            self.push_builtin_frame(lname, frame_args, line);
+        } else {
+            self.ucf_call_line = Some(line);
+        }
+        let r = f(self, &args);
+        if own_frame {
+            self.pop_builtin_frame();
+        } else {
+            self.ucf_call_line = None;
+        }
+        r
+    }
+}
+
+/// Whether php-src compiles this call to builtin `lname` with `args` (no
+/// named arguments, name resolved at compile time) into an opcode instead of
+/// a function call (zend_try_compile_special_func_ex), so it has no frame.
+/// Cases depending on literal arguments (defined(), in_array()) or on the
+/// calling context (func_get_args(), array_slice()) are left out.
+pub fn compiled_special(lname: &[u8], args: &[Value]) -> bool {
+    if lname == b"sprintf" {
+        return sprintf_is_rope(args);
+    }
+    match args.len() {
+        0 => matches!(lname, b"get_class" | b"get_called_class"),
+        1 => matches!(
+            lname,
+            b"strlen"
+                | b"is_null"
+                | b"is_bool"
+                | b"is_long"
+                | b"is_int"
+                | b"is_integer"
+                | b"is_float"
+                | b"is_double"
+                | b"is_string"
+                | b"is_array"
+                | b"is_object"
+                | b"is_resource"
+                | b"is_scalar"
+                | b"boolval"
+                | b"intval"
+                | b"floatval"
+                | b"doubleval"
+                | b"strval"
+                | b"chr"
+                | b"ord"
+                | b"count"
+                | b"sizeof"
+                | b"get_class"
+                | b"gettype"
+        ),
+        2 => lname == b"array_key_exists",
+        _ => false,
+    }
+}
+
 /// Whether php-src compiles this sprintf() call into a rope instead of a
 /// function call (zend_compile_func_sprintf: a short format with only %s,
 /// %d and %% and one argument per placeholder), so it has no frame.

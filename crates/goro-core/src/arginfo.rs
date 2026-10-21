@@ -1,13 +1,18 @@
-//! Arginfo of internal functions, generated from php-src's `*.stub.php`
-//! (tools/gen_arginfo.py -> arginfo_table.rs), and the generic
+//! Arginfo of internal functions and methods, from php-src's `*.stub.php`
+//! (tools/gen_stub_sigs.php -> stub_sigs.rs), and the generic
 //! zend_parse_parameters-style layer built on it: argument count errors,
 //! weak/strict scalar parameter checks and coercion, null-to-non-nullable
 //! deprecations, and named arguments (incl. default values of skipped
 //! parameters).
 //!
-//! The checks are enabled per function only where tools/verify_arginfo.py
-//! confirmed against a real PHP that the stub reproduces the function's zpp
-//! diagnostics exactly (arginfo_verified.rs).
+//! The checks are enabled per function / method only where
+//! tools/verify_arginfo.py confirmed against a real PHP and php-src's C
+//! argument parsing that the stub reproduces its zpp diagnostics exactly
+//! (arginfo_verified.rs). Methods are checked where the VM dispatches
+//! internal methods: deferred SPL calls, argument-taking native methods
+//! (`__spl::`), methods run when the call is initialized (argument count
+//! only, `__builtin_return:`), internal constructors, static methods and
+//! the Generator/Fiber/Closure/WeakMap pseudo-calls.
 
 use crate::string::PhpString;
 use crate::value::Value;
@@ -303,6 +308,33 @@ pub fn verified_flags(lname: &[u8]) -> u8 {
         .unwrap_or(0)
 }
 
+/// Arginfo and verified flags of the internal method `key` (lowercase
+/// "declaring class::method"), if it is in the verified list.
+fn verified_method(key: &str) -> Option<(&'static FuncInfo, u8)> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<&'static str, (FuncInfo, u8)>> =
+        std::sync::OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut map = std::collections::HashMap::new();
+        for &(k, flags) in verified::VERIFIED_METHODS {
+            let Some((cls, m)) = k.split_once("::") else {
+                continue;
+            };
+            let Some(c) = crate::stubs::find_class(cls.as_bytes()) else {
+                continue;
+            };
+            let Some(f) = c.methods.iter().find(|f| f.name.eq_ignore_ascii_case(m)) else {
+                continue;
+            };
+            let mut info = FuncInfo::from_stub(f);
+            info.name = Box::leak(format!("{}::{}", c.name, f.name).into_boxed_str());
+            info.module = c.ext;
+            map.insert(k, (info, flags));
+        }
+        map
+    });
+    map.get(key).map(|(i, f)| (i, *f))
+}
+
 /// Why a call to an internal function failed before it ran.
 pub enum ZppError {
     /// Throw a new `class` exception with this message.
@@ -356,6 +388,343 @@ impl Vm {
             self.zpp_rebuild_map();
         }
         self.zpp_map.get(lname).copied()
+    }
+
+    /// Arginfo and verified flags of internal method `method_lower` called on
+    /// internal class `class_lower` (declared there or inherited), if the
+    /// generic zpp layer is enabled for it. Cached per class and method.
+    pub(crate) fn zpp_method_info(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<(&'static FuncInfo, u8)> {
+        if let Some(r) = self
+            .zpp_method_map
+            .get(class_lower)
+            .and_then(|m| m.get(method_lower))
+        {
+            return *r;
+        }
+        let r = crate::stubs::find_method(class_lower, method_lower).and_then(|(c, m)| {
+            verified_method(&format!("{}::{}", c.name, m.name).to_ascii_lowercase())
+        });
+        self.zpp_method_map
+            .entry(class_lower.to_vec())
+            .or_default()
+            .insert(method_lower.to_vec(), r);
+        r
+    }
+
+    /// The generic zpp checks for a call to internal method `class_lower::
+    /// method_lower` with `args[skip..]` (`args[..skip]`: $this), if they are
+    /// enabled for it: named arguments are resolved first (taken from `named`)
+    /// when given. On failure the exception is created and left in
+    /// current_exception: Err(()). `frame`: whether to give the method a frame
+    /// while it is created (Some(is_instance); None when the caller pushed
+    /// one). Ok(true) when the layer checked the arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn zpp_method_call(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &mut Vec<Value>,
+        skip: usize,
+        named: &mut Vec<(Vec<u8>, Value)>,
+        frame: Option<bool>,
+        strict: bool,
+        line: u32,
+    ) -> Result<bool, ()> {
+        let Some((info, flags)) = self.zpp_method_info(class_lower, method_lower) else {
+            return Ok(false);
+        };
+        let skip = skip.min(args.len());
+        let mut err = None;
+        if !named.is_empty() {
+            let n = std::mem::take(named);
+            let mut margs = args.split_off(skip);
+            if let Err(e) = self.zpp_resolve_named(info, &mut margs, n) {
+                err = Some((e, false));
+            }
+            args.append(&mut margs);
+        }
+        // Arguments as passed, when zpp coerced some (for the frame)
+        let mut orig = None;
+        if err.is_none() {
+            if let Err(e) = self.zpp_check(info, flags, &mut args[skip..], &mut orig, strict, line)
+            {
+                err = Some((e, true));
+            }
+        }
+        let Some((e, in_call)) = err else {
+            return Ok(true);
+        };
+        if let ZppError::Throw(cls, msg) = e {
+            let push = in_call && frame.is_some();
+            if push {
+                let file = self.current_file.clone();
+                let is_instance = frame == Some(true);
+                let shown = orig.unwrap_or_else(|| args[skip..].to_vec());
+                self.call_stack
+                    .push((info.name.to_string(), file, line, shown, is_instance));
+            }
+            let exc = self.create_exception(cls, &msg, line);
+            if push {
+                self.call_stack.pop();
+            }
+            self.current_exception = Some(exc);
+        }
+        Err(())
+    }
+
+    /// zpp_method_call() on call arguments led by $this, for a method whose
+    /// frame the caller has pushed. True when the call failed (exception set).
+    pub(crate) fn zpp_spl_args(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &mut Vec<Value>,
+        named: &mut Vec<(Vec<u8>, Value)>,
+        strict: bool,
+        line: u32,
+    ) -> bool {
+        self.zpp_method_call(
+            class_lower,
+            method_lower,
+            args,
+            1,
+            named,
+            None,
+            strict,
+            line,
+        )
+        .is_err()
+    }
+
+    /// The internal class `class_lower` is, or the nearest internal ancestor
+    /// of the user class `class_lower` (lowercase).
+    pub(crate) fn zpp_internal_class(&mut self, class_lower: &[u8]) -> Option<Vec<u8>> {
+        // Internal classes and user classes can't change once declared, but a
+        // user class may be declared later under a name looked up before.
+        if let Some((n, r)) = self.zpp_internal_class_cache.get(class_lower) {
+            if *n == self.classes.len() {
+                return r.clone();
+            }
+        }
+        let r = self.zpp_internal_class_uncached(class_lower);
+        let n = self.classes.len();
+        self.zpp_internal_class_cache
+            .insert(class_lower.to_vec(), (n, r.clone()));
+        r
+    }
+
+    fn zpp_internal_class_uncached(&self, class_lower: &[u8]) -> Option<Vec<u8>> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            match self.classes.get(&cur) {
+                // A user class (internal ones registered here have no file)
+                Some(c) if c.filename.is_some() => cur = c.parent.as_ref()?.to_ascii_lowercase(),
+                _ => return crate::stubs::find_class(&cur).map(|_| cur),
+            }
+        }
+        None
+    }
+
+    /// Name of the pending call returning the result of internal method
+    /// `method_lower`, run on an object of `class_lower` when the call was
+    /// initialized (it takes no arguments): "__builtin_return", with
+    /// ":<class>::<method>" appended when the method's argument count is
+    /// verified, for zpp_builtin_return_check() once the arguments are known.
+    pub(crate) fn zpp_builtin_return_name(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> PhpString {
+        if let Some(r) = self
+            .zpp_return_names
+            .get(class_lower)
+            .and_then(|m| m.get(method_lower))
+        {
+            return r.clone();
+        }
+        let r = self.zpp_builtin_return_name_uncached(class_lower, method_lower);
+        self.zpp_return_names
+            .entry(class_lower.to_vec())
+            .or_default()
+            .insert(method_lower.to_vec(), r.clone());
+        r
+    }
+
+    fn zpp_builtin_return_name_uncached(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> PhpString {
+        if let Some(c) = self.zpp_internal_class(class_lower) {
+            if let Some((info, f)) = self.zpp_method_info(&c, method_lower) {
+                if f & CHECK_ARITY == 0 {
+                    return PhpString::from_bytes(b"__builtin_return");
+                }
+                // "__builtin_return:<min>:<max>:class::method", so that calls
+                // in range need no lookup
+                let max = if info.is_variadic() {
+                    "v".to_string()
+                } else {
+                    info.num_args().to_string()
+                };
+                let mut n = format!("__builtin_return:{}:{}:", info.required, max).into_bytes();
+                n.extend_from_slice(&c);
+                n.extend_from_slice(b"::");
+                n.extend_from_slice(method_lower);
+                return PhpString::from_vec(n);
+            }
+        }
+        PhpString::from_bytes(b"__builtin_return")
+    }
+
+    /// Argument checks of a call named by zpp_builtin_return_name(): `args`
+    /// are the result followed by the arguments passed. On error the
+    /// exception is left in current_exception.
+    pub(crate) fn zpp_builtin_return_check(
+        &mut self,
+        name_lower: &[u8],
+        args: &[Value],
+        named: &[(Vec<u8>, Value)],
+        line: u32,
+    ) {
+        let Some(rest) = name_lower.strip_prefix(b"__builtin_return:") else {
+            return;
+        };
+        if self.current_exception.is_some() {
+            return;
+        }
+        let mut parts = rest.splitn(3, |&c| c == b':');
+        let (Some(min), Some(max), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+            return;
+        };
+        let given = args.len().saturating_sub(1);
+        let num = |b: &[u8]| {
+            std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+        };
+        if named.is_empty()
+            && num(min).is_some_and(|m| given >= m)
+            && (max == b"v" || num(max).is_some_and(|m| given <= m))
+        {
+            return;
+        }
+        let Some(sep) = rest.windows(2).position(|w| w == b"::") else {
+            return;
+        };
+        let Some((info, _)) = self.zpp_method_info(&rest[..sep], &rest[sep + 2..]) else {
+            return;
+        };
+        let (cls, msg): (&[u8], String) = if let Some((n, _)) = named.first() {
+            (
+                b"Error",
+                format!("Unknown named parameter ${}", String::from_utf8_lossy(n)),
+            )
+        } else {
+            match info.arity_error(args.len().saturating_sub(1)) {
+                Some(m) => (b"ArgumentCountError", m),
+                None => return,
+            }
+        };
+        let push = named.is_empty();
+        if push {
+            let file = self.current_file.clone();
+            let shown = args.get(1..).unwrap_or(&[]).to_vec();
+            self.call_stack
+                .push((info.name.to_string(), file, line, shown, true));
+        }
+        let exc = self.create_exception(cls, &msg, line);
+        if push {
+            self.call_stack.pop();
+        }
+        self.current_exception = Some(exc);
+    }
+
+    /// Generic zpp for a call to the internal constructor an object inherits
+    /// (`args[0]` is the object). True when the call failed (exception set).
+    pub(crate) fn zpp_internal_ctor(
+        &mut self,
+        args: &mut Vec<Value>,
+        named: &mut Vec<(Vec<u8>, Value)>,
+        strict: bool,
+        line: u32,
+    ) -> bool {
+        let class = match args.first() {
+            Some(Value::Object(o)) => o.borrow().class_name.to_ascii_lowercase(),
+            _ => return false,
+        };
+        let Some(internal) = self.zpp_internal_class(&class) else {
+            return false;
+        };
+        if self.zpp_method_info(&internal, b"__construct").is_none() {
+            return false;
+        }
+        self.zpp_method_call(
+            &internal,
+            b"__construct",
+            args,
+            1,
+            named,
+            Some(true),
+            strict,
+            line,
+        )
+        .is_err()
+    }
+
+    /// Generic zpp for a call `name_lower` ("class::method") to a static
+    /// method of an internal class. True when the call failed (exception set).
+    pub(crate) fn zpp_internal_static(
+        &mut self,
+        name_lower: &[u8],
+        args: &mut Vec<Value>,
+        named: &mut Vec<(Vec<u8>, Value)>,
+        strict: bool,
+        line: u32,
+    ) -> bool {
+        // Instance methods dispatched through internal pseudo-calls, led by $this
+        let this_call: Option<(&[u8], &[u8])> = match name_lower {
+            b"__generator_send" => Some((b"generator", b"send")),
+            b"__generator_throw" => Some((b"generator", b"throw")),
+            b"__closure_call" => Some((b"closure", b"call")),
+            b"__closure_bindto" => Some((b"closure", b"bindto")),
+            _ => {
+                if let Some(m) = name_lower.strip_prefix(b"__fiber::") {
+                    Some((b"fiber", m))
+                } else if let Some(m) = name_lower.strip_prefix(b"__weakmap::") {
+                    Some((b"weakmap", m))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some((class, method)) = this_call {
+            return self
+                .zpp_method_call(class, method, args, 1, named, Some(true), strict, line)
+                .is_err();
+        }
+        let Some(sep) = name_lower.windows(2).position(|w| w == b"::") else {
+            return false;
+        };
+        let (class, method) = (&name_lower[..sep], &name_lower[sep + 2..]);
+        // User classes (declared ones have a file)
+        if self
+            .classes
+            .get(class)
+            .is_some_and(|c| c.filename.is_some())
+        {
+            return false;
+        }
+        match self.zpp_method_info(class, method) {
+            Some((info, _)) if info.stub.is_static() => {}
+            _ => return false,
+        }
+        self.zpp_method_call(class, method, args, 0, named, Some(false), strict, line)
+            .is_err()
     }
 
     fn zpp_rebuild_map(&mut self) {

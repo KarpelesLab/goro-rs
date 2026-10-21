@@ -529,6 +529,13 @@ pub struct Vm {
     /// the number of registered functions changes.
     pub(crate) zpp_map: HashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
     pub(crate) zpp_map_fn_count: usize,
+    /// Internal methods (class -> method) with verified stub arginfo
+    pub(crate) zpp_method_map:
+        HashMap<Vec<u8>, HashMap<Vec<u8>, Option<(&'static crate::arginfo::FuncInfo, u8)>>>,
+    /// Class -> its nearest internal class (with the class count it was computed at)
+    pub(crate) zpp_internal_class_cache: HashMap<Vec<u8>, (usize, Option<Vec<u8>>)>,
+    /// Pending-call names of internal methods run at INIT time (see arginfo.rs)
+    pub(crate) zpp_return_names: HashMap<Vec<u8>, HashMap<Vec<u8>, PhpString>>,
     /// Builtin calls in progress (see internal_frames.rs)
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     /// Parameter CVs of running user functions (see internal_frames.rs)
@@ -1546,6 +1553,9 @@ impl Vm {
             builtin_named_skipped: Vec::new(),
             zpp_map: HashMap::new(),
             zpp_map_fn_count: usize::MAX,
+            zpp_method_map: HashMap::new(),
+            zpp_internal_class_cache: HashMap::new(),
+            zpp_return_names: HashMap::new(),
             builtin_frames: Vec::new(),
             cv_frames: Vec::new(),
             ucf_call_line: None,
@@ -2337,7 +2347,7 @@ impl Vm {
                         }
                         return true;
                     } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        let _ = builtin(self, &args);
+                        let _ = self.call_builtin_from_internal(builtin, &func_lower, &args);
                         return true;
                     }
                 }
@@ -2598,7 +2608,7 @@ impl Vm {
                         return self.execute_fn_with_named_args(&user_fn, combined, vec![], None);
                     }
                     if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        return builtin(self, args);
+                        return self.call_builtin_from_internal(builtin, &func_lower, args);
                     }
                 }
                 Ok(Value::Null)
@@ -13099,7 +13109,7 @@ impl Vm {
 
         // Try builtin functions
         if let Some(builtin) = self.functions.get(&func_lower).copied() {
-            if let Ok(result) = builtin(self, call_args) {
+            if let Ok(result) = self.call_builtin_from_internal(builtin, &func_lower, call_args) {
                 return result;
             }
         }
@@ -18513,6 +18523,27 @@ impl Vm {
                         }
                     }
 
+                    // Generic zpp for static methods of internal classes
+                    // (verified stub arginfo).
+                    if (func_name_lower.first() == Some(&b'_') || func_name_lower.contains(&b':'))
+                        && self.zpp_internal_static(
+                            &func_name_lower,
+                            &mut call.args,
+                            &mut call.named_args,
+                            op_array.strict_types,
+                            op.line,
+                        )
+                    {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
+                    }
                     // Extension-registered native class static methods (e.g. ext/date).
                     if !self.native_class_handlers.is_empty() {
                         if let Some(sep) = func_name_lower.windows(2).position(|w| w == b"::") {
@@ -19999,6 +20030,7 @@ impl Vm {
                             &call.args,
                             &call.named_args,
                             op.line,
+                            op_array.strict_types,
                         );
                         if self.fatal_emitted && self.current_exception.is_none() {
                             return Err(VmError {
@@ -20097,7 +20129,18 @@ impl Vm {
                                 let mut spl_args = call.args.clone();
                                 let mut named_err = None;
                                 let mut named_ok = true;
-                                if !call.named_args.is_empty() {
+                                // Generic zpp (verified stub arginfo of the method)
+                                let zpp_failed = self.zpp_spl_args(
+                                    spl_class,
+                                    spl_method,
+                                    &mut spl_args,
+                                    &mut call.named_args,
+                                    op_array.strict_types,
+                                    op.line,
+                                );
+                                if zpp_failed {
+                                    named_ok = false;
+                                } else if !call.named_args.is_empty() {
                                     if self.native_class_handlers.contains_key(spl_class) {
                                         if let Err(n) = self.merge_native_named_args(
                                             spl_class,
@@ -20183,7 +20226,13 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
-                    } else if func_name_lower == b"__builtin_return" {
+                    } else if func_name_lower.starts_with(b"__builtin_return") {
+                        self.zpp_builtin_return_check(
+                            &func_name_lower,
+                            &call.args,
+                            &call.named_args,
+                            op.line,
+                        );
                         // Check if the SPL method set an exception
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -20857,6 +20906,13 @@ impl Vm {
                         let mut named_skipped_args: Vec<usize> = Vec::new();
                         let zpp = self.zpp_info(&func_name_lower);
                         let mut zpp_err: Option<crate::arginfo::ZppError> = None;
+                        // Compiled to an opcode by php-src: no frame of its own
+                        let special = call.named_args.is_empty()
+                            && !call_name_bytes.contains(&b'\\')
+                            && crate::internal_frames::compiled_special(
+                                &func_name_lower,
+                                &call.args,
+                            );
                         if !call.named_args.is_empty() {
                             // Special functions that forward named args to their callbacks
                             let forwards_named = func_name_lower == b"call_user_func"
@@ -20963,7 +21019,7 @@ impl Vm {
                         if let Some(e) = zpp_err {
                             if let crate::arginfo::ZppError::Throw(cls, msg) = e {
                                 // zpp errors are raised inside the function: its frame is in the trace
-                                if zpp_err_in_call {
+                                if zpp_err_in_call && !special {
                                     self.push_builtin_frame(
                                         &func_name_lower,
                                         zpp_orig.as_deref().unwrap_or(&call.args),
@@ -20971,7 +21027,7 @@ impl Vm {
                                     );
                                 }
                                 let exc_val = self.create_exception(cls, &msg, op.line);
-                                if zpp_err_in_call {
+                                if zpp_err_in_call && !special {
                                     self.pop_builtin_frame();
                                 }
                                 self.current_exception = Some(exc_val);
@@ -21167,10 +21223,7 @@ impl Vm {
                         // own in php-src (ZEND_INIT_USER_CALL).
                         let is_direct_ucf = func_name_lower == b"call_user_func"
                             || func_name_lower == b"call_user_func_array";
-                        let own_frame = !is_assert_call
-                            && !is_direct_ucf
-                            && !(func_name_lower == b"sprintf"
-                                && crate::internal_frames::sprintf_is_rope(&call.args));
+                        let own_frame = !is_assert_call && !is_direct_ucf && !special;
                         if own_frame {
                             self.push_builtin_frame(
                                 &func_name_lower,
@@ -22683,6 +22736,25 @@ impl Vm {
                                 if let Some(this_val @ Value::Object(_)) = cvs.first() {
                                     call.args.insert(0, this_val.clone());
                                 }
+                            }
+                            // Generic zpp (verified stub arginfo of the internal constructor)
+                            if self.zpp_internal_ctor(
+                                &mut call.args,
+                                &mut call.named_args,
+                                op_array.strict_types,
+                                op.line,
+                            ) {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
                             }
                             // Named arguments for extension-provided constructors.
                             if !call.named_args.is_empty() && !self.native_class_handlers.is_empty()
@@ -42815,8 +42887,12 @@ impl Vm {
                                 b"isstarted" => {
                                     let state =
                                         obj.borrow().get_property(b"__fiber_state").to_long();
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![if state > FiberState::Created as i64 {
                                             Value::True
                                         } else {
@@ -42829,8 +42905,12 @@ impl Vm {
                                 b"isrunning" => {
                                     let state =
                                         obj.borrow().get_property(b"__fiber_state").to_long();
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![if state == FiberState::Running as i64 {
                                             Value::True
                                         } else {
@@ -42843,8 +42923,12 @@ impl Vm {
                                 b"issuspended" => {
                                     let state =
                                         obj.borrow().get_property(b"__fiber_state").to_long();
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![if state == FiberState::Suspended as i64 {
                                             Value::True
                                         } else {
@@ -42857,8 +42941,12 @@ impl Vm {
                                 b"isterminated" => {
                                     let state =
                                         obj.borrow().get_property(b"__fiber_state").to_long();
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![if state == FiberState::Terminated as i64 {
                                             Value::True
                                         } else {
@@ -42930,8 +43018,12 @@ impl Vm {
                                     }
                                     let ret_val =
                                         obj.borrow().get_property(b"__fiber_return_value");
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![ret_val],
                                         named_args: Vec::new(),
                                     });
@@ -42966,8 +43058,12 @@ impl Vm {
                                 }
                                 b"getvalue" => {
                                     let v = obj.borrow().get_property(b"__sensitive_value");
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![v],
                                         named_args: Vec::new(),
                                     });
@@ -42993,8 +43089,12 @@ impl Vm {
                                     } else {
                                         Value::Null
                                     };
+                                    let name = self.zpp_builtin_return_name(
+                                        &class_name_lower,
+                                        &method_name_lower,
+                                    );
                                     self.pending_calls.push(PendingCall {
-                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        name,
                                         args: vec![result],
                                         named_args: Vec::new(),
                                     });
@@ -43346,8 +43446,12 @@ impl Vm {
                         };
 
                         if let Some(result) = builtin_result {
+                            // Run already (no arguments): the call checks the
+                            // argument count of verified methods.
+                            let name =
+                                self.zpp_builtin_return_name(&class_name_lower, &method_name_lower);
                             self.pending_calls.push(PendingCall {
-                                name: PhpString::from_bytes(b"__builtin_return"),
+                                name,
                                 args: vec![result],
                                 named_args: Vec::new(),
                             });
@@ -44027,8 +44131,9 @@ impl Vm {
                                 named_args: Vec::new(),
                             });
                         } else {
+                            let name = self.zpp_builtin_return_name(b"generator", &method_lower);
                             self.pending_calls.push(PendingCall {
-                                name: PhpString::from_bytes(b"__builtin_return"),
+                                name,
                                 args: vec![result],
                                 named_args: Vec::new(),
                             });
@@ -44877,7 +44982,7 @@ impl Vm {
     }
 
     /// Execute a pending function call from generator context
-    pub fn generator_do_fcall(&mut self, line: u32) -> Result<Value, VmError> {
+    pub fn generator_do_fcall(&mut self, line: u32, strict: bool) -> Result<Value, VmError> {
         let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
             message: "no pending function call".into(),
             line,
@@ -45028,7 +45133,7 @@ impl Vm {
             return result;
         }
 
-        if func_name_lower == b"__builtin_return" {
+        if func_name_lower.starts_with(b"__builtin_return") {
             Ok(call.args.first().cloned().unwrap_or(Value::Null))
         } else if func_name_lower == b"__throw_error" {
             // Throw an Error exception (for "Cannot resume an already running generator" etc.)
@@ -45095,10 +45200,12 @@ impl Vm {
                 Ok(Value::Null)
             }
         } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
-            func(self, &call.args).map_err(|e| VmError {
-                message: e.message,
-                line,
-            })
+            let named = std::mem::take(&mut call.named_args);
+            self.call_builtin_at(func, &func_name_lower, call.args, named, strict, line)
+                .map_err(|e| VmError {
+                    message: e.message,
+                    line,
+                })
         } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned() {
             // Resolve named arguments by reordering to match parameter positions
             if !call.named_args.is_empty() {

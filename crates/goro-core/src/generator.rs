@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::array::ArrayKey;
 use crate::opcode::{OpArray, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -1246,7 +1247,7 @@ impl PhpGenerator {
                     vm.generator_send_named_val(name, val);
                 }
                 OpCode::DoFCall => {
-                    match vm.generator_do_fcall(op.line) {
+                    match vm.generator_do_fcall(op.line, op_array.strict_types) {
                         Ok(result) => {
                             self.write_operand(&op.result, result);
                         }
@@ -2369,6 +2370,31 @@ impl PhpGenerator {
                     // Note: constructor call will be set up by the subsequent InitMethodCall opcode
                 }
 
+                OpCode::SendUnpack
+                    if matches!(
+                        self.read_operand(&op.op1, &op_array.literals).deref(),
+                        Value::Array(_)
+                    ) =>
+                {
+                    // f(...$array): each element is an argument (string keys
+                    // are named arguments)
+                    if let Value::Array(a) = self.read_operand(&op.op1, &op_array.literals).deref()
+                    {
+                        let items: Vec<(ArrayKey, Value)> = a
+                            .borrow()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        for (k, v) in items {
+                            match k {
+                                ArrayKey::String(s) => {
+                                    vm.generator_send_named_val(s.as_bytes().to_vec(), v)
+                                }
+                                ArrayKey::Int(_) => vm.generator_send_val(v),
+                            }
+                        }
+                    }
+                }
                 OpCode::SendRef | OpCode::MakeRef | OpCode::SendUnpack => {
                     // Handle SendRef like SendVal in generator context
                     let val = self.read_operand(&op.op1, &op_array.literals);

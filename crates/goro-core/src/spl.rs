@@ -168,6 +168,7 @@ impl Vm {
         args: &[Value],
         named: &[(Vec<u8>, Value)],
         line: u32,
+        strict: bool,
     ) -> Value {
         let obj = match args.first() {
             Some(Value::Object(o)) => o.clone(),
@@ -186,7 +187,26 @@ impl Vm {
         let decl_disp = self.builtin_canonical_name(&decl);
         let method_disp = String::from_utf8_lossy(method_orig).to_string();
         let mut call_args: Vec<Value> = args.to_vec();
-        if !named.is_empty() && !self.spl_map_named_args(base, &method_lower, &mut call_args, named)
+        // Generic zpp (verified stub arginfo of the method)
+        if self.zpp_method_info(base, &method_lower).is_some() {
+            let mut named = named.to_vec();
+            if self
+                .zpp_method_call(
+                    base,
+                    &method_lower,
+                    &mut call_args,
+                    1,
+                    &mut named,
+                    Some(true),
+                    strict,
+                    line,
+                )
+                .is_err()
+            {
+                return Value::Null;
+            }
+        } else if !named.is_empty()
+            && !self.spl_map_named_args(base, &method_lower, &mut call_args, named)
         {
             return Value::Null;
         }

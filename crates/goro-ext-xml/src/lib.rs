@@ -626,7 +626,7 @@ fn call_callback(vm: &mut Vm, callback: &Value, args: Vec<Value>) -> Result<Valu
             let func_name = s.as_bytes();
             let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-                return builtin(vm, &args);
+                return vm.call_builtin_from_internal(builtin, &func_lower, &args);
             }
             if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
                 return vm.execute_fn_with_named_args(&user_fn, args, vec![], None);

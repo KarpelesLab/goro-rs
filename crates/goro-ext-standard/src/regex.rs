@@ -3771,7 +3771,7 @@ fn call_callback(vm: &mut Vm, callback: &Value, call_args: &[Value]) -> Result<V
 
     // Try builtin first
     if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-        return builtin(vm, call_args);
+        return vm.call_builtin_from_internal(builtin, &func_lower, call_args);
     }
 
     // Try user function

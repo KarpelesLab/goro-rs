@@ -407,6 +407,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"chmod", chmod_fn);
     vm.register_function(b"chown", chown_fn);
     vm.register_function(b"chgrp", chgrp_fn);
+    vm.register_function(b"lchown", lchown_fn);
+    vm.register_function(b"lchgrp", lchgrp_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function(b"fpassthru", fpassthru_fn);
     vm.register_function(b"fgetc", fgetc_fn);
@@ -2020,7 +2022,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
 
             if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-                return builtin(vm, &call_args);
+                return vm.call_builtin_from_internal(builtin, &func_lower, &call_args);
             }
             if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
                 let mut combined_args = captured;
@@ -3898,7 +3900,7 @@ fn array_walk_object_entries(
         }
     } else if let Some(builtin) = vm.functions.get(&func_lower).copied() {
         for (_, _, val) in entries {
-            builtin(vm, std::slice::from_ref(val))?;
+            vm.call_builtin_from_internal(builtin, &func_lower, std::slice::from_ref(val))?;
         }
     }
     Ok(Value::True)
@@ -15728,6 +15730,25 @@ fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     Ok(Value::True)
+}
+
+/// lchown()/lchgrp(): like chown()/chgrp(), on the link itself.
+fn lchown_common(vm: &mut Vm, args: &[Value], name: &str) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    let path_str = filename.to_string_lossy();
+    if path_str.is_empty() || std::fs::symlink_metadata(&*path_str).is_err() {
+        vm.emit_warning(&format!("{}(): No such file or directory", name));
+        return Ok(Value::False);
+    }
+    Ok(Value::True)
+}
+
+fn lchown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    lchown_common(vm, args, "lchown")
+}
+
+fn lchgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    lchown_common(vm, args, "lchgrp")
 }
 
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

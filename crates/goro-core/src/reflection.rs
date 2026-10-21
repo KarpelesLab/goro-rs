@@ -6655,7 +6655,9 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         .unwrap_or(Value::Null);
                     Some(result)
                 } else if let Some(func) = vm.functions.get(&func_lower).cloned() {
-                    let result = func(vm, &invoke_args).unwrap_or(Value::Null);
+                    let result = vm
+                        .call_builtin_from_internal(func, &func_lower, &invoke_args)
+                        .unwrap_or(Value::Null);
                     Some(result)
                 } else {
                     Some(Value::Null)
@@ -6683,7 +6685,9 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         .unwrap_or(Value::Null);
                     Some(result)
                 } else if let Some(func) = vm.functions.get(&func_lower).cloned() {
-                    let result = func(vm, &invoke_args).unwrap_or(Value::Null);
+                    let result = vm
+                        .call_builtin_from_internal(func, &func_lower, &invoke_args)
+                        .unwrap_or(Value::Null);
                     Some(result)
                 } else {
                     Some(Value::Null)
