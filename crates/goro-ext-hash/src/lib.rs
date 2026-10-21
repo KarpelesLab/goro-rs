@@ -62,6 +62,9 @@ pub fn register(vm: &mut Vm) {
     );
     vm.register_builtin_param_types(b"hash_hmac", vec![s(), s(), s(), b()]);
     vm.register_builtin_param_types(b"hash_pbkdf2", vec![s(), s(), s(), i(), i(), b()]);
+    vm.register_builtin_param_types(b"hash_update", vec![None, s()]);
+    vm.register_builtin_param_types(b"hash_update_stream", vec![None, None, i()]);
+    vm.register_builtin_param_types(b"hash_update_file", vec![None, s()]);
 
     // Register parameter names (for deprecation messages that mention $filename, etc.)
     let names = |l: &[&str]| l.iter().map(|n| n.as_bytes().to_vec()).collect::<Vec<_>>();
@@ -84,6 +87,16 @@ pub fn register(vm: &mut Vm) {
     vm.builtin_param_names.insert(
         b"hash_hmac".to_vec(),
         names(&["algo", "data", "key", "binary"]),
+    );
+    vm.builtin_param_names
+        .insert(b"hash_update".to_vec(), names(&["context", "data"]));
+    vm.builtin_param_names.insert(
+        b"hash_update_stream".to_vec(),
+        names(&["context", "stream", "length"]),
+    );
+    vm.builtin_param_names.insert(
+        b"hash_update_file".to_vec(),
+        names(&["context", "filename", "stream_context"]),
     );
     vm.builtin_param_names.insert(
         b"hash_equals".to_vec(),
@@ -975,9 +988,118 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Object(obj))
 }
 
+/// ArgumentCountError of zend_parse_parameters().
+fn check_arity(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), VmError> {
+    let n = args.len();
+    if n >= min && n <= max {
+        return Ok(());
+    }
+    let (kind, count) = if min == max {
+        ("exactly", min)
+    } else if n < min {
+        ("at least", min)
+    } else {
+        ("at most", max)
+    };
+    let msg = format!(
+        "{}() expects {} {} argument{}, {} given",
+        fname,
+        kind,
+        count,
+        if count == 1 { "" } else { "s" },
+        n
+    );
+    throw(vm, b"ArgumentCountError", &msg)
+}
+
+fn has_tostring(vm: &Vm, obj: &Rc<RefCell<PhpObject>>) -> bool {
+    let mut cur = obj.borrow().class_name.to_ascii_lowercase();
+    if let Some((c, h)) = vm.find_native_class_handler(&cur) {
+        if (h.has_method)(&c, b"__tostring", false) {
+            return true;
+        }
+    }
+    for _ in 0..64 {
+        let Some(ce) = vm.classes.get(&cur) else {
+            return false;
+        };
+        if ce.get_method(b"__tostring").is_some() {
+            return true;
+        }
+        match &ce.parent {
+            Some(p) => cur = p.to_ascii_lowercase(),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// A string parameter ('S'/'P'); null coercion and strict mode are handled
+/// by the builtin parameter types registered for the function.
+fn zpp_string(
+    vm: &mut Vm,
+    args: &[Value],
+    i: usize,
+    fname: &str,
+    pname: &str,
+) -> Result<PhpString, VmError> {
+    let v = arg(args, i);
+    match &v {
+        Value::Array(_) => {}
+        Value::Object(o) if has_tostring(vm, o) => return vm.value_to_string_checked(&v),
+        Value::Object(_) => {}
+        _ => return Ok(v.to_php_string()),
+    }
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type string, {} given",
+        fname,
+        i + 1,
+        pname,
+        zval_value_name(&v)
+    );
+    throw(vm, b"TypeError", &msg)
+}
+
+/// An int parameter ('l').
+fn zpp_long(
+    vm: &mut Vm,
+    args: &[Value],
+    i: usize,
+    fname: &str,
+    pname: &str,
+) -> Result<i64, VmError> {
+    let v = arg(args, i);
+    let ok = match &v {
+        Value::Long(n) => return Ok(*n),
+        Value::Null | Value::Undef | Value::True | Value::False => true,
+        Value::Double(d) => d.is_finite(),
+        Value::String(s) => goro_core::value::parse_numeric_str(s.as_bytes(), false)
+            .is_some_and(|(_, trailing)| !trailing),
+        _ => false,
+    };
+    if ok {
+        return Ok(v.to_long());
+    }
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type int, {} given",
+        fname,
+        i + 1,
+        pname,
+        zval_value_name(&v)
+    );
+    throw(vm, b"TypeError", &msg)
+}
+
 fn hash_update_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    check_arity(vm, args, "hash_update", 2, 2)?;
     let (_, st) = context_arg(vm, args, "hash_update")?;
-    let data = arg_str(args, 1);
+    let data = zpp_string(vm, args, 1, "hash_update", "data")?;
     if let Some(c) = st.borrow_mut().ctx.as_mut() {
         c.update(data.as_bytes());
     }
@@ -985,6 +1107,7 @@ fn hash_update_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    check_arity(vm, args, "hash_update_stream", 2, 3)?;
     let (_, st) = context_arg(vm, args, "hash_update_stream")?;
     let stream = arg(args, 1);
     if !matches!(stream, Value::Resource(_)) {
@@ -994,9 +1117,10 @@ fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         );
         return throw(vm, b"TypeError", &msg);
     }
-    let mut length = match args.get(2) {
-        Some(v) => v.deref().to_long(),
-        None => -1,
+    let mut length = if args.len() > 2 {
+        zpp_long(vm, args, 2, "hash_update_stream", "length")?
+    } else {
+        -1
     };
     let mut didread: i64 = 0;
     while length != 0 {
@@ -1017,8 +1141,9 @@ fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 }
 
 fn hash_update_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    check_arity(vm, args, "hash_update_file", 2, 3)?;
     let (_, st) = context_arg(vm, args, "hash_update_file")?;
-    let filename = arg_str(args, 1);
+    let filename = zpp_string(vm, args, 1, "hash_update_file", "filename")?;
     if filename.as_bytes().contains(&0) {
         return throw(
             vm,
@@ -1027,6 +1152,13 @@ fn hash_update_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
     }
     let context = arg(args, 2);
+    if !matches!(context, Value::Null | Value::Undef | Value::Resource(_)) {
+        let msg = format!(
+            "hash_update_file(): Argument #3 ($stream_context) must be of type resource or null, {} given",
+            zval_value_name(&context)
+        );
+        return throw(vm, b"TypeError", &msg);
+    }
     let Some(stream) = open_stream(vm, "hash_update_file", &filename, &context)? else {
         return Ok(Value::False);
     };
