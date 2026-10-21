@@ -15395,6 +15395,9 @@ impl Vm {
                         // Deferred SPL method call (see spl_deferred_call).
                         let method_orig = call.name.as_bytes()[8..].to_vec();
                         let result = self.spl_deferred_call(&method_orig, &call.args, &call.named_args, op.line);
+                        if self.fatal_emitted && self.current_exception.is_none() {
+                            return Err(VmError { message: String::new(), line: op.line });
+                        }
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);

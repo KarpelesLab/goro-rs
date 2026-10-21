@@ -593,6 +593,13 @@ impl Vm {
         self.spl_internal_frames.push((self.call_stack.len(), frame));
     }
 
+    /// Raise a fatal error from a built-in SPL method; the deferred call
+    /// returns an error so execution stops.
+    pub(crate) fn spl_fatal(&mut self, msg: &str) {
+        let line = self.current_line;
+        self.emit_fatal_at(msg, line);
+    }
+
     /// Whether the innermost frame is a built-in SPL method (stale entries
     /// of frames popped without unregistering are discarded).
     pub(crate) fn spl_caller_is_internal(&mut self) -> bool {

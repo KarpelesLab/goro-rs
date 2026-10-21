@@ -41,6 +41,12 @@ impl Vm {
         if size == cur {
             return;
         }
+        if size > cur && (size as u64).checked_mul(16).map(|b| b > isize::MAX as u64).unwrap_or(true) {
+            // safe_erealloc(elements, size, sizeof(zval), 0)
+            let msg = format!("Possible integer overflow in memory allocation ({} * 16 + 0)", size as u64);
+            self.spl_fatal(&msg);
+            return;
+        }
         if size > cur {
             let mut a = st.borrow_mut();
             for i in cur..size {
