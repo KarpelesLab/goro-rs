@@ -345,6 +345,8 @@ impl Compiler {
                     (b"socket_recvfrom", 1) => true,
                     (b"socket_recvfrom", 4) => true,
                     (b"socket_recvfrom", 5) => true,
+                    // mysqli_poll(&$read, &$error, &$reject, $sec, $usec)
+                    (b"mysqli_poll", 0..=2) => true,
                     // mysqli_stmt_bind_param($stmt, $types, &$var1, &$var2, ...)
                     (b"mysqli_stmt_bind_param", p) if p >= 2 => true,
                     // mysqli_stmt_bind_result($stmt, &$var1, &$var2, ...)
@@ -14140,6 +14142,16 @@ impl Compiler {
 
                     Some(jmp)
                 } else {
+                    // mysqli::poll() takes its arrays by reference
+                    let static_bridge: Option<&[u8]> = match &class_name {
+                        Some(c)
+                            if c.eq_ignore_ascii_case(b"mysqli")
+                                && method.eq_ignore_ascii_case(b"poll") =>
+                        {
+                            Some(b"mysqli_poll")
+                        }
+                        _ => None,
+                    };
                     if let Some(class_name) = class_name {
                         // Static class name known at compile time
                         // Keep parent:: and self:: as markers for late static binding forwarding.
@@ -14205,7 +14217,7 @@ impl Compiler {
                         });
                     }
 
-                    self.compile_send_args(args, expr.span.line)?;
+                    self.compile_send_args_with_name(args, expr.span.line, static_bridge)?;
 
                     self.op_array.emit(Op {
                         opcode: OpCode::DoFCall,

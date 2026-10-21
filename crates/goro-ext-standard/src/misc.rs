@@ -1173,8 +1173,11 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         name.as_bytes()
     };
-    if let Some(val) = vm.constants.get(lookup_name) {
-        return Ok(val.clone());
+    if let Some(val) = vm.constants.get(lookup_name).cloned() {
+        if let Some(m) = vm.internal_deprecated_constants.get(lookup_name).cloned() {
+            vm.emit_deprecated_at(&m, vm.current_line);
+        }
+        return Ok(val);
     }
     let msg = format!("Undefined constant \"{}\"", name_str);
     let line = vm.current_line;
@@ -13983,6 +13986,12 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
 // iterator_to_array and iterator_count moved to goro-ext-spl
 
+/// INI settings share the constant table; their names ("mysqli.max_links")
+/// are lowercase and dotted, which no extension constant is.
+fn is_ini_entry_name(name: &[u8]) -> bool {
+    name.contains(&b'.') && !name.iter().any(|b| b.is_ascii_uppercase())
+}
+
 fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let categorize = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let mut result = PhpArray::new();
@@ -13991,9 +14000,15 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         // that registered them; the libxml ones are recognised by prefix.
         let mut user = PhpArray::new();
         let mut libxml = PhpArray::new();
+        let mut mysqli = PhpArray::new();
         for (name, val) in &vm.constants {
+            if is_ini_entry_name(name) {
+                continue;
+            }
             let target = if name.starts_with(b"LIBXML_") {
                 &mut libxml
+            } else if name.starts_with(b"MYSQLI_") {
+                &mut mysqli
             } else {
                 &mut user
             };
@@ -14008,12 +14023,21 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 Value::Array(Rc::new(RefCell::new(libxml))),
             );
         }
+        if !mysqli.is_empty() {
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"mysqli")),
+                Value::Array(Rc::new(RefCell::new(mysqli))),
+            );
+        }
         result.set(
             goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),
             Value::Array(Rc::new(RefCell::new(user))),
         );
     } else {
         for (name, val) in &vm.constants {
+            if is_ini_entry_name(name) {
+                continue;
+            }
             result.set(
                 goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                 val.clone(),
@@ -14030,9 +14054,15 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
+    // Internal classes known by name only: their declared shape (stubs)
+    let internal = if vm.classes.contains_key(&name_lower) {
+        None
+    } else {
+        goro_core::stubs::class_entry(vm, &name_lower)
+    };
     // PHP throws an Error when the class is not declared; the message
     // uses the original-case spelling supplied by the caller.
-    if !vm.classes.contains_key(&name_lower) {
+    if !vm.classes.contains_key(&name_lower) && internal.is_none() {
         let class_str = class_name.to_string_lossy().to_string();
         let msg = format!(
             "get_class_vars(): Argument #1 ($class) must be a valid class name, {} given",
@@ -14083,7 +14113,23 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
     let mut result = PhpArray::new();
-    if vm.classes.contains_key(&name_lower) {
+    if let Some(class) = internal {
+        for statics in [false, true] {
+            for prop in &class.properties {
+                if prop.is_static != statics || prop.is_virtual || !can_see(prop) {
+                    continue;
+                }
+                let val = match &prop.default {
+                    Value::Undef => Value::Null,
+                    other => other.clone(),
+                };
+                result.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(prop.name.clone())),
+                    val,
+                );
+            }
+        }
+    } else if vm.classes.contains_key(&name_lower) {
         // Build the inheritance chain from most-derived to base; PHP's
         // get_class_vars emits each level's declared properties in that
         // order (non-static across all classes first, then static).

@@ -7990,7 +7990,10 @@ impl Vm {
                     | b"internaliterator"
             ),
             b"iteratoraggregate" => {
-                matches!(class_lower, b"arrayobject" | b"weakmap" | b"dateperiod")
+                matches!(
+                    class_lower,
+                    b"arrayobject" | b"weakmap" | b"dateperiod" | b"mysqli_result"
+                )
             }
             b"traversable" => matches!(
                 class_lower,
@@ -8032,6 +8035,7 @@ impl Vm {
                     | b"simplexmlelement"
                     | b"weakmap"
                     | b"dateperiod"
+                    | b"mysqli_result"
                     | b"internaliterator"
             ),
             b"countable" => matches!(
