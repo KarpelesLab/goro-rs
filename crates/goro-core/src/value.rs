@@ -1239,6 +1239,11 @@ pub fn format_php_float_repr(f: f64) -> String {
     format_php_float_shortest(f)
 }
 
+/// Public wrapper for format_php_float_shortest (zend_gcvt mode 0).
+pub fn format_php_float_shortest_pub(f: f64) -> String {
+    format_php_float_shortest(f)
+}
+
 /// Format a float using shortest-roundtrip representation (like precision=-1).
 fn format_php_float_shortest(f: f64) -> String {
     if f.is_nan() {

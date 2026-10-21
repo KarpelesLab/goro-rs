@@ -8,6 +8,7 @@ pub mod ob;
 pub mod output;
 pub mod regex;
 pub mod request;
+pub mod serialize;
 pub mod strings;
 pub mod type_funcs;
 

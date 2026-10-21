@@ -3320,6 +3320,11 @@ impl Vm {
         self.value_matches_type_mode(value, param_type, true)
     }
 
+    /// Strict-mode type check (used by unserialize() for typed properties).
+    pub fn value_matches_type_strict_pub(&self, value: &Value, param_type: &ParamType) -> bool {
+        self.value_matches_type_mode(value, param_type, true)
+    }
+
     fn value_matches_type_mode(&self, value: &Value, param_type: &ParamType, strict: bool) -> bool {
         match param_type {
             ParamType::Simple(type_name) => {
@@ -14787,6 +14792,14 @@ impl Vm {
 
     /// Max output buffer size (64MB) to prevent OOM from infinite echo loops
     pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
+
+    /// The buffer that write_output() currently appends to.
+    pub fn active_output_buffer(&mut self) -> &mut Vec<u8> {
+        match self.ob_stack.last_mut() {
+            Some(buf) => buf,
+            None => &mut self.output,
+        }
+    }
 
     pub fn write_output(&mut self, data: &[u8]) {
         self.ob_write(data);
@@ -32369,6 +32382,43 @@ impl Vm {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        // zend_implement_serializable(): Serializable without
+                        // __serialize()/__unserialize() is deprecated.
+                        if !class.is_interface && !class.is_trait && !class.is_abstract && !class.is_enum {
+                            let implements_serializable = class.interfaces.iter().any(|i| {
+                                let il: Vec<u8> = i.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                il == b"serializable" || self.class_implements_interface(&il, b"serializable")
+                            }) || class.parent.as_ref().map(|p| {
+                                let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                self.class_implements_interface(&pl, b"serializable")
+                            }).unwrap_or(false);
+                            // Builtin Serializable implementors (ArrayObject, SplObjectStorage, ...)
+                            // provide native __serialize/__unserialize.
+                            let mut extends_builtin = false;
+                            let mut cur = class.parent.clone();
+                            for _ in 0..64 {
+                                let Some(p) = cur else { break };
+                                let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                if self.is_known_builtin_class(&pl) {
+                                    extends_builtin = true;
+                                    break;
+                                }
+                                match self.classes.get(&pl) {
+                                    Some(pc) => cur = pc.parent.clone(),
+                                    None => break,
+                                }
+                            }
+                            if implements_serializable && !extends_builtin
+                                && (!class.methods.contains_key(b"__serialize".as_slice())
+                                    || !class.methods.contains_key(b"__unserialize".as_slice()))
+                            {
+                                let class_display = crate::value::display_class_name(&class.name);
+                                self.emit_deprecated_at(
+                                    &format!("{} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)", class_display),
+                                    op.line,
+                                );
                             }
                         }
                         self.classes.insert(name_lower, class);
