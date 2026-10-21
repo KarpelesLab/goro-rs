@@ -153,6 +153,7 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 }
 
 pub fn register(vm: &mut Vm) {
+    register_std_streams();
     vm.unserialize_value_hook = Some(crate::serialize::unserialize_value_hook);
     // Built-in php_user_filter base class (user_filters.stub.php). Compiled
     // from its PHP declaration so methods carry real signatures for
@@ -558,14 +559,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gethostbyname", gethostbyname_fn);
     vm.register_function(b"gethostbynamel", gethostbynamel_fn);
     vm.register_function(b"gethostbyaddr", gethostbyaddr_fn);
-    vm.register_function(b"proc_open", proc_open_fn);
-    vm.register_function(b"proc_close", proc_close_fn);
-    vm.register_function(b"proc_get_status", proc_get_status_fn);
-    vm.register_function(b"proc_terminate", proc_terminate_fn);
+    vm.register_function(b"proc_open", proc_open::proc_open);
+    vm.register_function(b"proc_close", proc_open::proc_close);
+    vm.register_function(b"proc_get_status", proc_open::proc_get_status);
+    vm.register_function(b"proc_terminate", proc_open::proc_terminate);
     vm.register_function(b"inet_pton", inet_pton_fn);
     vm.register_function(b"inet_ntop", inet_ntop_fn);
-    vm.register_function(b"stream_set_blocking", stream_set_blocking_fn);
-    vm.register_function(b"stream_set_timeout", stream_set_timeout_fn);
+    vm.register_function(b"stream_set_blocking", xp_socket::stream_set_blocking);
+    vm.register_function(b"socket_set_blocking", xp_socket::stream_set_blocking);
+    vm.register_function(b"stream_set_timeout", xp_socket::stream_set_timeout);
+    vm.register_function(b"socket_set_timeout", xp_socket::stream_set_timeout);
     vm.register_function(b"stream_set_write_buffer", stream_set_write_buffer_fn);
     vm.register_function(b"stream_set_read_buffer", stream_set_read_buffer_fn);
     vm.register_function(b"stream_copy_to_stream", stream_copy_to_stream_fn);
@@ -639,16 +642,16 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_get_wrappers", stream_get_wrappers_fn);
     vm.register_function(b"stream_get_filters", stream_get_filters_fn);
     vm.register_function(b"stream_get_transports", stream_get_transports_fn);
-    vm.register_function(b"stream_socket_client", stream_socket_client_fn);
-    vm.register_function(b"stream_socket_server", stream_socket_server_fn);
-    vm.register_function(b"stream_socket_get_name", stream_socket_get_name_fn);
-    vm.register_function(b"stream_select", stream_select_fn);
-    vm.register_function(b"stream_socket_pair", stream_socket_pair_fn);
+    vm.register_function(b"stream_socket_client", xp_socket::stream_socket_client);
+    vm.register_function(b"stream_socket_server", xp_socket::stream_socket_server);
+    vm.register_function(b"stream_socket_get_name", xp_socket::stream_socket_get_name);
+    vm.register_function(b"stream_select", xp_socket::stream_select);
+    vm.register_function(b"stream_socket_pair", xp_socket::stream_socket_pair);
     vm.register_function(b"stream_get_line", stream_get_line_fn);
     vm.register_function(b"stream_set_chunk_size", stream_set_chunk_size_fn);
-    vm.register_function(b"stream_socket_recvfrom", stream_socket_recvfrom_fn);
-    vm.register_function(b"stream_socket_sendto", stream_socket_sendto_fn);
-    vm.register_function(b"stream_socket_shutdown", stream_socket_shutdown_fn);
+    vm.register_function(b"stream_socket_recvfrom", xp_socket::stream_socket_recvfrom);
+    vm.register_function(b"stream_socket_sendto", xp_socket::stream_socket_sendto);
+    vm.register_function(b"stream_socket_shutdown", xp_socket::stream_socket_shutdown);
     vm.register_function(
         b"stream_socket_enable_crypto",
         stream_socket_enable_crypto_fn,
@@ -682,7 +685,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"getprotobyname", getprotobyname_fn);
     vm.register_function(b"getprotobynumber", getprotobynumber_fn);
     vm.register_function(b"get_browser", get_browser_fn);
-    vm.register_function(b"stream_socket_accept", stream_socket_accept_fn);
+    vm.register_function(b"stream_socket_accept", xp_socket::stream_socket_accept);
     vm.register_function(b"stream_isatty", stream_isatty_fn);
     vm.register_function(b"is_uploaded_file", is_uploaded_file_fn);
     vm.register_function(b"move_uploaded_file", move_uploaded_file_fn);
@@ -1179,8 +1182,9 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // === Output buffering === (see ob.rs)
 
-fn flush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // No-op in our implementation
+fn flush_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    // sapi_flush(): the CLI hands pending output to stdout.
+    vm.flush_cli_output();
     Ok(Value::Null)
 }
 
@@ -6794,19 +6798,10 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let formatted = crate::strings::do_sprintf_vm(vm, format_args)?;
     let len = formatted.len();
 
-    // Check if it's a real file handle
-    let written = FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            fh.file.write_all(&formatted).ok();
-            true
-        } else {
-            false
-        }
-    });
-
-    if !written {
-        // Fallback to stdout for STDOUT handle or unknown handles
+    // php_stream_write() on the stream (filters, read buffer, sockets).
+    if has_file_handle(fid) {
+        stream_write(vm, "fprintf", &args[0], &formatted);
+    } else {
         vm.write_output(&formatted);
     }
     Ok(Value::Long(len as i64))
@@ -6840,16 +6835,9 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let formatted = crate::strings::do_sprintf_vm(vm, &format_args)?;
     let len = formatted.len();
 
-    let written = FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            fh.file.write_all(&formatted).ok();
-            true
-        } else {
-            false
-        }
-    });
-    if !written {
+    if has_file_handle(fid) {
+        stream_write(vm, "vfprintf", &args[0], &formatted);
+    } else {
         vm.write_output(&formatted);
     }
     Ok(Value::Long(len as i64))
@@ -7862,7 +7850,14 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // php://filter routes through fopen so the filter chain is applied.
     // (Dispatch through the registered functions: the inner resource may be
     // served by a userspace stream wrapper.)
-    if path_str.starts_with("php://filter/") {
+    let lower_path = path_str.to_ascii_lowercase();
+    if lower_path.starts_with("php://filter/")
+        || matches!(
+            lower_path.as_str(),
+            "php://stdin" | "php://stdout" | "php://stderr" | "php://memory"
+        )
+        || lower_path.starts_with("php://temp")
+    {
         let mut inner_args = vec![
             Value::String(PhpString::from_string(path_str.to_string())),
             Value::String(PhpString::from_bytes(b"r")),
@@ -7898,16 +7893,6 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if path_str == "php://input" {
         let body = get_request_body();
         return Ok(Value::String(PhpString::from_vec(body)));
-    }
-    // php://stdin / php://stdout / php://stderr / php://memory / php://temp:
-    // file_get_contents on these should return false (no warning) or empty.
-    if path_str == "php://stdin"
-        || path_str == "php://stdout"
-        || path_str == "php://stderr"
-        || path_str == "php://memory"
-        || path_str.starts_with("php://temp")
-    {
-        return Ok(Value::False);
     }
     // http:// and https:// via the built-in minimal HTTP client.
     if path_str.starts_with("http://") || path_str.starts_with("https://") {
@@ -9445,6 +9430,7 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Actually sleep up to 2 seconds to support tests that compare timestamps
     // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
+    _vm.flush_cli_output();
     if secs > 0 {
         let actual = (secs as u64).min(2);
         std::thread::sleep(std::time::Duration::from_secs(actual));
@@ -9461,6 +9447,7 @@ fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "usleep(): Argument #1 ($microseconds) must be greater than or equal to 0",
         ));
     }
+    _vm.flush_cli_output();
     if usecs > 0 {
         // Sleep the actual duration, capped at 2s (like sleep()).
         let actual = (usecs as u64).min(2_000_000);
@@ -10118,6 +10105,19 @@ use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 #[path = "userstream.rs"]
 pub(crate) mod userstream;
 
+/// Socket transports (tcp/udp/unix/udg) and socket stream functions.
+#[path = "sockets.rs"]
+pub(crate) mod xp_socket;
+
+/// proc_open() family.
+#[path = "proc_open.rs"]
+pub(crate) mod proc_open;
+
+/// CLI: write pending unbuffered output before blocking or spawning.
+pub(crate) fn flush_cli_output(vm: &mut Vm) {
+    vm.flush_cli_output();
+}
+
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
     static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
@@ -10258,7 +10258,123 @@ struct FileHandle {
     /// For user-stream wrappers: scheme name (e.g. "var" for "var://").
     #[allow(dead_code)]
     pub user_scheme: Option<String>,
+    /// Socket streams: php_netstream_data_t.
+    pub sock: Option<xp_socket::SockData>,
 }
+
+impl FileHandle {
+    /// ops->read() on the underlying descriptor. Socket streams follow
+    /// php_sockop_read(): Err(WouldBlock) means "no data right now" (not
+    /// EOF) and Err(TimedOut) a timed-out blocking read. `has_buffered`
+    /// says data was already gathered by the current read call.
+    fn read_raw(&mut self, buf: &mut [u8], has_buffered: bool) -> std::io::Result<usize> {
+        // Data already read but not consumed (php_stream readbuf).
+        if !self.filter_read_ready.is_empty() && !buf.is_empty() {
+            let n = buf.len().min(self.filter_read_ready.len());
+            buf[..n].copy_from_slice(&self.filter_read_ready[..n]);
+            self.filter_read_ready.drain(..n);
+            return Ok(n);
+        }
+        // php_stream_fill_read_buffer(): descriptor-backed streams read a
+        // whole chunk and keep what the caller did not ask for.
+        if self.is_buffered() && buf.len() < STREAM_CHUNK_SIZE {
+            let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
+            let n = self.read_direct(&mut chunk, has_buffered)?;
+            let k = n.min(buf.len());
+            buf[..k].copy_from_slice(&chunk[..k]);
+            if n > k {
+                self.filter_read_ready.extend_from_slice(&chunk[k..n]);
+            }
+            return Ok(k);
+        }
+        self.read_direct(buf, has_buffered)
+    }
+
+    /// ops->read() straight from the descriptor, bypassing the read buffer.
+    fn read_direct(&mut self, buf: &mut [u8], has_buffered: bool) -> std::io::Result<usize> {
+        if self.sock.is_some() {
+            xp_socket::sock_read(self, buf, has_buffered)
+        } else {
+            self.file.read(buf)
+        }
+    }
+
+    /// Streams read through a read buffer (memory/temp streams and the
+    /// output sinks are not: PHP_STREAM_FLAG_NO_BUFFER).
+    fn is_buffered(&self) -> bool {
+        self.special == SpecialStream::None && self.user_wrapper.is_none()
+    }
+
+    /// _php_stream_read() keeps reading until the request is satisfied
+    /// only for plain files and memory/temp streams.
+    fn is_greedy(&self) -> bool {
+        self.sock.is_none()
+            && (matches!(self.special, SpecialStream::Memory | SpecialStream::Temp)
+                || (self.seekable && self.wrapper_type == "plainfile"))
+    }
+}
+
+/// Re-read the state of descriptors 0-2 after the embedder replaced them
+/// (e.g. the PHPT runner installing a test's stdin).
+pub fn refresh_std_streams() {
+    FILE_HANDLES.with(|h| {
+        let mut h = h.borrow_mut();
+        for (fid, fd) in [(1i64, 0), (2, 1), (3, 2)] {
+            if let Some(fh) = h.get_mut(&fid) {
+                fh.seekable = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) } >= 0;
+                fh.eof = false;
+                fh.filter_read_ready.clear();
+            }
+        }
+    });
+}
+
+/// The STDIN/STDOUT/STDERR constants (resources 1-3) wrap descriptors 0-2
+/// (cli_register_file_handles()); output to the latter two still goes
+/// through the VM output layer.
+fn register_std_streams() {
+    use std::os::unix::io::FromRawFd;
+    FILE_HANDLES.with(|h| {
+        let mut h = h.borrow_mut();
+        for (fid, fd, mode, special, uri) in [
+            (1i64, 0, "rb", SpecialStream::None, "php://stdin"),
+            (2, 1, "wb", SpecialStream::Stdout, "php://stdout"),
+            (3, 2, "wb", SpecialStream::Stderr, "php://stderr"),
+        ] {
+            if h.contains_key(&fid) {
+                continue;
+            }
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                continue;
+            }
+            let seekable = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) } >= 0;
+            // The handle owns the real descriptor: fclose(STDIN) closes 0.
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            h.insert(
+                fid,
+                FileHandle {
+                    file,
+                    mode: mode.to_string(),
+                    eof: false,
+                    special,
+                    filter_read_pending: Vec::new(),
+                    filter_read_ready: Vec::new(),
+                    uri: uri.to_string(),
+                    wrapper_type: "PHP".to_string(),
+                    stream_type: "STDIO".to_string(),
+                    seekable,
+                    user_wrapper: None,
+                    user_wrapper_class: None,
+                    user_scheme: None,
+                    sock: None,
+                },
+            );
+        }
+    });
+}
+
+/// Default stream chunk size (php_stream chunk_size).
+const STREAM_CHUNK_SIZE: usize = 8192;
 
 fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
     alloc_file_handle_special(file, mode, SpecialStream::None)
@@ -10322,6 +10438,9 @@ fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64,
     let fid = val.to_long();
     let has_handle = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
     if has_handle {
+        // CLI: stream I/O may block (or be observed by another process);
+        // pending unbuffered output goes out first.
+        vm.flush_cli_output();
         return Ok(fid);
     }
     let msg = format!(
@@ -10357,6 +10476,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     user_wrapper: None,
                     user_wrapper_class: None,
                     user_scheme: None,
+                    sock: None,
                 },
             );
         });
@@ -10691,7 +10811,24 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
             "stderr" => Some(SpecialStream::Stderr),
-            "stdin" => Some(SpecialStream::Stdin),
+            "stdin" => {
+                let fd = unsafe { libc::dup(0) };
+                if fd >= 0 {
+                    use std::os::unix::io::FromRawFd;
+                    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+                    let fid =
+                        alloc_file_handle_special_uri(file, &mode, SpecialStream::Stdin, &filename);
+                    FILE_HANDLES.with(|h| {
+                        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                            fh.special = SpecialStream::None;
+                            fh.seekable = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) } >= 0;
+                        }
+                    });
+                    goro_core::value::register_resource(fid, b"stream");
+                    return Ok(Value::Resource(fid));
+                }
+                Some(SpecialStream::Stdin)
+            }
             "output" => Some(SpecialStream::Output),
             "memory" => Some(SpecialStream::Memory),
             "input" => Some(SpecialStream::Memory), // tests don't rely on stdin
@@ -10946,14 +11083,39 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
+/// CLI: STDERR writes go straight to descriptor 2 (after pending stdout).
+fn write_cli_stderr(vm: &mut Vm, bytes: &[u8]) -> usize {
+    vm.flush_cli_output();
+    let mut done = 0;
+    while done < bytes.len() {
+        let n = unsafe {
+            libc::write(
+                2,
+                bytes[done..].as_ptr() as *const libc::c_void,
+                bytes.len() - done,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        done += n as usize;
+    }
+    done
+}
+
 /// Write `bytes` to the physical backing of the stream (file or vm
 /// output for special streams). Used after the write filter chain has
 /// been applied.
 fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     // The PHP constants STDIN/STDOUT/STDERR are pre-registered at resource
     // ids 1/2/3 without a FILE_HANDLES entry. Route those directly.
+    if fid == 3 && vm.cli_direct_output {
+        return write_cli_stderr(vm, bytes);
+    }
     if fid == 2 || fid == 3 {
         vm.write_output(bytes);
+        // CLI: STDOUT is unbuffered.
+        vm.flush_cli_output();
         return bytes.len();
     }
     // Check special routing for explicitly opened php://stdout etc.
@@ -10964,6 +11126,7 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
             .unwrap_or(SpecialStream::None)
     });
     match special {
+        SpecialStream::Stderr if vm.cli_direct_output => write_cli_stderr(vm, bytes),
         SpecialStream::Stdout | SpecialStream::Output | SpecialStream::Stderr => {
             vm.write_output(bytes);
             bytes.len()
@@ -11039,33 +11202,38 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            let mut buf = vec![0u8; length];
-            match fh.file.read(&mut buf) {
-                Ok(0) => {
-                    fh.eof = true;
-                    Ok(Value::String(PhpString::from_bytes(b"")))
-                }
-                Ok(n) => {
-                    buf.truncate(n);
-                    // PHP marks EOF when fewer bytes than requested are read
-                    // from a stream. This applies to plain files and to
-                    // php://memory / php://temp (which are seekable, so once
-                    // we hit the end we report EOF).
-                    if n < length
-                        && matches!(
-                            fh.special,
-                            SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp
-                        )
-                    {
-                        fh.eof = true;
+            // _php_stream_read(): plain files and memory streams read until
+            // the request is satisfied; other streams return after one read.
+            let greedy = fh.is_greedy();
+            let mut buf = vec![0u8; length.min(1 << 20)];
+            let mut got = 0usize;
+            loop {
+                if got == buf.len() {
+                    if got >= length {
+                        break;
                     }
-                    Ok(Value::String(PhpString::from_vec(buf)))
+                    buf.resize((got * 2).min(length), 0);
                 }
-                Err(e) => {
-                    // Capture errno before we drop the borrow
-                    Err(e.raw_os_error().unwrap_or(0))
+                match fh.read_raw(&mut buf[got..], got > 0) {
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        got += n;
+                        if got >= length || !greedy {
+                            break;
+                        }
+                    }
+                    // Non-blocking stream without data: not an error.
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) if got > 0 => break,
+                    Err(_) if fh.sock.is_some() => return Ok(Value::False),
+                    Err(e) => return Err(e.raw_os_error().unwrap_or(0)),
                 }
             }
+            buf.truncate(got);
+            Ok(Value::String(PhpString::from_vec(buf)))
         } else {
             Ok(Value::False)
         }
@@ -11114,7 +11282,7 @@ fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
             let Some(fh) = h.get_mut(&fid) else {
                 return (0usize, true);
             };
-            match fh.file.read(&mut raw) {
+            match fh.read_direct(&mut raw, false) {
                 Ok(0) => {
                     fh.eof = true;
                     (0, true)
@@ -11214,6 +11382,33 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // _php_stream_write(): invalidate the read buffer of a seekable stream
+    // so the data lands at the logical position.
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            if fh.seekable && !fh.filter_read_ready.is_empty() {
+                let n = std::mem::take(&mut fh.filter_read_ready).len() as i64;
+                let _ = fh.file.seek(SeekFrom::Current(-n));
+            }
+        }
+    });
+    // Socket streams: php_sockop_write() reports partial / failed writes.
+    if xp_socket::is_socket(fid)
+        && !crate::stream_filters::chain_has_direction(
+            fid,
+            crate::stream_filters::STREAM_FILTER_WRITE,
+        )
+    {
+        if to_write.is_empty() {
+            return Ok(Value::Long(0));
+        }
+        let n = xp_socket::sock_write(vm, "fwrite", fid, to_write);
+        return Ok(if n < 0 {
+            Value::False
+        } else {
+            Value::Long(n as i64)
+        });
+    }
     // Apply write filter chain if any are attached.
     let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
     // STDOUT/STDERR are resource ids 1/2/3 without a FILE_HANDLES entry.
@@ -11388,8 +11583,9 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = Vec::new();
             let mut byte = [0u8; 1];
+            let mut failed = false;
             for _ in 0..limit {
-                match fh.file.read(&mut byte) {
+                match fh.read_raw(&mut byte, false) {
                     Ok(0) => {
                         fh.eof = true;
                         break;
@@ -11400,8 +11596,16 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        failed = e.kind() != std::io::ErrorKind::WouldBlock;
+                        break;
+                    }
                 }
+            }
+            // A socket read that timed out (or failed) with nothing read
+            // makes fgets() fail.
+            if buf.is_empty() && fh.sock.is_some() && (failed || fh.eof) {
+                return Ok(Value::False);
             }
             // php://temp reads greedily from its inner memory stream, so the
             // eof flag is raised as soon as all data has been consumed.
@@ -11446,8 +11650,16 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::True);
     }
     FILE_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        if let Some(fh) = handles.get(&fid) {
+        let mut handles = handles.borrow_mut();
+        if let Some(fh) = handles.get_mut(&fid) {
+            // _php_stream_eof(): buffered data means not at EOF; sockets
+            // check whether the peer is still alive.
+            if !fh.filter_read_ready.is_empty() {
+                return Ok(Value::False);
+            }
+            if !fh.eof && fh.sock.is_some() {
+                xp_socket::check_liveness(fh);
+            }
             if fh.eof {
                 Ok(Value::True)
             } else {
@@ -11466,6 +11678,7 @@ fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             fh.eof = false;
+            fh.filter_read_ready.clear();
             match fh.file.seek(SeekFrom::Start(0)) {
                 Ok(_) => Ok(Value::True),
                 Err(_) => Ok(Value::False),
@@ -11495,10 +11708,13 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output
             );
             fh.eof = false;
+            // The read buffer is discarded; SEEK_CUR is relative to the
+            // logical position (before the buffered bytes).
+            let buffered = std::mem::take(&mut fh.filter_read_ready).len() as i64;
             let seek = match whence {
-                0 => SeekFrom::Start(offset as u64), // SEEK_SET
-                1 => SeekFrom::Current(offset),      // SEEK_CUR
-                2 => SeekFrom::End(offset),          // SEEK_END
+                0 => SeekFrom::Start(offset as u64),       // SEEK_SET
+                1 => SeekFrom::Current(offset - buffered), // SEEK_CUR
+                2 => SeekFrom::End(offset),                // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
             };
             if is_unseekable_special {
@@ -11546,8 +11762,9 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
+            let buffered = fh.filter_read_ready.len() as u64;
             match fh.file.stream_position() {
-                Ok(pos) => Ok(Value::Long(pos as i64)),
+                Ok(pos) => Ok(Value::Long(pos.saturating_sub(buffered) as i64)),
                 Err(_) => Ok(Value::False),
             }
         } else {
@@ -15783,13 +16000,19 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = Vec::new();
-            match fh.file.read_to_end(&mut buf) {
-                Ok(_n) => {
-                    fh.eof = true;
-                    Some(buf)
+            let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
+            loop {
+                match fh.read_raw(&mut chunk, false) {
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) if !buf.is_empty() || fh.sock.is_some() => break,
+                    Err(_) => return None,
                 }
-                Err(_) => None,
             }
+            Some(buf)
         } else {
             None
         }
@@ -16390,7 +16613,7 @@ fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = [0u8; 1];
-            match fh.file.read(&mut buf) {
+            match fh.read_raw(&mut buf, false) {
                 Ok(0) => {
                     fh.eof = true;
                     Ok(Value::False)
@@ -16600,8 +16823,17 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let max_length = match args.get(1).map(|v| v.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => -1,
+        Some(v) => v.to_long(),
+    };
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
+    if max_length < -1 {
+        return Err(throw_value_error_msg(
+            vm,
+            "stream_get_contents(): Argument #2 ($length) must be greater than or equal to -1",
+        ));
+    }
 
     let has_read_filters =
         crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
@@ -16630,39 +16862,95 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
         return Ok(Value::String(PhpString::from_vec(out)));
     }
 
+    // desiredpos handling: SEEK_CUR forward, SEEK_SET backward.
+    if offset >= 0 {
+        let ok = FILE_HANDLES.with(|h| {
+            let mut h = h.borrow_mut();
+            let Some(fh) = h.get_mut(&fid) else {
+                return true;
+            };
+            if !fh.seekable {
+                // Non-seekable streams start at position 0.
+                return offset == 0;
+            }
+            let buffered = fh.filter_read_ready.len() as u64;
+            let ok = match fh.file.stream_position() {
+                Ok(pos) if offset as u64 + buffered > pos => {
+                    fh.filter_read_ready.clear();
+                    fh.file.seek(SeekFrom::Current(offset - pos as i64)).is_ok()
+                }
+                Ok(pos) if (offset as u64) + buffered < pos => {
+                    fh.filter_read_ready.clear();
+                    fh.file.seek(SeekFrom::Start(offset as u64)).is_ok()
+                }
+                Ok(_) => return true,
+                Err(_) => fh.file.seek(SeekFrom::Start(offset as u64)).is_ok(),
+            };
+            if ok {
+                fh.eof = false;
+            }
+            ok
+        });
+        if !ok {
+            vm.emit_warning(&format!(
+                "stream_get_contents(): Failed to seek to position {} in the stream",
+                offset
+            ));
+            return Ok(Value::False);
+        }
+    }
+    if max_length == 0 {
+        return Ok(Value::String(PhpString::from_bytes(b"")));
+    }
+    // _php_stream_copy_to_mem(): read until EOF (or maxlen bytes).
+    let limit = if max_length < 0 {
+        usize::MAX
+    } else {
+        max_length as usize
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut read_error: Option<i32> = None;
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            // Seek to offset if specified
-            if offset >= 0 {
-                let _ = fh.file.seek(SeekFrom::Start(offset as u64));
+        let Some(fh) = handles.get_mut(&fid) else {
+            return;
+        };
+        let mut buf = vec![0u8; 8192];
+        while out.len() < limit {
+            if limit != usize::MAX && fh.eof {
+                break;
             }
-            let mut buf = Vec::new();
-            if max_length >= 0 {
-                buf = vec![0; max_length as usize];
-                match fh.file.read(&mut buf) {
-                    Ok(n) => {
-                        buf.truncate(n);
-                        if n == 0 {
+            let want = (limit - out.len()).min(buf.len());
+            match fh.read_raw(&mut buf[..want], false) {
+                Ok(0) => {
+                    fh.eof = true;
+                    break;
+                }
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) => {
+                    if fh.sock.is_none() && e.kind() != std::io::ErrorKind::WouldBlock {
+                        read_error = e.raw_os_error();
+                        if read_error != Some(libc::EBADF) {
                             fh.eof = true;
                         }
-                        Ok(Value::String(PhpString::from_vec(buf)))
                     }
-                    Err(_) => Ok(Value::False),
-                }
-            } else {
-                match fh.file.read_to_end(&mut buf) {
-                    Ok(_) => {
-                        fh.eof = true;
-                        Ok(Value::String(PhpString::from_vec(buf)))
-                    }
-                    Err(_) => Ok(Value::False),
+                    break;
                 }
             }
-        } else {
-            Ok(Value::False)
         }
-    })
+    });
+    if let Some(errno) = read_error {
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            &format!(
+                "stream_get_contents(): Read of 8192 bytes failed with errno={} {}",
+                errno,
+                xp_socket::strerror(errno)
+            ),
+            line,
+        );
+    }
+    Ok(Value::String(PhpString::from_vec(out)))
 }
 
 fn get_error_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -17489,383 +17777,6 @@ fn gethostbyaddr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(name.unwrap_or(addr))))
 }
 
-thread_local! {
-    static PROC_HANDLES: RefCell<StdHashMap<i64, std::process::Child>> = RefCell::new(StdHashMap::new());
-    static NEXT_PROC_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(1) };
-}
-
-fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let cmd = args.first().unwrap_or(&Value::Null);
-    let descriptor_spec = args.get(1);
-    let pipes_ref = args.get(2);
-
-    use std::process::{Command, Stdio};
-    // PHP semantics: if cmd is an array, exec directly without a shell.
-    // Otherwise pass to sh -c.
-    let mut child_cmd = match cmd {
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            let parts: Vec<String> = arr
-                .iter()
-                .map(|(_, v)| v.to_php_string().to_string_lossy().to_string())
-                .collect();
-            if parts.is_empty() {
-                return Ok(Value::False);
-            }
-            let mut c = Command::new(&parts[0]);
-            if parts.len() > 1 {
-                c.args(&parts[1..]);
-            }
-            c
-        }
-        _ => {
-            let cmd_str = cmd.to_php_string().to_string_lossy().to_string();
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(&cmd_str);
-            c
-        }
-    };
-    let mut has_stdin_pipe = false;
-    let mut has_stdout_pipe = false;
-    let mut has_stderr_pipe = false;
-    let mut stdin_assigned = false;
-    let mut stdout_assigned = false;
-    let mut stderr_assigned = false;
-
-    if let Some(Value::Array(spec)) = descriptor_spec {
-        let spec = spec.borrow();
-        for (key, val) in spec.iter() {
-            let fd_num = match key {
-                ArrayKey::Int(n) => *n,
-                _ => continue,
-            };
-            match val {
-                Value::Array(fd_spec) => {
-                    let fd_spec = fd_spec.borrow();
-                    let fd_type = fd_spec
-                        .get_int(0)
-                        .map(|v| v.to_php_string())
-                        .unwrap_or_else(|| PhpString::from_bytes(b""));
-                    match &*fd_type.to_string_lossy() {
-                        "pipe" => match fd_num {
-                            0 => {
-                                child_cmd.stdin(Stdio::piped());
-                                has_stdin_pipe = true;
-                                stdin_assigned = true;
-                            }
-                            1 => {
-                                child_cmd.stdout(Stdio::piped());
-                                has_stdout_pipe = true;
-                                stdout_assigned = true;
-                            }
-                            2 => {
-                                child_cmd.stderr(Stdio::piped());
-                                has_stderr_pipe = true;
-                                stderr_assigned = true;
-                            }
-                            _ => {}
-                        },
-                        "file" => {
-                            let filename = fd_spec
-                                .get_int(1)
-                                .map(|v| v.to_php_string())
-                                .unwrap_or_else(|| PhpString::from_bytes(b""));
-                            let mode = fd_spec
-                                .get_int(2)
-                                .map(|v| v.to_php_string())
-                                .unwrap_or_else(|| PhpString::from_bytes(b"r"));
-                            let mode_str = mode.to_string_lossy();
-                            let filename_str = filename.to_string_lossy();
-                            match fd_num {
-                                0 => {
-                                    if let Ok(f) = std::fs::File::open(&*filename_str) {
-                                        child_cmd.stdin(f);
-                                        stdin_assigned = true;
-                                    }
-                                }
-                                1 => {
-                                    let file = if mode_str.contains('a') {
-                                        std::fs::OpenOptions::new()
-                                            .append(true)
-                                            .create(true)
-                                            .open(&*filename_str)
-                                    } else {
-                                        std::fs::File::create(&*filename_str)
-                                    };
-                                    if let Ok(f) = file {
-                                        child_cmd.stdout(f);
-                                        stdout_assigned = true;
-                                    }
-                                }
-                                2 => {
-                                    let file = if mode_str.contains('a') {
-                                        std::fs::OpenOptions::new()
-                                            .append(true)
-                                            .create(true)
-                                            .open(&*filename_str)
-                                    } else {
-                                        std::fs::File::create(&*filename_str)
-                                    };
-                                    if let Ok(f) = file {
-                                        child_cmd.stderr(f);
-                                        stderr_assigned = true;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Value::Long(fid) => {
-                    // The user passed an existing file/stream resource (like STDIN, or an fopen handle).
-                    // STDIN=1, STDOUT=2, STDERR=3 in our const setup; treat these as inherited.
-                    // For other ids, look up the file in FILE_HANDLES and dup its fd.
-                    use std::os::unix::io::AsRawFd;
-                    let fid_v = *fid;
-                    if fid_v <= 3 {
-                        // Inherit standard streams: stdio is fd 0/1/2
-                        match fd_num {
-                            0 => {
-                                child_cmd.stdin(Stdio::inherit());
-                                stdin_assigned = true;
-                            }
-                            1 => {
-                                child_cmd.stdout(Stdio::inherit());
-                                stdout_assigned = true;
-                            }
-                            2 => {
-                                child_cmd.stderr(Stdio::inherit());
-                                stderr_assigned = true;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        // dup the file handle into a fresh fd we can hand to Command
-                        let dup_fd: Option<i32> = FILE_HANDLES.with(|h| {
-                            let handles = h.borrow();
-                            handles.get(&fid_v).map(|fh| {
-                                let raw = fh.file.as_raw_fd();
-                                unsafe { libc::dup(raw) }
-                            })
-                        });
-                        if let Some(dup_fd) = dup_fd {
-                            if dup_fd >= 0 {
-                                let stdio: Stdio = unsafe {
-                                    <Stdio as std::os::unix::io::FromRawFd>::from_raw_fd(dup_fd)
-                                };
-                                match fd_num {
-                                    0 => {
-                                        child_cmd.stdin(stdio);
-                                        stdin_assigned = true;
-                                    }
-                                    1 => {
-                                        child_cmd.stdout(stdio);
-                                        stdout_assigned = true;
-                                    }
-                                    2 => {
-                                        child_cmd.stderr(stdio);
-                                        stderr_assigned = true;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if !stdin_assigned {
-        child_cmd.stdin(Stdio::null());
-    }
-    if !stdout_assigned {
-        child_cmd.stdout(Stdio::inherit());
-    }
-    if !stderr_assigned {
-        child_cmd.stderr(Stdio::inherit());
-    }
-
-    if let Some(cwd) = args.get(3) {
-        if !matches!(cwd, Value::Null) {
-            let s = cwd.to_php_string().to_string_lossy();
-            if !s.is_empty() {
-                child_cmd.current_dir(&*s);
-            }
-        }
-    }
-    if let Some(Value::Array(env_arr)) = args.get(4) {
-        child_cmd.env_clear();
-        for (key, val) in env_arr.borrow().iter() {
-            let k = match key {
-                ArrayKey::String(s) => s.to_string_lossy(),
-                ArrayKey::Int(n) => format!("{}", n),
-            };
-            child_cmd.env(&*k, &*val.to_php_string().to_string_lossy());
-        }
-    }
-
-    match child_cmd.spawn() {
-        Ok(mut child) => {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            let mut pipes_arr = PhpArray::new();
-            if has_stdin_pipe {
-                if let Some(stdin) = child.stdin.take() {
-                    let fid = alloc_file_handle(
-                        unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) },
-                        "w",
-                    );
-                    goro_core::value::register_resource(fid, b"stream");
-                    pipes_arr.set(ArrayKey::Int(0), Value::Resource(fid));
-                }
-            }
-            if has_stdout_pipe {
-                if let Some(stdout) = child.stdout.take() {
-                    let fid = alloc_file_handle(
-                        unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) },
-                        "r",
-                    );
-                    goro_core::value::register_resource(fid, b"stream");
-                    pipes_arr.set(ArrayKey::Int(1), Value::Resource(fid));
-                }
-            }
-            if has_stderr_pipe {
-                if let Some(stderr) = child.stderr.take() {
-                    let fid = alloc_file_handle(
-                        unsafe { std::fs::File::from_raw_fd(stderr.into_raw_fd()) },
-                        "r",
-                    );
-                    goro_core::value::register_resource(fid, b"stream");
-                    pipes_arr.set(ArrayKey::Int(2), Value::Resource(fid));
-                }
-            }
-            if let Some(Value::Reference(r)) = pipes_ref {
-                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(pipes_arr)));
-            }
-            let proc_id = NEXT_PROC_ID.with(|id| {
-                let pid = id.get();
-                id.set(pid + 1);
-                PROC_HANDLES.with(|h| h.borrow_mut().insert(pid, child));
-                pid
-            });
-            goro_core::value::register_resource(proc_id, b"process");
-            Ok(Value::Resource(proc_id))
-        }
-        Err(_) => Ok(Value::False),
-    }
-}
-
-fn proc_close_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
-    let exit_code = PROC_HANDLES.with(|h| match h.borrow_mut().remove(&proc_id) {
-        Some(mut child) => child
-            .wait()
-            .map(|s| s.code().unwrap_or(-1) as i64)
-            .unwrap_or(-1),
-        None => -1,
-    });
-    Ok(Value::Long(exit_code))
-}
-
-fn proc_get_status_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
-    PROC_HANDLES.with(|h| {
-        let mut handles = h.borrow_mut();
-        if let Some(child) = handles.get_mut(&proc_id) {
-            let mut arr = PhpArray::new();
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"command")),
-                        Value::String(PhpString::from_bytes(b"")),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"pid")),
-                        Value::Long(child.id() as i64),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"running")),
-                        Value::False,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"signaled")),
-                        Value::False,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"stopped")),
-                        Value::False,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"exitcode")),
-                        Value::Long(status.code().unwrap_or(-1) as i64),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"termsig")),
-                        Value::Long(0),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"stopsig")),
-                        Value::Long(0),
-                    );
-                }
-                Ok(None) => {
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"command")),
-                        Value::String(PhpString::from_bytes(b"")),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"pid")),
-                        Value::Long(child.id() as i64),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"running")),
-                        Value::True,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"signaled")),
-                        Value::False,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"stopped")),
-                        Value::False,
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"exitcode")),
-                        Value::Long(-1),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"termsig")),
-                        Value::Long(0),
-                    );
-                    arr.set(
-                        ArrayKey::String(PhpString::from_bytes(b"stopsig")),
-                        Value::Long(0),
-                    );
-                }
-                Err(_) => return Ok(Value::False),
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(arr))))
-        } else {
-            Ok(Value::False)
-        }
-    })
-}
-
-fn proc_terminate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let proc_id = args.first().unwrap_or(&Value::Null).to_long();
-    PROC_HANDLES.with(|h| {
-        if let Some(child) = h.borrow_mut().get_mut(&proc_id) {
-            match child.kill() {
-                Ok(_) => Ok(Value::True),
-                Err(_) => Ok(Value::False),
-            }
-        } else {
-            Ok(Value::False)
-        }
-    })
-}
-
 fn inet_pton_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let addr_str = args.first().unwrap_or(&Value::Null).to_php_string();
     let addr_s = addr_str.to_string_lossy();
@@ -17933,17 +17844,6 @@ fn mangle_property_name(
 }
 
 // Stream stubs
-fn stream_set_blocking_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
-}
-fn stream_set_timeout_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let arg = args.first().unwrap_or(&Value::Null);
-    // Require an open stream resource (throws TypeError on closed/non-resource).
-    let _fid = require_open_stream(vm, arg, "stream_set_timeout")?;
-    // For regular file streams we return false; sockets would set SO_RCVTIMEO.
-    // We do not yet track per-stream timeouts.
-    Ok(Value::False)
-}
 fn stream_set_write_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
@@ -17989,23 +17889,26 @@ fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         let data = FILE_HANDLES.with(|h| {
             let mut handles = h.borrow_mut();
             if let Some(fh) = handles.get_mut(&src_fid) {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                if max_length >= 0 {
-                    buf.resize(max_length as usize, 0);
-                    match fh.file.read(&mut buf) {
-                        Ok(n) => {
-                            buf.truncate(n);
-                            Some(buf)
-                        }
-                        Err(_) => None,
-                    }
+                let limit = if max_length < 0 {
+                    usize::MAX
                 } else {
-                    match fh.file.read_to_end(&mut buf) {
-                        Ok(_) => Some(buf),
-                        Err(_) => None,
+                    max_length as usize
+                };
+                let mut out = Vec::new();
+                let mut chunk = vec![0u8; 8192];
+                while out.len() < limit {
+                    let want = (limit - out.len()).min(chunk.len());
+                    match fh.read_raw(&mut chunk[..want], false) {
+                        Ok(0) => {
+                            fh.eof = true;
+                            break;
+                        }
+                        Ok(n) => out.extend_from_slice(&chunk[..n]),
+                        Err(_) if !out.is_empty() || fh.sock.is_some() => break,
+                        Err(_) => return None,
                     }
                 }
+                Some(out)
             } else {
                 None
             }
@@ -18749,22 +18652,40 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             // Order matches PHP's _php_stream_populate_meta_data():
             // timed_out, blocked, eof, [wrapper_data], wrapper_type, stream_type,
             // mode, unread_bytes, seekable, uri.
+            // PHP_STREAM_OPTION_META_DATA_API: sockets report their own
+            // state; descriptor-backed STDIO streams read O_NONBLOCK.
+            let (timed_out, blocked) = match xp_socket::meta(fh) {
+                Some(m) => m,
+                None => {
+                    let blocked =
+                        if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp) {
+                            true
+                        } else {
+                            use std::os::unix::io::AsRawFd;
+                            let fl = unsafe { libc::fcntl(fh.file.as_raw_fd(), libc::F_GETFL, 0) };
+                            fl < 0 || fl & libc::O_NONBLOCK == 0
+                        };
+                    (false, blocked)
+                }
+            };
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"timed_out")),
-                Value::False,
+                if timed_out { Value::True } else { Value::False },
             );
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"blocked")),
-                Value::True,
+                if blocked { Value::True } else { Value::False },
             );
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"eof")),
                 if fh.eof { Value::True } else { Value::False },
             );
-            arr.set(
-                ArrayKey::String(PhpString::from_bytes(b"wrapper_type")),
-                Value::String(PhpString::from_string(fh.wrapper_type.clone())),
-            );
+            if !fh.wrapper_type.is_empty() {
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"wrapper_type")),
+                    Value::String(PhpString::from_string(fh.wrapper_type.clone())),
+                );
+            }
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"stream_type")),
                 Value::String(PhpString::from_string(fh.stream_type.clone())),
@@ -18931,66 +18852,133 @@ fn stream_get_transports_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn stream_socket_client_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_server_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_get_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_select_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_pair_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+/// One `ops->read()` worth of data for record reading: post-filter bytes
+/// when read filters are attached. Returns None when no data could be
+/// read (EOF, would block, timeout or error).
+fn read_some(vm: &mut Vm, fid: i64, max: usize) -> Option<Vec<u8>> {
+    if crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ) {
+        let d = read_filtered(vm, fid, max);
+        return if d.is_empty() { None } else { Some(d) };
+    }
+    FILE_HANDLES.with(|h| {
+        let mut h = h.borrow_mut();
+        let fh = h.get_mut(&fid)?;
+        let mut buf = vec![0u8; max];
+        match fh.read_raw(&mut buf, false) {
+            Ok(0) => {
+                fh.eof = true;
+                None
+            }
+            Ok(n) => {
+                buf.truncate(n);
+                Some(buf)
+            }
+            Err(_) => None,
+        }
+    })
 }
 
-fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let max_length = args.get(1).map(|v| v.to_long() as usize).unwrap_or(0);
+/// Put bytes back at the front of the stream's read buffer.
+fn unread_bytes(fid: i64, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            let mut v = data.to_vec();
+            v.extend_from_slice(&fh.filter_read_ready);
+            fh.filter_read_ready = v;
+        }
+    });
+}
+
+/// php_stream_get_record()
+fn stream_get_record(vm: &mut Vm, fid: i64, maxlen: usize, delim: &[u8]) -> Option<Vec<u8>> {
+    if maxlen == 0 {
+        return None;
+    }
+    // Already buffered data first (php_stream readbuf).
+    let mut buf: Vec<u8> = FILE_HANDLES.with(|h| {
+        h.borrow_mut()
+            .get_mut(&fid)
+            .map(|fh| std::mem::take(&mut fh.filter_read_ready))
+            .unwrap_or_default()
+    });
+    // Search for the delimiter in buf[from..] (within the first maxlen bytes).
+    let find = |buf: &[u8], from: usize| -> Option<usize> {
+        let hay = &buf[..buf.len().min(maxlen)];
+        if delim.is_empty() || hay.len() < delim.len() || from >= hay.len() {
+            return None;
+        }
+        hay[from..]
+            .windows(delim.len())
+            .position(|w| w == delim)
+            .map(|p| p + from)
+    };
+    let mut found = find(&buf, 0);
+    while found.is_none() && buf.len() < maxlen {
+        let want = (maxlen - buf.len()).min(8192);
+        let before = buf.len();
+        match read_some(vm, fid, want) {
+            Some(d) => buf.extend_from_slice(&d),
+            None => break,
+        }
+        found = find(&buf, before.saturating_sub(delim.len().saturating_sub(1)));
+    }
+    let eof = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.eof).unwrap_or(true));
+    let ret_len = if let Some(p) = found {
+        p
+    } else if delim.is_empty() && buf.len() >= maxlen {
+        maxlen
+    } else if buf.len() < maxlen && !eof {
+        unread_bytes(fid, &buf);
+        return None;
+    } else if buf.is_empty() && eof {
+        return None;
+    } else {
+        buf.len().min(maxlen)
+    };
+    let skip = if found.is_some() { delim.len() } else { 0 };
+    unread_bytes(fid, &buf[ret_len + skip..]);
+    buf.truncate(ret_len);
+    Some(buf)
+}
+
+fn stream_get_line_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "stream_get_line")?;
+    let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if max_length < 0 {
+        return Err(throw_value_error_msg(
+            vm,
+            "stream_get_line(): Argument #2 ($length) must be greater than or equal to 0",
+        ));
+    }
+    let max_length = if max_length == 0 {
+        8192
+    } else {
+        max_length as usize
+    };
     let ending = args
         .get(2)
         .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b"\n"));
-    let ending_bytes = ending.as_bytes();
-    if max_length == 0 {
-        return Ok(Value::False);
-    }
-    FILE_HANDLES.with(|h| {
-        let mut handles = h.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut byte = [0u8; 1];
-            for _ in 0..max_length {
-                match fh.file.read(&mut byte) {
-                    Ok(0) => {
-                        fh.eof = true;
-                        break;
-                    }
-                    Ok(_) => {
-                        buf.push(byte[0]);
-                        if buf.len() >= ending_bytes.len()
-                            && buf[buf.len() - ending_bytes.len()..] == *ending_bytes
-                        {
-                            buf.truncate(buf.len() - ending_bytes.len());
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if buf.is_empty() && fh.eof {
-                Ok(Value::False)
-            } else {
-                Ok(Value::String(PhpString::from_vec(buf)))
-            }
-        } else {
-            Ok(Value::False)
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
+    if let Some(m) = stream_mode_clean(fid) {
+        if matches!(m.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(
+                "stream_get_line(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                line,
+            );
+            return Ok(Value::False);
         }
-    })
+    }
+    Ok(
+        match stream_get_record(vm, fid, max_length, ending.as_bytes()) {
+            Some(b) => Value::String(PhpString::from_vec(b)),
+            None => Value::False,
+        },
+    )
 }
 
 fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -19009,15 +18997,6 @@ fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     // We don't currently honour the chunk size internally. Return the default
     // 8192 so callers see a sane previous value.
     Ok(Value::Long(8192))
-}
-fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
 }
 fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
@@ -19118,21 +19097,26 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match child {
         Ok(child) => {
             use std::os::unix::io::{FromRawFd, IntoRawFd};
+            // php_stream_fopen_from_pipe(): no wrapper, not seekable.
+            let pipe_stream = |file: std::fs::File| {
+                let fid = alloc_file_handle(file, &mode_str);
+                FILE_HANDLES.with(|h| {
+                    if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                        fh.wrapper_type = String::new();
+                        fh.seekable = false;
+                    }
+                });
+                goro_core::value::register_resource(fid, b"stream");
+                fid
+            };
             if mode_str.contains('r') {
                 if let Some(stdout) = child.stdout {
-                    let fid = alloc_file_handle(
-                        unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) },
-                        &mode_str,
-                    );
-                    goro_core::value::register_resource(fid, b"stream");
+                    let fid =
+                        pipe_stream(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) });
                     return Ok(Value::Resource(fid));
                 }
             } else if let Some(stdin) = child.stdin {
-                let fid = alloc_file_handle(
-                    unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) },
-                    &mode_str,
-                );
-                goro_core::value::register_resource(fid, b"stream");
+                let fid = pipe_stream(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) });
                 return Ok(Value::Resource(fid));
             }
             Ok(Value::False)
@@ -19308,104 +19292,11 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let hostname = args.first().unwrap_or(&Value::Null).to_php_string();
-    let port = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
-    let errno_ref = args.get(2);
-    let errstr_ref = args.get(3);
-    let timeout = args
-        .get(4)
-        .map(|v| v.to_double())
-        .filter(|&d| d > 0.0)
-        .unwrap_or(60.0);
-
-    let host_str = hostname.to_string_lossy();
-
-    // Try to connect
-    use std::net::{TcpStream, ToSocketAddrs};
-    // Strip URL scheme
-    let stripped = host_str
-        .trim_start_matches("tcp://")
-        .trim_start_matches("ssl://")
-        .trim_start_matches("tls://")
-        .to_string();
-    let addr = if port > 0 && !stripped.contains(':') {
-        format!("{}:{}", stripped, port)
-    } else {
-        stripped
-    };
-
-    // Resolve via DNS (supports "localhost")
-    let socket_addr = match addr.to_socket_addrs() {
-        Ok(mut iter) => match iter.next() {
-            Some(a) => a,
-            None => {
-                if let Some(Value::Reference(r)) = errno_ref {
-                    *r.borrow_mut() = Value::Long(111);
-                }
-                if let Some(Value::Reference(r)) = errstr_ref {
-                    *r.borrow_mut() = Value::String(PhpString::from_string(format!(
-                        "DNS lookup failed for {}",
-                        addr
-                    )));
-                }
-                vm.emit_warning(&format!(
-                    "fsockopen(): Unable to connect to {} (DNS lookup failed)",
-                    addr
-                ));
-                return Ok(Value::False);
-            }
-        },
-        Err(e) => {
-            if let Some(Value::Reference(r)) = errno_ref {
-                *r.borrow_mut() = Value::Long(111);
-            }
-            if let Some(Value::Reference(r)) = errstr_ref {
-                *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
-            }
-            vm.emit_warning(&format!(
-                "fsockopen(): Unable to connect to {} ({})",
-                addr, e
-            ));
-            return Ok(Value::False);
-        }
-    };
-
-    match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs_f64(timeout)) {
-        Ok(stream) => {
-            // Set errno to 0 and errstr to ""
-            if let Some(Value::Reference(r)) = errno_ref {
-                *r.borrow_mut() = Value::Long(0);
-            }
-            if let Some(Value::Reference(r)) = errstr_ref {
-                *r.borrow_mut() = Value::String(PhpString::from_bytes(b""));
-            }
-
-            use std::os::unix::io::IntoRawFd;
-            let raw_fd = stream.into_raw_fd();
-            use std::os::unix::io::FromRawFd;
-            let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
-            let fid = alloc_file_handle(file, "r+");
-            goro_core::value::register_resource(fid, b"stream");
-            Ok(Value::Resource(fid))
-        }
-        Err(e) => {
-            if let Some(Value::Reference(r)) = errno_ref {
-                *r.borrow_mut() = Value::Long(111);
-            } // ECONNREFUSED
-            if let Some(Value::Reference(r)) = errstr_ref {
-                *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
-            }
-            vm.emit_warning(&format!(
-                "fsockopen(): Unable to connect to {} ({})",
-                addr, e
-            ));
-            Ok(Value::False)
-        }
-    }
+    xp_socket::fsockopen(vm, args, false)
 }
 
 fn pfsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    fsockopen_fn(vm, args)
+    xp_socket::fsockopen(vm, args, true)
 }
 
 fn register_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -19448,9 +19339,6 @@ fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::False)
 }
 fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-fn stream_socket_accept_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 

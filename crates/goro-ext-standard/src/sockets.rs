@@ -1,0 +1,2205 @@
+//! Socket transports: main/streams/xp_socket.c, transports.c and the
+//! socket parts of main/network.c, plus the socket-related stream
+//! functions of ext/standard/streamsfuncs.c and fsock.c.
+//!
+//! Socket streams are ordinary `FILE_HANDLES` entries whose `file` wraps
+//! the socket descriptor; `FileHandle::sock` holds php_netstream_data_t.
+
+use super::*;
+use std::os::unix::io::{AsRawFd, FromRawFd};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SockKind {
+    /// php_stream_generic_socket_ops (stream_socket_pair()).
+    Generic,
+    Tcp,
+    Udp,
+    Unix,
+    Udg,
+}
+
+impl SockKind {
+    /// php_stream_ops.label
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            // The openssl extension registers its own "tcp" factory.
+            SockKind::Tcp => "tcp_socket/ssl",
+            SockKind::Generic => "generic_socket",
+            SockKind::Udp => "udp_socket",
+            SockKind::Unix => "unix_socket",
+            SockKind::Udg => "udg_socket",
+        }
+    }
+
+    fn is_unix(self) -> bool {
+        matches!(self, SockKind::Unix | SockKind::Udg)
+    }
+
+    fn socktype(self) -> i32 {
+        match self {
+            SockKind::Udp | SockKind::Udg => libc::SOCK_DGRAM,
+            _ => libc::SOCK_STREAM,
+        }
+    }
+}
+
+/// php_netstream_data_t
+#[derive(Clone, Debug)]
+pub(crate) struct SockData {
+    pub kind: SockKind,
+    pub is_blocked: bool,
+    /// struct timeval; tv_sec == -1 means "no timeout".
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+    pub timeout_event: bool,
+    /// PHP_STREAM_FLAG_NO_IO (bound/listening server sockets).
+    pub no_io: bool,
+}
+
+impl SockData {
+    fn new(kind: SockKind, default_timeout: i64) -> Self {
+        SockData {
+            kind,
+            is_blocked: true,
+            tv_sec: default_timeout,
+            tv_usec: 0,
+            timeout_event: false,
+            no_io: false,
+        }
+    }
+
+    fn timeout_ms(&self) -> i32 {
+        if self.tv_sec == -1 {
+            -1
+        } else {
+            tv_to_ms(self.tv_sec, self.tv_usec)
+        }
+    }
+}
+
+const PHP_STREAM_CLIENT_PERSISTENT: i64 = 1;
+const PHP_STREAM_CLIENT_ASYNC_CONNECT: i64 = 2;
+const PHP_STREAM_CLIENT_CONNECT: i64 = 4;
+const STREAM_XPORT_BIND: i64 = 4;
+const STREAM_XPORT_LISTEN: i64 = 8;
+const STREAM_OOB: i64 = 1;
+const STREAM_PEEK: i64 = 2;
+const PHP_TIMEOUT_ULL_MAX: f64 = u64::MAX as f64;
+
+/// php_tvtoto()
+fn tv_to_ms(sec: i64, usec: i64) -> i32 {
+    (sec.wrapping_mul(1000).wrapping_add(usec / 1000)) as i32
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// php_socket_strerror() / php_socket_error_str()
+pub(crate) fn strerror(err: i32) -> String {
+    unsafe {
+        let p = libc::strerror(err);
+        if p.is_null() {
+            return format!("Unknown error {}", err);
+        }
+        std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+    }
+}
+
+/// php_pollfd_for(): poll() a single descriptor; returns revents (> 0),
+/// 0 on timeout or -1 on error.
+fn pollfd_for(fd: i32, events: i16, timeout_ms: i32) -> i32 {
+    let mut p = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    let n = unsafe { libc::poll(&mut p, 1, timeout_ms) };
+    if n > 0 { p.revents as i32 } else { n }
+}
+
+const POLLREADABLE: i16 = libc::POLLIN | libc::POLLERR | libc::POLLHUP;
+
+fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
+    let exc = if class == b"TypeError" {
+        vm.throw_type_error(msg.to_string())
+    } else {
+        vm.create_exception(class, msg, vm.current_line)
+    };
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
+}
+
+fn type_error(vm: &mut Vm, func: &str, n: usize, name: &str, ty: &str, v: &Value) -> VmError {
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type {}, {} given",
+        func,
+        n,
+        name,
+        ty,
+        Vm::value_type_name(v)
+    );
+    throw(vm, b"TypeError", &msg)
+}
+
+fn null_deprecation(vm: &mut Vm, func: &str, n: usize, name: &str, ty: &str) {
+    vm.emit_deprecated(&format!(
+        "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+        func, n, name, ty
+    ));
+}
+
+/// Z_PARAM_LONG (weak mode) for argument `n` (1-based).
+fn zpp_long(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: &Value,
+    nullable: bool,
+) -> Result<Option<i64>, VmError> {
+    let v = v.deref();
+    match &v {
+        Value::Long(l) => Ok(Some(*l)),
+        Value::Null | Value::Undef => {
+            if nullable {
+                Ok(None)
+            } else {
+                null_deprecation(vm, func, n, name, "int");
+                Ok(Some(0))
+            }
+        }
+        Value::True => Ok(Some(1)),
+        Value::False => Ok(Some(0)),
+        Value::Double(d) => double_to_long(vm, func, n, name, *d, &v, nullable),
+        Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+            Some((goro_core::value::NumStr::Long(l), _)) => Ok(Some(l)),
+            Some((goro_core::value::NumStr::Double(d), _)) => {
+                if !d.is_finite() || d.fract() != 0.0 {
+                    if (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
+                        vm.emit_deprecated(&format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            s.to_string_lossy()
+                        ));
+                        return Ok(Some(d as i64));
+                    }
+                    return Err(type_error(vm, func, n, name, ty_int(nullable), &v));
+                }
+                if d < -9.223_372_036_854_776e18 || d >= 9.223_372_036_854_776e18 {
+                    return Err(type_error(vm, func, n, name, ty_int(nullable), &v));
+                }
+                Ok(Some(d as i64))
+            }
+            None => Err(type_error(vm, func, n, name, ty_int(nullable), &v)),
+        },
+        _ => Err(type_error(vm, func, n, name, ty_int(nullable), &v)),
+    }
+}
+
+fn ty_int(nullable: bool) -> &'static str {
+    if nullable { "?int" } else { "int" }
+}
+
+fn double_to_long(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    d: f64,
+    v: &Value,
+    nullable: bool,
+) -> Result<Option<i64>, VmError> {
+    if !d.is_finite() || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
+        return Err(type_error(vm, func, n, name, ty_int(nullable), v));
+    }
+    if d.fract() != 0.0 {
+        vm.emit_deprecated(&format!(
+            "Implicit conversion from float {} to int loses precision",
+            Value::Double(d).to_php_string().to_string_lossy()
+        ));
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            });
+        }
+    }
+    Ok(Some(d as i64))
+}
+
+/// Z_PARAM_DOUBLE(_OR_NULL) (weak mode).
+fn zpp_double(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: &Value,
+    nullable: bool,
+) -> Result<Option<f64>, VmError> {
+    let v = v.deref();
+    let ty = if nullable { "?float" } else { "float" };
+    match &v {
+        Value::Double(d) => Ok(Some(*d)),
+        Value::Long(l) => Ok(Some(*l as f64)),
+        Value::Null | Value::Undef => {
+            if nullable {
+                Ok(None)
+            } else {
+                null_deprecation(vm, func, n, name, "float");
+                Ok(Some(0.0))
+            }
+        }
+        Value::True => Ok(Some(1.0)),
+        Value::False => Ok(Some(0.0)),
+        Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+            Some((goro_core::value::NumStr::Long(l), _)) => Ok(Some(l as f64)),
+            Some((goro_core::value::NumStr::Double(d), _)) => Ok(Some(d)),
+            None => Err(type_error(vm, func, n, name, ty, &v)),
+        },
+        _ => Err(type_error(vm, func, n, name, ty, &v)),
+    }
+}
+
+/// Z_PARAM_STRING (weak mode).
+fn zpp_string(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: &Value,
+) -> Result<Vec<u8>, VmError> {
+    let v = v.deref();
+    match &v {
+        Value::String(s) => Ok(s.as_bytes().to_vec()),
+        Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+            Ok(v.to_php_string().as_bytes().to_vec())
+        }
+        Value::Null | Value::Undef => {
+            null_deprecation(vm, func, n, name, "string");
+            Ok(Vec::new())
+        }
+        Value::Object(_) => match vm.value_to_string_checked(&v) {
+            Ok(s) => Ok(s.as_bytes().to_vec()),
+            Err(_) if vm.current_exception.is_some() => Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            }),
+            Err(_) => Err(type_error(vm, func, n, name, "string", &v)),
+        },
+        _ => Err(type_error(vm, func, n, name, "string", &v)),
+    }
+}
+
+/// Z_PARAM_BOOL (weak mode).
+fn zpp_bool(vm: &mut Vm, func: &str, n: usize, name: &str, v: &Value) -> Result<bool, VmError> {
+    let v = v.deref();
+    match &v {
+        Value::Null | Value::Undef => {
+            null_deprecation(vm, func, n, name, "bool");
+            Ok(false)
+        }
+        Value::Array(_) | Value::Object(_) | Value::Resource(_) => {
+            Err(type_error(vm, func, n, name, "bool", &v))
+        }
+        _ => Ok(v.is_truthy()),
+    }
+}
+
+/// ZEND_PARSE_PARAMETERS_START(min, max) argument-count check.
+fn check_arity(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    min: usize,
+    max: usize,
+) -> Result<(), VmError> {
+    let n = args.len();
+    if n >= min && n <= max {
+        return Ok(());
+    }
+    let (q, c) = if min == max {
+        ("exactly", min)
+    } else if n < min {
+        ("at least", min)
+    } else {
+        ("at most", max)
+    };
+    let msg = format!(
+        "{}() expects {} {} argument{}, {} given",
+        func,
+        q,
+        c,
+        if c == 1 { "" } else { "s" },
+        n
+    );
+    Err(throw(vm, b"ArgumentCountError", &msg))
+}
+
+fn set_ref(v: Option<&Value>, val: Value) {
+    if let Some(Value::Reference(r)) = v {
+        *r.borrow_mut() = val;
+    }
+}
+
+fn str_val(s: &str) -> Value {
+    Value::String(PhpString::from_bytes(s.as_bytes()))
+}
+
+fn default_socket_timeout(vm: &Vm) -> i64 {
+    vm.constants
+        .get(b"default_socket_timeout".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(60)
+}
+
+// ---------------------------------------------------------------------------
+// Socket descriptor helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the socket data and descriptor of a stream, if it is a socket.
+fn sock_of(fid: i64) -> Option<(SockData, i32)> {
+    FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .and_then(|fh| fh.sock.clone().map(|s| (s, fh.file.as_raw_fd())))
+    })
+}
+
+fn with_sock<R>(fid: i64, f: impl FnOnce(&mut FileHandle) -> R) -> Option<R> {
+    FILE_HANDLES.with(|h| h.borrow_mut().get_mut(&fid).map(f))
+}
+
+/// php_set_sock_blocking()
+fn set_fd_blocking(fd: i32, block: bool) -> bool {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+        if flags < 0 {
+            return false;
+        }
+        let nf = if block {
+            flags & !libc::O_NONBLOCK
+        } else {
+            flags | libc::O_NONBLOCK
+        };
+        libc::fcntl(fd, libc::F_SETFL, nf) != -1
+    }
+}
+
+/// php_network_populate_name_from_sockaddr(): text form of an address.
+fn sockaddr_to_text(sa: &libc::sockaddr_storage, sl: libc::socklen_t) -> Option<Vec<u8>> {
+    match sa.ss_family as i32 {
+        libc::AF_INET => {
+            let sin = unsafe { &*(sa as *const _ as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            Some(format!("{}:{}", ip, u16::from_be(sin.sin_port)).into_bytes())
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &*(sa as *const _ as *const libc::sockaddr_in6) };
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            Some(format!("[{}]:{}", ip, u16::from_be(sin6.sin6_port)).into_bytes())
+        }
+        libc::AF_UNIX => {
+            let sun = unsafe { &*(sa as *const _ as *const libc::sockaddr_un) };
+            let path: Vec<u8> = sun.sun_path.iter().map(|&c| c as u8).collect();
+            if path.first() == Some(&0) {
+                // Abstract name: everything after the family.
+                let len = (sl as usize).saturating_sub(std::mem::size_of::<libc::sa_family_t>());
+                Some(path[..len.min(path.len())].to_vec())
+            } else {
+                let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+                Some(path[..len].to_vec())
+            }
+        }
+        _ => None,
+    }
+}
+
+type SockAddr = (libc::sockaddr_storage, libc::socklen_t);
+
+fn ipv6_works() -> bool {
+    thread_local! {
+        static IPV6: std::cell::Cell<i8> = const { std::cell::Cell::new(-1) };
+    }
+    IPV6.with(|c| {
+        if c.get() == -1 {
+            let s = unsafe { libc::socket(libc::PF_INET6, libc::SOCK_DGRAM, 0) };
+            if s < 0 {
+                c.set(0);
+            } else {
+                unsafe { libc::close(s) };
+                c.set(1);
+            }
+        }
+        c.get() == 1
+    })
+}
+
+/// php_network_getaddresses(): resolve `host`; on failure emits the
+/// warning (under `func`) and returns the error text.
+fn getaddresses(
+    vm: &mut Vm,
+    func: &str,
+    host: &[u8],
+    socktype: i32,
+) -> Result<Vec<SockAddr>, String> {
+    let chost = match std::ffi::CString::new(host.to_vec()) {
+        Ok(c) => c,
+        Err(_) => return Err(String::new()),
+    };
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = if ipv6_works() {
+        libc::AF_UNSPEC
+    } else {
+        libc::AF_INET
+    };
+    hints.ai_socktype = socktype;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    let n = unsafe { libc::getaddrinfo(chost.as_ptr(), std::ptr::null(), &hints, &mut res) };
+    if n != 0 {
+        let gai = unsafe { std::ffi::CStr::from_ptr(libc::gai_strerror(n)) }
+            .to_string_lossy()
+            .into_owned();
+        let msg = format!(
+            "php_network_getaddresses: getaddrinfo for {} failed: {}",
+            String::from_utf8_lossy(host),
+            gai
+        );
+        vm.emit_warning(&format!("{}(): {}", func, msg));
+        return Err(msg);
+    }
+    let mut out = Vec::new();
+    let mut p = res;
+    while !p.is_null() {
+        let ai = unsafe { &*p };
+        let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let len = (ai.ai_addrlen as usize).min(std::mem::size_of::<libc::sockaddr_storage>());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ai.ai_addr as *const u8,
+                &mut ss as *mut _ as *mut u8,
+                len,
+            );
+        }
+        out.push((ss, ai.ai_addrlen));
+        p = ai.ai_next;
+    }
+    unsafe { libc::freeaddrinfo(res) };
+    Ok(out)
+}
+
+fn set_port(sa: &mut libc::sockaddr_storage, port: u16) -> Option<libc::socklen_t> {
+    match sa.ss_family as i32 {
+        libc::AF_INET => {
+            let sin = unsafe { &mut *(sa as *mut _ as *mut libc::sockaddr_in) };
+            sin.sin_port = port.to_be();
+            Some(std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &mut *(sa as *mut _ as *mut libc::sockaddr_in6) };
+            sin6.sin6_port = port.to_be();
+            Some(std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+        }
+        _ => None,
+    }
+}
+
+fn setsockopt_int(fd: i32, level: i32, name: i32, val: i32) {
+    unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            &val as *const i32 as *const libc::c_void,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        );
+    }
+}
+
+/// C atoi(): leading whitespace, optional sign, digits; wraps like int.
+fn atoi(s: &[u8]) -> i32 {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        neg = s[i] == b'-';
+        i += 1;
+    }
+    let mut n: i64 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        n = n.wrapping_mul(10).wrapping_add((s[i] - b'0') as i64);
+        i += 1;
+    }
+    (if neg { -n } else { n }) as i32
+}
+
+/// parse_ip_address_ex()
+fn parse_ip_address(s: &[u8]) -> Result<(Vec<u8>, i32), String> {
+    if s.contains(&0) {
+        return Err("The hostname must not contain null bytes".to_string());
+    }
+    if s.first() == Some(&b'[') && s.len() > 1 {
+        let inner = &s[1..s.len() - 1];
+        if let Some(p) = inner.iter().position(|&c| c == b']') {
+            let close = p + 1;
+            if s.get(close + 1) == Some(&b':') {
+                return Ok((s[1..close].to_vec(), atoi(&s[close + 2..])));
+            }
+        }
+        return Err(format!(
+            "Failed to parse IPv6 address \"{}\"",
+            String::from_utf8_lossy(s)
+        ));
+    }
+    let colon = if s.is_empty() {
+        None
+    } else {
+        s[..s.len() - 1].iter().position(|&c| c == b':')
+    };
+    match colon {
+        Some(c) => Ok((s[..c].to_vec(), atoi(&s[c + 1..]))),
+        None => Err(format!(
+            "Failed to parse address \"{}\"",
+            String::from_utf8_lossy(s)
+        )),
+    }
+}
+
+/// parse_unix_address(): build a sockaddr_un; returns it and the address
+/// length to pass to bind()/connect().
+fn parse_unix_address(
+    vm: &mut Vm,
+    func: &str,
+    name: &[u8],
+) -> (libc::sockaddr_un, libc::socklen_t) {
+    let mut sun: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    sun.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let is_abstract = name.first() == Some(&0);
+    let cap = sun.sun_path.len();
+    let max_len = if is_abstract { cap } else { cap - 1 };
+    let mut len = name.len();
+    if len > max_len {
+        len = max_len;
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            &format!(
+                "{}(): socket path exceeded the maximum allowed length of {} bytes and was truncated",
+                func, max_len
+            ),
+            line,
+        );
+    }
+    for (i, &b) in name[..len].iter().enumerate() {
+        sun.sun_path[i] = b as libc::c_char;
+    }
+    let off = std::mem::size_of::<libc::sa_family_t>();
+    (sun, (off + len) as libc::socklen_t)
+}
+
+/// php_network_connect_socket(): returns Ok(()) on success (or a pending
+/// asynchronous connect), Err(errno) otherwise.
+fn connect_socket(
+    fd: i32,
+    sa: *const libc::sockaddr,
+    sl: libc::socklen_t,
+    asynchronous: bool,
+    timeout_ms: Option<i32>,
+) -> Result<bool, i32> {
+    let orig = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    unsafe { libc::fcntl(fd, libc::F_SETFL, orig | libc::O_NONBLOCK) };
+    let n = unsafe { libc::connect(fd, sa, sl) };
+    let mut error = 0;
+    if n != 0 {
+        error = errno();
+        if error != libc::EINPROGRESS {
+            return Err(error);
+        }
+        if asynchronous {
+            return Ok(true);
+        }
+        let deadline = timeout_ms.map(|ms| {
+            std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64)
+        });
+        let mut remaining = timeout_ms.unwrap_or(-1);
+        loop {
+            let r = pollfd_for(fd, POLLREADABLE | libc::POLLOUT, remaining);
+            if r < 0 {
+                if errno() == libc::EINTR {
+                    if let Some(d) = deadline {
+                        let now = std::time::Instant::now();
+                        if now >= d {
+                            error = libc::ETIMEDOUT;
+                            break;
+                        }
+                        remaining = (d - now).as_millis() as i32;
+                    }
+                    continue;
+                }
+                error = errno();
+            } else if r == 0 {
+                error = libc::ETIMEDOUT;
+            } else {
+                let mut e: i32 = 0;
+                let mut len = std::mem::size_of::<i32>() as libc::socklen_t;
+                if unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        &mut e as *mut i32 as *mut libc::c_void,
+                        &mut len,
+                    )
+                } != 0
+                {
+                    error = errno();
+                } else {
+                    error = e;
+                }
+            }
+            break;
+        }
+    }
+    if !asynchronous {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, orig) };
+    }
+    if error != 0 { Err(error) } else { Ok(false) }
+}
+
+/// Lookup of a socket context option ("socket" wrapper).
+fn ctx_socket_opt(ctx: Option<i64>, name: &[u8]) -> Option<Value> {
+    let id = ctx?;
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow()
+            .get(&id)
+            .and_then(|ctx| ctx.options.get(b"socket".as_ref()))
+            .and_then(|m| m.get(name).cloned())
+    })
+}
+
+/// php_stream_context_from_zval(): the explicit context, or the default
+/// context unless `no_default`.
+fn context_from(ctx: Option<&Value>, no_default: bool) -> Option<i64> {
+    match ctx.map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => {
+            if no_default {
+                None
+            } else {
+                DEFAULT_STREAM_CTX.with(|d| d.get())
+            }
+        }
+        Some(v) => resolve_context_id(&v),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport creation (_php_stream_xport_create)
+// ---------------------------------------------------------------------------
+
+struct XportErr {
+    text: Option<String>,
+    code: i32,
+}
+
+fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i64>) -> i64 {
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let fid = alloc_file_handle(file, "r+");
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.wrapper_type = String::new();
+            fh.stream_type = sd.kind.label().to_string();
+            fh.seekable = false;
+            fh.uri = uri
+                .map(|u| String::from_utf8_lossy(u).into_owned())
+                .unwrap_or_default();
+            fh.sock = Some(sd);
+        }
+    });
+    if let Some(cid) = ctx {
+        let c = STREAM_CONTEXTS.with(|c| c.borrow().get(&cid).cloned());
+        if let Some(c) = c {
+            STREAM_CONTEXTS.with(|m| m.borrow_mut().insert(fid, c));
+        }
+    }
+    goro_core::value::register_resource(fid, b"stream");
+    fid
+}
+
+/// A stream that was neither connected nor bound has no socket
+/// (sock->socket == -1); a /dev/null descriptor stands in for it so that
+/// socket operations on it fail.
+fn unconnected_fd() -> i32 {
+    unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) }
+}
+
+fn split_transport(name: &[u8]) -> (Vec<u8>, &[u8]) {
+    let n = name
+        .iter()
+        .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.')
+        .count();
+    if n > 1 && name[n..].starts_with(b"://") {
+        (name[..n].to_vec(), &name[n + 3..])
+    } else {
+        (b"tcp".to_vec(), name)
+    }
+}
+
+enum XportOp {
+    Connect { asynchronous: bool },
+    Server { flags: i64 },
+    None,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn xport_create(
+    vm: &mut Vm,
+    func: &str,
+    orig_name: &[u8],
+    op: XportOp,
+    timeout_ms: Option<i32>,
+    ctx: Option<i64>,
+) -> Result<i64, XportErr> {
+    let (proto, name) = split_transport(orig_name);
+    let kind = match proto.as_slice() {
+        b"tcp" => SockKind::Tcp,
+        b"udp" => SockKind::Udp,
+        b"unix" => SockKind::Unix,
+        b"udg" => SockKind::Udg,
+        _ => {
+            let mut w = proto.clone();
+            w.truncate(31);
+            return Err(XportErr {
+                text: Some(format!(
+                    "Unable to find the socket transport \"{}\" - did you forget to enable it when you configured PHP?",
+                    String::from_utf8_lossy(&w)
+                )),
+                code: 0,
+            });
+        }
+    };
+    let mut sd = SockData::new(kind, default_socket_timeout(vm));
+    let fd = match op {
+        XportOp::Connect { asynchronous } => {
+            let r = if kind.is_unix() {
+                connect_unix(vm, func, kind, name, asynchronous, timeout_ms)
+            } else {
+                connect_ip(vm, func, kind, name, asynchronous, timeout_ms, ctx)
+            };
+            match r {
+                Ok((fd, pending)) => {
+                    if asynchronous && pending {
+                        sd.is_blocked = false;
+                    }
+                    fd
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        XportOp::Server { flags } if flags & STREAM_XPORT_BIND == 0 => unconnected_fd(),
+        XportOp::Server { flags } => {
+            let fd = if kind.is_unix() {
+                bind_unix(vm, func, kind, name)?
+            } else {
+                bind_ip(vm, func, kind, name, ctx)?
+            };
+            if flags & STREAM_XPORT_LISTEN != 0 {
+                let backlog = ctx_socket_opt(ctx, b"backlog")
+                    .map(|v| v.to_long() as i32)
+                    .unwrap_or(32);
+                if unsafe { libc::listen(fd, backlog) } != 0 {
+                    unsafe { libc::close(fd) };
+                    return Err(XportErr {
+                        text: None,
+                        code: 0,
+                    });
+                }
+            }
+            sd.no_io = true;
+            fd
+        }
+        XportOp::None => unconnected_fd(),
+    };
+    Ok(alloc_socket_stream(fd, sd, Some(orig_name), ctx))
+}
+
+fn connect_unix(
+    vm: &mut Vm,
+    func: &str,
+    kind: SockKind,
+    name: &[u8],
+    asynchronous: bool,
+    timeout_ms: Option<i32>,
+) -> Result<(i32, bool), XportErr> {
+    let fd = unsafe { libc::socket(libc::PF_UNIX, kind.socktype(), 0) };
+    if fd < 0 {
+        return Err(XportErr {
+            text: Some("Failed to create unix socket".to_string()),
+            code: 0,
+        });
+    }
+    let (sun, sl) = parse_unix_address(vm, func, name);
+    match connect_socket(
+        fd,
+        &sun as *const _ as *const libc::sockaddr,
+        sl,
+        asynchronous,
+        timeout_ms,
+    ) {
+        Ok(p) => Ok((fd, p)),
+        Err(e) => {
+            unsafe { libc::close(fd) };
+            Err(XportErr {
+                text: Some(strerror(e)),
+                code: e,
+            })
+        }
+    }
+}
+
+fn connect_ip(
+    vm: &mut Vm,
+    func: &str,
+    kind: SockKind,
+    name: &[u8],
+    asynchronous: bool,
+    timeout_ms: Option<i32>,
+    ctx: Option<i64>,
+) -> Result<(i32, bool), XportErr> {
+    let (host, port) = parse_ip_address(name).map_err(|t| XportErr {
+        text: Some(t),
+        code: 0,
+    })?;
+    let mut bindto: Option<(Vec<u8>, i32)> = None;
+    if let Some(v) = ctx_socket_opt(ctx, b"bindto") {
+        match v.deref() {
+            // A bindto address that does not parse is ignored.
+            Value::String(s) => bindto = parse_ip_address(s.as_bytes()).ok(),
+            _ => {
+                return Err(XportErr {
+                    text: Some("local_addr context option is not a string.".to_string()),
+                    code: 0,
+                });
+            }
+        }
+    }
+    let broadcast = kind == SockKind::Udp
+        && ctx_socket_opt(ctx, b"so_broadcast")
+            .map(|v| v.is_truthy())
+            .unwrap_or(false);
+    let nodelay = kind == SockKind::Tcp
+        && ctx_socket_opt(ctx, b"tcp_nodelay")
+            .map(|v| v.is_truthy())
+            .unwrap_or(false);
+    // php_network_connect_socket_to_host()
+    let addrs = getaddresses(vm, func, &host, kind.socktype()).map_err(|t| XportErr {
+        text: if t.is_empty() { None } else { Some(t) },
+        code: 0,
+    })?;
+    let deadline = timeout_ms
+        .filter(|&ms| ms >= 0)
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms as u64));
+    let mut working = timeout_ms;
+    let mut last = XportErr {
+        text: None,
+        code: 0,
+    };
+    for (mut sa, _) in addrs {
+        let family = sa.ss_family as i32;
+        if family == libc::AF_INET6 {
+            if let Some((b, _)) = &bindto {
+                if !b.contains(&b':') {
+                    continue;
+                }
+            }
+        } else if family == libc::AF_INET {
+            if let Some((b, _)) = &bindto {
+                if b.contains(&b':') || b.as_slice() == b"0" {
+                    bindto = None;
+                }
+            }
+        }
+        let Some(sl) = set_port(&mut sa, port as u16) else {
+            continue;
+        };
+        let fd = unsafe { libc::socket(family, kind.socktype(), 0) };
+        if fd < 0 {
+            continue;
+        }
+        if let Some((b, bport)) = &bindto {
+            let ok = bind_local(fd, family, b, *bport as u16);
+            match ok {
+                None => vm.emit_warning(&format!(
+                    "{}(): Invalid IP Address: {}",
+                    func,
+                    String::from_utf8_lossy(b)
+                )),
+                Some(Err(e)) => vm.emit_warning(&format!(
+                    "{}(): Failed to bind to '{}:{}', system said: {}",
+                    func,
+                    String::from_utf8_lossy(b),
+                    bport,
+                    strerror(e)
+                )),
+                Some(Ok(())) => {}
+            }
+        }
+        if broadcast {
+            setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_BROADCAST, 1);
+        }
+        if nodelay {
+            setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
+        }
+        match connect_socket(
+            fd,
+            &sa as *const _ as *const libc::sockaddr,
+            sl,
+            asynchronous,
+            working,
+        ) {
+            Ok(p) => return Ok((fd, p)),
+            Err(e) => {
+                last = XportErr {
+                    text: Some(strerror(e)),
+                    code: e,
+                };
+                unsafe { libc::close(fd) };
+                if let Some(d) = deadline {
+                    let now = std::time::Instant::now();
+                    if now >= d {
+                        break;
+                    }
+                    working = Some((d - now).as_millis() as i32);
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Bind a client socket to the "bindto" address; None for an invalid IP.
+fn bind_local(fd: i32, family: i32, addr: &[u8], port: u16) -> Option<Result<(), i32>> {
+    let s = std::str::from_utf8(addr).ok()?;
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let len = if family == libc::AF_INET {
+        let ip: std::net::Ipv4Addr = s.parse().ok()?;
+        let sin = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in) };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = port.to_be();
+        sin.sin_addr.s_addr = u32::from(ip).to_be();
+        std::mem::size_of::<libc::sockaddr_in>()
+    } else {
+        let ip: std::net::Ipv6Addr = s.parse().ok()?;
+        let sin6 = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in6) };
+        sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        sin6.sin6_port = port.to_be();
+        sin6.sin6_addr.s6_addr = ip.octets();
+        std::mem::size_of::<libc::sockaddr_in6>()
+    };
+    setsockopt_int(fd, libc::SOL_IP, libc::IP_BIND_ADDRESS_NO_PORT, 1);
+    let r = unsafe {
+        libc::bind(
+            fd,
+            &ss as *const _ as *const libc::sockaddr,
+            len as libc::socklen_t,
+        )
+    };
+    Some(if r != 0 { Err(errno()) } else { Ok(()) })
+}
+
+fn bind_unix(vm: &mut Vm, func: &str, kind: SockKind, name: &[u8]) -> Result<i32, XportErr> {
+    let fd = unsafe { libc::socket(libc::PF_UNIX, kind.socktype(), 0) };
+    if fd < 0 {
+        let e = errno();
+        return Err(XportErr {
+            text: Some(format!(
+                "Failed to create unix{} socket {}",
+                if kind == SockKind::Unix {
+                    ""
+                } else {
+                    "datagram"
+                },
+                strerror(e)
+            )),
+            code: 0,
+        });
+    }
+    let (sun, sl) = parse_unix_address(vm, func, name);
+    if unsafe { libc::bind(fd, &sun as *const _ as *const libc::sockaddr, sl) } != 0 {
+        unsafe { libc::close(fd) };
+        // php_tcp_sockop_bind() reports no error text for unix sockets.
+        return Err(XportErr {
+            text: None,
+            code: 0,
+        });
+    }
+    Ok(fd)
+}
+
+fn bind_ip(
+    vm: &mut Vm,
+    func: &str,
+    kind: SockKind,
+    name: &[u8],
+    ctx: Option<i64>,
+) -> Result<i32, XportErr> {
+    let (host, port) = parse_ip_address(name).map_err(|t| XportErr {
+        text: Some(t),
+        code: 0,
+    })?;
+    let v6only = ctx_socket_opt(ctx, b"ipv6_v6only")
+        .filter(|v| !matches!(v.deref(), Value::Null))
+        .map(|v| v.is_truthy());
+    let reuseport = ctx_socket_opt(ctx, b"so_reuseport")
+        .map(|v| v.is_truthy())
+        .unwrap_or(false);
+    let broadcast = kind == SockKind::Udp
+        && ctx_socket_opt(ctx, b"so_broadcast")
+            .map(|v| v.is_truthy())
+            .unwrap_or(false);
+    let addrs = getaddresses(vm, func, &host, kind.socktype()).map_err(|t| XportErr {
+        text: if t.is_empty() { None } else { Some(t) },
+        code: 0,
+    })?;
+    let mut err = 0;
+    for (mut sa, _) in addrs {
+        let Some(sl) = set_port(&mut sa, port as u16) else {
+            continue;
+        };
+        let family = sa.ss_family as i32;
+        let fd = unsafe { libc::socket(family, kind.socktype(), 0) };
+        if fd < 0 {
+            continue;
+        }
+        setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1);
+        if let Some(on) = v6only {
+            setsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, on as i32);
+        }
+        if reuseport {
+            setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, 1);
+        }
+        if broadcast {
+            setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_BROADCAST, 1);
+        }
+        if unsafe { libc::bind(fd, &sa as *const _ as *const libc::sockaddr, sl) } == 0 {
+            return Ok(fd);
+        }
+        err = errno();
+        unsafe { libc::close(fd) };
+    }
+    Err(XportErr {
+        text: Some(strerror(err)),
+        code: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Stream operations (php_sockop_*)
+// ---------------------------------------------------------------------------
+
+/// php_sockop_read(). Returns the bytes read; Ok(0) at EOF;
+/// Err(WouldBlock) for "no data right now" and Err(TimedOut) when a
+/// blocking read timed out (the stream read fails).
+pub(super) fn sock_read(
+    fh: &mut FileHandle,
+    buf: &mut [u8],
+    has_buffered: bool,
+) -> std::io::Result<usize> {
+    let fd = fh.file.as_raw_fd();
+    let Some(sd) = fh.sock.as_mut() else {
+        return fh.file.read(buf);
+    };
+    let mut flags = 0;
+    if sd.is_blocked {
+        let dont_wait = has_buffered || (sd.tv_sec == 0 && sd.tv_usec == 0);
+        if dont_wait || sd.tv_sec != -1 {
+            flags = libc::MSG_DONTWAIT;
+        }
+        if !dont_wait {
+            // php_sock_stream_wait_for_data()
+            sd.timeout_event = false;
+            let ms = sd.timeout_ms();
+            loop {
+                let r = pollfd_for(fd, POLLREADABLE, ms);
+                if r == 0 {
+                    sd.timeout_event = true;
+                }
+                if r >= 0 || errno() != libc::EINTR {
+                    break;
+                }
+            }
+            if sd.timeout_event {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+        }
+    }
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), flags) };
+    if n < 0 {
+        let e = errno();
+        if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        fh.eof = true;
+        return Err(std::io::Error::from_raw_os_error(e));
+    }
+    if n == 0 {
+        fh.eof = true;
+    }
+    Ok(n as usize)
+}
+
+/// php_sockop_write() for one chunk; returns the bytes written, 0 when
+/// a non-blocking socket would block, or -1 (with a notice) on failure.
+fn sock_write_once(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> isize {
+    let Some((sd, fd)) = sock_of(fid) else {
+        return -1;
+    };
+    let has_timeout = sd.tv_sec != -1;
+    let flags = libc::MSG_NOSIGNAL
+        | if sd.is_blocked && has_timeout {
+            libc::MSG_DONTWAIT
+        } else {
+            0
+        };
+    loop {
+        let n = unsafe { libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), flags) };
+        if n > 0 {
+            return n;
+        }
+        let mut err = errno();
+        if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+            if sd.is_blocked {
+                with_sock(fid, |fh| {
+                    if let Some(s) = fh.sock.as_mut() {
+                        s.timeout_event = false;
+                    }
+                });
+                let ms = sd.timeout_ms();
+                let mut retry = false;
+                loop {
+                    let r = pollfd_for(fd, libc::POLLOUT, ms);
+                    if r == 0 {
+                        with_sock(fid, |fh| {
+                            if let Some(s) = fh.sock.as_mut() {
+                                s.timeout_event = true;
+                            }
+                        });
+                        break;
+                    }
+                    if r > 0 {
+                        retry = true;
+                        break;
+                    }
+                    err = errno();
+                    if err != libc::EINTR {
+                        break;
+                    }
+                }
+                if retry {
+                    continue;
+                }
+            } else {
+                return 0;
+            }
+        }
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            &format!(
+                "{}(): Send of {} bytes failed with errno={} {}",
+                func,
+                data.len(),
+                err,
+                strerror(err)
+            ),
+            line,
+        );
+        return n;
+    }
+}
+
+/// _php_stream_write_buffer() on a socket stream.
+pub(crate) fn sock_write(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> isize {
+    let mut done = 0usize;
+    while done < data.len() {
+        let n = sock_write_once(vm, func, fid, &data[done..]);
+        if n <= 0 {
+            return if done == 0 { n } else { done as isize };
+        }
+        done += n as usize;
+    }
+    done as isize
+}
+
+pub(crate) fn is_socket(fid: i64) -> bool {
+    FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .map(|fh| fh.sock.is_some())
+            .unwrap_or(false)
+    })
+}
+
+/// PHP_STREAM_OPTION_CHECK_LIVENESS with value 0 (_php_stream_eof()).
+pub(super) fn check_liveness(fh: &mut FileHandle) {
+    let fd = fh.file.as_raw_fd();
+    let Some(sd) = fh.sock.as_ref() else {
+        return;
+    };
+    let mut alive = true;
+    let ready = if !sd.no_io {
+        true
+    } else {
+        pollfd_for(fd, POLLREADABLE | libc::POLLPRI, 0) > 0
+    };
+    if ready {
+        let mut b = 0u8;
+        let r = unsafe {
+            libc::recv(
+                fd,
+                &mut b as *mut u8 as *mut libc::c_void,
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if r == 0 {
+            alive = false;
+        } else if r < 0 {
+            let e = errno();
+            if e != libc::EWOULDBLOCK && e != libc::EMSGSIZE && e != libc::EAGAIN {
+                alive = false;
+            }
+        }
+    }
+    if !alive {
+        fh.eof = true;
+    }
+}
+
+/// Metadata of a socket stream for stream_get_meta_data():
+/// (timed_out, blocked).
+pub(super) fn meta(fh: &FileHandle) -> Option<(bool, bool)> {
+    fh.sock.as_ref().map(|s| (s.timeout_event, s.is_blocked))
+}
+
+/// PHP_STREAM_OPTION_BLOCKING on a descriptor-backed stream; returns
+/// false when the stream does not support it (php_stream_set_option() == -1).
+pub(crate) fn set_blocking(fid: i64, block: bool) -> bool {
+    if let Some(r) = with_sock(fid, |fh| {
+        let fd = fh.file.as_raw_fd();
+        match fh.sock.as_mut() {
+            Some(sd) => {
+                if set_fd_blocking(fd, block) {
+                    sd.is_blocked = block;
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
+            None => match fh.special {
+                SpecialStream::Memory | SpecialStream::Temp => Some(true),
+                _ => Some(set_fd_blocking(fd, block)),
+            },
+        }
+    }) {
+        return r.unwrap_or(true);
+    }
+    match fid {
+        1..=3 => set_fd_blocking((fid - 1) as i32, block),
+        _ => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PHP functions
+// ---------------------------------------------------------------------------
+
+fn finish_open_error(
+    vm: &mut Vm,
+    errno_ref: Option<&Value>,
+    errstr_ref: Option<&Value>,
+    e: &XportErr,
+) {
+    set_ref(errno_ref, Value::Long(e.code as i64));
+    if let Some(t) = &e.text {
+        set_ref(errstr_ref, str_val(t));
+    }
+    let _ = vm;
+}
+
+/// timeout (seconds, float) -> poll milliseconds, None meaning "no limit".
+fn timeout_from_double(t: f64) -> Option<i32> {
+    if t < 0.0 || t >= PHP_TIMEOUT_ULL_MAX / 1_000_000.0 {
+        None
+    } else {
+        let conv = (t * 1_000_000.0) as u64;
+        Some(tv_to_ms(
+            (conv / 1_000_000) as i64,
+            (conv % 1_000_000) as i64,
+        ))
+    }
+}
+
+thread_local! {
+    /// Persistent sockets (pfsockopen(), STREAM_CLIENT_PERSISTENT): hashkey -> stream id.
+    static PERSISTENT: RefCell<StdHashMap<Vec<u8>, i64>> = RefCell::new(StdHashMap::new());
+}
+
+fn persistent_lookup(key: &[u8]) -> Option<i64> {
+    let fid = PERSISTENT.with(|p| p.borrow().get(key).copied())?;
+    let alive = with_sock(fid, |fh| {
+        check_liveness(fh);
+        !fh.eof
+    });
+    PERSISTENT.with(|p| p.borrow_mut().remove(key));
+    match alive {
+        Some(true) => {
+            PERSISTENT.with(|p| p.borrow_mut().insert(key.to_vec(), fid));
+            Some(fid)
+        }
+        Some(false) => {
+            // "dead - kill it"
+            FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+            goro_core::value::close_resource(fid);
+            None
+        }
+        None => None,
+    }
+}
+
+fn persistent_store(key: Vec<u8>, fid: i64) {
+    goro_core::value::register_resource(fid, b"persistent stream");
+    PERSISTENT.with(|p| p.borrow_mut().insert(key, fid));
+}
+
+/// PHP_FUNCTION(stream_socket_client)
+pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_client";
+    check_arity(vm, F, args, 1, 6)?;
+    let host = zpp_string(vm, F, 1, "address", &args[0])?;
+    let timeout = match args.get(3) {
+        Some(v) => zpp_double(vm, F, 4, "timeout", v, true)?,
+        None => None,
+    };
+    let flags = match args.get(4) {
+        Some(v) => zpp_long(vm, F, 5, "flags", v, false)?.unwrap_or(0),
+        None => PHP_STREAM_CLIENT_CONNECT,
+    };
+    let ctx_arg = args.get(5);
+    if let Some(c) = ctx_arg {
+        if !matches!(c.deref(), Value::Null | Value::Resource(_)) {
+            return Err(type_error(vm, F, 6, "context", "resource or null", c));
+        }
+    }
+    let timeout = match timeout {
+        None => default_socket_timeout(vm) as f64,
+        Some(t) if !t.is_finite() => {
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "stream_socket_client(): Argument #4 ($timeout) must be a finite value",
+            ));
+        }
+        Some(t) => t,
+    };
+    let ctx = context_from(ctx_arg, false);
+    set_ref(args.get(1), Value::Long(0));
+    set_ref(args.get(2), str_val(""));
+    let hashkey = if flags & PHP_STREAM_CLIENT_PERSISTENT != 0 {
+        let mut k = b"stream_socket_client__".to_vec();
+        k.extend_from_slice(&host);
+        Some(k)
+    } else {
+        None
+    };
+    if let Some(k) = &hashkey {
+        if let Some(fid) = persistent_lookup(k) {
+            return Ok(Value::Resource(fid));
+        }
+    }
+    let op = if flags & (PHP_STREAM_CLIENT_CONNECT | PHP_STREAM_CLIENT_ASYNC_CONNECT) != 0 {
+        XportOp::Connect {
+            asynchronous: flags & PHP_STREAM_CLIENT_ASYNC_CONNECT != 0,
+        }
+    } else {
+        XportOp::None
+    };
+    match xport_create(vm, F, &host, op, timeout_from_double(timeout), ctx) {
+        Ok(fid) => {
+            if let Some(k) = hashkey {
+                persistent_store(k, fid);
+            }
+            Ok(Value::Resource(fid))
+        }
+        Err(e) => {
+            let quoted = php_addslashes(&host);
+            vm.emit_warning(&format!(
+                "{}(): Unable to connect to {} ({})",
+                F,
+                String::from_utf8_lossy(&quoted),
+                e.text.as_deref().unwrap_or("Unknown error")
+            ));
+            finish_open_error(vm, args.get(1), args.get(2), &e);
+            Ok(Value::False)
+        }
+    }
+}
+
+/// php_addslashes()
+fn php_addslashes(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for &c in s {
+        match c {
+            0 => out.extend_from_slice(b"\\0"),
+            b'\'' | b'"' | b'\\' => {
+                out.push(b'\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// PHP_FUNCTION(stream_socket_server)
+pub(crate) fn stream_socket_server(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_server";
+    check_arity(vm, F, args, 1, 5)?;
+    let host = zpp_string(vm, F, 1, "address", &args[0])?;
+    let flags = match args.get(3) {
+        Some(v) => zpp_long(vm, F, 4, "flags", v, false)?.unwrap_or(0),
+        None => STREAM_XPORT_BIND | STREAM_XPORT_LISTEN,
+    };
+    let ctx_arg = args.get(4);
+    if let Some(c) = ctx_arg {
+        if !matches!(c.deref(), Value::Null | Value::Resource(_)) {
+            return Err(type_error(vm, F, 5, "context", "resource or null", c));
+        }
+    }
+    let ctx = context_from(ctx_arg, false);
+    set_ref(args.get(1), Value::Long(0));
+    set_ref(args.get(2), str_val(""));
+    match xport_create(vm, F, &host, XportOp::Server { flags }, None, ctx) {
+        Ok(fid) => Ok(Value::Resource(fid)),
+        Err(e) => {
+            // The host is printed as a C string.
+            let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
+            vm.emit_warning(&format!(
+                "{}(): Unable to connect to {} ({})",
+                F,
+                String::from_utf8_lossy(&shown),
+                e.text.as_deref().unwrap_or("Unknown error")
+            ));
+            finish_open_error(vm, args.get(1), args.get(2), &e);
+            Ok(Value::False)
+        }
+    }
+}
+
+/// PHP_FUNCTION(stream_socket_accept)
+pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_accept";
+    check_arity(vm, F, args, 1, 3)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let timeout = match args.get(1) {
+        Some(v) => zpp_double(vm, F, 2, "timeout", v, true)?,
+        None => None,
+    };
+    let timeout = match timeout {
+        None => default_socket_timeout(vm) as f64,
+        Some(t) if !t.is_finite() => {
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "stream_socket_accept(): Argument #2 ($timeout) must be a finite value",
+            ));
+        }
+        Some(t) => t,
+    };
+    let Some((sd, srv)) = sock_of(fid) else {
+        vm.emit_warning(&format!("{}(): Accept failed: Unknown error", F));
+        return Ok(Value::False);
+    };
+    let ms = timeout_from_double(timeout).unwrap_or(-1);
+    super::flush_cli_output(vm);
+    let n = pollfd_for(srv, POLLREADABLE, ms);
+    let error;
+    let mut cli = -1;
+    let mut peer = None;
+    if n == 0 {
+        error = libc::ETIMEDOUT;
+    } else if n < 0 {
+        error = errno();
+    } else {
+        let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        cli = unsafe { libc::accept(srv, &mut ss as *mut _ as *mut libc::sockaddr, &mut sl) };
+        if cli >= 0 {
+            peer = sockaddr_to_text(&ss, sl);
+            error = 0;
+            let ctx = resolve_context_id(&args[0]);
+            if ctx_socket_opt(ctx, b"tcp_nodelay")
+                .map(|v| v.is_truthy())
+                .unwrap_or(false)
+            {
+                setsockopt_int(cli, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
+            }
+        } else {
+            error = errno();
+        }
+    }
+    if cli < 0 {
+        vm.emit_warning(&format!("{}(): Accept failed: {}", F, strerror(error)));
+        return Ok(Value::False);
+    }
+    let mut csd = sd.clone();
+    csd.is_blocked = true;
+    csd.no_io = false;
+    csd.timeout_event = false;
+    let ctx = STREAM_CONTEXTS
+        .with(|c| c.borrow().contains_key(&fid))
+        .then_some(fid);
+    let cfid = alloc_socket_stream(cli, csd, None, ctx);
+    if let (Some(p), Some(r)) = (peer, args.get(2)) {
+        set_ref(Some(r), Value::String(PhpString::from_vec(p)));
+    }
+    Ok(Value::Resource(cfid))
+}
+
+/// PHP_FUNCTION(stream_socket_get_name)
+pub(crate) fn stream_socket_get_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_get_name";
+    check_arity(vm, F, args, 2, 2)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let want_peer = zpp_bool(vm, F, 2, "remote", &args[1])?;
+    let Some((_, fd)) = sock_of(fid) else {
+        return Ok(Value::False);
+    };
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let r = unsafe {
+        if want_peer {
+            libc::getpeername(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut sl)
+        } else {
+            libc::getsockname(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut sl)
+        }
+    };
+    if r != 0 {
+        return Ok(Value::False);
+    }
+    match sockaddr_to_text(&ss, sl) {
+        Some(t) if !t.is_empty() && t[0] != 0 => Ok(Value::String(PhpString::from_vec(t))),
+        _ => Ok(Value::False),
+    }
+}
+
+/// PHP_FUNCTION(stream_socket_pair)
+pub(crate) fn stream_socket_pair(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_pair";
+    check_arity(vm, F, args, 3, 3)?;
+    let domain = zpp_long(vm, F, 1, "domain", &args[0], false)?.unwrap_or(0);
+    let ty = zpp_long(vm, F, 2, "type", &args[1], false)?.unwrap_or(0);
+    let proto = zpp_long(vm, F, 3, "protocol", &args[2], false)?.unwrap_or(0);
+    let mut fds = [0i32; 2];
+    if unsafe { libc::socketpair(domain as i32, ty as i32, proto as i32, fds.as_mut_ptr()) } != 0 {
+        let e = errno();
+        vm.emit_warning(&format!(
+            "{}(): Failed to create sockets: [{}]: {}",
+            F,
+            e,
+            strerror(e)
+        ));
+        return Ok(Value::False);
+    }
+    let a = stream_from_socket(vm, fds[0]);
+    let b = stream_from_socket(vm, fds[1]);
+    let mut arr = PhpArray::new();
+    arr.push(Value::Resource(a));
+    arr.push(Value::Resource(b));
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+/// php_stream_sock_open_from_socket(): a generic socket stream.
+pub(crate) fn stream_from_socket(vm: &Vm, fd: i32) -> i64 {
+    let t = default_socket_timeout(vm);
+    alloc_socket_stream(fd, SockData::new(SockKind::Generic, t), None, None)
+}
+
+/// php_network_parse_network_address_with_port()
+fn parse_network_address(vm: &mut Vm, func: &str, addr: &[u8]) -> Option<SockAddr> {
+    let (host, port) = if addr.first() == Some(&b'[') {
+        let close = addr[1..].iter().position(|&c| c == b']')? + 1;
+        if addr.get(close + 1) != Some(&b':') {
+            return None;
+        }
+        (&addr[1..close], atoi(&addr[close + 2..]) as i16 as u16)
+    } else {
+        let colon = addr.iter().position(|&c| c == b':')?;
+        (&addr[..colon], atoi(&addr[colon + 1..]) as i16 as u16)
+    };
+    let hs = String::from_utf8_lossy(host).into_owned();
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    if let Ok(ip) = hs.parse::<std::net::Ipv6Addr>() {
+        let sin6 = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in6) };
+        sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        sin6.sin6_port = port.to_be();
+        sin6.sin6_addr.s6_addr = ip.octets();
+        return Some((
+            ss,
+            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+        ));
+    }
+    if let Ok(ip) = hs.parse::<std::net::Ipv4Addr>() {
+        let sin = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in) };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = port.to_be();
+        sin.sin_addr.s_addr = u32::from(ip).to_be();
+        return Some((
+            ss,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        ));
+    }
+    match getaddresses(vm, func, host, libc::SOCK_DGRAM) {
+        Ok(list) => {
+            let (mut sa, _) = list.into_iter().next()?;
+            let sl = set_port(&mut sa, port)?;
+            Some((sa, sl))
+        }
+        Err(e) => {
+            if !e.is_empty() {
+                vm.emit_warning(&format!("{}(): Failed to resolve `{}': {}", func, hs, e));
+            }
+            None
+        }
+    }
+}
+
+/// PHP_FUNCTION(stream_socket_sendto)
+pub(crate) fn stream_socket_sendto(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_sendto";
+    check_arity(vm, F, args, 2, 4)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let data = zpp_string(vm, F, 2, "data", &args[1])?;
+    let flags = match args.get(2) {
+        Some(v) => zpp_long(vm, F, 3, "flags", v, false)?.unwrap_or(0),
+        None => 0,
+    };
+    let target = match args.get(3) {
+        Some(v) => zpp_string(vm, F, 4, "address", v)?,
+        None => Vec::new(),
+    };
+    let mut addr = None;
+    if !target.is_empty() {
+        match parse_network_address(vm, F, &target) {
+            Some(a) => addr = Some(a),
+            None => {
+                vm.emit_warning(&format!(
+                    "{}(): Failed to parse `{}' into a valid network address",
+                    F,
+                    String::from_utf8_lossy(&target)
+                ));
+                return Ok(Value::False);
+            }
+        }
+    }
+    let oob = flags & STREAM_OOB != 0;
+    if (oob || addr.is_some())
+        && crate::stream_filters::chain_has_direction(
+            fid,
+            crate::stream_filters::STREAM_FILTER_WRITE,
+        )
+    {
+        vm.emit_warning(&format!(
+            "{}(): Cannot write OOB data, or data to a targeted address on a filtered stream",
+            F
+        ));
+        return Ok(Value::Long(-1));
+    }
+    let Some((_, fd)) = sock_of(fid) else {
+        return Ok(Value::Long(-1));
+    };
+    let sflags = libc::MSG_NOSIGNAL | if oob { libc::MSG_OOB } else { 0 };
+    let r = unsafe {
+        match &addr {
+            Some((ss, sl)) => libc::sendto(
+                fd,
+                data.as_ptr() as *const libc::c_void,
+                data.len(),
+                sflags,
+                ss as *const _ as *const libc::sockaddr,
+                *sl,
+            ),
+            None => libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), sflags),
+        }
+    };
+    if r < 0 {
+        let e = errno();
+        vm.emit_warning(&format!("{}(): {}\n", F, strerror(e)));
+        return Ok(Value::Long(-1));
+    }
+    Ok(Value::Long(r as i64))
+}
+
+/// PHP_FUNCTION(stream_socket_recvfrom)
+pub(crate) fn stream_socket_recvfrom(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_recvfrom";
+    check_arity(vm, F, args, 2, 4)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let len = zpp_long(vm, F, 2, "length", &args[1], false)?.unwrap_or(0);
+    let flags = match args.get(2) {
+        Some(v) => zpp_long(vm, F, 3, "flags", v, false)?.unwrap_or(0),
+        None => 0,
+    };
+    let want_addr = args.len() > 3;
+    if want_addr {
+        set_ref(args.get(3), Value::Null);
+    }
+    if len <= 0 {
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "stream_socket_recvfrom(): Argument #2 ($length) must be greater than 0",
+        ));
+    }
+    let Some((_, fd)) = sock_of(fid) else {
+        return Ok(Value::False);
+    };
+    let mut rflags = 0;
+    if flags & STREAM_OOB != 0 {
+        rflags |= libc::MSG_OOB;
+    }
+    if flags & STREAM_PEEK != 0 {
+        rflags |= libc::MSG_PEEK;
+    }
+    let mut buf = vec![0u8; len as usize];
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let r = unsafe {
+        if want_addr {
+            libc::recvfrom(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                rflags,
+                &mut ss as *mut _ as *mut libc::sockaddr,
+                &mut sl,
+            )
+        } else {
+            libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), rflags)
+        }
+    };
+    if r < 0 {
+        return Ok(Value::False);
+    }
+    if want_addr {
+        let text = if sl > 0 {
+            sockaddr_to_text(&ss, sl).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // An unconnected peer (stream sockets) still yields its address.
+        if sl > 0 && sockaddr_to_text(&ss, sl).is_some() || sl == 0 {
+            set_ref(args.get(3), Value::String(PhpString::from_vec(text)));
+        }
+    }
+    buf.truncate(r as usize);
+    Ok(Value::String(PhpString::from_vec(buf)))
+}
+
+/// PHP_FUNCTION(stream_socket_shutdown)
+pub(crate) fn stream_socket_shutdown(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_shutdown";
+    check_arity(vm, F, args, 2, 2)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let how = zpp_long(vm, F, 2, "mode", &args[1], false)?.unwrap_or(0);
+    if !(0..=2).contains(&how) {
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "stream_socket_shutdown(): Argument #2 ($mode) must be one of STREAM_SHUT_RD, STREAM_SHUT_WR, or STREAM_SHUT_RDWR",
+        ));
+    }
+    let Some((_, fd)) = sock_of(fid) else {
+        return Ok(Value::False);
+    };
+    let how = [libc::SHUT_RD, libc::SHUT_WR, libc::SHUT_RDWR][how as usize];
+    Ok(if unsafe { libc::shutdown(fd, how) } == 0 {
+        Value::True
+    } else {
+        Value::False
+    })
+}
+
+/// php_fsockopen_stream()
+pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result<Value, VmError> {
+    let f = if persistent {
+        "pfsockopen"
+    } else {
+        "fsockopen"
+    };
+    check_arity(vm, f, args, 1, 5)?;
+    let host = zpp_string(vm, f, 1, "hostname", &args[0])?;
+    let port = match args.get(1) {
+        Some(v) => zpp_long(vm, f, 2, "port", v, false)?.unwrap_or(0),
+        None => -1,
+    };
+    let timeout = match args.get(4) {
+        Some(v) => zpp_double(vm, f, 5, "timeout", v, true)?,
+        None => None,
+    };
+    let timeout = timeout.unwrap_or(default_socket_timeout(vm) as f64);
+    let mut hashkey = None;
+    if persistent {
+        let mut k = b"pfsockopen__".to_vec();
+        k.extend_from_slice(&host);
+        k.extend_from_slice(format!(":{}", port).as_bytes());
+        hashkey = Some(k);
+    }
+    let hostname = if port > 0 {
+        let mut h = host.clone();
+        h.extend_from_slice(format!(":{}", port).as_bytes());
+        h
+    } else {
+        host.clone()
+    };
+    let max = PHP_TIMEOUT_ULL_MAX / 1_000_000.0;
+    if timeout != -1.0 && !(timeout >= 0.0 && timeout <= max) {
+        return Err(throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): Argument #6 must be -1 or between 0 and {}",
+                f, max as u64
+            ),
+        ));
+    }
+    let conv = (timeout * 1_000_000.0) as i64;
+    let ms = tv_to_ms(conv / 1_000_000, conv % 1_000_000);
+    if let Some(k) = &hashkey {
+        if let Some(fid) = persistent_lookup(k) {
+            set_ref(args.get(2), Value::Long(0));
+            set_ref(args.get(3), str_val(""));
+            return Ok(Value::Resource(fid));
+        }
+    }
+    match xport_create(
+        vm,
+        f,
+        &hostname,
+        XportOp::Connect {
+            asynchronous: false,
+        },
+        Some(ms),
+        None,
+    ) {
+        Ok(fid) => {
+            set_ref(args.get(2), Value::Long(0));
+            set_ref(args.get(3), str_val(""));
+            if let Some(k) = hashkey {
+                persistent_store(k, fid);
+            }
+            Ok(Value::Resource(fid))
+        }
+        Err(e) => {
+            let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
+            vm.emit_warning(&format!(
+                "{}(): Unable to connect to {}:{} ({})",
+                f,
+                String::from_utf8_lossy(&shown),
+                port,
+                e.text.as_deref().unwrap_or("Unknown error")
+            ));
+            set_ref(args.get(2), Value::Long(e.code as i64));
+            set_ref(args.get(3), str_val(e.text.as_deref().unwrap_or("")));
+            Ok(Value::False)
+        }
+    }
+}
+
+/// PHP_FUNCTION(stream_set_blocking)
+pub(crate) fn stream_set_blocking(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_set_blocking";
+    check_arity(vm, F, args, 2, 2)?;
+    let raw = args[0].deref();
+    let fid = match raw {
+        Value::Resource(1..=3) => raw.to_long(),
+        _ => require_open_stream(vm, &args[0], F)?,
+    };
+    let block = zpp_bool(vm, F, 2, "enable", &args[1])?;
+    Ok(if set_blocking(fid, block) {
+        Value::True
+    } else {
+        Value::False
+    })
+}
+
+/// PHP_FUNCTION(stream_set_timeout)
+pub(crate) fn stream_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_set_timeout";
+    check_arity(vm, F, args, 2, 3)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let mut sec = zpp_long(vm, F, 2, "seconds", &args[1], false)?.unwrap_or(0);
+    let mut usec = 0;
+    if let Some(v) = args.get(2) {
+        let u = zpp_long(vm, F, 3, "microseconds", v, false)?.unwrap_or(0);
+        usec = u % 1_000_000;
+        sec += u / 1_000_000;
+    }
+    let ok = with_sock(fid, |fh| match fh.sock.as_mut() {
+        Some(sd) => {
+            sd.tv_sec = sec;
+            sd.tv_usec = usec;
+            sd.timeout_event = false;
+            true
+        }
+        None => false,
+    })
+    .unwrap_or(false);
+    Ok(if ok { Value::True } else { Value::False })
+}
+
+// ---------------------------------------------------------------------------
+// stream_select()
+// ---------------------------------------------------------------------------
+
+/// Resolves a stream array element to (stream id, descriptor). User
+/// streams and other non-descriptor streams are handled by `resolve`.
+pub(crate) type FdResolver<'a> = dyn FnMut(&mut Vm, i64) -> Result<Option<i32>, VmError> + 'a;
+
+fn element_stream_id(v: &Value) -> Option<i64> {
+    match v.deref() {
+        Value::Resource(id) => Some(id),
+        _ => None,
+    }
+}
+
+fn select_array_arg(
+    vm: &mut Vm,
+    args: &[Value],
+    i: usize,
+    name: &str,
+) -> Result<Option<Rc<RefCell<PhpArray>>>, VmError> {
+    match args.get(i).map(|v| v.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(a)),
+        Some(v) => Err(type_error(vm, "stream_select", i + 1, name, "?array", &v)),
+    }
+}
+
+/// PHP_FUNCTION(stream_select), with `resolve` mapping a stream id that has
+/// no descriptor of its own (e.g. a user-space stream) to one.
+pub(crate) fn stream_select_impl(
+    vm: &mut Vm,
+    args: &[Value],
+    resolve: &mut FdResolver,
+    buffered: &dyn Fn(i64) -> bool,
+) -> Result<Value, VmError> {
+    const F: &str = "stream_select";
+    check_arity(vm, F, args, 4, 5)?;
+    let arrays = [
+        select_array_arg(vm, args, 0, "read")?,
+        select_array_arg(vm, args, 1, "write")?,
+        select_array_arg(vm, args, 2, "except")?,
+    ];
+    let sec = zpp_long(vm, F, 4, "seconds", &args[3], true)?;
+    let usec = match args.get(4) {
+        Some(v) => zpp_long(vm, F, 5, "microseconds", v, true)?,
+        None => None,
+    };
+    // stream_array_to_fd_set()
+    let mut sets: Vec<Vec<(i32, i64)>> = vec![Vec::new(), Vec::new(), Vec::new()];
+    let mut total = 0;
+    for (i, a) in arrays.iter().enumerate() {
+        let Some(a) = a else { continue };
+        let vals: Vec<Value> = a.borrow().values().cloned().collect();
+        for v in vals {
+            let Some(id) = element_stream_id(&v) else {
+                continue;
+            };
+            if !goro_core::value::is_open_resource(id) {
+                continue;
+            }
+            let fd = match stream_fd_for_select(vm, id)? {
+                Some(fd) => Some(fd),
+                None => resolve(vm, id)?,
+            };
+            if let Some(fd) = fd {
+                sets[i].push((fd, id));
+            }
+        }
+        if !sets[i].is_empty() {
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return Err(throw(vm, b"ValueError", "No stream arrays were passed"));
+    }
+    if sec.is_none() && usec.is_some() && usec != Some(0) {
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "stream_select(): Argument #5 ($microseconds) must be null when argument #4 ($seconds) is null",
+        ));
+    }
+    let mut timeout_ms = -1;
+    if let Some(s) = sec {
+        if s < 0 {
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "stream_select(): Argument #4 ($seconds) must be greater than or equal to 0",
+            ));
+        }
+        let u = usec.unwrap_or(0);
+        if u < 0 {
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "stream_select(): Argument #5 ($microseconds) must be greater than or equal to 0",
+            ));
+        }
+        let total_s = s.saturating_add(u / 1_000_000);
+        timeout_ms = total_s
+            .saturating_mul(1000)
+            .saturating_add((u % 1_000_000 + 999) / 1000)
+            .min(i32::MAX as i64) as i32;
+    }
+    // stream_array_emulate_read_fd_set(): streams with buffered data are
+    // readable without select().
+    if let Some(r) = &arrays[0] {
+        let mut kept = PhpArray::new();
+        let mut cnt = 0;
+        for (k, v) in r.borrow().iter() {
+            if let Some(id) = element_stream_id(v) {
+                if buffered(id) {
+                    kept.set(k.clone(), v.clone());
+                    cnt += 1;
+                }
+            }
+        }
+        if cnt > 0 {
+            replace_array(args, 0, kept);
+            for (i, a) in arrays.iter().enumerate().skip(1) {
+                if a.is_some() {
+                    replace_array(args, i, PhpArray::new());
+                }
+            }
+            return Ok(Value::Long(cnt));
+        }
+    }
+    let mut pfds: Vec<libc::pollfd> = Vec::new();
+    let mut index: Vec<(usize, usize)> = Vec::new();
+    for (i, set) in sets.iter().enumerate() {
+        let events = match i {
+            0 => libc::POLLIN,
+            1 => libc::POLLOUT,
+            _ => libc::POLLPRI,
+        };
+        for (j, (fd, _)) in set.iter().enumerate() {
+            pfds.push(libc::pollfd {
+                fd: *fd,
+                events,
+                revents: 0,
+            });
+            index.push((i, j));
+        }
+    }
+    if timeout_ms != 0 {
+        super::flush_cli_output(vm);
+    }
+    let n = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms) };
+    if n < 0 {
+        let e = errno();
+        let max_fd = pfds.iter().map(|p| p.fd).max().unwrap_or(0);
+        vm.emit_warning(&format!(
+            "{}(): Unable to select [{}]: {} (max_fd={})",
+            F,
+            e,
+            strerror(e),
+            max_fd
+        ));
+        return Ok(Value::False);
+    }
+    // Ready descriptors per set (select() semantics).
+    let mut ready: Vec<std::collections::HashSet<i32>> = vec![Default::default(); 3];
+    let mut count = 0i64;
+    for (p, (i, _)) in pfds.iter().zip(index.iter()) {
+        let rv = p.revents;
+        let hit = match i {
+            0 => rv & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0,
+            1 => rv & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0,
+            _ => rv & libc::POLLPRI != 0,
+        };
+        if hit && ready[*i].insert(p.fd) {
+            count += 1;
+        }
+    }
+    for i in 0..3 {
+        let Some(a) = &arrays[i] else { continue };
+        let mut out = PhpArray::new();
+        let entries: Vec<(ArrayKey, Value)> = a
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in entries {
+            let Some(id) = element_stream_id(&v) else {
+                continue;
+            };
+            if let Some((fd, _)) = sets[i].iter().find(|(_, sid)| *sid == id) {
+                if ready[i].contains(fd) {
+                    out.set(k, v.deref());
+                }
+            }
+        }
+        replace_array(args, i, out);
+    }
+    Ok(Value::Long(count))
+}
+
+fn replace_array(args: &[Value], i: usize, arr: PhpArray) {
+    if let Some(Value::Reference(r)) = args.get(i) {
+        *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(arr)));
+    } else if let Some(Value::Array(a)) = args.get(i) {
+        *a.borrow_mut() = arr;
+    }
+}
+
+/// php_stream_cast(PHP_STREAM_AS_FD_FOR_SELECT) for built-in streams.
+fn stream_fd_for_select(vm: &mut Vm, id: i64) -> Result<Option<i32>, VmError> {
+    if (1..=3).contains(&id) {
+        return Ok(Some((id - 1) as i32));
+    }
+    let info = FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&id)
+            .map(|fh| (fh.special, fh.file.as_raw_fd(), fh.user_wrapper.is_some()))
+    });
+    match info {
+        Some((SpecialStream::Memory, _, _)) => {
+            vm.emit_warning(
+                "stream_select(): Cannot represent a stream of type MEMORY as a select()able descriptor",
+            );
+            Ok(None)
+        }
+        Some((SpecialStream::Stdin, _, _)) => Ok(Some(0)),
+        Some((SpecialStream::Stdout, _, _)) | Some((SpecialStream::Output, _, _)) => Ok(Some(1)),
+        Some((SpecialStream::Stderr, _, _)) => Ok(Some(2)),
+        Some((_, _, true)) => Ok(None),
+        Some((_, fd, false)) => Ok(Some(fd)),
+        None => Ok(None),
+    }
+}
+
+/// stream_select() for built-in streams.
+pub(crate) fn stream_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    stream_select_impl(vm, args, &mut |_, _| Ok(None), &|id| {
+        FILE_HANDLES.with(|h| {
+            h.borrow()
+                .get(&id)
+                .map(|fh| !fh.filter_read_ready.is_empty())
+                .unwrap_or(false)
+        })
+    })
+}

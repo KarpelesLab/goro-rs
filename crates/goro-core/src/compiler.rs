@@ -254,6 +254,12 @@ impl Compiler {
                     // stream_socket_server($address, &$errno, &$errstr, ...)
                     (b"stream_socket_server", 1) => true,
                     (b"stream_socket_server", 2) => true,
+                    // stream_socket_accept($socket, $timeout, &$peer_name)
+                    (b"stream_socket_accept", 2) => true,
+                    // stream_socket_recvfrom($socket, $length, $flags, &$address)
+                    (b"stream_socket_recvfrom", 3) => true,
+                    // stream_select(&$read, &$write, &$except, ...)
+                    (b"stream_select", 0..=2) => true,
                     // mb_ereg($pattern, $string, &$regs)
                     (b"mb_ereg", 2) => true,
                     (b"mb_eregi", 2) => true,

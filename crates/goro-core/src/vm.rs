@@ -421,6 +421,9 @@ impl PendingCall {
 pub struct Vm {
     /// Output buffer
     pub(crate) output: Vec<u8>,
+    /// CLI: unbuffered output reaches stdout at flush points (see
+    /// `flush_cli_output`) instead of only at the end of the request.
+    pub cli_direct_output: bool,
     /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
     pub ob_stack: Vec<Vec<u8>>,
     /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
@@ -720,6 +723,7 @@ impl Vm {
     pub fn new() -> Self {
         let mut vm = Self {
             output: Vec::new(),
+            cli_direct_output: false,
             ob_stack: Vec::new(),
             ob_handlers: Vec::new(),
             ob_running: None,
@@ -13099,6 +13103,18 @@ impl Vm {
 
     pub fn write_output(&mut self, data: &[u8]) {
         self.ob_write(data);
+    }
+
+    /// CLI only: hand output that is not held by an output buffer to stdout
+    /// now (before blocking on I/O or spawning a process).
+    pub fn flush_cli_output(&mut self) {
+        if self.cli_direct_output && self.ob_stack.is_empty() && !self.output.is_empty() {
+            use std::io::Write;
+            let out = std::mem::take(&mut self.output);
+            let mut so = std::io::stdout().lock();
+            let _ = so.write_all(&out);
+            let _ = so.flush();
+        }
     }
 
     /// Compare two PHP values (for sorting)

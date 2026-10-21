@@ -86,6 +86,15 @@ fn main() {
                     process::exit(1);
                 }
                 inline_code = Some(args[i + 1].clone());
+                // $argv: "Standard input code" then the remaining arguments
+                // (a leading "--" separator is dropped).
+                let mut rest = &args[i + 2..];
+                if rest.first().map(|s| s.as_str()) == Some("--") {
+                    rest = &rest[1..];
+                }
+                let mut av = vec!["Standard input code".to_string()];
+                av.extend(rest.iter().cloned());
+                let _ = SCRIPT_ARGV.set(av);
                 break;
             }
             "-f" => {
@@ -250,6 +259,7 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
 
     // Execute
     let mut vm = Vm::new();
+    vm.cli_direct_output = true;
     vm.current_file = filename.to_string();
     vm.error_reporting = initial_error_reporting;
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings
