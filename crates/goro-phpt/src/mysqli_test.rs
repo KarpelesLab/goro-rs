@@ -210,6 +210,17 @@ pub fn try_start() -> Option<EmbeddedMysql> {
             .arg("--skip-log-bin");
     }
 
+    // The server must not outlive the runner, even when the runner is
+    // killed (timeouts, ^C): have the kernel send it SIGTERM when its
+    // parent goes away.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
     let mut child = cmd.spawn().ok()?;
 
     // 3. Wait for socket to be ready.

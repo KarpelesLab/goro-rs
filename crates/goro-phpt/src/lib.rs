@@ -2368,6 +2368,8 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
         }
     }
 
+    // Stop the embedded MySQL server, if one was started.
+    mysqli_test::shutdown();
     (pass, fail, skip, error)
 }
 
