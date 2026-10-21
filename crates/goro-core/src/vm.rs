@@ -6580,15 +6580,9 @@ impl Vm {
             b"reflectionfiber" => {
                 crate::reflection::reflection_fiber_method(self, method_lower, obj)
             }
-            b"splfileinfo" => {
-                if let Some(r) = self.spl_file_info_call(method_lower, obj, None) {
-                    return Some(r);
-                }
-                self.spl_file_info_method(method_lower, obj)
-            }
-            b"directoryiterator" | b"filesystemiterator"
+            b"splfileinfo" | b"directoryiterator" | b"filesystemiterator"
             | b"recursivedirectoryiterator" | b"globiterator" => {
-                self.spl_directory_iterator_method(class_lower, method_lower, obj)
+                self.spl_fs_call(class_lower, method_lower, obj, None)
             }
             b"splfileobject" | b"spltempfileobject" => {
                 self.spl_file_object_call(method_lower, obj, None)
@@ -7826,488 +7820,6 @@ impl Vm {
         }
     }
 
-    fn spl_file_info_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        // Don't handle constructors or unknown methods
-        if method == b"__construct" {
-            return None;
-        }
-
-        let ob = obj.borrow();
-        let path_val = ob.get_property(b"__spl_file_path");
-        let path_str = if let Value::String(s) = &path_val {
-            s.to_string_lossy()
-        } else {
-            // Path not set yet (pre-constructor) - only handle known methods
-            return None;
-        };
-        drop(ob);
-
-        match method {
-            b"getfilename" => {
-                let name = std::path::Path::new(&path_str)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Some(Value::String(PhpString::from_string(name)))
-            }
-            b"getextension" => {
-                // PHP's behavior differs from Rust's Path::extension:
-                // - Files starting with "." but having more dots ARE treated as having
-                //   an extension (e.g. ".test" returns "test", ".tar.gz" returns "gz")
-                let name = std::path::Path::new(&path_str)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let ext = match name.rfind('.') {
-                    Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
-                    _ => String::new(),
-                };
-                Some(Value::String(PhpString::from_string(ext)))
-            }
-            b"getbasename" => None, // handled in handle_spl_docall (takes optional suffix arg)
-            b"getpath" => {
-                let dir = std::path::Path::new(&path_str)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Some(Value::String(PhpString::from_string(dir)))
-            }
-            b"getpathname" => {
-                Some(Value::String(PhpString::from_string(path_str)))
-            }
-            b"getrealpath" => {
-                match std::fs::canonicalize(&path_str) {
-                    Ok(p) => Some(Value::String(PhpString::from_string(p.to_string_lossy().to_string()))),
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"getsize" => {
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.len() as i64)),
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"gettype" => {
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => {
-                        let t = if m.is_dir() { "dir" } else if m.is_file() { "file" } else { "unknown" };
-                        Some(Value::String(PhpString::from_bytes(t.as_bytes())))
-                    }
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"isdir" => {
-                Some(if std::path::Path::new(&path_str).is_dir() { Value::True } else { Value::False })
-            }
-            b"isfile" => {
-                Some(if std::path::Path::new(&path_str).is_file() { Value::True } else { Value::False })
-            }
-            b"islink" => {
-                Some(if std::fs::symlink_metadata(&path_str).map_or(false, |m| m.file_type().is_symlink()) { Value::True } else { Value::False })
-            }
-            b"getlinktarget" => {
-                match std::fs::read_link(&path_str) {
-                    Ok(target) => Some(Value::String(PhpString::from_string(target.to_string_lossy().to_string()))),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getLinkTarget(): Unable to read link {}, error: No such file or directory", class_canonical, path_str);
-                        let line = self.current_line;
-                        let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    }
-                }
-            }
-            b"isreadable" => {
-                Some(if std::path::Path::new(&path_str).exists() { Value::True } else { Value::False })
-            }
-            b"iswritable" | b"iswriteable" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(if m.mode() & 0o200 != 0 { Value::True } else { Value::False }),
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"isexecutable" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(if m.mode() & 0o100 != 0 { Value::True } else { Value::False }),
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"getperms" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.mode() as i64)),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getPerms(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getinode" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.ino() as i64)),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getInode(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getowner" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.uid() as i64)),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getOwner(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getgroup" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.gid() as i64)),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getGroup(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getatime" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.atime())),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getATime(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getmtime" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.mtime())),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getMTime(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"getctime" => {
-                use std::os::unix::fs::MetadataExt;
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => Some(Value::Long(m.ctime())),
-                    Err(_) => {
-                        let class_canonical = self.builtin_canonical_name(&obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                        let msg = format!("{}::getCTime(): stat failed for {}", class_canonical, path_str);
-                        let line = self.current_line; let exc = self.create_exception(b"RuntimeException", &msg, line);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    },
-                }
-            }
-            b"__tostring" | b"tostring" => {
-                Some(Value::String(PhpString::from_string(path_str)))
-            }
-            b"__debuginfo" => {
-                // PHP exposes the SplFileInfo internal state through two
-                // private fields: pathName (full path) and fileName (basename).
-                let mut arr = PhpArray::new();
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
-                    Value::String(PhpString::from_string(path_str.clone())),
-                );
-                let filename = std::path::Path::new(&path_str)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
-                    Value::String(PhpString::from_string(filename)),
-                );
-                Some(Value::Array(Rc::new(RefCell::new(arr))))
-            }
-            b"setfileclass" => None, // handled in handle_spl_docall
-            b"setinfoclass" => None, // handled in handle_spl_docall
-            b"getfileinfo" | b"getpathinfo" => {
-                // Returns a new SplFileInfo (or subclass) object for the path
-                // For getPathInfo, use the directory portion; for getFileInfo, use full path
-                let info_class = {
-                    let ob = obj.borrow();
-                    ob.get_property(b"__spl_info_class")
-                };
-                let class_name: Vec<u8> = match info_class {
-                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
-                    _ => b"SplFileInfo".to_vec(),
-                };
-                let new_path = if method == b"getpathinfo" {
-                    // Get parent directory
-                    std::path::Path::new(&path_str).parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                } else {
-                    path_str.clone()
-                };
-                let obj_id = self.next_object_id;
-                self.next_object_id += 1;
-                let mut fi_obj = PhpObject::new(class_name.clone(), obj_id);
-                fi_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(new_path)));
-                // Also copy info_class so chained calls preserve the class setting
-                let info_class_val = {
-                    let ob = obj.borrow();
-                    ob.get_property(b"__spl_info_class")
-                };
-                if let Value::String(s) = &info_class_val {
-                    if !s.as_bytes().is_empty() {
-                        fi_obj.set_property(b"__spl_info_class".to_vec(), info_class_val);
-                    }
-                }
-                Some(Value::Object(Rc::new(RefCell::new(fi_obj))))
-            }
-            _ => None,
-        }
-    }
-
-    fn spl_directory_iterator_get_current_path(
-        &self,
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> String {
-        let ob = obj.borrow();
-        let base_path = ob.get_property(b"__spl_file_path");
-        let base = base_path.to_php_string().to_string_lossy();
-        let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-        let entries = ob.get_property(b"__spl_dir_entries");
-        if let Value::Array(a) = entries {
-            let a = a.borrow();
-            if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
-                let entry_name = entry.to_php_string().to_string_lossy();
-                let base_trimmed = base.trim_end_matches('/');
-                format!("{}/{}", base_trimmed, entry_name)
-            } else {
-                base
-            }
-        } else {
-            base
-        }
-    }
-
-    fn spl_directory_iterator_method(
-        &mut self,
-        _class_lower: &[u8],
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        match method {
-            b"count" => {
-                // FilesystemIterator/RecursiveDirectoryIterator/GlobIterator
-                // are Countable through GlobIterator. PHP throws an Error if
-                // the iterator has not been initialised (constructed via
-                // Reflection's newInstanceWithoutConstructor).
-                let ob = obj.borrow();
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if matches!(entries, Value::Null | Value::Undef) {
-                    drop(ob);
-                    let class_canonical = self.builtin_canonical_name(_class_lower);
-                    let msg = format!("{} is not initialized", class_canonical);
-                    let exc = self.create_exception(b"Error", &msg, 0);
-                    self.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                if let Value::Array(a) = entries {
-                    Some(Value::Long(a.borrow().len() as i64))
-                } else {
-                    Some(Value::Long(0))
-                }
-            }
-            b"rewind" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                Some(Value::Null)
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if let Value::Array(a) = entries {
-                    Some(if pos < a.borrow().len() as i64 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"current" => {
-                // DirectoryIterator::current() returns $this
-                Some(Value::Object(obj.clone()))
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if matches!(entries, Value::Null | Value::Undef) {
-                    drop(ob);
-                    let exc = self.create_exception(b"Error", "Object not initialized", 0);
-                    self.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                Some(Value::Long(pos))
-            }
-            b"next" => {
-                let mut ob = obj.borrow_mut();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
-                Some(Value::Null)
-            }
-            b"seek" => None, // handled in handle_spl_docall
-            b"isdot" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if let Value::Array(a) = entries {
-                    let a = a.borrow();
-                    if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
-                        let name = entry.to_php_string().to_string_lossy();
-                        Some(if name == "." || name == ".." { Value::True } else { Value::False })
-                    } else {
-                        Some(Value::False)
-                    }
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"getfilename" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if let Value::Array(a) = entries {
-                    let a = a.borrow();
-                    if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
-                        Some(entry.clone())
-                    } else {
-                        Some(Value::String(PhpString::from_bytes(b"")))
-                    }
-                } else {
-                    Some(Value::String(PhpString::from_bytes(b"")))
-                }
-            }
-            b"getextension" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if let Value::Array(a) = entries {
-                    let a = a.borrow();
-                    if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
-                        let name = entry.to_php_string().to_string_lossy();
-                        let ext = match name.rfind('.') {
-                            Some(idx) if idx + 1 < name.len() => name[idx + 1..].to_string(),
-                            _ => String::new(),
-                        };
-                        Some(Value::String(PhpString::from_string(ext)))
-                    } else {
-                        Some(Value::String(PhpString::from_bytes(b"")))
-                    }
-                } else {
-                    Some(Value::String(PhpString::from_bytes(b"")))
-                }
-            }
-            b"getbasename" => None, // handled in handle_spl_docall
-            b"getpath" => {
-                let ob = obj.borrow();
-                let base_path = ob.get_property(b"__spl_file_path");
-                let base = base_path.to_php_string().to_string_lossy();
-                Some(Value::String(PhpString::from_string(base.trim_end_matches('/').to_string())))
-            }
-            b"getpathname" => {
-                let full_path = self.spl_directory_iterator_get_current_path(obj);
-                Some(Value::String(PhpString::from_string(full_path)))
-            }
-            b"__tostring" | b"tostring" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let entries = ob.get_property(b"__spl_dir_entries");
-                if let Value::Array(a) = entries {
-                    let a = a.borrow();
-                    if let Some(entry) = a.get(&ArrayKey::Int(pos)) {
-                        Some(entry.clone())
-                    } else {
-                        Some(Value::String(PhpString::from_bytes(b"")))
-                    }
-                } else {
-                    Some(Value::String(PhpString::from_bytes(b"")))
-                }
-            }
-            b"isfile" | b"isdir" | b"islink" | b"isreadable" | b"iswritable"
-            | b"iswriteable" | b"isexecutable" | b"getperms" | b"getinode"
-            | b"getowner" | b"getgroup" | b"getatime" | b"getmtime"
-            | b"getctime" | b"getsize" | b"gettype" | b"getrealpath" => {
-                // Delegate to file info method using the full path of the current entry
-                let full_path = self.spl_directory_iterator_get_current_path(obj);
-                // Temporarily set the path and call file info method
-                let old_path = obj.borrow().get_property(b"__spl_file_path");
-                obj.borrow_mut().set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(full_path)));
-                let result = self.spl_file_info_method(method, obj);
-                obj.borrow_mut().set_property(b"__spl_file_path".to_vec(), old_path);
-                result
-            }
-            b"getchildren" | b"haschildren" => {
-                // RecursiveDirectoryIterator
-                if method == b"haschildren" {
-                    let full_path = self.spl_directory_iterator_get_current_path(obj);
-                    // "." and ".." never have children.
-                    let is_dot = full_path.ends_with("/.") || full_path.ends_with("/..");
-                    Some(if !is_dot && std::path::Path::new(&full_path).is_dir() { Value::True } else { Value::False })
-                } else {
-                    // getChildren - return a new RecursiveDirectoryIterator for the subdirectory
-                    let full_path = self.spl_directory_iterator_get_current_path(obj);
-                    let obj_id = self.next_object_id;
-                    self.next_object_id += 1;
-                    let class_name = obj.borrow().class_name.clone();
-                    let mut child_obj = PhpObject::new(class_name, obj_id);
-                    child_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(full_path.clone())));
-                    if let Ok(entries) = std::fs::read_dir(&full_path) {
-                        let mut entries_arr = PhpArray::new();
-                        entries_arr.push(Value::String(PhpString::from_bytes(b".")));
-                        entries_arr.push(Value::String(PhpString::from_bytes(b"..")));
-                        for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            entries_arr.push(Value::String(PhpString::from_string(name)));
-                        }
-                        child_obj.set_property(b"__spl_dir_entries".to_vec(), Value::Array(Rc::new(RefCell::new(entries_arr))));
-                    }
-                    child_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                    Some(Value::Object(Rc::new(RefCell::new(child_obj))))
-                }
-            }
-            b"getsubpath" | b"getsubpathname" => {
-                // RecursiveDirectoryIterator specific
-                Some(Value::String(PhpString::from_bytes(b"")))
-            }
-            _ => None,
-        }
-    }
-
     /// Check if this is an SPL method that needs call arguments
     pub(crate) fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
         if let Some(h) = self.native_class_handlers.get(class) {
@@ -8358,15 +7870,11 @@ impl Vm {
                     | b"fgetcsv" | b"fputcsv" | b"fwrite" | b"flock" | b"ftruncate"
                     | b"fread" | b"fscanf" | b"fseek"
             ),
-            b"splfileinfo" => matches!(
-                method,
-                b"getbasename" | b"setfileclass" | b"setinfoclass" | b"openfile"
-            ),
-            b"directoryiterator" | b"filesystemiterator"
-            | b"recursivedirectoryiterator" | b"globiterator" => matches!(
-                method,
-                b"getbasename" | b"setfileclass" | b"setinfoclass" | b"seek"
-            ),
+            b"splfileinfo" | b"directoryiterator" | b"filesystemiterator"
+            | b"recursivedirectoryiterator" | b"globiterator" => {
+                crate::spl_stubs::spl_stub_method(class, method).map(|m| !m.params.is_empty()).unwrap_or(false)
+                    && method != b"__construct"
+            }
             b"recursivetreeiterator" => false, // delegate to outer iterator
             b"datetime" | b"datetimeimmutable" => matches!(method, b"format" | b"modify" | b"settimezone" | b"gettimezone" | b"settime" | b"setdate" | b"setisodate" | b"settimestamp" | b"gettimestamp" | b"add" | b"sub" | b"diff" | b"getoffset" | b"__unserialize"),
             b"dateinterval" => matches!(method, b"format" | b"__unserialize"),
@@ -9295,139 +8803,9 @@ impl Vm {
                 b"splfileobject" | b"spltempfileobject" => {
                     self.spl_file_object_call(method, obj, Some(&args[1..]))
                 }
-                b"splfileinfo" => {
-                    if method == b"getbasename" || method == b"openfile" {
-                        return self.spl_file_info_call(method, obj, Some(&args[1..]));
-                    }
-                    match method {
-                        b"getbasename" => {
-                            let suffix = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let name = std::path::Path::new(&path_str)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            // PHP basename() does not strip the suffix if it
-                            // equals the entire basename (avoid empty result).
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
-                                name[..name.len() - suffix.len()].to_string()
-                            } else {
-                                name
-                            };
-                            Some(Value::String(PhpString::from_string(result)))
-                        }
-                        b"setfileclass" | b"setinfoclass" => {
-                            let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
-                            // Validate the class is derived from SplFileObject (setFileClass)
-                            // or SplFileInfo (setInfoClass)
-                            let class_str = class_name.to_php_string().to_string_lossy();
-                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                            let (required, method_name) = if method == b"setfileclass" {
-                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
-                            } else {
-                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
-                            };
-                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
-                            // The class must be the required class itself or extend it
-                            let ok = class_lower == required || self.class_extends(&class_lower, required);
-                            if !ok {
-                                let line = self.current_line;
-                                let msg = format!(
-                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
-                                    method_name, required_display, class_str
-                                );
-                                let exc = self.create_exception(b"TypeError", &msg, line);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
-                            ob.set_property(prop_name.to_vec(), class_name);
-                            Some(Value::Null)
-                        }
-                        _ => None,
-                    }
-                }
-                b"directoryiterator" | b"filesystemiterator"
+                b"splfileinfo" | b"directoryiterator" | b"filesystemiterator"
                 | b"recursivedirectoryiterator" | b"globiterator" => {
-                    match method {
-                        b"getbasename" => {
-                            let suffix = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-                            // Get the current entry name, not the directory path
-                            let ob = obj.borrow();
-                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                            let entries = ob.get_property(b"__spl_dir_entries");
-                            let name = if let Value::Array(a) = entries {
-                                let a = a.borrow();
-                                a.get(&ArrayKey::Int(pos))
-                                    .map(|v| v.to_php_string().to_string_lossy())
-                                    .unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            // PHP basename() does not strip the suffix if it
-                            // equals the entire basename (avoid empty result).
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
-                                name[..name.len() - suffix.len()].to_string()
-                            } else {
-                                name
-                            };
-                            Some(Value::String(PhpString::from_string(result)))
-                        }
-                        b"seek" => {
-                            let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            let ob = obj.borrow();
-                            let entries = ob.get_property(b"__spl_dir_entries");
-                            let len = if let Value::Array(a) = entries {
-                                a.borrow().len() as i64
-                            } else {
-                                0
-                            };
-                            drop(ob);
-                            if pos < 0 || pos >= len {
-                                // Set pos past end so valid() returns false
-                                let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_pos".to_vec(), Value::Long(len));
-                                drop(ob);
-                                let msg = format!("Seek position {} is out of range", pos);
-                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
-                            Some(Value::Null)
-                        }
-                        b"setfileclass" | b"setinfoclass" => {
-                            let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"SplFileInfo")));
-                            let class_str = class_name.to_php_string().to_string_lossy();
-                            let class_lower: Vec<u8> = class_str.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                            let (required, method_name) = if method == b"setfileclass" {
-                                (b"splfileobject".as_slice(), "SplFileInfo::setFileClass")
-                            } else {
-                                (b"splfileinfo".as_slice(), "SplFileInfo::setInfoClass")
-                            };
-                            let required_display = if method == b"setfileclass" { "SplFileObject" } else { "SplFileInfo" };
-                            let ok = class_lower == required || self.class_extends(&class_lower, required);
-                            if !ok {
-                                let line = self.current_line;
-                                let msg = format!(
-                                    "{}(): Argument #1 ($class) must be a class name derived from {}, {} given",
-                                    method_name, required_display, class_str
-                                );
-                                let exc = self.create_exception(b"TypeError", &msg, line);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            let prop_name = if method == b"setfileclass" { b"__spl_file_class" } else { b"__spl_info_class" };
-                            ob.set_property(prop_name.to_vec(), class_name);
-                            Some(Value::Null)
-                        }
-                        _ => None,
-                    }
+                    self.spl_fs_call(class, method, obj, Some(&args[1..]))
                 }
                 b"simplexmlelement" => {
                     self.simplexml_docall(method, obj, args)
@@ -10585,13 +9963,16 @@ impl Vm {
             }
             b"filesystemiterator" | b"recursivedirectoryiterator" | b"globiterator" => {
                 match const_name {
+                    b"CURRENT_MODE_MASK" => Some(Value::Long(0x000000F0)),
                     b"CURRENT_AS_PATHNAME" => Some(Value::Long(0x00000020)),
                     b"CURRENT_AS_FILEINFO" => Some(Value::Long(0x00000000)),
                     b"CURRENT_AS_SELF" => Some(Value::Long(0x00000010)),
+                    b"KEY_MODE_MASK" => Some(Value::Long(0x00000F00)),
                     b"KEY_AS_PATHNAME" => Some(Value::Long(0x00000000)),
                     b"KEY_AS_FILENAME" => Some(Value::Long(0x00000100)),
-                    b"FOLLOW_SYMLINKS" => Some(Value::Long(0x00000200)),
+                    b"FOLLOW_SYMLINKS" => Some(Value::Long(0x00004000)),
                     b"NEW_CURRENT_AND_KEY" => Some(Value::Long(0x00000100)),
+                    b"OTHER_MODE_MASK" => Some(Value::Long(0x00007000)),
                     b"SKIP_DOTS" => Some(Value::Long(0x00001000)),
                     b"UNIX_PATHS" => Some(Value::Long(0x00002000)),
                     _ => None,
@@ -10723,9 +10104,9 @@ impl Vm {
                 b"EXTR_DATA", b"EXTR_PRIORITY", b"EXTR_BOTH",
             ],
             b"filesystemiterator" | b"recursivedirectoryiterator" | b"globiterator" => &[
-                b"CURRENT_AS_PATHNAME", b"CURRENT_AS_FILEINFO", b"CURRENT_AS_SELF",
-                b"KEY_AS_PATHNAME", b"KEY_AS_FILENAME", b"FOLLOW_SYMLINKS",
-                b"NEW_CURRENT_AND_KEY", b"SKIP_DOTS", b"UNIX_PATHS",
+                b"CURRENT_MODE_MASK", b"CURRENT_AS_PATHNAME", b"CURRENT_AS_FILEINFO", b"CURRENT_AS_SELF",
+                b"KEY_MODE_MASK", b"KEY_AS_PATHNAME", b"FOLLOW_SYMLINKS", b"KEY_AS_FILENAME",
+                b"NEW_CURRENT_AND_KEY", b"OTHER_MODE_MASK", b"SKIP_DOTS", b"UNIX_PATHS",
             ],
             b"recursiveiteratoriterator" => &[
                 b"LEAVES_ONLY", b"SELF_FIRST", b"CHILD_FIRST", b"CATCH_GET_CHILD",
@@ -18680,58 +18061,6 @@ impl Vm {
                                             obj_mut.set_property(b"__spl_pos".to_vec(), Value::Long(0));
                                             obj_mut.set_property(b"__spl_flags".to_vec(), Value::Long(0));
                                         }
-                                        b"directoryiterator" | b"filesystemiterator"
-                                        | b"recursivedirectoryiterator" => {
-                                            // __construct(string $directory)
-                                            if call.args.len() > 1 {
-                                                let path = call.args[1].to_php_string().to_string_lossy();
-                                                // Empty path is a ValueError
-                                                if path.is_empty() {
-                                                    drop(obj_mut);
-                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
-                                                    let msg = format!("{}::__construct(): Argument #1 ($directory) must not be empty", class_canonical);
-                                                    let exc = self.create_exception(b"ValueError", &msg, op.line);
-                                                    self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
-                                                        pending_calls_catch_depth = Some(*eh_pc_depth);
-                                                        let ct = *catch_target;
-                                                        ip = ct as usize;
-                                                        continue;
-                                                    }
-                                                    return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: op.line });
-                                                }
-                                                obj_mut.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path.clone())));
-                                                // Read directory entries
-                                                if let Ok(entries) = std::fs::read_dir(&path) {
-                                                    let mut entries_arr = PhpArray::new();
-                                                    entries_arr.push(Value::String(PhpString::from_bytes(b".")));
-                                                    entries_arr.push(Value::String(PhpString::from_bytes(b"..")));
-                                                    for entry in entries.flatten() {
-                                                        let name = entry.file_name().to_string_lossy().to_string();
-                                                        entries_arr.push(Value::String(PhpString::from_string(name)));
-                                                    }
-                                                    obj_mut.set_property(b"__spl_dir_entries".to_vec(), Value::Array(Rc::new(RefCell::new(entries_arr))));
-                                                    obj_mut.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                                                } else {
-                                                    drop(obj_mut);
-                                                    let class_canonical = self.builtin_canonical_name(&class_lower);
-                                                    let msg = format!("{}::__construct({}): Failed to open directory: No such file or directory", class_canonical, path);
-                                                    let exc = self.create_exception(b"UnexpectedValueException", &msg, op.line);
-                                                    self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
-                                                        let ct = *catch_target;
-                                                        ip = ct as usize;
-                                                        continue;
-                                                    }
-                                                    return Err(VmError { message: format!("Uncaught UnexpectedValueException: {}", msg), line: op.line });
-                                                }
-                                                // FilesystemIterator flags
-                                                if matches!(class_lower.as_slice(), b"filesystemiterator" | b"recursivedirectoryiterator") {
-                                                    let flags = if call.args.len() > 2 { call.args[2].to_long() } else { 0x00000100 }; // KEY_AS_PATHNAME
-                                                    obj_mut.set_property(b"__spl_flags".to_vec(), Value::Long(flags));
-                                                }
-                                            }
-                                        }
                                         // Reflection class constructors
                                         b"reflectionclass" | b"reflectionobject" | b"reflectionenum" => {
                                             // ReflectionClass::__construct(string|object $objectOrClass)
@@ -24232,7 +23561,7 @@ impl Vm {
                                     | b"reflectionconstant" | b"reflectiongenerator"
                                     | b"reflectionfiber" | b"reflectionreference"
                             );
-                            let spl_uncloneable = self.spl_find_base(&class_lower, &[b"splfileobject"]).is_some();
+                            let spl_uncloneable = self.spl_find_base(&class_lower, &[b"splfileobject", b"globiterator"]).is_some();
                             if reflection_uncloneable || spl_uncloneable || class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
@@ -31532,6 +30861,18 @@ impl Vm {
                             .get(&class_name_lower)
                             .map(|c| c.methods.contains_key(&method_name_lower))
                             .unwrap_or(false);
+
+                        // SplFileObject/GlobIterator: spl_filesystem_object_get_method_check()
+                        if method_name_lower != b"__construct" && self.spl_fs_method_check_fails(obj, &class_name_lower) {
+                            let msg = "The parent constructor was not called: the object is in an invalid state";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        }
 
                         // Handle Fiber methods before the main dispatch
                         if class_name_lower == b"fiber" && !has_user_method {

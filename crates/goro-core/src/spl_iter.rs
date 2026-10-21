@@ -628,7 +628,7 @@ impl Vm {
         }
     }
 
-    fn arity_check(&mut self, func: &str, given: usize, min: usize, max: usize) -> bool {
+    pub(crate) fn arity_check(&mut self, func: &str, given: usize, min: usize, max: usize) -> bool {
         if given < min || given > max {
             let (word, n) = if min == max {
                 ("exactly", min)

@@ -21,9 +21,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::array::{ArrayKey, PhpArray};
+use crate::array::PhpArray;
 use crate::object::PhpObject;
-use crate::spl::{mangle_private, obj_class_lower, val_arr};
+use crate::spl::{obj_class_lower, val_arr};
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
@@ -104,31 +104,6 @@ impl Vm {
         crate::value::display_class_name(&obj.borrow().class_name).to_string()
     }
 
-    /// file_name and path of an SplFileInfo/SplFileObject.
-    pub(crate) fn sfi_names(obj: &Rc<RefCell<PhpObject>>) -> Option<(Vec<u8>, Vec<u8>)> {
-        let ob = obj.borrow();
-        let fname = match ob.get_property(b"__spl_file_path") {
-            Value::String(s) => s.as_bytes().to_vec(),
-            _ => return None,
-        };
-        match ob.get_property(b"__spl_path") {
-            Value::String(p) => Some((fname, p.as_bytes().to_vec())),
-            _ => {
-                let (_, p) = split_file_name(&fname);
-                Some((fname, p))
-            }
-        }
-    }
-
-    /// The file-name part (file_name minus "path/").
-    fn sfi_short_name(fname: &[u8], path: &[u8]) -> Vec<u8> {
-        if !path.is_empty() && path.len() < fname.len() {
-            fname[path.len() + 1..].to_vec()
-        } else {
-            fname.to_vec()
-        }
-    }
-
     fn sfi_not_initialized(&mut self) -> Option<Value> {
         self.spl_throw(b"Error", "Object not initialized")
     }
@@ -139,104 +114,10 @@ impl Vm {
         set_prop(obj, b"__spl_path", Value::String(PhpString::from_vec(p)));
     }
 
-    /// Debug info for SplFileInfo / SplFileObject (not directory iterators).
-    pub(crate) fn sfi_debug_info(&mut self, obj: &Rc<RefCell<PhpObject>>, is_file: bool) -> PhpArray {
-        let mut out = self.spl_std_props(obj);
-        let names = Self::sfi_names(obj);
-        let path_name = names.as_ref().map(|n| n.0.clone()).unwrap_or_default();
-        out.set(
-            ArrayKey::String(PhpString::from_vec(mangle_private(b"SplFileInfo", b"pathName"))),
-            Value::String(PhpString::from_vec(path_name)),
-        );
-        if let Some((f, p)) = &names {
-            out.set(
-                ArrayKey::String(PhpString::from_vec(mangle_private(b"SplFileInfo", b"fileName"))),
-                Value::String(PhpString::from_vec(Self::sfi_short_name(f, p))),
-            );
-        }
-        if is_file && !matches!(prop(obj, b"__spl_stream"), Value::Null | Value::Undef) {
-            let mode = prop(obj, b"__spl_open_mode");
-            out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplFileObject", b"openMode"))), mode);
-            let d = Self::sfo_csv_char(obj, b"__spl_csv_delimiter", b",");
-            let e = Self::sfo_csv_char(obj, b"__spl_csv_enclosure", b"\"");
-            out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplFileObject", b"delimiter"))), d);
-            out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplFileObject", b"enclosure"))), e);
-        }
-        out
-    }
-
     fn sfo_csv_char(obj: &Rc<RefCell<PhpObject>>, name: &[u8], default: &[u8]) -> Value {
         match prop(obj, name) {
             Value::String(s) => Value::String(s),
             _ => sv(default),
-        }
-    }
-
-    /// SplFileInfo methods dealing with names. Returns None for methods not
-    /// handled here (stat-based methods stay in vm.rs).
-    pub(crate) fn spl_file_info_call(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-        args: Option<&[Value]>,
-    ) -> Option<Value> {
-        match method {
-            b"getpath" | b"getfilename" | b"getpathname" | b"__tostring" | b"getextension" | b"getbasename"
-            | b"openfile" => {}
-            _ => return None,
-        }
-        if matches!(method, b"getbasename" | b"openfile") && args.is_none() {
-            return None;
-        }
-        if method == b"openfile" {
-            let a = args.unwrap_or(&[]);
-            let fname = match Self::sfi_names(obj) {
-                Some((f, _)) => f,
-                None => return self.sfi_not_initialized(),
-            };
-            let class = match prop(obj, b"__spl_file_class") {
-                Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
-                _ => b"SplFileObject".to_vec(),
-            };
-            let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let new_obj = self.spl_instantiate(&class);
-            let mode = a.first().cloned().unwrap_or_else(|| sv(b"r"));
-            if self.spl_has_user_ctor(&cl) {
-                self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", &[Value::String(PhpString::from_vec(fname)), mode]);
-            } else {
-                let mut cargs = vec![Value::String(PhpString::from_vec(fname)), mode];
-                cargs.extend_from_slice(a.get(1..).unwrap_or(&[]));
-                self.spl_file_object_construct(&new_obj, &cargs);
-            }
-            if self.current_exception.is_some() {
-                return Some(Value::Null);
-            }
-            return Some(Value::Object(new_obj));
-        }
-        let (fname, path) = match Self::sfi_names(obj) {
-            Some(n) => n,
-            None => return self.sfi_not_initialized(),
-        };
-        match method {
-            b"getpath" => Some(Value::String(PhpString::from_vec(path))),
-            b"getfilename" => Some(Value::String(PhpString::from_vec(Self::sfi_short_name(&fname, &path)))),
-            b"getpathname" | b"__tostring" => Some(Value::String(PhpString::from_vec(fname))),
-            b"getextension" => {
-                let base = php_basename(&Self::sfi_short_name(&fname, &path), b"");
-                match base.iter().rposition(|&c| c == b'.') {
-                    Some(i) => Some(Value::String(PhpString::from_vec(base[i + 1..].to_vec()))),
-                    None => Some(sv(b"")),
-                }
-            }
-            b"getbasename" => {
-                let suffix = args
-                    .and_then(|a| a.first())
-                    .map(|v| v.to_php_string().as_bytes().to_vec())
-                    .unwrap_or_default();
-                let base = php_basename(&Self::sfi_short_name(&fname, &path), &suffix);
-                Some(Value::String(PhpString::from_vec(base)))
-            }
-            _ => None,
         }
     }
 
@@ -1185,7 +1066,7 @@ impl Vm {
                 }
                 Some(prop(obj, b"__spl_cur_line"))
             }
-            b"__debuginfo" => Some(val_arr(self.sfi_debug_info(obj, true))),
+            b"__debuginfo" => Some(val_arr(self.fs_debug_info(obj))),
             _ => None,
         }
     }

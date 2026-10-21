@@ -62,6 +62,10 @@ pub fn register(vm: &mut Vm) {
         b"splfixedarray".to_vec(),
         goro_core::spl_fixed::spl_fixed_construct_native,
     );
+    for cls in goro_core::spl_dir::DIR_CLASSES {
+        vm.object_construct_handlers
+            .insert(cls.to_vec(), goro_core::spl_dir::spl_dir_construct_native);
+    }
     for cls in goro_core::spl_iter::ITER_CLASSES {
         vm.object_construct_handlers
             .insert(cls.to_vec(), goro_core::spl_iter::spl_iter_construct_native);
