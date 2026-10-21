@@ -4665,7 +4665,12 @@ impl Vm {
         caller_strict: bool,
     ) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
-            if i >= user_fn.param_types.len() {
+            // Extra arguments are checked against the variadic parameter.
+            let (ti, variadic) = match user_fn.variadic_param {
+                Some(v) if i >= v as usize => (v as usize, true),
+                _ => (i, false),
+            };
+            if ti >= user_fn.param_types.len() {
                 continue;
             }
             // Skip Undef args - these are parameters not provided by the caller,
@@ -4673,12 +4678,17 @@ impl Vm {
             if matches!(arg, Value::Undef) {
                 continue;
             }
-            if let Some(type_info) = &user_fn.param_types[i] {
+            if let Some(type_info) = &user_fn.param_types[ti] {
                 let val = arg.deref();
                 if !self.value_matches_type_mode(&val, &type_info.param_type, caller_strict) {
                     let expected = self.param_type_display(&type_info.param_type);
                     let given = Self::value_type_name(&val);
-                    let param_name = String::from_utf8_lossy(&type_info.param_name);
+                    // A variadic argument has no name of its own.
+                    let param_name = if variadic {
+                        String::new()
+                    } else {
+                        format!(" (${})", String::from_utf8_lossy(&type_info.param_name))
+                    };
                     // Argument number is 1-based, excluding implicit args like $this
                     let arg_num = i + 1 - implicit_args;
                     // zend_verify_arg_error prints the name as a C string: an
@@ -4686,7 +4696,7 @@ impl Vm {
                     let func_display_name =
                         func_display_name.split('\0').next().unwrap_or_default();
                     return Some(format!(
-                        "{}(): Argument #{} (${}) \
+                        "{}(): Argument #{}{} \
                          must be of type {}, {} given, called in {} on line {}",
                         func_display_name,
                         arg_num,
@@ -4826,13 +4836,17 @@ impl Vm {
         caller_strict: bool,
     ) {
         for (i, arg) in args.iter_mut().enumerate() {
-            if i >= user_fn.param_types.len() {
+            let ti = match user_fn.variadic_param {
+                Some(v) if i >= v as usize => v as usize,
+                _ => i,
+            };
+            if ti >= user_fn.param_types.len() {
                 continue;
             }
             if matches!(arg, Value::Undef) {
                 continue;
             }
-            if let Some(type_info) = &user_fn.param_types[i] {
+            if let Some(type_info) = &user_fn.param_types[ti] {
                 if let Value::Reference(r) = arg {
                     // A by-reference argument is converted in place.
                     let mut v = r.borrow().clone();
@@ -23120,8 +23134,54 @@ impl Vm {
                                     qualifier,
                                     required,
                                 );
-                                let exc_val =
-                                    self.create_exception(b"ArgumentCountError", &err_msg, op.line);
+                                // The passed arguments are received (and type-checked)
+                                // before the first missing one is noticed.
+                                let scope_pushed = match &user_fn.scope_class {
+                                    Some(scope) => {
+                                        self.class_scope_stack.push(scope.clone());
+                                        true
+                                    }
+                                    None => false,
+                                };
+                                let type_err = if user_fn.param_types.is_empty() {
+                                    None
+                                } else {
+                                    self.check_param_types_with_strict(
+                                        &user_fn,
+                                        &call.args,
+                                        &display_name,
+                                        usize::from(method_expects_this),
+                                        op.line,
+                                        op_array.strict_types,
+                                    )
+                                };
+                                if scope_pushed {
+                                    self.class_scope_stack.pop();
+                                }
+                                let (exc_class, err_msg, exc_line): (&[u8], String, u32) =
+                                    match type_err {
+                                        Some(m) => (
+                                            b"TypeError",
+                                            m,
+                                            if user_fn.decl_line > 0 {
+                                                user_fn.decl_line
+                                            } else {
+                                                op.line
+                                            },
+                                        ),
+                                        None => (b"ArgumentCountError", err_msg, op.line),
+                                    };
+                                let exc_val = self.create_exception(exc_class, &err_msg, exc_line);
+                                if exc_class == b"TypeError" && !user_fn.filename.is_empty() {
+                                    if let Value::Object(ref o) = exc_val {
+                                        o.borrow_mut().set_property(
+                                            b"file".to_vec(),
+                                            Value::String(PhpString::from_vec(
+                                                user_fn.filename.clone(),
+                                            )),
+                                        );
+                                    }
+                                }
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -23133,10 +23193,11 @@ impl Vm {
                                 } else {
                                     return Err(VmError {
                                         message: format!(
-                                            "Uncaught ArgumentCountError: {}",
+                                            "Uncaught {}: {}",
+                                            String::from_utf8_lossy(exc_class),
                                             err_msg
                                         ),
-                                        line: op.line,
+                                        line: exc_line,
                                     });
                                 }
                             }
