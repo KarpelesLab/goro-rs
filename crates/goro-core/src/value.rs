@@ -840,14 +840,10 @@ impl Value {
                 if a.len() != b.len() {
                     return false;
                 }
-                for (key, a_val) in a.iter() {
-                    match b.get(key) {
-                        Some(b_val) => {
-                            if !a_val.identical(b_val) {
-                                return false;
-                            }
-                        }
-                        None => return false,
+                // zend_hash_compare(ordered=1): same keys in the same order.
+                for ((ka, a_val), (kb, b_val)) in a.iter().zip(b.iter()) {
+                    if ka != kb || !a_val.identical(b_val) {
+                        return false;
                     }
                 }
                 true

@@ -134,6 +134,20 @@ impl Vm {
         out
     }
 
+    /// get_properties_for(ARRAY_CAST): elements, then the property table
+    /// (numeric property names become integer keys and may overwrite).
+    pub(crate) fn fa_properties_for_cast(&self, obj: &Rc<RefCell<PhpObject>>) -> PhpArray {
+        let mut out = PhpArray::new();
+        for (k, v) in storage(obj).borrow().iter() {
+            out.set(k.clone(), v.clone());
+        }
+        let props = Vm::proptable_to_symtable(self.object_props_mangled(obj));
+        for (k, v) in props.borrow().iter() {
+            out.set(k.clone(), v.clone());
+        }
+        out
+    }
+
     /// SplFixedArray::fromArray(array $array, bool $preserveKeys = true)
     pub(crate) fn fa_from_array(&mut self, args: &[Value]) -> Value {
         let func = "SplFixedArray::fromArray";

@@ -4595,6 +4595,9 @@ impl Vm {
             if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_some() {
                 return Rc::new(RefCell::new(self.ao_properties_for_cast(obj)));
             }
+            if self.spl_find_base(&cl, &[b"splfixedarray"]).is_some() {
+                return Rc::new(RefCell::new(self.fa_properties_for_cast(obj)));
+            }
         }
         // Proxy: if initialized, use the real backing object's props.
         let target = self.proxy_redirect(obj);
@@ -24271,6 +24274,11 @@ impl Vm {
                         let spl_args = vec![obj_val.clone(), key_val.clone()];
                         if self.handle_spl_docall(&class_lower, b"offsetunset", &spl_args).is_none() {
                             self.call_object_method(&obj_val, b"offsetunset", &[key_val]);
+                        }
+                        drop(spl_args);
+                        // An element dropped from SPL storage is destroyed now.
+                        if self.current_exception.is_none() && !self.destructible_objects.is_empty() {
+                            self.run_pending_destructors();
                         }
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);

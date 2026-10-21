@@ -8262,7 +8262,8 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 arr.set(key, val.clone());
             }
         }
-        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        // zend_symtable: numeric property names become integer keys.
+        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(RefCell::new(arr)))))
     } else {
         Ok(Value::False)
     }

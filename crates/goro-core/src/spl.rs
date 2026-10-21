@@ -205,6 +205,11 @@ impl Vm {
         }
         self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
         let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
+        drop(call_args);
+        // Values the built-in dropped from its storage are destroyed now.
+        if !self.destructible_objects.is_empty() {
+            self.run_pending_destructors_pub();
+        }
         self.call_stack.pop();
         match r {
             Some(v) => v,
