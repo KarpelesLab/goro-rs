@@ -13834,6 +13834,20 @@ impl Vm {
         self.emit_fatal_at(&msg, line)
     }
 
+    /// zend_timeout(): the "Maximum execution time" fatal error.
+    pub fn timeout_fatal(&mut self) -> VmError {
+        use std::sync::atomic::Ordering;
+        crate::value::TIMED_OUT.store(false, Ordering::Relaxed);
+        let secs = crate::value::TIMEOUT_SECONDS.load(Ordering::Relaxed);
+        let msg = format!(
+            "Maximum execution time of {} second{} exceeded",
+            secs,
+            if secs == 1 { "" } else { "s" }
+        );
+        let line = self.current_line;
+        self.emit_fatal_at(&msg, line)
+    }
+
     /// CLI only: hand output that is not held by an output buffer to stdout
     /// now (before blocking on I/O or spawning a process).
     pub fn flush_cli_output(&mut self) {
@@ -15532,6 +15546,10 @@ impl Vm {
             // An allocation went over memory_limit (zend_mm_safe_error()).
             if crate::value::memory_exhausted() != 0 {
                 return Err(self.memory_limit_fatal());
+            }
+            // max_execution_time expired (zend_timeout()).
+            if crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(self.timeout_fatal());
             }
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks

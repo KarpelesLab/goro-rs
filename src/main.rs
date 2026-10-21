@@ -462,9 +462,24 @@ fn apply_ini_overrides(overrides: &[(String, String)]) -> i64 {
                     error_reporting = n;
                 }
             }
+            "hard_timeout" => {
+                if let Ok(n) = val.trim().parse::<i64>() {
+                    goro_core::value::HARD_TIMEOUT.store(n, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             _ => {
                 // Unhandled INI directive — silently ignored for now.
             }
+        }
+    }
+    // php_request_startup(): arm the max_execution_time timer.
+    if let Some((_, v)) = overrides
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "max_execution_time")
+    {
+        if let Ok(n) = v.trim().parse::<i64>() {
+            goro_ext_standard::misc::set_execution_timeout(n);
         }
     }
     error_reporting

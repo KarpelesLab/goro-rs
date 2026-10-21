@@ -47,6 +47,14 @@ thread_local! {
     static MEMORY_EXHAUSTED: Cell<usize> = const { Cell::new(0) };
 }
 
+/// EG(timed_out): set from the SIGPROF handler when max_execution_time
+/// expires; the VM turns it into the "Maximum execution time" fatal.
+pub static TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// EG(timeout_seconds): the limit the pending timer was armed with.
+pub static TIMEOUT_SECONDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// EG(hard_timeout): grace period after a timeout before the process dies.
+pub static HARD_TIMEOUT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(2);
+
 /// Pending memory-limit violation: the size of the failed allocation.
 #[inline]
 pub fn memory_exhausted() -> usize {

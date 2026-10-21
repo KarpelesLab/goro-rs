@@ -1383,6 +1383,21 @@ fn execute_php_inner_impl(
             let limit = parse_memory_limit_value(&v);
             set_memory_limit(limit);
         }
+        if key == "hard_timeout" {
+            if let Ok(n) = value.trim().parse::<i64>() {
+                goro_core::value::HARD_TIMEOUT.store(n, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    // php_request_startup(): arm the max_execution_time timer.
+    if let Some((_, v)) = ini_settings
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "max_execution_time")
+    {
+        if let Ok(n) = v.trim().parse::<i64>() {
+            goro_ext_standard::misc::set_execution_timeout(n);
+        }
     }
 
     // Lex

@@ -5355,6 +5355,10 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
+    // OnUpdateTimeout: changing max_execution_time restarts the timer.
+    if key == b"max_execution_time" {
+        set_execution_timeout(value.to_long());
+    }
     // Handle precision specially to update thread-local
     if key == b"precision" {
         if let Value::Long(p) = &value {
@@ -5515,8 +5519,104 @@ fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::Null)
 }
-fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn set_time_limit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let secs = args.first().map(|v| v.to_long()).unwrap_or(0);
+    vm.constants.insert(
+        b"max_execution_time".to_vec(),
+        Value::String(PhpString::from_string(secs.to_string())),
+    );
+    set_execution_timeout(secs);
     Ok(Value::True)
+}
+
+/// SIGPROF handler (zend_timeout_handler): flag the timeout for the VM, or
+/// kill the process when the hard timeout after an earlier one expires.
+#[cfg(unix)]
+extern "C" fn execution_timeout_handler(_sig: libc::c_int) {
+    use goro_core::value::{HARD_TIMEOUT, TIMED_OUT, TIMEOUT_SECONDS};
+    use std::sync::atomic::Ordering;
+    if TIMED_OUT.load(Ordering::Relaxed) {
+        // Async-signal-safe formatting into a stack buffer.
+        let mut buf = [0u8; 160];
+        let mut n = 0;
+        let mut put = |bytes: &[u8]| {
+            for &b in bytes {
+                if n < buf.len() {
+                    buf[n] = b;
+                    n += 1;
+                }
+            }
+        };
+        let num = |v: i64, out: &mut [u8; 20]| -> usize {
+            let mut v = v.unsigned_abs();
+            let mut i = out.len();
+            loop {
+                i -= 1;
+                out[i] = b'0' + (v % 10) as u8;
+                v /= 10;
+                if v == 0 {
+                    break;
+                }
+            }
+            i
+        };
+        let mut d = [0u8; 20];
+        put(b"\nFatal error: Maximum execution time of ");
+        let i = num(TIMEOUT_SECONDS.load(Ordering::Relaxed), &mut d);
+        put(&d[i..]);
+        put(b"+");
+        let i = num(HARD_TIMEOUT.load(Ordering::Relaxed), &mut d);
+        put(&d[i..]);
+        put(b" seconds exceeded (terminated) in Unknown on line 0\n");
+        unsafe {
+            libc::write(2, buf.as_ptr() as *const libc::c_void, n);
+            libc::_exit(124);
+        }
+    }
+    TIMED_OUT.store(true, Ordering::Relaxed);
+    let hard = HARD_TIMEOUT.load(Ordering::Relaxed);
+    if hard > 0 {
+        arm_prof_timer(hard);
+    }
+}
+
+#[cfg(unix)]
+fn arm_prof_timer(secs: i64) {
+    let t = libc::itimerval {
+        it_interval: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        it_value: libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: 0,
+        },
+    };
+    unsafe {
+        libc::setitimer(libc::ITIMER_PROF, &t, std::ptr::null_mut());
+    }
+}
+
+/// zend_set_timeout(): (re)arm the max_execution_time CPU timer; 0 disarms.
+pub fn set_execution_timeout(secs: i64) {
+    use goro_core::value::{TIMED_OUT, TIMEOUT_SECONDS};
+    use std::sync::atomic::Ordering;
+    let secs = if (0..=999_999_999).contains(&secs) {
+        secs
+    } else {
+        0
+    };
+    TIMEOUT_SECONDS.store(secs, Ordering::Relaxed);
+    TIMED_OUT.store(false, Ordering::Relaxed);
+    #[cfg(unix)]
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = execution_timeout_handler as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
+        arm_prof_timer(secs);
+    }
 }
 thread_local! {
     /// ASSERTG(callback): set by assert_options(ASSERT_CALLBACK) / ini_set().
