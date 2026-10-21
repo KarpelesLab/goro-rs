@@ -3899,6 +3899,65 @@ impl Vm {
         }
     }
 
+    /// "The float X is not representable as an int, cast occurred" for
+    /// non-finite / out-of-range floats converted with zend_dval_to_lval.
+    pub(crate) fn warn_oob_float_to_int(&mut self, v: &Value, line: u32) {
+        let d = match v {
+            Value::Double(d) => *d,
+            Value::Reference(r) => match &*r.borrow() { Value::Double(d) => *d, _ => return },
+            _ => return,
+        };
+        if !d.is_finite() || !crate::value::php_double_fits_long(d) {
+            self.emit_warning_at(
+                &format!("The float {} is not representable as an int, cast occurred", crate::value::format_php_float(d)),
+                line,
+            );
+        }
+    }
+
+    /// Integer conversion of an operand of %, <<, >>, &, |, ^, ~ (zendi_try_get_long):
+    /// emits the precision-loss deprecation and the out-of-range warning.
+    pub(crate) fn int_operand_long(&mut self, v: &Value, line: u32) -> i64 {
+        let inner = if let Value::Reference(r) = v { r.borrow().clone() } else { v.clone() };
+        match &inner {
+            Value::Double(d) => {
+                let d = *d;
+                let l = crate::value::php_dval_to_lval(d);
+                if !d.is_finite() || !crate::value::php_double_fits_long(d) {
+                    self.warn_oob_float_to_int(&inner, line);
+                } else if l as f64 != d {
+                    self.emit_deprecated_at(
+                        &format!("Implicit conversion from float {} to int loses precision", crate::value::format_php_float(d)),
+                        line,
+                    );
+                }
+                l
+            }
+            Value::String(s) => {
+                let l = crate::value::php_str_to_lval(s.as_bytes());
+                if let Some((f, _)) = crate::value::parse_leading_numeric_string(s.as_bytes()) {
+                    if l as f64 != f {
+                        self.emit_deprecated_at(
+                            &format!("Implicit conversion from float-string \"{}\" to int loses precision", s.to_string_lossy()),
+                            line,
+                        );
+                    }
+                }
+                l
+            }
+            other => other.to_long(),
+        }
+    }
+
+    fn int_operand_value(&mut self, v: Value, line: u32) -> Value {
+        let is_conv = match &v {
+            Value::Double(_) | Value::String(_) => true,
+            Value::Reference(r) => matches!(&*r.borrow(), Value::Double(_) | Value::String(_)),
+            _ => false,
+        };
+        if is_conv { Value::Long(self.int_operand_long(&v, line)) } else { v }
+    }
+
     /// Coerce a single value to match a parameter type.
     pub(crate) fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
         match param_type {

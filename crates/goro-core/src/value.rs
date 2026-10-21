@@ -331,17 +331,8 @@ impl Value {
             Value::True => 1,
             Value::Long(n) => *n,
             Value::Resource(n) => *n,
-            Value::Double(f) => *f as i64,
-            Value::String(s) => {
-                // zval_get_long(): is_numeric_string(allow_errors), doubles capped
-                match parse_numeric_str(s.as_bytes(), true) {
-                    Some((NumStr::Long(n), _)) => n,
-                    Some((NumStr::Double(f), _)) => {
-                        if f.is_nan() { 0 } else { f as i64 }
-                    }
-                    None => 0,
-                }
-            }
+            Value::Double(f) => php_dval_to_lval(*f),
+            Value::String(s) => php_str_to_lval(s.as_bytes()),
             Value::Array(arr) => {
                 if arr.borrow().is_empty() {
                     0
@@ -1531,6 +1522,92 @@ fn parse_leading_float(s: &str) -> f64 {
         }
     }
     s[..i].parse::<f64>().unwrap_or(0.0)
+}
+
+/// True if `d` fits in a PHP int (ZEND_DOUBLE_FITS_LONG).
+pub fn php_double_fits_long(d: f64) -> bool {
+    !(d >= 9.223372036854775808e18 || d < -9.223372036854775808e18)
+}
+
+/// zend_dval_to_lval: non-finite -> 0, out of range -> modular arithmetic.
+pub fn php_dval_to_lval(d: f64) -> i64 {
+    if !d.is_finite() {
+        0
+    } else if !php_double_fits_long(d) {
+        let two_pow_64 = 18446744073709551616.0f64;
+        let mut dmod = d % two_pow_64;
+        if dmod < 0.0 {
+            dmod += two_pow_64;
+        }
+        (dmod as u64) as i64
+    } else {
+        d as i64
+    }
+}
+
+/// zend_dval_to_lval_cap: non-finite -> 0, out of range -> saturate.
+pub fn php_dval_to_lval_cap(d: f64) -> i64 {
+    if !d.is_finite() {
+        0
+    } else if !php_double_fits_long(d) {
+        if d > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        d as i64
+    }
+}
+
+/// String to int conversion as done by (int) casts / zval_get_long:
+/// leading numeric prefix, integer overflow and float strings saturate.
+pub fn php_str_to_lval(b: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let start = i;
+    let mut j = i;
+    if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+        j += 1;
+    }
+    let digits_start = j;
+    while j < b.len() && b[j].is_ascii_digit() {
+        j += 1;
+    }
+    let int_digits = j - digits_start;
+    let mut is_float = false;
+    if j < b.len() && b[j] == b'.' && (int_digits > 0 || (j + 1 < b.len() && b[j + 1].is_ascii_digit())) {
+        is_float = true;
+    } else if int_digits > 0 && j < b.len() && (b[j] == b'e' || b[j] == b'E') {
+        let mut k = j + 1;
+        if k < b.len() && (b[k] == b'+' || b[k] == b'-') {
+            k += 1;
+        }
+        if k < b.len() && b[k].is_ascii_digit() {
+            is_float = true;
+        }
+    }
+    if int_digits == 0 && !is_float {
+        return 0;
+    }
+    if !is_float {
+        let neg = b[start] == b'-';
+        let mut acc: i64 = 0;
+        let mut overflow = false;
+        for &c in &b[digits_start..j] {
+            let d = (c - b'0') as i64;
+            match acc.checked_mul(10).and_then(|v| if neg { v.checked_sub(d) } else { v.checked_add(d) }) {
+                Some(v) => acc = v,
+                None => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        if !overflow {
+            return acc;
+        }
+    }
+    let text = String::from_utf8_lossy(&b[start..]);
+    php_dval_to_lval_cap(parse_leading_float(&text))
 }
 
 /// Parse a leading-numeric PHP string, returning (value, is_fully_numeric).
