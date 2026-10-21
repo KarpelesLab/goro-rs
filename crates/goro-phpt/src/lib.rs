@@ -1421,19 +1421,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         }
         vm.write_output(&prev);
     }
-    // php_module_startup(): deprecated directives (cfg_get_long() != 0).
-    if let Some((_, v)) = ini_settings.iter().rev().find(|(k, _)| k == "allow_url_include") {
-        let t = v.trim_start();
-        let (neg, digits) = match t.strip_prefix('-') {
-            Some(r) => (true, r),
-            None => (false, t.strip_prefix('+').unwrap_or(t)),
-        };
-        let n: i64 = digits.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
-        if (if neg { -n } else { n }) != 0 {
-            startup_messages.extend_from_slice(
-                b"\nDeprecated: Directive 'allow_url_include' is deprecated in Unknown on line 0\n");
-        }
-    }
+    // (allow_url_include's startup deprecation is emitted by the standard extension.)
     if !startup_messages.is_empty() && vm.error_reporting & 8192 != 0 {
         let buf = vm.active_output_buffer();
         buf.splice(0..0, startup_messages);
