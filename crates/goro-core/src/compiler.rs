@@ -1212,6 +1212,64 @@ impl Compiler {
                     self.op_array.patch_jump(jmp_end, end);
                     continue;
                 }
+                if !is_byref
+                    && !known_byval
+                    && func_name.is_some()
+                    && Self::is_call_expr(&arg.value)
+                {
+                    // f(g()) with f's parameter by reference: g()'s returned
+                    // reference is passed; a by-value result raises a notice.
+                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                    let jmp_ref = self.op_array.emit(Op {
+                        opcode: OpCode::JmpIfArgByRef,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let v = self.compile_expr(&arg.value)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendVal,
+                        op1: v,
+                        op2: OperandType::Const(pos_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let ref_start = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_ref, ref_start);
+                    let v = self.compile_expr(&arg.value)?;
+                    self.mark_ref_call(&v);
+                    let msg_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_bytes(
+                            b"Only variables should be passed by reference",
+                        )));
+                    let cond_idx = self.op_array.add_literal(Value::Long(1));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::EmitNotice,
+                        op1: OperandType::Const(msg_idx),
+                        op2: OperandType::Const(cond_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendRef,
+                        op1: v,
+                        op2: OperandType::Const(pos_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+                    continue;
+                }
                 let val = if is_byref {
                     if let ExprKind::ArrayAccess { array, index } = &arg.value.kind {
                         if let Some(idx_expr) = index {
@@ -1890,7 +1948,10 @@ impl Compiler {
                         }
                     }
                 }
-                self.emit_by_ref_return_notice(value.as_ref(), stmt.span.line);
+                if value.is_none() {
+                    // `return;` from a by-ref function returns NULL by value.
+                    self.emit_by_ref_return_notice(None, stmt.span.line);
+                }
                 let operand = if let Some(expr) = value {
                     if self.op_array.returns_by_ref && !self.op_array.is_generator {
                         self.compile_ref_fetch(expr)?
@@ -2230,6 +2291,17 @@ impl Compiler {
                     }
                 }
                 let arr = self.compile_expr(expr)?;
+                // foreach (f() as &$v): iterate f()'s returned reference, or a
+                // copy of a by-value result.
+                let call_src = *by_ref && Self::is_call_expr(expr);
+                if call_src {
+                    self.mark_ref_call(&arr);
+                }
+                let src_flag = if call_src {
+                    OperandType::Const(self.op_array.add_literal(Value::Long(1)))
+                } else {
+                    OperandType::Unused
+                };
 
                 // Create iterator temp
                 let iter_tmp = self.op_array.alloc_temp();
@@ -2240,7 +2312,7 @@ impl Compiler {
                         OpCode::ForeachInit
                     },
                     op1: arr,
-                    op2: OperandType::Unused,
+                    op2: src_flag,
                     result: OperandType::Tmp(iter_tmp),
                     line: stmt.span.line,
                 });
@@ -8186,6 +8258,20 @@ impl Compiler {
             _ if Self::is_call_expr(expr) => {
                 let v = self.compile_expr(expr)?;
                 self.mark_ref_call(&v);
+                // Returning a by-value call result from a by-ref function.
+                let msg_idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_bytes(
+                        b"Only variable references should be returned by reference",
+                    )));
+                let cond_idx = self.op_array.add_literal(Value::Long(1));
+                self.op_array.emit(Op {
+                    opcode: OpCode::EmitNotice,
+                    op1: OperandType::Const(msg_idx),
+                    op2: OperandType::Const(cond_idx),
+                    result: OperandType::Unused,
+                    line,
+                });
                 Ok(v)
             }
             _ => self.compile_expr(expr),

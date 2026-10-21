@@ -29265,6 +29265,10 @@ impl Vm {
                     // For by-ref foreach, we need to work on the original array
                     // If the source is a CV, get the actual Rc from it
                     let arr_rc = match &arr_val {
+                        // By-value call result: iterate a copy.
+                        Value::Array(a) if !matches!(op.op2, OperandType::Unused) => {
+                            Rc::new(RefCell::new(a.borrow().clone()))
+                        }
                         Value::Array(a) => a.clone(),
                         Value::Reference(r) => {
                             let inner = r.borrow();
