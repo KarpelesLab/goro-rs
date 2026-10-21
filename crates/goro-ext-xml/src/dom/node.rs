@@ -1240,6 +1240,13 @@ fn m_clone_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         let p = doc_props(Some(n));
         set_doc_props(c, p);
     }
+    tree::with(|t| {
+        // libxml2 drops the namespace of a copied lone attribute; PHP
+        // puts it back and lets reconciliation deal with it
+        if t.nodes[c].t == NType::Attribute && t.nodes[c].ns.is_none() {
+            t.nodes[c].ns = t.nodes[n].ns;
+        }
+    });
     Ok(node_obj(vm, c))
 }
 

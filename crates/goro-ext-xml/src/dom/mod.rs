@@ -194,12 +194,7 @@ fn free_detached_one(t: &mut Tree, n: NodeId) {
     }
     if matches!(
         t.nodes[n].t,
-        NType::NamespaceDecl
-            | NType::EntityDecl
-            | NType::Entity
-            | NType::Dtd
-            | NType::DocumentType
-            | NType::Notation
+        NType::NamespaceDecl | NType::EntityDecl | NType::Entity | NType::Notation
     ) {
         return;
     }
@@ -216,6 +211,10 @@ fn free_detached_one(t: &mut Tree, n: NodeId) {
     while let Some(x) = stack.pop() {
         if alive(t, x) {
             t.unlink(x);
+            if t.nodes[x].t == NType::Element {
+                // keep the namespaces it uses declared within the survivor
+                node::reconciliate_ns(t, x);
+            }
             continue;
         }
         push_kids(t, x, &mut stack);
@@ -695,6 +694,41 @@ impl<'a> Args<'a> {
             }
         }
     }
+    /// "P"/"p": a string that must not contain NUL bytes
+    pub fn path_str(&self, vm: &mut Vm, i: usize, name: &str) -> R<String> {
+        let s = self.str(vm, i, name)?;
+        if s.contains('\0') {
+            throw_error(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #{} (${}) must not contain any null bytes",
+                    self.f,
+                    i + 1,
+                    name
+                ),
+            );
+            return Err(());
+        }
+        Ok(s)
+    }
+    pub fn opt_path_str(&self, vm: &mut Vm, i: usize, name: &str) -> R<Option<String>> {
+        let s = self.opt_str(vm, i, name)?;
+        if s.as_deref().map(|s| s.contains('\0')).unwrap_or(false) {
+            throw_error(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #{} (${}) must not contain any null bytes",
+                    self.f,
+                    i + 1,
+                    name
+                ),
+            );
+            return Err(());
+        }
+        Ok(s)
+    }
     /// ?string
     pub fn opt_str(&self, vm: &mut Vm, i: usize, name: &str) -> R<Option<String>> {
         match self.get(i) {
@@ -989,6 +1023,10 @@ fn prop_target(vm: &mut Vm, o: &Obj) -> R<NodeId> {
         },
         None => {}
     }
+    // DOMXPath property readers check their own state
+    if base_of(vm, o) == Some(Base::XPath) {
+        return Ok(usize::MAX);
+    }
     throw_dom(vm, INVALID_STATE_ERR, true);
     Err(())
 }
@@ -1160,19 +1198,31 @@ fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
         Some(d) => match &*d.kind.borrow() {
             Kind::Node(n) => Some(*n),
             Kind::List(_) | Kind::Map(_) | Kind::XPath(_) => Some(usize::MAX),
+            _ if b == Base::XPath => Some(usize::MAX),
             _ => None,
         },
         None => None,
     };
-    let target = target?;
+    let target = match target {
+        Some(t) => t,
+        // uninitialized object: every property read fails (and the
+        // exception of the failed read is left pending, as in PHP)
+        None => {
+            if !tbl.is_empty() && vm.current_exception.is_none() {
+                throw_dom(vm, INVALID_STATE_ERR, true);
+            }
+            return Some(arr);
+        }
+    };
     let saved_exc = vm.current_exception.take();
+    let mut first_exc: Option<Value> = None;
     let prev = IN_DEBUG.with(|c| c.replace(true));
     let saved_er = vm.error_reporting;
     vm.error_reporting = 0;
     for p in tbl.iter() {
         let r = (p.read)(vm, o, target);
-        if vm.current_exception.is_some() {
-            vm.current_exception = None;
+        if let Some(e) = vm.current_exception.take() {
+            first_exc.get_or_insert(e);
             continue;
         }
         if let Ok(v) = r {
@@ -1189,7 +1239,7 @@ fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
     }
     vm.error_reporting = saved_er;
     IN_DEBUG.with(|c| c.set(prev));
-    vm.current_exception = saved_exc;
+    vm.current_exception = saved_exc.or(first_exc);
     Some(arr)
 }
 
@@ -1320,6 +1370,22 @@ fn methods_of(b: Base) -> Rc<HashMap<String, MethodFn>> {
     })
 }
 
+fn has_ctor(b: Base) -> bool {
+    matches!(
+        b,
+        Base::Document
+            | Base::Element
+            | Base::Attr
+            | Base::Text
+            | Base::Comment
+            | Base::CdataSection
+            | Base::ProcessingInstruction
+            | Base::EntityReference
+            | Base::DocumentFragment
+            | Base::XPath
+    )
+}
+
 fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
     let b = match base_from_lower(class) {
         Some(b) => b,
@@ -1336,7 +1402,7 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
         return true;
     }
     // non-static methods called statically error out in call_method
-    methods_of(b).contains_key(&m)
+    (m == "__construct" && has_ctor(b)) || methods_of(b).contains_key(&m)
 }
 
 fn method_display(b: Base, m: &str) -> String {
@@ -1436,6 +1502,14 @@ fn call_method(
         Some(Value::Object(o)) => o.clone(),
         _ => return Value::Null,
     };
+    if m == "__construct" && has_ctor(b) {
+        // explicit $obj->__construct(...) re-initializes the object
+        let mut full = vec![Value::Object(o.clone())];
+        full.extend_from_slice(args);
+        let line = vm.current_line;
+        let _ = construct(vm, &full, line);
+        return Value::Null;
+    }
     let f = match methods_of(b).get(&m) {
         Some(f) => *f,
         None => return Value::Null,

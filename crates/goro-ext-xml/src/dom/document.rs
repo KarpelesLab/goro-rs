@@ -532,7 +532,7 @@ fn m_get_element_by_id(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_get_elements_by_tag_name(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 1)?;
-    let name = a.str(vm, 0, "qualifiedName")?;
+    let name = a.path_str(vm, 0, "qualifiedName")?;
     let n = need_node(vm, o)?;
     Ok(list_obj(
         vm,
@@ -547,8 +547,8 @@ fn m_get_elements_by_tag_name(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_get_elements_by_tag_name_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 2, 2)?;
-    let ns = a.opt_str(vm, 0, "namespace")?;
-    let name = a.str(vm, 1, "localName")?;
+    let ns = a.opt_path_str(vm, 0, "namespace")?;
+    let name = a.path_str(vm, 1, "localName")?;
     let n = need_node(vm, o)?;
     Ok(list_obj(
         vm,

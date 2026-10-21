@@ -1294,7 +1294,8 @@ pub fn namespace_nodes(t: &mut Tree, n: NodeId) -> Vec<NodeId> {
     let doc = t.nodes[n].doc;
     let xml = t.xml_ns(doc);
     out.push(ns_node(t, n, xml));
-    for ns in list {
+    // xmlXPathNextNamespace walks xmlGetNsList() from the end
+    for ns in list.into_iter().rev() {
         // a default namespace undeclared with xmlns="" is not in scope
         if t.nss[ns].prefix.is_none() && t.nss[ns].href.is_empty() {
             continue;
@@ -1339,7 +1340,7 @@ fn order_key(t: &Tree, n: NodeId) -> Vec<(u8, usize)> {
             }
         };
         let (rank, idx) = match nd.t {
-            NType::NamespaceDecl => (0u8, nd.ns.unwrap_or(0)),
+            NType::NamespaceDecl => (0u8, cur),
             NType::Attribute => {
                 let mut i = 0;
                 let mut p = nd.prev;

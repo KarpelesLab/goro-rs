@@ -1572,7 +1572,8 @@ impl<'a, S: Sink> Parser<'a, S> {
         } else {
             self.parse_element();
             self.parse_misc();
-            if !self.at_end() && !self.stopped() {
+            // 2.13: only reported while still well-formed
+            if !self.at_end() && !self.stopped() && self.st.well_formed {
                 self.fatal(XML_ERR_DOCUMENT_END, None);
             }
         }

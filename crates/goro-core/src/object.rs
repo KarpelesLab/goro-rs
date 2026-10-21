@@ -256,9 +256,9 @@ impl Drop for PhpObject {
         if let Some(c) = &self.closure {
             crate::gc::on_child_released(c);
         }
-        // Release owned values before this object's handle goes back to the
-        // free list (zend_objects_store_del frees the storage, and with it
-        // the children, before recycling the handle).
+        // Release what the object holds before its handle goes back to the
+        // free list (zend_objects_store_del: free_obj, then the handle).
+        drop(self.native.take());
         drop(std::mem::take(&mut self.properties));
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.
