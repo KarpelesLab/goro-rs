@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "legacy-ciphers", "kdf", "bignum", "rng", "rsa", "der", "dh", "dsa", "x509", "pkcs12", "ec", "legacy-ec", "whirlpool-table", "ed25519-table", "ed448-table", "p256-table"] }
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "legacy-ciphers", "kdf", "bignum", "rng", "rsa", "der", "dh", "dsa", "x509", "pkcs12", "ec", "legacy-ec", "whirlpool-table", "ed25519-table", "ed448-table", "p256-table", "tls", "tls-legacy"] }
 # Legacy-provider block ciphers purecrypto does not provide (Blowfish is
 # internal-only there): RustCrypto implementations, with their `cipher` traits.
 cipher = "0.4"
@@ -22,3 +22,4 @@ num-bigint-dig = { version = "0.8", features = ["rand", "prime"] }
 num-traits = "0.2"
 num-integer = "0.1"
 rand = "0.8"
+libc = "0.2"

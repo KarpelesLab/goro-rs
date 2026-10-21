@@ -26,6 +26,7 @@ mod req;
 mod smime;
 mod x509;
 mod x509v3;
+mod xp_ssl;
 mod zpp;
 
 // Option flags
@@ -47,6 +48,7 @@ macro_rules! checked {
 /// Register all openssl extension functions and constants
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"openssl");
+    xp_ssl::install(vm);
     pkey_fns::register_class(vm);
     let fns: &[(&str, BuiltinFn)] = &[
         checked!("openssl_encrypt", openssl_encrypt),

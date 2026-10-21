@@ -693,6 +693,8 @@ pub struct Vm {
     /// Stream layer services for ext/sockets (socket_import_stream() /
     /// socket_export_stream()), installed by the standard extension.
     pub socket_stream_hooks: Option<SocketStreamHooks>,
+    /// The TLS layer of socket streams, installed by the openssl extension.
+    pub crypto_hooks: Option<crate::crypto::CryptoHooks>,
     /// Resolves an include target to a stream-wrapper URL (verbatim
     /// wrapper URLs, or relative names found through include_path entries
     /// served by userspace wrappers). None: use the plain-file logic.
@@ -1467,12 +1469,34 @@ impl Vm {
                 c.insert(b"STREAM_OOB".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_USE_PATH".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_REPORT_ERRORS".to_vec(), Value::Long(8));
-                c.insert(
-                    b"STREAM_CRYPTO_METHOD_SSLv23_CLIENT".to_vec(),
-                    Value::Long(57),
-                );
-                c.insert(b"STREAM_CRYPTO_METHOD_TLS_CLIENT".to_vec(), Value::Long(57));
-                c.insert(b"STREAM_CRYPTO_METHOD_ANY_CLIENT".to_vec(), Value::Long(63));
+                // php_stream_xport_crypt_method_t (main/streams/php_stream_transport.h)
+                for (name, v) in [
+                    (&b"STREAM_CRYPTO_METHOD_SSLv2_CLIENT"[..], 3),
+                    (b"STREAM_CRYPTO_METHOD_SSLv3_CLIENT", 5),
+                    (b"STREAM_CRYPTO_METHOD_SSLv23_CLIENT", 57),
+                    (b"STREAM_CRYPTO_METHOD_TLS_CLIENT", 121),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT", 9),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT", 17),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT", 33),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT", 65),
+                    (b"STREAM_CRYPTO_METHOD_ANY_CLIENT", 127),
+                    (b"STREAM_CRYPTO_METHOD_SSLv2_SERVER", 2),
+                    (b"STREAM_CRYPTO_METHOD_SSLv3_SERVER", 4),
+                    (b"STREAM_CRYPTO_METHOD_SSLv23_SERVER", 120),
+                    (b"STREAM_CRYPTO_METHOD_TLS_SERVER", 120),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_0_SERVER", 8),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_1_SERVER", 16),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_2_SERVER", 32),
+                    (b"STREAM_CRYPTO_METHOD_TLSv1_3_SERVER", 64),
+                    (b"STREAM_CRYPTO_METHOD_ANY_SERVER", 126),
+                    (b"STREAM_CRYPTO_PROTO_SSLv3", 4),
+                    (b"STREAM_CRYPTO_PROTO_TLSv1_0", 8),
+                    (b"STREAM_CRYPTO_PROTO_TLSv1_1", 16),
+                    (b"STREAM_CRYPTO_PROTO_TLSv1_2", 32),
+                    (b"STREAM_CRYPTO_PROTO_TLSv1_3", 64),
+                ] {
+                    c.insert(name.to_vec(), Value::Long(v));
+                }
                 // Image type constants
                 c.insert(b"IMAGETYPE_GIF".to_vec(), Value::Long(1));
                 c.insert(b"IMAGETYPE_JPEG".to_vec(), Value::Long(2));
@@ -1722,6 +1746,7 @@ impl Vm {
             output_start: None,
             include_stream_hook: None,
             socket_stream_hooks: None,
+            crypto_hooks: None,
             include_resolve_hook: None,
             resource_shutdown_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),

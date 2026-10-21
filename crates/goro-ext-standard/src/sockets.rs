@@ -54,6 +54,17 @@ pub(crate) struct SockData {
     pub timeout_event: bool,
     /// PHP_STREAM_FLAG_NO_IO (bound/listening server sockets).
     pub no_io: bool,
+    /// ssl:// & co: sslsock->enable_on_connect and sslsock->method.
+    pub enable_on_connect: bool,
+    pub crypto_method: i64,
+    /// The crypto layer was set up for a client (STREAM_CRYPTO_IS_CLIENT).
+    pub crypto_client: bool,
+    /// sslsock->url_name: the host of the address the stream was opened for.
+    pub url_name: Option<Vec<u8>>,
+    /// sslsock->connect_timeout in milliseconds (-1: none).
+    pub connect_timeout_ms: i32,
+    /// The stream context resource the stream was created with.
+    pub ctx_src: Option<i64>,
 }
 
 impl SockData {
@@ -65,6 +76,12 @@ impl SockData {
             tv_usec: 0,
             timeout_event: false,
             no_io: false,
+            enable_on_connect: false,
+            crypto_method: 0,
+            crypto_client: false,
+            url_name: None,
+            connect_timeout_ms: 0,
+            ctx_src: None,
         }
     }
 
@@ -763,8 +780,51 @@ fn xport_create(
     ctx: Option<i64>,
 ) -> Result<i64, XportErr> {
     let (proto, name) = split_transport(orig_name);
+    let mut crypto: Option<i64> = None;
+    let ssl_loaded = vm.crypto_hooks.is_some();
     let kind = match proto.as_slice() {
         b"tcp" => SockKind::Tcp,
+        // php_openssl_ssl_socket_factory()
+        b"ssl" | b"tls" if ssl_loaded => {
+            crypto = Some(get_crypto_method(ctx, STREAM_CRYPTO_METHOD_TLS_ANY_CLIENT));
+            SockKind::Tcp
+        }
+        b"tlsv1.0" if ssl_loaded => {
+            crypto = Some(STREAM_CRYPTO_METHOD_TLSV1_0_CLIENT);
+            SockKind::Tcp
+        }
+        b"tlsv1.1" if ssl_loaded => {
+            crypto = Some(STREAM_CRYPTO_METHOD_TLSV1_1_CLIENT);
+            SockKind::Tcp
+        }
+        b"tlsv1.2" if ssl_loaded => {
+            crypto = Some(STREAM_CRYPTO_METHOD_TLSV1_2_CLIENT);
+            SockKind::Tcp
+        }
+        b"tlsv1.3" if ssl_loaded => {
+            crypto = Some(STREAM_CRYPTO_METHOD_TLSV1_3_CLIENT);
+            SockKind::Tcp
+        }
+        b"sslv2" if ssl_loaded => {
+            vm.emit_warning(&format!(
+                "{}(): SSLv2 unavailable in this PHP version",
+                func
+            ));
+            return Err(XportErr {
+                text: None,
+                code: 0,
+            });
+        }
+        b"sslv3" if ssl_loaded => {
+            vm.emit_warning(&format!(
+                "{}(): SSLv3 support is not compiled into the OpenSSL library against which PHP is linked",
+                func
+            ));
+            return Err(XportErr {
+                text: None,
+                code: 0,
+            });
+        }
         b"udp" => SockKind::Udp,
         b"unix" => SockKind::Unix,
         b"udg" => SockKind::Udg,
@@ -781,6 +841,16 @@ fn xport_create(
         }
     };
     let mut sd = SockData::new(kind, default_socket_timeout(vm));
+    if let Some(m) = crypto {
+        sd.enable_on_connect = true;
+        sd.crypto_method = m;
+    }
+    if kind == SockKind::Tcp && ssl_loaded {
+        sd.url_name = url_name(name);
+        sd.connect_timeout_ms = timeout_ms.unwrap_or(-1);
+    }
+    sd.ctx_src = ctx;
+    let connecting = matches!(op, XportOp::Connect { .. });
     let fd = match op {
         XportOp::Connect { asynchronous } => {
             let r = if kind.is_unix() {
@@ -822,7 +892,29 @@ fn xport_create(
         }
         XportOp::None => unconnected_fd(),
     };
-    Ok(alloc_socket_stream(fd, sd, Some(orig_name), ctx))
+    let enable = connecting && sd.enable_on_connect;
+    let method = sd.crypto_method;
+    if enable && !sd.is_blocked {
+        // An asynchronous connect leaves the stream flagged blocking in
+        // PHP; the handshake then waits for the connection to complete and
+        // the descriptor ends up blocking again.
+        sd.is_blocked = true;
+        set_fd_blocking(fd, true);
+    }
+    let fid = alloc_socket_stream(fd, sd, Some(orig_name), ctx);
+    if enable
+        && (crypto_setup(vm, func, fid, method, None) < 0 || crypto_enable(vm, func, fid, true) < 0)
+    {
+        vm.emit_warning(&format!("{}(): Failed to enable crypto", func));
+        FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
+        goro_core::value::close_resource(fid);
+        return Err(XportErr {
+            text: None,
+            code: 0,
+        });
+    }
+    Ok(fid)
 }
 
 fn connect_unix(
@@ -1107,6 +1199,9 @@ pub(super) fn sock_read(
     buf: &mut [u8],
     has_buffered: bool,
 ) -> std::io::Result<usize> {
+    if let Some(r) = crypto_read(fh, buf, has_buffered) {
+        return r;
+    }
     let fd = fh.file.as_raw_fd();
     let Some(sd) = fh.sock.as_mut() else {
         return fh.file.read(buf);
@@ -1153,6 +1248,9 @@ pub(super) fn sock_read(
 /// php_sockop_write() for one chunk; returns the bytes written, 0 when
 /// a non-blocking socket would block, or -1 (with a notice) on failure.
 fn sock_write_once(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> isize {
+    if let Some(n) = crypto_write(vm, func, fid, data) {
+        return n;
+    }
     let Some((sd, fd)) = sock_of(fid) else {
         return -1;
     };
@@ -1244,6 +1342,16 @@ pub(crate) fn is_socket(fid: i64) -> bool {
 /// PHP_STREAM_OPTION_CHECK_LIVENESS with value 0 (_php_stream_eof()).
 pub(super) fn check_liveness(fh: &mut FileHandle) {
     let fd = fh.file.as_raw_fd();
+    if let Some(c) = fh.crypto.as_mut().filter(|c| c.is_active()) {
+        if !c.alive(fd) {
+            fh.eof = true;
+        }
+        let w = c.take_warnings();
+        if !w.is_empty() {
+            CRYPTO_WARNINGS.with(|q| q.borrow_mut().extend(w));
+        }
+        return;
+    }
     let Some(sd) = fh.sock.as_ref() else {
         return;
     };
@@ -1560,7 +1668,22 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
     let ctx = STREAM_CONTEXTS
         .with(|c| c.borrow().contains_key(&fid))
         .then_some(fid);
+    let enable = csd.enable_on_connect;
+    let method = csd.crypto_method & !STREAM_CRYPTO_IS_CLIENT;
+    csd.enable_on_connect = false;
+    csd.url_name = None;
+    csd.connect_timeout_ms = 0;
     let cfid = alloc_socket_stream(cli, csd, None, ctx);
+    if enable {
+        if crypto_setup(vm, F, cfid, method, None) < 0 || crypto_enable(vm, F, cfid, true) < 0 {
+            vm.emit_warning(&format!("{}(): Failed to enable crypto", F));
+            FILE_HANDLES.with(|h| h.borrow_mut().remove(&cfid));
+            STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&cfid));
+            goro_core::value::close_resource(cfid);
+            vm.emit_warning(&format!("{}(): Accept failed: Cannot enable crypto", F));
+            return Ok(Value::False);
+        }
+    }
     if let (Some(p), Some(r)) = (peer, args.get(2)) {
         set_ref(Some(r), Value::String(PhpString::from_vec(p)));
     }
@@ -2171,6 +2294,25 @@ fn stream_fd_for_select(vm: &mut Vm, id: i64) -> Result<Option<i32>, VmError> {
     if (1..=3).contains(&id) {
         return Ok(Some((id - 1) as i32));
     }
+    // php_openssl_sockop_cast(PHP_STREAM_AS_FD_FOR_SELECT): data the TLS
+    // layer already decrypted moves to the read buffer, so it counts.
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&id) {
+            if !fh.filter_read_ready.is_empty() {
+                return;
+            }
+            let fd = fh.file.as_raw_fd();
+            if let Some(c) = fh.crypto.as_mut().filter(|c| c.is_active()) {
+                let n = c.pending().min(STREAM_CHUNK_SIZE);
+                if n > 0 {
+                    let mut buf = vec![0u8; n];
+                    if let Ok(k) = c.read(fd, &mut buf, false, -1) {
+                        fh.filter_read_ready.extend_from_slice(&buf[..k]);
+                    }
+                }
+            }
+        }
+    });
     let info = FILE_HANDLES.with(|h| {
         h.borrow()
             .get(&id)
@@ -2228,7 +2370,7 @@ fn hook_stream_socket_fd(vm: &mut Vm, v: &Value, func: &str) -> Result<Option<i3
     let info = FILE_HANDLES.with(|h| {
         h.borrow().get(&id).map(|fh| {
             (
-                fh.sock.is_some(),
+                fh.sock.is_some() && !fh.crypto.as_ref().is_some_and(|c| c.is_active()),
                 fh.file.as_raw_fd(),
                 fh.stream_type.clone(),
             )
@@ -2310,4 +2452,419 @@ pub(crate) fn install_hooks(vm: &mut Vm) {
         stream_from_socket: hook_stream_from_socket,
         close_stream: hook_close_stream,
     });
+}
+
+// ---------------------------------------------------------------------------
+// TLS (the socket side of ext/openssl/xp_ssl.c)
+// ---------------------------------------------------------------------------
+
+const STREAM_CRYPTO_IS_CLIENT: i64 = 1;
+const STREAM_CRYPTO_METHOD_TLS_ANY_CLIENT: i64 = 121;
+const STREAM_CRYPTO_METHOD_TLSV1_0_CLIENT: i64 = 9;
+const STREAM_CRYPTO_METHOD_TLSV1_1_CLIENT: i64 = 17;
+const STREAM_CRYPTO_METHOD_TLSV1_2_CLIENT: i64 = 33;
+const STREAM_CRYPTO_METHOD_TLSV1_3_CLIENT: i64 = 65;
+
+thread_local! {
+    /// Warnings of TLS reads, emitted by the PHP function that read.
+    static CRYPTO_WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Emit the warnings TLS reads queued (they run without the VM).
+pub(crate) fn flush_crypto_warnings(vm: &mut Vm, func: &str) {
+    let w = CRYPTO_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    for m in w {
+        vm.emit_warning(&format!("{}(): {}", func, m));
+    }
+}
+
+/// The "ssl" options of a stream's (or context's) context.
+pub(crate) fn ssl_options(id: i64) -> Option<PhpArray> {
+    STREAM_CONTEXTS.with(|c| {
+        let c = c.borrow();
+        let ctx = c.get(&id)?;
+        let m = ctx.options.get(b"ssl".as_ref())?;
+        let mut a = PhpArray::new();
+        for (k, v) in m {
+            a.set(ArrayKey::String(PhpString::from_bytes(k)), v.clone());
+        }
+        Some(a)
+    })
+}
+
+fn set_ssl_option(id: i64, name: &[u8], v: Value) {
+    STREAM_CONTEXTS.with(|c| {
+        if let Some(ctx) = c.borrow_mut().get_mut(&id) {
+            ctx.options
+                .entry(b"ssl".to_vec())
+                .or_default()
+                .insert(name.to_vec(), v);
+        }
+    });
+}
+
+fn ctx_crypto_method(ctx: Option<i64>) -> Option<Value> {
+    let c = ctx?;
+    STREAM_CONTEXTS.with(|m| {
+        m.borrow()
+            .get(&c)
+            .and_then(|x| x.options.get(b"ssl".as_ref()))
+            .and_then(|o| o.get(b"crypto_method".as_ref()).cloned())
+    })
+}
+
+/// php_openssl_get_crypto_method()
+fn get_crypto_method(ctx: Option<i64>, default: i64) -> i64 {
+    match ctx_crypto_method(ctx) {
+        Some(v) => v.to_long() | STREAM_CRYPTO_IS_CLIENT,
+        None => default,
+    }
+}
+
+/// php_openssl_get_url_name(): the host of "host:port" without trailing dots.
+fn url_name(name: &[u8]) -> Option<Vec<u8>> {
+    let host: &[u8] = if name.first() == Some(&b'[') {
+        match name.iter().position(|&c| c == b']') {
+            Some(e) => &name[..=e],
+            None => name,
+        }
+    } else {
+        match name.iter().rposition(|&c| c == b':') {
+            Some(p) => &name[..p],
+            None => name,
+        }
+    };
+    let host: &[u8] = match host.iter().position(|&c| c == b'/') {
+        Some(p) => &host[..p],
+        None => host,
+    };
+    let mut h = host.to_vec();
+    while h.last() == Some(&b'.') {
+        h.pop();
+    }
+    if h.is_empty() { None } else { Some(h) }
+}
+
+/// php_stream_xport_crypto_setup(): < 0 on failure.
+pub(crate) fn crypto_setup(
+    vm: &mut Vm,
+    func: &str,
+    fid: i64,
+    method: i64,
+    session: Option<i64>,
+) -> i32 {
+    let info = FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .map(|fh| (fh.sock.clone(), fh.crypto.is_some()))
+    });
+    let Some((Some(sd), has)) = info else {
+        vm.emit_warning(&format!(
+            "{}(): This stream does not support SSL/crypto",
+            func
+        ));
+        return -2;
+    };
+    let hooks = match vm.crypto_hooks {
+        Some(h) if sd.kind == SockKind::Tcp => h,
+        _ => {
+            vm.emit_warning(&format!(
+                "{}(): This stream does not support SSL/crypto",
+                func
+            ));
+            return -2;
+        }
+    };
+    if has {
+        if sd.is_blocked {
+            vm.emit_warning(&format!(
+                "{}(): SSL/TLS already set-up for this stream",
+                func
+            ));
+            return -1;
+        }
+        return 0;
+    }
+    if let Some(sess) = session {
+        let ok = FILE_HANDLES.with(|h| {
+            h.borrow()
+                .get(&sess)
+                .map(|fh| (fh.sock.is_some(), fh.crypto.is_some()))
+        });
+        match ok {
+            Some((true, true)) => {}
+            Some((true, false)) => vm.emit_warning(&format!(
+                "{}(): Supplied SSL session stream is not initialized",
+                func
+            )),
+            _ => vm.emit_warning(&format!(
+                "{}(): Supplied session stream must be an SSL enabled stream",
+                func
+            )),
+        }
+    }
+    let opts = ssl_options(fid);
+    let is_client = method & STREAM_CRYPTO_IS_CLIENT != 0;
+    let setup = goro_core::crypto::CryptoSetup {
+        is_client,
+        method: method & !STREAM_CRYPTO_IS_CLIENT,
+        url_name: sd.url_name.as_deref(),
+        opts: opts.as_ref(),
+        blocked: sd.is_blocked,
+        func,
+    };
+    match (hooks.setup)(vm, &setup) {
+        Some(c) => {
+            FILE_HANDLES.with(|h| {
+                if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                    fh.crypto = Some(c);
+                    if let Some(s) = fh.sock.as_mut() {
+                        s.crypto_client = is_client;
+                    }
+                }
+            });
+            0
+        }
+        None => -1,
+    }
+}
+
+/// php_stream_xport_crypto_enable(): -1 failure, 0 would block, 1 done.
+pub(crate) fn crypto_enable(vm: &mut Vm, func: &str, fid: i64, activate: bool) -> i32 {
+    let taken = FILE_HANDLES.with(|h| {
+        h.borrow_mut()
+            .get_mut(&fid)
+            .map(|fh| (fh.crypto.take(), fh.sock.clone(), fh.file.as_raw_fd()))
+    });
+    let Some((crypto, Some(sd), fd)) = taken else {
+        vm.emit_warning(&format!(
+            "{}(): This stream does not support SSL/crypto",
+            func
+        ));
+        return -2;
+    };
+    let Some(mut c) = crypto else {
+        if sd.kind == SockKind::Tcp && vm.crypto_hooks.is_some() {
+            return -1;
+        }
+        vm.emit_warning(&format!(
+            "{}(): This stream does not support SSL/crypto",
+            func
+        ));
+        return -2;
+    };
+    let mut result = -1;
+    if activate && !c.is_active() {
+        let timeout = if sd.crypto_client {
+            sd.connect_timeout_ms
+        } else {
+            sd.timeout_ms()
+        };
+        let opts = ssl_options(fid);
+        vm.flush_cli_output();
+        let r = c.enable(vm, func, fd, sd.is_blocked, timeout, opts.as_ref());
+        for (k, v) in r.captured {
+            set_ssl_option(fid, &k, v.clone());
+            if let Some(src) = sd.ctx_src {
+                if src != fid {
+                    set_ssl_option(src, &k, v);
+                }
+            }
+        }
+        result = r.result;
+    } else if !activate && c.is_active() {
+        c.disable(fd);
+    }
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.crypto = Some(c);
+        }
+    });
+    result
+}
+
+/// PHP_FUNCTION(stream_socket_enable_crypto)
+pub(crate) fn stream_socket_enable_crypto(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_socket_enable_crypto";
+    check_arity(vm, F, args, 2, 4)?;
+    let fid = require_open_stream(vm, &args[0], F)?;
+    let enable = zpp_bool(vm, F, 2, "enable", &args[1])?;
+    let kind = match args.get(2) {
+        Some(v) => zpp_long(vm, F, 3, "crypto_method", v, true)?,
+        None => None,
+    };
+    let session = match args.get(3).map(|v| v.deref()) {
+        None | Some(Value::Null) => None,
+        Some(Value::Resource(id)) => Some(id),
+        Some(v) => {
+            return Err(type_error(
+                vm,
+                F,
+                4,
+                "session_stream",
+                "resource or null",
+                &v,
+            ));
+        }
+    };
+    if enable {
+        let kind = match kind {
+            Some(k) => k,
+            None => match ctx_crypto_method(resolve_context_id(&args[0])) {
+                Some(v) => v.to_long(),
+                None => {
+                    return Err(throw(
+                        vm,
+                        b"ValueError",
+                        "stream_socket_enable_crypto(): Argument #3 ($crypto_method) must be specified when enabling encryption",
+                    ));
+                }
+            },
+        };
+        if crypto_setup(vm, F, fid, kind, session) < 0 {
+            return Ok(Value::False);
+        }
+    }
+    Ok(match crypto_enable(vm, F, fid, enable) {
+        r if r < 0 => Value::False,
+        0 => Value::Long(0),
+        _ => Value::True,
+    })
+}
+
+/// php_openssl_sockop_io(read) for an active TLS stream.
+fn crypto_read(
+    fh: &mut FileHandle,
+    buf: &mut [u8],
+    has_buffered: bool,
+) -> Option<std::io::Result<usize>> {
+    let fd = fh.file.as_raw_fd();
+    if !fh.crypto.as_ref().map(|c| c.is_active()).unwrap_or(false) {
+        return None;
+    }
+    let sd = fh.sock.as_mut()?;
+    let blocked = sd.is_blocked && !has_buffered;
+    let timeout = if sd.tv_sec == -1 { -1 } else { sd.timeout_ms() };
+    let c = fh.crypto.as_mut()?;
+    let r = c.read(fd, buf, blocked, timeout);
+    let w = c.take_warnings();
+    if !w.is_empty() {
+        CRYPTO_WARNINGS.with(|q| q.borrow_mut().extend(w));
+    }
+    match &r {
+        Ok(0) if !buf.is_empty() => fh.eof = true,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => sd.timeout_event = true,
+        _ => {}
+    }
+    Some(r)
+}
+
+/// php_openssl_sockop_io(write) for an active TLS stream: bytes written,
+/// 0 when nothing could be written, -1 on timeout.
+fn crypto_write(vm: &mut Vm, func: &str, fid: i64, data: &[u8]) -> Option<isize> {
+    let taken = FILE_HANDLES.with(|h| {
+        let mut h = h.borrow_mut();
+        let fh = h.get_mut(&fid)?;
+        if !fh.crypto.as_ref().map(|c| c.is_active()).unwrap_or(false) {
+            return None;
+        }
+        Some((fh.crypto.take()?, fh.sock.clone()?, fh.file.as_raw_fd()))
+    });
+    let (mut c, sd, fd) = taken?;
+    let timeout = if sd.is_blocked && sd.tv_sec != -1 {
+        sd.timeout_ms()
+    } else {
+        -1
+    };
+    let r = c.write(fd, data, sd.is_blocked, timeout);
+    let w = c.take_warnings();
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.crypto = Some(c);
+            if let (Err(e), Some(s)) = (&r, fh.sock.as_mut()) {
+                if e.kind() == std::io::ErrorKind::TimedOut {
+                    s.timeout_event = true;
+                }
+            }
+        }
+    });
+    for m in w {
+        vm.emit_warning(&format!("{}(): {}", func, m));
+    }
+    Some(match r {
+        Ok(n) => n as isize,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => -1,
+        Err(_) => 0,
+    })
+}
+
+/// The https:// transport of the http wrapper: connect to ssl://`addr`
+/// with the given "ssl" context options, send `request` and read the
+/// response until the server closes. None after the warnings on failure.
+pub(crate) fn tls_roundtrip(
+    vm: &mut Vm,
+    func: &str,
+    addr: &[u8],
+    ssl_opts: Option<PhpArray>,
+    request: &[u8],
+) -> Option<Vec<u8>> {
+    thread_local! {
+        static NEXT_TMP_CTX: std::cell::Cell<i64> = const { std::cell::Cell::new(-1_000_000) };
+    }
+    let ctx_id = NEXT_TMP_CTX.with(|c| {
+        let v = c.get();
+        c.set(v - 1);
+        v
+    });
+    let mut ctx = StreamContext::default();
+    if let Some(o) = ssl_opts {
+        let m = ctx.options.entry(b"ssl".to_vec()).or_default();
+        for (k, v) in o.iter() {
+            let k = match k {
+                ArrayKey::String(s) => s.as_bytes().to_vec(),
+                ArrayKey::Int(i) => i.to_string().into_bytes(),
+            };
+            m.insert(k, v.clone());
+        }
+    }
+    STREAM_CONTEXTS.with(|c| c.borrow_mut().insert(ctx_id, ctx));
+    let mut name = b"ssl://".to_vec();
+    name.extend_from_slice(addr);
+    let timeout = default_socket_timeout(vm);
+    let r = xport_create(
+        vm,
+        func,
+        &name,
+        XportOp::Connect {
+            asynchronous: false,
+        },
+        timeout_from_double(timeout as f64),
+        Some(ctx_id),
+    );
+    STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
+    let fid = r.ok()?;
+    let mut out = None;
+    if sock_write(vm, func, fid, request) == request.len() as isize {
+        let mut buf = Vec::new();
+        loop {
+            let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
+            let n = FILE_HANDLES.with(|h| {
+                h.borrow_mut()
+                    .get_mut(&fid)
+                    .map(|fh| fh.read_raw(&mut chunk, false))
+            });
+            match n {
+                Some(Ok(0)) | None => break,
+                Some(Ok(k)) => buf.extend_from_slice(&chunk[..k]),
+                Some(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Some(Err(_)) => break,
+            }
+        }
+        out = Some(buf);
+    }
+    flush_crypto_warnings(vm, func);
+    FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+    STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
+    goro_core::value::close_resource(fid);
+    out
 }

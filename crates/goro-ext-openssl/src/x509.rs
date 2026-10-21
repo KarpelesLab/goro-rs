@@ -1027,7 +1027,7 @@ pub struct Store {
 }
 
 impl Store {
-    fn lookup(&self, subject: &Name) -> Vec<Rc<Cert>> {
+    pub fn lookup(&self, subject: &Name) -> Vec<Rc<Cert>> {
         let mut v: Vec<Rc<Cert>> = self
             .certs
             .iter()
@@ -1053,7 +1053,7 @@ impl Store {
         v
     }
 
-    fn contains(&self, c: &Cert) -> bool {
+    pub fn contains(&self, c: &Cert) -> bool {
         self.lookup(&c.subject).iter().any(|x| x.der == c.der)
     }
 }
@@ -1222,6 +1222,122 @@ pub fn verify_chain(store: &Store, leaf: &Rc<Cert>, untrusted: &[Rc<Cert>], purp
         }
     }
     1
+}
+
+/// X509_verify_cert() for a TLS peer, returning the verify result
+/// (X509_V_OK = 0, or the X509_V_* code of the failure / of the last
+/// error the callback forgave). `check_cert` is the verify_callback: it is
+/// called with each error (and with 0 for every certificate of the chain)
+/// and its depth; Ok forgives/accepts, Err(code) aborts with `code`.
+pub fn verify_peer_chain(
+    store: &Store,
+    leaf: &Rc<Cert>,
+    untrusted: &[Rc<Cert>],
+    check_cert: &mut dyn FnMut(i32, usize, &Cert) -> Result<(), i32>,
+) -> i32 {
+    let mut last_err = 0;
+    macro_rules! report {
+        ($err:expr, $depth:expr, $c:expr) => {
+            match check_cert($err, $depth, $c) {
+                Ok(()) => {
+                    if $err != 0 {
+                        last_err = $err;
+                    }
+                }
+                Err(code) => return code,
+            }
+        };
+    }
+    let mut chain: Vec<Rc<Cert>> = vec![leaf.clone()];
+    let mut trusted = store.contains(leaf);
+    while !trusted {
+        let cur = chain.last().unwrap().clone();
+        let issued_by = |cand: &Rc<Cert>| -> bool {
+            cand.subject.eq_canon(&cur.issuer)
+                && cand
+                    .public_key()
+                    .map(|k| cur.verify(&k) == 1)
+                    .unwrap_or(false)
+        };
+        if let Some(c) = store.lookup(&cur.issuer).into_iter().find(issued_by) {
+            chain.push(c);
+            trusted = true;
+            break;
+        }
+        let fl = x509v3::ex_flags(&cur);
+        if fl.self_signed {
+            let depth = chain.len() - 1;
+            report!(if depth == 0 { 18 } else { 19 }, depth, &cur);
+            break;
+        }
+        match untrusted
+            .iter()
+            .find(|c| issued_by(c) && !chain.iter().any(|x| x.der == c.der))
+        {
+            Some(c) => chain.push(c.clone()),
+            None => {
+                let depth = chain.len() - 1;
+                report!(if chain.len() == 1 { 21 } else { 20 }, depth, &cur);
+                break;
+            }
+        }
+        if chain.len() > 100 {
+            return 22;
+        }
+    }
+    let now = cert::now();
+    for (i, c) in chain.iter().enumerate() {
+        let last = i + 1 == chain.len();
+        // signature (a trust anchor's own signature is not checked)
+        if !last {
+            let ok = chain[i + 1]
+                .public_key()
+                .map(|k| c.verify(&k) == 1)
+                .unwrap_or(false);
+            if !ok {
+                report!(7, i, c);
+            }
+        }
+        let nb = cert::asn1_time_to_unix(c.not_before.0, &c.not_before.1);
+        let na = cert::asn1_time_to_unix(c.not_after.0, &c.not_after.1);
+        if let (Some(nb), Some(na)) = (nb, na) {
+            if now < nb {
+                report!(9, i, c);
+            }
+            if now > na {
+                report!(10, i, c);
+            }
+        }
+        if i > 0 && !(last && trusted) {
+            let fl = x509v3::ex_flags(c);
+            if fl.bcons && !fl.ca {
+                report!(24, i, c);
+            }
+        }
+        report!(0, i, c);
+    }
+    last_err
+}
+
+/// X509_verify_cert_error_string()
+pub fn verify_error_string(code: i32) -> &'static str {
+    match code {
+        0 => "ok",
+        2 => "unable to get issuer certificate",
+        7 => "certificate signature failure",
+        9 => "certificate is not yet valid",
+        10 => "certificate has expired",
+        18 => "self-signed certificate",
+        19 => "self-signed certificate in certificate chain",
+        20 => "unable to get local issuer certificate",
+        21 => "unable to verify the first certificate",
+        22 => "certificate chain too long",
+        24 => "invalid CA certificate",
+        26 => "unsupported certificate purpose",
+        66 => "EE certificate key too weak",
+        67 => "CA certificate key too weak",
+        _ => "unspecified certificate verification error",
+    }
 }
 
 pub fn load_all_certs_from_file(

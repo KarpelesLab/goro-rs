@@ -7883,6 +7883,18 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut method = "GET".to_string();
         let mut req_headers: Vec<(String, String)> = Vec::new();
         let mut req_body: Vec<u8> = Vec::new();
+        let ssl_opts = match context {
+            Some(Value::Array(ctx)) => match ctx
+                .borrow()
+                .get(&ArrayKey::String(PhpString::from_bytes(b"ssl")))
+            {
+                Some(Value::Array(a)) => Some(a.borrow().clone()),
+                _ => None,
+            },
+            Some(v @ Value::Resource(_)) => resolve_context_id(v).and_then(xp_socket::ssl_options),
+            _ => None,
+        };
+        HTTP_SSL_OPTS.with(|o| *o.borrow_mut() = ssl_opts);
         if let Some(Value::Array(ctx)) = context {
             if let Some(Value::Array(http)) = ctx
                 .borrow()
@@ -7924,13 +7936,9 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
-        return Ok(http_fetch_ctx(
-            &path_str,
-            vm,
-            &method,
-            &req_headers,
-            &req_body,
-        ));
+        let r = http_fetch_ctx(&path_str, vm, &method, &req_headers, &req_body);
+        HTTP_SSL_OPTS.with(|o| *o.borrow_mut() = None);
+        return Ok(r);
     }
     if !path_str.starts_with("php://")
         && !path_str.starts_with("data://")
@@ -8046,6 +8054,11 @@ fn http_fetch_ctx(
     Value::False
 }
 
+thread_local! {
+    /// The "ssl" context options of the https:// request in progress.
+    static HTTP_SSL_OPTS: RefCell<Option<PhpArray>> = const { RefCell::new(None) };
+}
+
 /// Performs a single HTTP/1.0 request. Returns (status, Location, body).
 fn http_fetch_once(
     url: &str,
@@ -8058,14 +8071,12 @@ fn http_fetch_once(
     use std::net::{TcpStream, ToSocketAddrs};
 
     // Parse the URL: scheme://host[:port]/path?query
+    let mut https = false;
     let after_scheme = if let Some(rest) = url.strip_prefix("http://") {
         rest
-    } else if url.strip_prefix("https://").is_some() {
-        vm.emit_warning(&format!(
-            "file_get_contents(): https:// is not supported (URL: {})",
-            url
-        ));
-        return (0, None, None);
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        https = true;
+        rest
     } else {
         return (0, None, None);
     };
@@ -8073,13 +8084,29 @@ fn http_fetch_once(
         Some(i) => (&after_scheme[..i], &after_scheme[i..]),
         None => (after_scheme, "/"),
     };
+    let default_port = if https { 443u16 } else { 80u16 };
     let (host, port) = match host_port.rfind(':') {
         Some(i) => {
-            let p: u16 = host_port[i + 1..].parse().unwrap_or(80);
+            let p: u16 = host_port[i + 1..].parse().unwrap_or(default_port);
             (&host_port[..i], p)
         }
-        None => (host_port, 80u16),
+        None => (host_port, default_port),
     };
+    if https {
+        let req = http_build_request(method, path, host_port, headers, body);
+        let opts = HTTP_SSL_OPTS.with(|o| o.borrow().clone());
+        let addr = format!("{}:{}", host, port);
+        let Some(buf) =
+            xp_socket::tls_roundtrip(vm, "file_get_contents", addr.as_bytes(), opts, &req)
+        else {
+            vm.emit_warning(&format!(
+                "file_get_contents({}): Failed to open stream: operation failed",
+                url
+            ));
+            return (0, None, None);
+        };
+        return http_parse_response(vm, url, buf);
+    }
     let addr = format!("{}:{}", host, port);
     let socket_addr = match addr.to_socket_addrs() {
         Ok(mut it) => match it.next() {
@@ -8114,6 +8141,33 @@ fn http_fetch_once(
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+    let req_bytes = http_build_request(method, path, host_port, headers, body);
+    if stream.write_all(&req_bytes).is_err() {
+        vm.emit_warning(&format!(
+            "file_get_contents({}): Failed to open stream: HTTP request failed!",
+            url
+        ));
+        return (0, None, None);
+    }
+    let mut buf = Vec::new();
+    if stream.read_to_end(&mut buf).is_err() {
+        vm.emit_warning(&format!(
+            "file_get_contents({}): Failed to open stream: HTTP request failed!",
+            url
+        ));
+        return (0, None, None);
+    }
+    http_parse_response(vm, url, buf)
+}
+
+/// The HTTP/1.0 request http_fetch_once() sends.
+fn http_build_request(
+    method: &str,
+    path: &str,
+    host_port: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Vec<u8> {
     // Build the request
     let mut req = String::new();
     req.push_str(&format!("{} {} HTTP/1.0\r\n", method, path));
@@ -8154,21 +8208,15 @@ fn http_fetch_once(
     req.push_str("\r\n");
     let mut req_bytes = req.into_bytes();
     req_bytes.extend_from_slice(body);
-    if stream.write_all(&req_bytes).is_err() {
-        vm.emit_warning(&format!(
-            "file_get_contents({}): Failed to open stream: HTTP request failed!",
-            url
-        ));
-        return (0, None, None);
-    }
-    let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() {
-        vm.emit_warning(&format!(
-            "file_get_contents({}): Failed to open stream: HTTP request failed!",
-            url
-        ));
-        return (0, None, None);
-    }
+    req_bytes
+}
+
+/// Split a raw HTTP response: (status, Location, body).
+fn http_parse_response(
+    vm: &mut Vm,
+    url: &str,
+    buf: Vec<u8>,
+) -> (u16, Option<String>, Option<Vec<u8>>) {
     // Split headers from body
     let sep = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
         Some(s) => s,
@@ -10264,6 +10312,18 @@ struct FileHandle {
     pub fatal_error: bool,
     /// data: streams: the RFC 2397 meta data (stream_get_meta_data()).
     pub data_meta: Option<Vec<(Vec<u8>, Value)>>,
+    /// Socket streams with the TLS layer set up (php_openssl_netstream_data_t).
+    pub crypto: Option<Box<dyn goro_core::crypto::CryptoStream>>,
+}
+
+impl Drop for FileHandle {
+    /// php_openssl_sockop_close(): an active TLS layer sends close_notify
+    /// before the descriptor goes away.
+    fn drop(&mut self) {
+        if let Some(c) = self.crypto.as_mut() {
+            c.close(std::os::unix::io::AsRawFd::as_raw_fd(&self.file));
+        }
+    }
 }
 
 impl FileHandle {
@@ -10437,6 +10497,7 @@ fn register_std_streams() {
                     sock: None,
                     fatal_error: false,
                     data_meta: None,
+                    crypto: None,
                 },
             );
         }
@@ -10720,6 +10781,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     sock: None,
                     fatal_error: false,
                     data_meta: None,
+                    crypto: None,
                 },
             );
         });
@@ -11390,6 +11452,12 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
 }
 
 fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = fread_fn_inner(vm, args);
+    xp_socket::flush_crypto_warnings(vm, "fread");
+    r
+}
+
+fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fread")?;
     let length_signed = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -11901,6 +11969,12 @@ pub(crate) fn stream_write(vm: &mut Vm, func: &str, handle: &Value, data: &[u8])
 }
 
 fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = fgets_fn_inner(vm, args);
+    xp_socket::flush_crypto_warnings(vm, "fgets");
+    r
+}
+
+fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fgets")?;
     // PHP semantics: $length (if provided) must be > 0. fgets reads up to
@@ -16442,6 +16516,12 @@ fn lchgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = fpassthru_fn_inner(vm, args);
+    xp_socket::flush_crypto_warnings(vm, "fpassthru");
+    r
+}
+
+fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let has_read_filters =
         crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
@@ -17055,6 +17135,12 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = fgetc_fn_inner(vm, args);
+    xp_socket::flush_crypto_warnings(vm, "fgetc");
+    r
+}
+
+fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fgetc")?;
     // PHP emits a notice if the underlying mode is write-only.
@@ -17283,6 +17369,12 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = stream_get_contents_fn_inner(vm, args);
+    xp_socket::flush_crypto_warnings(vm, "stream_get_contents");
+    r
+}
+
+fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = match args.get(1).map(|v| v.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => -1,
@@ -19128,6 +19220,12 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                     (false, blocked)
                 }
             };
+            if let Some(m) = fh.crypto.as_ref().and_then(|c| c.meta()) {
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"crypto")),
+                    Value::Array(Rc::new(RefCell::new(m))),
+                );
+            }
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"timed_out")),
                 if timed_out { Value::True } else { Value::False },
@@ -19470,8 +19568,8 @@ fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     // 8192 so callers see a sane previous value.
     Ok(Value::Long(8192))
 }
-fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn stream_socket_enable_crypto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    xp_socket::stream_socket_enable_crypto(vm, args)
 }
 fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
