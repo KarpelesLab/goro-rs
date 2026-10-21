@@ -509,6 +509,9 @@ impl<'a> Lexer<'a> {
                                         let mut buf = [0u8; 4];
                                         let s = c.encode_utf8(&mut buf);
                                         result.extend_from_slice(s.as_bytes());
+                                    } else if (0xD800..=0xDFFF).contains(&cp) {
+                                        // PHP encodes surrogate codepoints as 3-byte sequences
+                                        result.extend_from_slice(&[(0xE0 | (cp >> 12)) as u8, (0x80 | ((cp >> 6) & 0x3F)) as u8, (0x80 | (cp & 0x3F)) as u8]);
                                     } else {
                                         result.push(b'\\');
                                         result.push(b'u');
@@ -1757,6 +1760,11 @@ impl<'a> Lexer<'a> {
                                         let mut buf = [0u8; 4];
                                         let s = c.encode_utf8(&mut buf);
                                         result.extend_from_slice(s.as_bytes());
+                                        i = j + 1;
+                                        continue;
+                                    } else if (0xD800..=0xDFFF).contains(&cp) {
+                                        // PHP encodes surrogate codepoints as 3-byte sequences
+                                        result.extend_from_slice(&[(0xE0 | (cp >> 12)) as u8, (0x80 | ((cp >> 6) & 0x3F)) as u8, (0x80 | (cp & 0x3F)) as u8]);
                                         i = j + 1;
                                         continue;
                                     }
