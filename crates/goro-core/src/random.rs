@@ -147,6 +147,7 @@ impl Xoshiro256State {
         self.s[3] = self.s[3].rotate_left(45);
         r
     }
+    #[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
     pub fn jump(&mut self, jmp: &[u64; 4]) {
         let mut t = [0u64; 4];
         for i in 0..4 {
@@ -611,6 +612,7 @@ pub fn dispatch_random_method(
 }
 
 /// Dispatch args methods. `args[0]` is `$this`, the rest are user args.
+#[allow(clippy::mutable_key_type)] // ArrayKey's interior mutability is only a hash cache
 pub fn handle_random_docall(
     vm: &mut Vm,
     class_lower: &[u8],

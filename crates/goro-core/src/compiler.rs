@@ -75,6 +75,7 @@ struct LoopContext {
     /// The offset to jump to for continue (set when known)
     continue_target: Option<u32>,
     /// Whether this is a switch statement (for "continue targeting switch" warning)
+    #[allow(dead_code)]
     is_switch: bool,
     /// Number of enclosing finally blocks when the loop started
     finally_depth: usize,
@@ -441,6 +442,7 @@ impl Compiler {
     /// 3. If unqualified (no backslash):
     ///    - Check use imports first
     ///    - Otherwise prefix with current namespace
+    ///
     /// Special names like "self", "parent", "static" are not resolved.
     /// Compile-time validation of `parent::$prop::get()` / `parent::$prop::set()`
     /// (lowered by the parser to `parent::__property_{get,set}_<prop>()`),
@@ -6313,17 +6315,6 @@ impl Compiler {
                 }
                 Ok(())
             }
-
-            _ => {
-                // Unimplemented statement types
-                Err(CompileError {
-                    message: format!(
-                        "unimplemented statement: {:?}",
-                        std::mem::discriminant(&stmt.kind)
-                    ),
-                    line: stmt.span.line,
-                })
-            }
         }
     }
 
@@ -11296,37 +11287,6 @@ impl Compiler {
                 }
             }
 
-            ExprKind::Pipe { value, callable } => {
-                // pipe operator: $value |> $callable  ==>  $callable($value)
-                let val = self.compile_expr(value)?;
-                let func = self.compile_expr(callable)?;
-                let arg_count = self.op_array.add_literal(Value::Long(1));
-                self.op_array.emit(Op {
-                    opcode: OpCode::InitFCall,
-                    op1: func,
-                    op2: OperandType::Const(arg_count),
-                    result: OperandType::Unused,
-                    line: expr.span.line,
-                });
-                let pos_idx = self.op_array.add_literal(Value::Long(0));
-                self.op_array.emit(Op {
-                    opcode: OpCode::SendVal,
-                    op1: val,
-                    op2: OperandType::Const(pos_idx),
-                    result: OperandType::Unused,
-                    line: expr.span.line,
-                });
-                let tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::DoFCall,
-                    op1: OperandType::Unused,
-                    op2: OperandType::Unused,
-                    result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
-                });
-                Ok(OperandType::Tmp(tmp))
-            }
-
             ExprKind::FirstClassCallable(target) => {
                 if let CallableTarget::StaticMethod { class, method } = target {
                     self.check_parent_hook_call(class, method, true, expr.span.line)?;
@@ -11375,14 +11335,6 @@ impl Compiler {
                     Ok(OperandType::Tmp(tmp))
                 }
             }
-
-            _ => Err(CompileError {
-                message: format!(
-                    "unimplemented expression: {:?}",
-                    std::mem::discriminant(&expr.kind)
-                ),
-                line: expr.span.line,
-            }),
         }
     }
 
@@ -12408,13 +12360,6 @@ impl Compiler {
     }
 }
 
-/// Convert an AST TypeHint into a runtime ParamType.
-/// For built-in types (int, string, etc.), the name is stored lowercase.
-/// For class names, the original case is preserved for error messages.
-fn type_hint_to_param_type(hint: &TypeHint) -> ParamType {
-    type_hint_to_param_type_with_ns(hint, &[], &HashMap::new())
-}
-
 /// Map a compound-assignment binary operator (`+=`, `.=`, ...) to the plain
 /// binary opcode used to compute the new value.
 fn compound_binary_opcode(op: &BinaryOp) -> OpCode {
@@ -13036,7 +12981,7 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
         ExprKind::Match { subject, arms } => {
             collect_expr_variables(subject, vars);
             for arm in arms {
-                for cond_list in &arm.conditions {
+                if let Some(cond_list) = &arm.conditions {
                     for cond in cond_list {
                         collect_expr_variables(cond, vars);
                     }
@@ -13241,6 +13186,7 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
 
 /// Convert an expression back to a PHP source string representation.
 /// Used by the compiler to inject the source string as assert()'s 2nd argument.
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn expr_to_source_string(expr: &Expr) -> String {
     match &expr.kind {
         ExprKind::True => "true".to_string(),
@@ -13493,16 +13439,6 @@ fn expr_to_source_string(expr: &Expr) -> String {
         }
         ExprKind::Spread(inner) => {
             format!("...{}", expr_to_source_string(inner))
-        }
-        ExprKind::ArrayAccess { array, index } => {
-            match index {
-                Some(idx) => format!("{}[{}]", expr_to_source_string(array), expr_to_source_string(idx)),
-                None => format!("{}[]", expr_to_source_string(array)),
-            }
-        }
-        ExprKind::Identifier(name) => String::from_utf8_lossy(name).to_string(),
-        ExprKind::ConstantAccess(parts) => {
-            parts.iter().map(|p| String::from_utf8_lossy(p).to_string()).collect::<Vec<_>>().join("\\")
         }
         ExprKind::DynamicVariable(inner) => format!("${{{}}}", expr_to_source_string(inner)),
         // For complex expressions we can't easily represent, use a placeholder

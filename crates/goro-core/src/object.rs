@@ -176,9 +176,9 @@ impl ClassEntry {
     }
 }
 
-/// A thread-local pool of freed object IDs. When a `PhpObject` is dropped
-/// (its Rc reference count hits zero), its ID is pushed here so subsequent
-/// `alloc_object_id` calls can reuse it. Matches PHP's handle recycling.
+// A thread-local pool of freed object IDs. When a `PhpObject` is dropped
+// (its Rc reference count hits zero), its ID is pushed here so subsequent
+// `alloc_object_id` calls can reuse it. Matches PHP's handle recycling.
 std::thread_local! {
     pub static FREED_OBJECT_IDS: std::cell::RefCell<Vec<u64>> =
         const { std::cell::RefCell::new(Vec::new()) };

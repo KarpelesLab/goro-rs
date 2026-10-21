@@ -341,6 +341,7 @@ struct Analysis {
     garbage: Vec<bool>,
 }
 
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
 fn analyze(extra_refs: &HashMap<usize, usize>, ephemerons: HashMap<usize, Vec<Value>>, limit: Option<usize>) -> Analysis {
     let mut g = Graph::new();
     g.ephemerons = ephemerons;
@@ -443,6 +444,7 @@ pub trait GcHost {
 
 
 /// Run a collection. Returns the number of freed arrays/objects.
+#[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
 pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
     if GC_ACTIVE.with(|c| c.get()) {
         return 0;

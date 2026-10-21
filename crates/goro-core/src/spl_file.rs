@@ -453,6 +453,7 @@ impl Vm {
     }
 
     /// Coerce an argument to int (non-strict mode). None => TypeError set.
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     pub(crate) fn spl_arg_long(&mut self, func: &str, argn: usize, name: &str, v: &Value) -> Option<i64> {
         match v.deref() {
             Value::Long(n) => Some(n),

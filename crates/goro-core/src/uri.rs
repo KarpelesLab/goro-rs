@@ -584,7 +584,7 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
     }
     // Null byte in scheme portion → MissingSchemeNonRelativeUrl
     if let Some(colon) = uri.find(':') {
-        if uri[..colon].as_bytes().contains(&0) {
+        if uri.as_bytes()[..colon].contains(&0) {
             return "MissingSchemeNonRelativeUrl";
         }
     }

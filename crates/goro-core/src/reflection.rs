@@ -730,8 +730,8 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     };
 
     // Strip leading backslash
-    let class_name = if class_name.starts_with('\\') {
-        class_name[1..].to_string()
+    let class_name = if let Some(stripped) = class_name.strip_prefix('\\') {
+        stripped.to_string()
     } else {
         class_name
     };
@@ -1071,8 +1071,8 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     };
 
     // Strip leading backslash
-    let func_name = if func_name.starts_with('\\') {
-        func_name[1..].to_string()
+    let func_name = if let Some(stripped) = func_name.strip_prefix('\\') {
+        stripped.to_string()
     } else {
         func_name
     };
@@ -4720,7 +4720,7 @@ pub fn reflection_function_method(
         b"getnumberofparameters" => {
             if let Some(op_array) = rfunc(vm, &func_lower) {
                 Some(Value::Long(op_array.param_count as i64))
-            } else if vm.functions.get(func_lower.as_slice()).is_some() {
+            } else if vm.functions.contains_key(func_lower.as_slice()) {
                 // For built-in functions, check param names
                 let count = vm.builtin_param_names.get(func_lower.as_slice())
                     .map(|p| p.len() as i64)
@@ -8151,8 +8151,6 @@ fn reflection_class_get_constant(vm: &mut Vm, class_lower: &[u8], const_name: &[
             Some(val.clone())
         } else if let Some(ref parent) = ce.parent {
             let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Avoid recursion with mut borrow by releasing ce first.
-            drop(ce);
             return reflection_class_get_constant(vm, &parent_lower, const_name);
         } else {
             None
@@ -8568,6 +8566,7 @@ fn reflection_const_value_repr(val: &Value) -> String {
 
 /// Return the displayed type name for a class constant. If a type is declared,
 /// use it. Otherwise, derive it from the value (PHP 8.4+ behaviour).
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn reflection_const_type_name(declared: Option<&crate::opcode::ParamType>, val: &Value) -> Option<String> {
     if let Some(pt) = declared {
         return Some(param_type_name(pt));

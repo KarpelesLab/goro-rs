@@ -1561,6 +1561,7 @@ impl PhpGenerator {
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
+                        #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
                         let exc = vm.current_exception.as_ref().unwrap();
                         let msg = if let Value::Object(obj) = exc {
                             let obj = obj.borrow();

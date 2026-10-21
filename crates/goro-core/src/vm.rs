@@ -454,6 +454,7 @@ pub struct Vm {
     /// Stack of property names whose hooks are currently executing (recursion guard)
     property_hook_stack: Vec<Vec<u8>>,
     /// CVs returned from the most recent include/eval execution (for scope sharing)
+    #[allow(dead_code)]
     include_return_cvs: Option<Vec<(Vec<u8>, Value)>>,
     /// Set of files that have been included via include_once/require_once (canonical paths)
     pub(crate) included_files: std::collections::HashSet<String>,
@@ -908,7 +909,7 @@ impl Vm {
                     b"M_SQRT1_2".to_vec(),
                     Value::Double(std::f64::consts::FRAC_1_SQRT_2),
                 );
-                c.insert(b"M_EULER".to_vec(), Value::Double(0.5772156649015329));
+                c.insert(b"M_EULER".to_vec(), Value::Double(std::f64::consts::EULER_GAMMA));
                 c.insert(b"M_SQRTPI".to_vec(), Value::Double(1.772453850905516));
                 c.insert(b"M_LNPI".to_vec(), Value::Double(1.1447298858494002));
                 c.insert(b"INF".to_vec(), Value::Double(f64::INFINITY));
@@ -3451,10 +3452,6 @@ impl Vm {
         self.value_matches_type_mode(value, param_type, false)
     }
 
-    fn value_matches_type_strict(&self, value: &Value, param_type: &ParamType) -> bool {
-        self.value_matches_type_mode(value, param_type, true)
-    }
-
     /// Strict-mode type check (used by unserialize() for typed properties).
     pub fn value_matches_type_strict_pub(&self, value: &Value, param_type: &ParamType) -> bool {
         self.value_matches_type_mode(value, param_type, true)
@@ -3746,6 +3743,7 @@ impl Vm {
     }
 
     /// Check if a class is (or inherits from / implements) a given type name
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     fn class_is_a(&self, class_entry: &ClassEntry, target_lower: &[u8]) -> bool {
         // Check parent
         if let Some(parent_name) = &class_entry.parent {
@@ -3817,76 +3815,6 @@ impl Vm {
     /// Get the display name for a ParamType (for error messages)
     fn param_type_display(&self, param_type: &ParamType) -> String {
         self.canonical_type_display(param_type)
-    }
-
-    fn param_type_display_inner(&self, param_type: &ParamType, in_union: bool) -> String {
-        match param_type {
-            ParamType::Simple(name) => {
-                // Resolve self/parent/static to actual class names
-                match name.as_slice() {
-                    b"self" | b"parent" | b"static" => {
-                        return self.param_type_name(param_type);
-                    }
-                    b"iterable" => {
-                        return "Traversable|array".to_string();
-                    }
-                    _ => {}
-                }
-                String::from_utf8_lossy(name).to_string()
-            }
-            ParamType::Nullable(inner) => {
-                // If the inner type expands to a union (e.g., iterable -> Traversable|array),
-                // we need to append |null instead of using ? prefix
-                let inner_str = self.param_type_display_inner(inner, false);
-                if inner_str.contains('|') {
-                    format!("{}|null", inner_str)
-                } else {
-                    format!("?{}", inner_str)
-                }
-            }
-            ParamType::Union(types) => {
-                // PHP normalizes union types: null/false/true go to the end,
-                // everything else preserves source order
-                let mut parts: Vec<String> = types
-                    .iter()
-                    .map(|t| self.param_type_display_inner(t, true))
-                    .collect();
-                parts.sort_by_key(|s| match s.as_str() {
-                    "null" => 2,
-                    "false" | "true" => 1,
-                    _ => 0,
-                });
-                parts.join("|")
-            }
-            ParamType::Intersection(types) => {
-                let s = types
-                    .iter()
-                    .map(|t| self.param_type_display_inner(t, false))
-                    .collect::<Vec<_>>()
-                    .join("&");
-                if in_union {
-                    format!("({})", s)
-                } else {
-                    s
-                }
-            }
-        }
-    }
-
-    /// Check parameter types for a user function call. Returns an error message string if
-    /// there is a type mismatch, or None if all checks pass.
-    ///
-    /// `implicit_args` is the number of leading arguments that are implicit (e.g., $this for
-    /// methods) and should not be counted in the user-visible argument number.
-    fn check_param_types(
-        &self,
-        user_fn: &OpArray,
-        args: &[Value],
-        func_display_name: &str,
-        implicit_args: usize,
-        line: u32,
-    ) -> Option<String> {
-        self.check_param_types_with_strict(user_fn, args, func_display_name, implicit_args, line, false)
     }
 
     fn check_param_types_with_strict(
@@ -4099,49 +4027,6 @@ impl Vm {
         }
     }
 
-    /// Integer conversion of an operand of %, <<, >>, &, |, ^, ~ (zendi_try_get_long):
-    /// emits the precision-loss deprecation and the out-of-range warning.
-    pub(crate) fn int_operand_long(&mut self, v: &Value, line: u32) -> i64 {
-        let inner = if let Value::Reference(r) = v { r.borrow().clone() } else { v.clone() };
-        match &inner {
-            Value::Double(d) => {
-                let d = *d;
-                let l = crate::value::php_dval_to_lval(d);
-                if !d.is_finite() || !crate::value::php_double_fits_long(d) {
-                    self.warn_oob_float_to_int(&inner, line);
-                } else if l as f64 != d {
-                    self.emit_deprecated_at(
-                        &format!("Implicit conversion from float {} to int loses precision", crate::value::format_php_float(d)),
-                        line,
-                    );
-                }
-                l
-            }
-            Value::String(s) => {
-                let l = crate::value::php_str_to_lval(s.as_bytes());
-                if let Some((f, _)) = crate::value::parse_leading_numeric_string(s.as_bytes()) {
-                    if l as f64 != f {
-                        self.emit_deprecated_at(
-                            &format!("Implicit conversion from float-string \"{}\" to int loses precision", s.to_string_lossy()),
-                            line,
-                        );
-                    }
-                }
-                l
-            }
-            other => other.to_long(),
-        }
-    }
-
-    fn int_operand_value(&mut self, v: Value, line: u32) -> Value {
-        let is_conv = match &v {
-            Value::Double(_) | Value::String(_) => true,
-            Value::Reference(r) => matches!(&*r.borrow(), Value::Double(_) | Value::String(_)),
-            _ => false,
-        };
-        if is_conv { Value::Long(self.int_operand_long(&v, line)) } else { v }
-    }
-
     /// Coerce a single value to match a parameter type.
     pub(crate) fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
         // Port of zend_verify_scalar_type_hint / zend_verify_weak_scalar_type_hint.
@@ -4236,58 +4121,6 @@ impl Vm {
             if matches!(value, Value::Long(_) | Value::Double(_) | Value::String(_)) {
                 *value = if value.is_truthy() { Value::True } else { Value::False };
             }
-        }
-    }
-
-    /// Check if a value is an exact type match (no coercion needed)
-    fn value_exact_match(value: &Value, param_type: &ParamType) -> bool {
-        match param_type {
-            ParamType::Simple(type_name) => match type_name.as_slice() {
-                b"int" | b"integer" => matches!(value, Value::Long(_)),
-                b"float" | b"double" => matches!(value, Value::Double(_)),
-                b"string" => matches!(value, Value::String(_)),
-                b"bool" | b"boolean" => matches!(value, Value::True | Value::False),
-                b"array" => matches!(value, Value::Array(_)),
-                b"object" => matches!(value, Value::Object(_)),
-                b"null" => matches!(value, Value::Null),
-                b"false" => matches!(value, Value::False),
-                b"true" => matches!(value, Value::True),
-                b"mixed" => true,
-                _ => false,
-            },
-            ParamType::Nullable(inner) => {
-                matches!(value, Value::Null) || Self::value_exact_match(value, inner)
-            }
-            _ => false,
-        }
-    }
-
-    /// Check if a value can be coerced to a type
-    fn value_can_coerce(value: &Value, param_type: &ParamType, strict: bool) -> bool {
-        match param_type {
-            ParamType::Simple(type_name) => match type_name.as_slice() {
-                b"int" | b"integer" => {
-                    if strict { false } else {
-                        matches!(value, Value::Double(_) | Value::True | Value::False)
-                            || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())
-                    }
-                }
-                b"float" | b"double" => {
-                    matches!(value, Value::Long(_))
-                        || (!strict && (matches!(value, Value::True | Value::False)
-                            || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())))
-                }
-                b"string" => {
-                    if strict { false } else {
-                        matches!(value, Value::Long(_) | Value::Double(_) | Value::True | Value::False)
-                    }
-                }
-                b"bool" | b"boolean" => {
-                    !strict
-                }
-                _ => false,
-            },
-            _ => false,
         }
     }
 
@@ -5926,6 +5759,7 @@ impl Vm {
     /// Check if child return type is compatible (covariant) with parent return type.
     /// This is a simplified check - only flags definitely-incompatible cases.
     /// Returns true if types are compatible (or we can't determine).
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     fn is_return_type_compatible(child_rt: &crate::opcode::ParamType, parent_rt: &crate::opcode::ParamType) -> bool {
         use crate::opcode::ParamType;
         match (child_rt, parent_rt) {
@@ -6039,7 +5873,6 @@ impl Vm {
                     }
                 }
             }
-            _ => true,
         }
     }
 
@@ -6136,147 +5969,6 @@ impl Vm {
         false
     }
 
-    /// Returns true if `child_type` is a subtype of `parent_type` (i.e. child can substitute for parent).
-    /// This is a structural check based on the alternatives in a union.
-    fn is_type_covariant(child_type: &Option<ParamType>, parent_type: &Option<ParamType>) -> bool {
-        fn display(t: &ParamType) -> String {
-            match t {
-                ParamType::Simple(n) => String::from_utf8_lossy(n).to_ascii_lowercase(),
-                ParamType::Nullable(inner) => format!("?{}", display(inner)),
-                ParamType::Union(types) => {
-                    let mut parts: Vec<String> = types.iter().map(display).collect();
-                    parts.sort();
-                    parts.join("|")
-                }
-                ParamType::Intersection(types) => {
-                    let mut parts: Vec<String> = types.iter().map(display).collect();
-                    parts.sort();
-                    parts.join("&")
-                }
-            }
-        }
-        match (child_type, parent_type) {
-            (None, None) => true,
-            (Some(c), Some(p)) => {
-                if display(c) == display(p) {
-                    return true;
-                }
-                // Every alternative of `child` must be covered by some alternative of `parent`.
-                fn alternatives(t: &ParamType) -> Vec<&ParamType> {
-                    match t {
-                        ParamType::Union(parts) => parts.iter().collect(),
-                        _ => vec![t],
-                    }
-                }
-                let child_alts = alternatives(c);
-                let parent_alts = alternatives(p);
-                for ca in &child_alts {
-                    let ca_disp = display(ca);
-                    if !parent_alts.iter().any(|pa| display(pa) == ca_disp) {
-                        return false;
-                    }
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn param_types_are_equal(a: &Option<ParamType>, b: &Option<ParamType>) -> bool {
-        match (a, b) {
-            (None, None) => true,
-            (Some(_), None) | (None, Some(_)) => false,
-            (Some(a), Some(b)) => {
-                // Normalize both types before comparing (expand iterable, flatten unions)
-                let a_norm = Self::normalize_param_type(a);
-                let b_norm = Self::normalize_param_type(b);
-                Self::param_type_equal(&a_norm, &b_norm)
-            }
-        }
-    }
-
-    /// Normalize a ParamType by expanding iterable to Traversable|array union members
-    fn normalize_param_type(pt: &ParamType) -> ParamType {
-        match pt {
-            ParamType::Simple(name) => {
-                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if lower == b"iterable" {
-                    // Expand iterable to Union(Traversable, array)
-                    ParamType::Union(vec![
-                        ParamType::Simple(b"Traversable".to_vec()),
-                        ParamType::Simple(b"array".to_vec()),
-                    ])
-                } else {
-                    pt.clone()
-                }
-            }
-            ParamType::Nullable(inner) => {
-                ParamType::Nullable(Box::new(Self::normalize_param_type(inner)))
-            }
-            ParamType::Union(types) => {
-                // Expand iterable members and flatten
-                let mut expanded: Vec<ParamType> = Vec::new();
-                for t in types {
-                    let normalized = Self::normalize_param_type(t);
-                    if let ParamType::Union(inner_types) = normalized {
-                        expanded.extend(inner_types);
-                    } else {
-                        expanded.push(normalized);
-                    }
-                }
-                ParamType::Union(expanded)
-            }
-            ParamType::Intersection(types) => {
-                ParamType::Intersection(types.iter().map(Self::normalize_param_type).collect())
-            }
-        }
-    }
-
-    fn param_type_equal(a: &ParamType, b: &ParamType) -> bool {
-        match (a, b) {
-            (ParamType::Simple(a_name), ParamType::Simple(b_name)) => {
-                let a_lower: Vec<u8> = a_name.iter().map(|bb| bb.to_ascii_lowercase()).collect();
-                let b_lower: Vec<u8> = b_name.iter().map(|bb| bb.to_ascii_lowercase()).collect();
-                // Normalize aliases
-                let normalize = |n: &[u8]| -> Vec<u8> {
-                    match n {
-                        b"integer" => b"int".to_vec(),
-                        b"double" => b"float".to_vec(),
-                        b"boolean" => b"bool".to_vec(),
-                        other => other.to_vec(),
-                    }
-                };
-                normalize(&a_lower) == normalize(&b_lower)
-            }
-            (ParamType::Nullable(a_inner), ParamType::Nullable(b_inner)) => {
-                Self::param_type_equal(a_inner, b_inner)
-            }
-            (ParamType::Union(a_types), ParamType::Union(b_types)) => {
-                if a_types.len() != b_types.len() {
-                    return false;
-                }
-                // Check all types in a exist in b (order-independent)
-                a_types.iter().all(|at| b_types.iter().any(|bt| Self::param_type_equal(at, bt)))
-                    && b_types.iter().all(|bt| a_types.iter().any(|at| Self::param_type_equal(at, bt)))
-            }
-            (ParamType::Intersection(a_types), ParamType::Intersection(b_types)) => {
-                if a_types.len() != b_types.len() {
-                    return false;
-                }
-                a_types.iter().all(|at| b_types.iter().any(|bt| Self::param_type_equal(at, bt)))
-                    && b_types.iter().all(|bt| a_types.iter().any(|at| Self::param_type_equal(at, bt)))
-            }
-            // An intersection type A&B can be equivalent to just B when B extends A.
-            // We can't check class hierarchy here, so we check if the simple type
-            // is one of the intersection members (which is a common case).
-            (ParamType::Intersection(types), ParamType::Simple(name)) | (ParamType::Simple(name), ParamType::Intersection(types)) => {
-                // If the simple type is one of the intersection members, it's plausibly equivalent
-                types.iter().any(|t| Self::param_type_equal(t, &ParamType::Simple(name.clone())))
-            }
-            _ => false,
-        }
-    }
-
     /// Format a ParamType for signature display
     fn format_param_type_for_sig(pt: &crate::opcode::ParamType, _class_name: &[u8]) -> String {
         use crate::opcode::ParamType;
@@ -6330,6 +6022,7 @@ impl Vm {
 
     /// Format a single argument value for a stack trace with a configurable max string length
     /// (corresponds to `zend.exception_string_param_max_len`).
+    #[allow(clippy::explicit_counter_loop)] // counter mirrors php-src
     pub fn format_trace_arg_with_limit(val: &Value, max_len: usize) -> String {
         match val {
             Value::Null | Value::Undef => "NULL".to_string(),
@@ -6434,6 +6127,7 @@ impl Vm {
     /// Apply non-static property defaults from a class (and its ancestors) onto
     /// a freshly-constructed object. Used by static factory methods like
     /// PhpToken::tokenize() to initialize subclass-declared properties.
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     pub fn apply_class_property_defaults(&self, obj: &mut PhpObject, class_lower: &[u8]) {
         // Walk the chain from root (most ancestral) to subclass so that
         // subclasses override parent defaults.
@@ -7378,66 +7072,6 @@ impl Vm {
             }
             _ => None,
         }
-    }
-
-    /// Count the public, non-internal properties of an object as visible to
-    /// ArrayObject/ArrayIterator when the object is used as backing storage.
-    /// Skips internal __-prefixed keys, mangled private/protected keys (which
-    /// start with NUL), and properties declared non-public in the class body.
-    fn count_visible_properties(&self, inner: &Rc<RefCell<PhpObject>>) -> i64 {
-        self.visible_properties(inner).len() as i64
-    }
-
-    /// Visible properties view for object-backed ArrayObject/ArrayIterator
-    /// storage. Mirrors `count_visible_properties` and returns a Vec of
-    /// (name, value) pairs for public, non-internal properties in declaration
-    /// order.
-    fn visible_properties(&self, inner: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Value)> {
-        // When the wrapped object is itself an ArrayObject-family instance,
-        // iterate the inner __spl_array entries so nested wrappers behave
-        // like a pass-through view of the ultimate items.
-        let inner_class: Vec<u8> = inner.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if matches!(inner_class.as_slice(),
-            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
-        {
-            let inner_storage = inner.borrow().get_property(b"__spl_array");
-            match inner_storage {
-                Value::Array(a) => {
-                    return a.borrow().iter().map(|(k, v)| {
-                        let name = match k {
-                            ArrayKey::Int(n) => n.to_string().into_bytes(),
-                            ArrayKey::String(s) => s.as_bytes().to_vec(),
-                        };
-                        (name, v.clone())
-                    }).collect();
-                }
-                Value::Object(o) => {
-                    return self.visible_properties(&o);
-                }
-                _ => return Vec::new(),
-            }
-        }
-        let inner_b = inner.borrow();
-        let class_lower: Vec<u8> = inner_b.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let vis_map: std::collections::HashMap<Vec<u8>, Visibility> = self
-            .classes
-            .get(&class_lower)
-            .map(|c| c.properties.iter()
-                .filter(|p| !p.is_static)
-                .map(|p| (p.name.clone(), p.visibility))
-                .collect())
-            .unwrap_or_default();
-        inner_b.properties.iter()
-            .filter(|(n, _)| {
-                if n.starts_with(b"__") { return false; }
-                if n.first() == Some(&0) { return false; }
-                if let Some(v) = vis_map.get(n) {
-                    return matches!(v, Visibility::Public);
-                }
-                true
-            })
-            .map(|(n, v)| (n.clone(), v.clone()))
-            .collect()
     }
 
     fn spl_outer_resolve_inner(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Value {
@@ -10153,7 +9787,6 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"iteratoraggregate" | b"arrayaccess" | b"countable" | b"serializable"
                 | b"seekableiterator" | b"outeriterator" | b"recursiveiterator"
                 | b"splobserver" | b"splsubject"
-                | b"reflectiontype" | b"reflectionreference" | b"reflectionconstant"
                 | b"fiber" | b"fibererror"
                 | b"attribute" | b"deprecated" | b"nodiscard" | b"override"
                 | b"mysqli" | b"mysqli_driver" | b"mysqli_result" | b"mysqli_stmt"
@@ -10163,7 +9796,7 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"xmlparser"
                 | b"streambucket" | b"weakmap"
                 | b"__php_incomplete_class"
-                | b"weakmap" | b"weakreference" | b"sensitiveparametervalue"
+                | b"weakreference" | b"sensitiveparametervalue"
                 | b"roundingmode"
                 | b"reflection" | b"reflector" | b"reflectionzendextension"
                 | b"propertyhooktype"
@@ -10642,27 +10275,6 @@ impl Vm {
         out
     }
 
-    /// Get timezone offset in seconds and abbreviation for a timezone name
-    fn get_tz_offset(&self, tz_name: &str) -> (i64, String) {
-        match tz_name {
-            "UTC" | "utc" => (0, "UTC".to_string()),
-            "America/New_York" | "US/Eastern" => (-5 * 3600, "EST".to_string()),
-            "America/Chicago" | "US/Central" => (-6 * 3600, "CST".to_string()),
-            "America/Denver" | "US/Mountain" => (-7 * 3600, "MST".to_string()),
-            "America/Los_Angeles" | "US/Pacific" => (-8 * 3600, "PST".to_string()),
-            "Europe/London" => (0, "GMT".to_string()),
-            "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Rome" | "CET" => (3600, "CET".to_string()),
-            "Europe/Helsinki" | "Europe/Athens" | "EET" => (2 * 3600, "EET".to_string()),
-            "Europe/Moscow" => (3 * 3600, "MSK".to_string()),
-            "Asia/Tokyo" | "Japan" => (9 * 3600, "JST".to_string()),
-            "Asia/Shanghai" | "Asia/Hong_Kong" | "PRC" => (8 * 3600, "CST".to_string()),
-            "Asia/Kolkata" | "Asia/Calcutta" => (5 * 3600 + 1800, "IST".to_string()),
-            "Australia/Sydney" => (10 * 3600, "AEST".to_string()),
-            "Pacific/Auckland" | "NZ" => (12 * 3600, "NZST".to_string()),
-            _ => (0, "UTC".to_string()),
-        }
-    }
-
     /// Format a timestamp with timezone info
     fn format_datetime_timestamp_tz(&self, format: &str, local_secs: i64, tz_abbrev: &str, offset_secs: i64) -> String {
         let days_since_epoch = if local_secs >= 0 { local_secs / 86400 } else { (local_secs - 86399) / 86400 };
@@ -10805,110 +10417,6 @@ impl Vm {
         }
     }
 
-    fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
-        let days_since_epoch = secs / 86400;
-        let time_of_day = secs.rem_euclid(86400);
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-        let seconds = time_of_day % 60;
-
-        // Use the closed-form Hinnant algorithm. The previous local loop
-        // walked year-by-year and hung for extreme timestamps.
-        let (year, month, day) = Self::days_to_ymd_static(days_since_epoch);
-
-        let mut result = String::new();
-        let fmt_bytes = format.as_bytes();
-        let mut i = 0;
-        while i < fmt_bytes.len() {
-            let c = fmt_bytes[i];
-            if c == b'\\' && i + 1 < fmt_bytes.len() {
-                result.push(fmt_bytes[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            match c {
-                b'Y' => result.push_str(&format!("{:04}", year)),
-                b'y' => result.push_str(&format!("{:02}", year % 100)),
-                b'm' => result.push_str(&format!("{:02}", month)),
-                b'n' => result.push_str(&format!("{}", month)),
-                b'd' => result.push_str(&format!("{:02}", day)),
-                b'j' => result.push_str(&format!("{}", day)),
-                b'H' => result.push_str(&format!("{:02}", hours)),
-                b'G' => result.push_str(&format!("{}", hours)),
-                b'i' => result.push_str(&format!("{:02}", minutes)),
-                b's' => result.push_str(&format!("{:02}", seconds)),
-                b'A' => result.push_str(if hours >= 12 { "PM" } else { "AM" }),
-                b'a' => result.push_str(if hours >= 12 { "pm" } else { "am" }),
-                b'g' => {
-                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
-                    result.push_str(&format!("{}", h12));
-                }
-                b'h' => {
-                    let h12 = if hours == 0 { 12 } else if hours > 12 { hours - 12 } else { hours };
-                    result.push_str(&format!("{:02}", h12));
-                }
-                b'U' => result.push_str(&format!("{}", secs)),
-                b'N' => {
-                    let dow = (days_since_epoch % 7 + 4 + 7) % 7;
-                    result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
-                }
-                b'w' => {
-                    let dow = (days_since_epoch % 7 + 4 + 7) % 7;
-                    result.push_str(&format!("{}", dow));
-                }
-                b'D' => {
-                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
-                    let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-                    result.push_str(names[dow]);
-                }
-                b'l' => {
-                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
-                    let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-                    result.push_str(names[dow]);
-                }
-                b'F' => {
-                    let names = ["January", "February", "March", "April", "May", "June",
-                        "July", "August", "September", "October", "November", "December"];
-                    result.push_str(names[(month - 1) as usize]);
-                }
-                b'M' => {
-                    let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                    result.push_str(names[(month - 1) as usize]);
-                }
-                b't' => {
-                    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-                    let month_days = [31u32, if is_leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-                    result.push_str(&format!("{}", month_days[(month - 1) as usize]));
-                }
-                b'L' => {
-                    let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
-                    result.push_str(&format!("{}", leap));
-                }
-                b'e' | b'T' => result.push_str("UTC"),
-                b'O' => result.push_str("+0000"),
-                b'P' => result.push_str("+00:00"),
-                b'p' => result.push('Z'),
-                b'Z' => result.push('0'),
-                b'c' => {
-                    result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
-                        year, month, day, hours, minutes, seconds));
-                }
-                b'r' => {
-                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as usize;
-                    let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-                    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                    result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
-                        day_names[dow], day, month_names[(month-1) as usize], year, hours, minutes, seconds));
-                }
-                _ => result.push(c as char),
-            }
-            i += 1;
-        }
-        result
-    }
-
     /// Max output buffer size (64MB) to prevent OOM from infinite echo loops
     pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
 
@@ -10954,170 +10462,6 @@ impl Vm {
                 a_cmp.cmp(&b_cmp)
             }
         }
-    }
-
-    /// Natural order string comparison
-    fn strnatcmp(a: &str, b: &str, case_insensitive: bool) -> std::cmp::Ordering {
-        let a_bytes: Vec<u8> = if case_insensitive {
-            a.bytes().map(|b| b.to_ascii_lowercase()).collect()
-        } else {
-            a.bytes().collect()
-        };
-        let b_bytes: Vec<u8> = if case_insensitive {
-            b.bytes().map(|b| b.to_ascii_lowercase()).collect()
-        } else {
-            b.bytes().collect()
-        };
-        let mut ai = 0;
-        let mut bi = 0;
-        loop {
-            if ai >= a_bytes.len() && bi >= b_bytes.len() {
-                return std::cmp::Ordering::Equal;
-            }
-            if ai >= a_bytes.len() {
-                return std::cmp::Ordering::Less;
-            }
-            if bi >= b_bytes.len() {
-                return std::cmp::Ordering::Greater;
-            }
-            let a_is_digit = a_bytes[ai].is_ascii_digit();
-            let b_is_digit = b_bytes[bi].is_ascii_digit();
-            if a_is_digit && b_is_digit {
-                // Compare numbers naturally
-                // Skip leading zeros
-                let a_start = ai;
-                let b_start = bi;
-                while ai < a_bytes.len() && a_bytes[ai] == b'0' { ai += 1; }
-                while bi < b_bytes.len() && b_bytes[bi] == b'0' { bi += 1; }
-                let a_num_start = ai;
-                let b_num_start = bi;
-                while ai < a_bytes.len() && a_bytes[ai].is_ascii_digit() { ai += 1; }
-                while bi < b_bytes.len() && b_bytes[bi].is_ascii_digit() { bi += 1; }
-                let a_num_len = ai - a_num_start;
-                let b_num_len = bi - b_num_start;
-                if a_num_len != b_num_len {
-                    return a_num_len.cmp(&b_num_len);
-                }
-                for (a_d, b_d) in a_bytes[a_num_start..ai].iter().zip(b_bytes[b_num_start..bi].iter()) {
-                    if a_d != b_d {
-                        return a_d.cmp(b_d);
-                    }
-                }
-                // Same number, compare by leading zeros
-                let a_zeros = a_num_start - a_start;
-                let b_zeros = b_num_start - b_start;
-                if a_zeros != b_zeros {
-                    // More leading zeros means smaller (PHP behavior: "01" < "1")
-                    // Actually in PHP strnatcmp, leading zeros cause character-by-character comparison
-                    // but for simplicity, continue
-                }
-            } else {
-                if a_bytes[ai] != b_bytes[bi] {
-                    return a_bytes[ai].cmp(&b_bytes[bi]);
-                }
-                ai += 1;
-                bi += 1;
-            }
-        }
-    }
-
-    /// Call a PHP callback function with two arguments for sorting comparison
-    fn spl_call_compare_callback(&mut self, callback: &Value, a: &Value, b: &Value) -> i64 {
-        // Resolve callback to a function name
-        let (func_name, captured) = match callback {
-            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-            Value::Array(arr) => {
-                let arr = arr.borrow();
-                let vals: Vec<Value> = arr.values().cloned().collect();
-                if vals.len() >= 2 {
-                    let first = &vals[0];
-                    let method = vals[1].to_php_string();
-                    match first {
-                        Value::String(class_name) => {
-                            let mut name = class_name.as_bytes().to_vec();
-                            name.extend_from_slice(b"::");
-                            name.extend_from_slice(method.as_bytes());
-                            (name, vec![])
-                        }
-                        Value::Object(_) => {
-                            let class_name = first.to_php_string();
-                            let mut name = class_name.as_bytes().to_vec();
-                            name.extend_from_slice(b"::");
-                            name.extend_from_slice(method.as_bytes());
-                            (name, vec![first.clone()])
-                        }
-                        _ => return 0,
-                    }
-                } else {
-                    return 0;
-                }
-            }
-            _ => return 0,
-        };
-
-        // Look up and execute the function
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-        // Check for class::method patterns
-        if let Some(sep_pos) = func_lower.windows(2).position(|w| w == b"::") {
-            let class_part = &func_lower[..sep_pos];
-            let method_part = &func_lower[sep_pos + 2..];
-            // Try user-defined class method
-            if let Some(class_def) = self.classes.get(class_part).cloned() {
-                if let Some(method) = class_def.get_method(method_part) {
-                    let method_op = method.op_array.clone();
-                    let mut fn_cvs = vec![Value::Undef; method_op.cv_names.len()];
-                    let mut arg_idx = 0;
-                    for cap in &captured {
-                        if arg_idx < fn_cvs.len() {
-                            fn_cvs[arg_idx] = cap.clone();
-                            arg_idx += 1;
-                        }
-                    }
-                    if arg_idx < fn_cvs.len() {
-                        fn_cvs[arg_idx] = a.clone();
-                        arg_idx += 1;
-                    }
-                    if arg_idx < fn_cvs.len() {
-                        fn_cvs[arg_idx] = b.clone();
-                    }
-                    if let Ok(result) = self.execute_op_array(&method_op, fn_cvs) {
-                        return result.to_long();
-                    }
-                }
-            }
-        }
-
-        // Try user functions
-        if let Some(func) = self.user_functions.get(&func_lower).cloned() {
-            let mut fn_cvs = vec![Value::Undef; func.cv_names.len()];
-            let mut arg_idx = 0;
-            for cap in &captured {
-                if arg_idx < fn_cvs.len() {
-                    fn_cvs[arg_idx] = cap.clone();
-                    arg_idx += 1;
-                }
-            }
-            if arg_idx < fn_cvs.len() {
-                fn_cvs[arg_idx] = a.clone();
-                arg_idx += 1;
-            }
-            if arg_idx < fn_cvs.len() {
-                fn_cvs[arg_idx] = b.clone();
-            }
-            if let Ok(result) = self.execute_op_array(&func, fn_cvs) {
-                return result.to_long();
-            }
-        }
-
-        // Try builtin functions
-        if let Some(builtin) = self.functions.get(&func_lower).copied() {
-            if let Ok(result) = builtin(self, &[a.clone(), b.clone()]) {
-                return result.to_long();
-            }
-        }
-
-        0
     }
 
     /// Call a PHP callback function with arbitrary arguments (for filter callbacks etc)
@@ -11663,12 +11007,12 @@ impl Vm {
                     .map(|p| start + p)
                     .unwrap_or(s_bytes.len());
                 let const_name = &s_bytes[start..end];
-                let found = self.constants.get(const_name).is_some()
+                let found = self.constants.contains_key(const_name)
                     || (const_name.contains(&b'\\')
                         && const_name
                             .iter()
                             .rposition(|&b| b == b'\\')
-                            .map(|sep| self.constants.get(&const_name[sep + 1..]).is_some())
+                            .map(|sep| self.constants.contains_key(&const_name[sep + 1..]))
                             .unwrap_or(false));
                 if !found {
                     return false;
@@ -17392,9 +16736,9 @@ impl Vm {
                                                 .map(|c| c.get_method(b"__tostring").is_some())
                                                 .unwrap_or(false);
                                             if has_tostring {
-                                                match self.value_to_string_checked(arg) {
-                                                    Ok(s) => *arg = Value::String(s),
-                                                    Err(_) => {} // Error will be handled later
+                                                // Error will be handled later
+                                                if let Ok(s) = self.value_to_string_checked(arg) {
+                                                    *arg = Value::String(s);
                                                 }
                                             }
                                         }
@@ -17879,6 +17223,7 @@ impl Vm {
                             let fwd_this = is_forwarding_call
                                 && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this".as_slice())
                                 && matches!(cvs.first(), Some(Value::Object(_)));
+                            #[allow(clippy::if_same_then_else)] // branches mirror php-src
                             if fwd_this {
                                 if let Some(this_val @ Value::Object(_)) = cvs.first() {
                                     call.args.insert(0, this_val.clone());
@@ -18551,12 +17896,6 @@ impl Vm {
                                             obj_mut.set_property(b"__spl_flags".to_vec(), Value::Long(flags));
                                             obj_mut.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
                                         }
-                                        b"recursivetreeiterator" => {
-                                            // __construct(RecursiveIterator|IteratorAggregate $iterator, ...)
-                                            if call.args.len() > 1 {
-                                                obj_mut.set_property(b"__spl_inner".to_vec(), call.args[1].clone());
-                                            }
-                                        }
                                         b"splfileinfo" => {
                                             // __construct(string $filename)
                                             if call.args.len() > 1 {
@@ -18757,7 +18096,7 @@ impl Vm {
                                                 // For lookup, strip a single leading backslash and
                                                 // lowercase the namespace prefix (the form used when
                                                 // the constant was registered via define()).
-                                                let stripped = if const_name.starts_with('\\') { &const_name[1..] } else { &const_name[..] };
+                                                let stripped = const_name.strip_prefix('\\').unwrap_or(&const_name[..]);
                                                 let lookup_bytes: Vec<u8> = if let Some(pos) = stripped.as_bytes().iter().rposition(|&b| b == b'\\') {
                                                     let mut out = Vec::with_capacity(stripped.len());
                                                     for &b in &stripped.as_bytes()[..pos] { out.push(b.to_ascii_lowercase()); }
@@ -18921,9 +18260,9 @@ impl Vm {
                                                 .unwrap_or(0);
                                             let timestamp = if datetime_str.is_empty() || datetime_str.eq_ignore_ascii_case("now") {
                                                 now_secs
-                                            } else if datetime_str.starts_with('@') {
+                                            } else if let Some(ts_str) = datetime_str.strip_prefix('@') {
                                                 // @timestamp ignores timezone
-                                                match datetime_str[1..].trim().parse::<i64>() {
+                                                match ts_str.trim().parse::<i64>() {
                                                     Ok(ts) => ts,
                                                     Err(_) => {
                                                         drop(obj_mut);
@@ -22489,6 +21828,7 @@ impl Vm {
                             if !found {
                                 if let Some(class_def) = self.classes.get(&obj_class_lower) {
                                     if class_def.is_enum {
+                                        #[allow(clippy::if_same_then_else)] // branches mirror php-src
                                         if class_lower == b"unitenum" {
                                             found = true;
                                         } else if class_lower == b"backedenum" && class_def.enum_backing_type.is_some() {
@@ -24840,20 +24180,16 @@ impl Vm {
                         // Walk self + ancestors to detect a write-only hooked property
                         let mut cur = class_lower_wo.clone();
                         let mut is_virtual_write_only = false;
-                        loop {
-                            if let Some(cd) = self.classes.get(&cur) {
-                                if let Some(p) = cd.properties.iter().find(|p| p.name == prop_name.as_bytes()) {
-                                    if p.has_set_hook && !p.has_get_hook && p.is_virtual {
-                                        is_virtual_write_only = true;
-                                    }
-                                    break;
+                        while let Some(cd) = self.classes.get(&cur) {
+                            if let Some(p) = cd.properties.iter().find(|p| p.name == prop_name.as_bytes()) {
+                                if p.has_set_hook && !p.has_get_hook && p.is_virtual {
+                                    is_virtual_write_only = true;
                                 }
-                                match &cd.parent {
-                                    Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
-                                    None => break,
-                                }
-                            } else {
                                 break;
+                            }
+                            match &cd.parent {
+                                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                                None => break,
                             }
                         }
                         if is_virtual_write_only {
@@ -25464,6 +24800,7 @@ impl Vm {
                             // If there's an avis error and we're already inside a magic method,
                             // throw the error instead of recursing into __unset again
                             if avis_error.is_some() && self.magic_depth > 0 {
+                                #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
                                 let msg = avis_error.unwrap();
                                 let exc = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc);
@@ -25709,6 +25046,7 @@ impl Vm {
                             }
                         }
                         // No outer handler - uncaught exception
+                        #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
                         let exc = self.current_exception.as_ref().unwrap();
                         let msg = if let Value::Object(obj) = exc {
                             let obj = obj.borrow();
@@ -26321,9 +25659,7 @@ impl Vm {
                         } else {
                             let idx = key_val.to_long();
                             let len = s.as_bytes().len() as i64;
-                            if idx >= 0 && idx < len {
-                                Value::True
-                            } else if idx < 0 && (-idx) <= len {
+                            if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
                                 Value::True
                             } else {
                                 Value::False
@@ -26558,6 +25894,7 @@ impl Vm {
                             }
                         }
                         Err(e) => {
+                            #[allow(clippy::if_same_then_else)] // branches mirror php-src
                             let exc_class: &[u8] = if e.starts_with("Only arrays") {
                                 b"Error"
                             } else {
@@ -27102,12 +26439,12 @@ impl Vm {
                                     let parent_has_concrete_get = parent.methods.get(&get_key_lower).map(|m| !m.is_abstract).unwrap_or(false);
                                     let parent_has_concrete_set = parent.methods.get(&set_key_lower).map(|m| !m.is_abstract).unwrap_or(false);
                                     if parent.methods.get(&get_key_lower).map(|m| m.is_abstract).unwrap_or(false) {
-                                        class.methods.remove(&get_key_lower);
+                                        class.methods.swap_remove(&get_key_lower);
                                     }
                                     // readonly child cannot satisfy abstract set hook
                                     if !is_readonly {
                                         if parent.methods.get(&set_key_lower).map(|m| m.is_abstract).unwrap_or(false) {
-                                            class.methods.remove(&set_key_lower);
+                                            class.methods.swap_remove(&set_key_lower);
                                         }
                                     }
                                     if parent_has_concrete_get || parent_has_concrete_set {
@@ -28603,13 +27940,13 @@ impl Vm {
                                 let set_key_lower: Vec<u8> = set_key.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if let Some(m) = class.methods.get(&get_key_lower) {
                                     if m.is_abstract {
-                                        class.methods.remove(&get_key_lower);
+                                        class.methods.swap_remove(&get_key_lower);
                                     }
                                 }
                                 if !is_readonly {
                                     if let Some(m) = class.methods.get(&set_key_lower) {
                                         if m.is_abstract {
-                                            class.methods.remove(&set_key_lower);
+                                            class.methods.swap_remove(&set_key_lower);
                                         }
                                     }
                                 }
@@ -29578,6 +28915,7 @@ impl Vm {
                                             if let Some(param_info) = set_method.op_array.param_types.iter().flatten().next() {
                                                 // Only check when the set hook parameter has an explicit type
                                                 let param_type = &param_info.param_type;
+                                                #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
                                                 let prop_type = prop.property_type.as_ref().unwrap();
                                                 if !Self::set_param_type_compatible_runtime(self, prop_type, param_type) {
                                                     let cls_display = String::from_utf8_lossy(&class.name);
@@ -29857,7 +29195,6 @@ impl Vm {
                             b"lengthexception" => b"LengthException".to_vec(),
                             b"outofrangeexception" => b"OutOfRangeException".to_vec(),
                             b"outofboundsexception" => b"OutOfBoundsException".to_vec(),
-                            b"invalidargumentexception" => b"InvalidArgumentException".to_vec(),
                             // Reflection classes
                             b"reflectionclass" => b"ReflectionClass".to_vec(),
                             b"reflectionobject" => b"ReflectionObject".to_vec(),
@@ -30832,8 +30169,7 @@ impl Vm {
                                     }
                                     return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                                 }
-                            } else
-                            if matches!(prop, Value::Null)
+                            } else if matches!(prop, Value::Null)
                                 && (hidden_private_prop || !obj.borrow().has_property(&storage_key))
                                 && self.magic_depth < 5
                             {
@@ -32434,6 +31770,7 @@ impl Vm {
                                     });
                                 } else {
                                     // Method not accessible and no __call - throw error
+                                    #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
                                     let err_msg = visibility_err.unwrap();
                                     let exc = self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc);
@@ -35585,8 +34922,8 @@ pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
     if s.is_empty() || s.eq_ignore_ascii_case("now") {
         return Some(now);
     }
-    if s.starts_with('@') {
-        return s[1..].trim().parse::<i64>().ok();
+    if let Some(rest) = s.strip_prefix('@') {
+        return rest.trim().parse::<i64>().ok();
     }
     // Standalone timezone identifier or offset - treat as "now in that tz"
     if vm_parse_tz_offset(s).is_some() || vm_is_tz_abbrev(s) || s.eq_ignore_ascii_case("GMT") || s.eq_ignore_ascii_case("UTC") {
@@ -35885,13 +35222,9 @@ fn vm_calc_calendar_diff(sy: i64, sm: i64, sd: i64, sh: i64, si: i64, ss: i64,
     (years, months, days_val, hours, minutes, seconds)
 }
 
-/// Parse a datetime string using a PHP-style format string
-fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
-    vm_parse_with_format_ex(format, datetime, now).map(|(ts, _)| ts)
-}
-
 /// Like `vm_parse_with_format` but also returns a parsed (tz_name, tz_type) pair
 /// when the format includes a recognised timezone token (O/P/p/e/T).
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
 fn vm_parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, Option<(String, i64)>)> {
     let now_days = now / 86400;
     let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
@@ -36426,15 +35759,15 @@ fn vm_is_tz_abbrev(tz_name: &str) -> bool {
         | "NZST" | "NZDT" | "IDT" | "SAST" | "EAT" | "WAT" | "CAT"
         | "BRT" | "BRST" | "ART" | "CLT" | "CLST" | "PET" | "COT"
         | "PKT" | "BDT" | "IRST" | "IRDT" | "AFT"
-        | "GST" | "AZOT" | "AZOST" | "ADT" | "CCT" | "CXT" | "CKT"
+        | "GST" | "AZOT" | "AZOST" | "CCT" | "CXT" | "CKT"
         | "ChST" | "EAST" | "EASST" | "FJT" | "FJST" | "GALT" | "GAMT"
-        | "GILT" | "GYT" | "HDT" | "HKT" | "HOVT" | "ICT" | "IOT"
+        | "GILT" | "GYT" | "HDT" | "HOVT" | "ICT" | "IOT"
         | "KGT" | "LHST" | "LHDT" | "MHT" | "MMT" | "MVT" | "MYT"
         | "NPT" | "NRT" | "NUT" | "PGT" | "PHOT" | "PHT" | "PONT"
         | "PYT" | "PYST" | "RET" | "ROTT" | "SBT" | "SCT" | "SRT"
         | "SST" | "TAHT" | "TFT" | "TJT" | "TKT" | "TMT" | "TOT"
         | "TVT" | "ULAT" | "UZT" | "VET" | "VLAT" | "VOST" | "VUT"
-        | "WAKT" | "WEST" | "WFT" | "YAKT" | "YEKT"
+        | "WAKT" | "WFT" | "YAKT" | "YEKT"
     )
 }
 

@@ -3,6 +3,7 @@ use crate::vm::BuiltinFn;
 
 /// A PHP function - either user-defined (compiled) or built-in (native Rust)
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // hot, cloned rarely; boxing UserFunction would churn every caller
 pub enum Function {
     User(UserFunction),
     Builtin(BuiltinFunction),

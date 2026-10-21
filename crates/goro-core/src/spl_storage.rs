@@ -433,11 +433,10 @@ impl Vm {
                     vm.spl_throw(b"UnexpectedValueException", &msg)
                 };
                 let n = data.len();
-                let mut p = 0usize;
                 if !(data.len() >= 2 && data[0] == b'x' && data[1] == b':') {
                     return fail(self, if data.first() == Some(&b'x') { 1 } else { 0 }, n);
                 }
-                p = 2;
+                let mut p = 2usize;
                 let count = match self.spl_unserialize_at(&data, &mut p) {
                     Some(Value::Long(c)) => c,
                     _ => return fail(self, p, n),
