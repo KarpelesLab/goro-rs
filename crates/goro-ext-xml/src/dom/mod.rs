@@ -474,6 +474,13 @@ pub fn node_obj(vm: &mut Vm, n: NodeId) -> Value {
             return Value::Null;
         }
     };
+    // a namespace declaration node keeps its parent element object alive
+    // ("fake child" of php_dom_create_fake_namespace_decl), created first
+    let ns_parent = if base == Base::NameSpaceNode {
+        tree::with(|t| t.nodes[n].parent).map(|p| node_obj(vm, p))
+    } else {
+        None
+    };
     let doc = doc_of_node(n);
     let mut class: Vec<u8> = base_name(base).as_bytes().to_vec();
     if let Some(d) = doc {
@@ -484,6 +491,9 @@ pub fn node_obj(vm: &mut Vm, n: NodeId) -> Value {
     }
     let o = new_object(vm, &class);
     attach(&o, Kind::Node(n));
+    if let Some(p) = ns_parent {
+        o.borrow_mut().set_property(b"__dom_parent".to_vec(), p);
+    }
     tree::with(|t| t.nodes[n].wrapper = Some(Rc::downgrade(&o)));
     Value::Object(o)
 }
