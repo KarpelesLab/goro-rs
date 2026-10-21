@@ -28898,7 +28898,27 @@ impl Vm {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
 
-                    if let Value::Array(arr) = &arr_val {
+                    if matches!(op.op2, OperandType::Unused) {
+                        // $a[] in reference context: append a fresh NULL slot.
+                        let r = Rc::new(RefCell::new(Value::Null));
+                        match &arr_val {
+                            Value::Array(arr) => { arr.borrow_mut().push(Value::Reference(r.clone())); }
+                            Value::Null | Value::Undef => {
+                                let mut na = PhpArray::new();
+                                na.push(Value::Reference(r.clone()));
+                                if let OperandType::Cv(ai) = op.op1 {
+                                    let nv = Value::Array(Rc::new(RefCell::new(na)));
+                                    match cvs.get_mut(ai as usize) {
+                                        Some(Value::Reference(cr)) => { *cr.borrow_mut() = nv; }
+                                        Some(slot) => { *slot = nv; }
+                                        None => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.write_operand(&op.result, Value::Reference(r), &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         let mut arr_mut = arr.borrow_mut();
                         // Check if the element is already a Reference

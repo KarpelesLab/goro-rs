@@ -826,9 +826,29 @@ impl Compiler {
                 // "Undefined array key" warning).
                 // Unknown callee at compile time: an array element or property
                 // argument may need to be passed by reference. Decide at runtime.
-                let dim_or_prop = matches!(&arg.value.kind, ExprKind::ArrayAccess { index: Some(_), .. })
+                let dim_or_prop = matches!(&arg.value.kind, ExprKind::ArrayAccess { .. })
                     || matches!(&arg.value.kind, ExprKind::PropertyAccess { nullsafe: false, .. });
-                if !is_byref && dim_or_prop {
+                let is_append = {
+                    let mut e = &arg.value;
+                    let mut found = false;
+                    while let ExprKind::ArrayAccess { array, index } = &e.kind {
+                        if index.is_none() { found = true; }
+                        e = array;
+                    }
+                    found
+                };
+                // Callee declared earlier in this file: its by-ref-ness is known.
+                let known_byval = func_name.and_then(|n| {
+                    let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let lower = lower.strip_prefix(b"\\").map(|x| x.to_vec()).unwrap_or(lower);
+                    self.op_array.child_functions.iter()
+                        .find(|f| f.name.eq_ignore_ascii_case(&lower))
+                        .map(|f| !f.by_ref_params.get(i).copied().unwrap_or(false) && f.variadic_param.is_none())
+                }).unwrap_or(false);
+                if is_append && known_byval {
+                    return Err(CompileError { message: "Cannot use [] for reading".into(), line });
+                }
+                if !is_byref && dim_or_prop && !known_byval {
                     let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
                     let jmp_ref = self.op_array.emit(Op {
                         opcode: OpCode::JmpIfArgByRef,
@@ -837,14 +857,18 @@ impl Compiler {
                         result: OperandType::Unused,
                         line,
                     });
-                    let v = self.compile_expr(&arg.value)?;
-                    self.op_array.emit(Op {
-                        opcode: OpCode::SendVal,
-                        op1: v,
-                        op2: OperandType::Const(pos_idx),
-                        result: OperandType::Unused,
-                        line,
-                    });
+                    if is_append {
+                        self.compile_throw_error(b"Cannot use [] for reading", line)?;
+                    } else {
+                        let v = self.compile_expr(&arg.value)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendVal,
+                            op1: v,
+                            op2: OperandType::Const(pos_idx),
+                            result: OperandType::Unused,
+                            line,
+                        });
+                    }
                     let jmp_end = self.op_array.emit(Op {
                         opcode: OpCode::Jmp,
                         op1: OperandType::JmpTarget(0),
@@ -873,9 +897,12 @@ impl Compiler {
                         continue;
                     }
                     let ref_tmp = match &arg.value.kind {
-                        ExprKind::ArrayAccess { array, index: Some(idx_expr) } => {
+                        ExprKind::ArrayAccess { array, index } => {
                             let arr_op = self.compile_dim_write_base(array)?;
-                            let idx_op = self.compile_expr(idx_expr)?;
+                            let idx_op = match index {
+                                Some(idx_expr) => self.compile_expr(idx_expr)?,
+                                None => OperandType::Unused,
+                            };
                             let t = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::ArrayGetRef,
