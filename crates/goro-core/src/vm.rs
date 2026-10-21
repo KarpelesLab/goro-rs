@@ -1929,7 +1929,8 @@ impl Vm {
         if d.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
             return d as i64;
         }
-        let repr = Value::Double(d).to_php_string().to_string_lossy();
+        // %.*H with precision -1: the shortest round-trip form.
+        let repr = crate::value::format_php_float_repr(d);
         self.emit_warning_at(
             &format!(
                 "The float {} is not representable as an int, cast occurred",
@@ -4680,6 +4681,10 @@ impl Vm {
                     let param_name = String::from_utf8_lossy(&type_info.param_name);
                     // Argument number is 1-based, excluding implicit args like $this
                     let arg_num = i + 1 - implicit_args;
+                    // zend_verify_arg_error prints the name as a C string: an
+                    // anonymous class's method name ends at its NUL byte.
+                    let func_display_name =
+                        func_display_name.split('\0').next().unwrap_or_default();
                     return Some(format!(
                         "{}(): Argument #{} (${}) \
                          must be of type {}, {} given, called in {} on line {}",
@@ -4967,7 +4972,7 @@ impl Vm {
             self.emit_warning_at(
                 &format!(
                     "The float {} is not representable as an int, cast occurred",
-                    crate::value::format_php_float(d)
+                    crate::value::format_php_float_repr(d)
                 ),
                 line,
             );
@@ -34960,7 +34965,7 @@ impl Vm {
                         });
                     }
                     if let Some(Value::Array(arr)) = arr_val {
-                        let key = Self::value_to_array_key(key_val.clone());
+                        let key = self.isset_unset_array_key(key_val.clone(), op.line);
                         let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
                         arr.borrow_mut().remove(&key);
                         crate::gc::dtor_watch_end(w);
@@ -37051,16 +37056,27 @@ impl Vm {
                         }
                     }
                     let result = if let Value::Array(arr) = &arr_val {
-                        let key = Self::value_to_array_key(key_val);
-                        match arr.borrow().get(&key) {
-                            Some(Value::Reference(r))
-                                if !matches!(*r.borrow(), Value::Null | Value::Undef) =>
-                            {
-                                Value::True
+                        let float_key = matches!(key_val.deref(), Value::Double(_));
+                        let key = self.isset_unset_array_key(key_val, op.line);
+                        // The error handler may have destroyed the array.
+                        let gone = float_key
+                            && !matches!(
+                                self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                                Value::Array(ref a2) if Rc::ptr_eq(a2, arr)
+                            );
+                        if gone {
+                            Value::False
+                        } else {
+                            match arr.borrow().get(&key) {
+                                Some(Value::Reference(r))
+                                    if !matches!(*r.borrow(), Value::Null | Value::Undef) =>
+                                {
+                                    Value::True
+                                }
+                                Some(Value::Reference(_)) => Value::False,
+                                Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
+                                _ => Value::False,
                             }
-                            Some(Value::Reference(_)) => Value::False,
-                            Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
-                            _ => Value::False,
                         }
                     } else if let Some(o) = match &arr_val {
                         Value::Object(o)
@@ -44205,139 +44221,38 @@ impl Vm {
                                 && obj.borrow().has_property(&storage_key)
                                 && self.error_reporting != 0
                             {
-                                // Try __get magic method first before throwing error
-                                let has_get = self.magic_depth < 5
-                                    && self
-                                        .classes
-                                        .get(&class_lower)
-                                        .map(|c| c.methods.contains_key(&b"__get".to_vec()))
-                                        .unwrap_or(false);
-                                if has_get {
-                                    if is_fetch_is
-                                        && self.magic_isset_denies(
-                                            &obj_val,
-                                            &class_lower,
-                                            &prop_name,
-                                        )
-                                    {
-                                        if let Some((rid, pname)) = &propagate_get_guard_to_real {
-                                            self.magic_prop_guards.remove(&(
-                                                *rid,
-                                                pname.clone(),
-                                                0u8,
-                                            ));
-                                        }
-                                        self.write_operand(
-                                            &op.result,
-                                            Value::Null,
-                                            &mut cvs,
-                                            &mut tmps,
-                                            &static_cv_keys,
-                                        );
-                                        continue;
-                                    }
-                                    self.magic_depth += 1;
-                                    let magic_method_def = self
-                                        .classes
-                                        .get(&class_lower)
-                                        .unwrap()
-                                        .get_method(b"__get")
-                                        .unwrap();
-                                    let method = magic_method_def.op_array.clone();
-                                    let magic_declaring = magic_method_def.declaring_class.clone();
-                                    let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
-                                    if !fn_cvs.is_empty() {
-                                        fn_cvs[0] = obj_val.clone();
-                                    } // $this
-                                    if fn_cvs.len() > 1 {
-                                        fn_cvs[1] = Value::String(prop_name.clone());
-                                    } // $name
-                                    self.class_scope_stack.push(magic_declaring);
-                                    self.called_class_stack.push(class_name_orig.clone());
-                                    let mut result = self
-                                        .execute_op_array(&method, fn_cvs)
-                                        .unwrap_or(Value::Null);
-                                    if is_w_fetch && self.current_exception.is_none() {
-                                        result = self.magic_get_w_result(
-                                            result,
-                                            &class_name_orig,
-                                            prop_name.as_bytes(),
-                                            op.line,
-                                        );
-                                    }
-                                    self.called_class_stack.pop();
-                                    self.class_scope_stack.pop();
-                                    self.magic_depth -= 1;
-                                    // Cast result to property's declared type if typed
-                                    if let Some(class) = self.classes.get(&class_lower) {
-                                        if let Some(prop_def) = class
-                                            .properties
-                                            .iter()
-                                            .find(|p| p.name == prop_name.as_bytes())
-                                        {
-                                            if let Some(ref pt) = prop_def.property_type {
-                                                if let ParamType::Simple(t) = pt {
-                                                    match t.as_slice() {
-                                                        b"int" | b"integer" => {
-                                                            result = Value::Long(result.to_long());
-                                                        }
-                                                        b"float" | b"double" => {
-                                                            result =
-                                                                Value::Double(result.to_double());
-                                                        }
-                                                        b"string" => {
-                                                            result = Value::String(
-                                                                result.to_php_string(),
-                                                            );
-                                                        }
-                                                        b"bool" | b"boolean" => {
-                                                            result = if result.is_truthy() {
-                                                                Value::True
-                                                            } else {
-                                                                Value::False
-                                                            };
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    result
-                                } else {
-                                    // No __get - throw the uninitialized error (named
-                                    // after the declaring class, prop_info->ce).
-                                    let class_display = self
-                                        .find_property_def(&class_lower, prop_name.as_bytes())
-                                        .and_then(|d| {
-                                            self.classes
-                                                .get(&d.1.to_ascii_lowercase())
-                                                .map(|c| crate::value::display_class_name(&c.name))
-                                        })
-                                        .unwrap_or_else(|| {
-                                            crate::value::display_class_name(&class_name_orig)
-                                        });
-                                    let prop_display =
-                                        String::from_utf8_lossy(prop_name.as_bytes());
-                                    let msg = format!(
-                                        "Typed property {}::${} must not be accessed before initialization",
-                                        class_display, prop_display
-                                    );
-                                    let exc = self.create_exception(b"Error", &msg, op.line);
-                                    self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                        exception_handlers.last()
-                                    {
-                                        pending_calls_catch_depth = Some(*eh_pc_depth);
-                                        let ct = *catch_target;
-                                        ip = ct as usize;
-                                        continue;
-                                    }
-                                    return Err(VmError {
-                                        message: format!("Uncaught Error: {}", msg),
-                                        line: op.line,
+                                // An uninitialized (never unset) typed property does not go through
+                                // __get(): only unset() makes it overloadable (IS_PROP_UNINIT).
+                                // Named after the declaring class (prop_info->ce).
+                                let class_display = self
+                                    .find_property_def(&class_lower, prop_name.as_bytes())
+                                    .and_then(|d| {
+                                        self.classes
+                                            .get(&d.1.to_ascii_lowercase())
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                    })
+                                    .unwrap_or_else(|| {
+                                        crate::value::display_class_name(&class_name_orig)
                                     });
+                                let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                let msg = format!(
+                                    "Typed property {}::${} must not be accessed before initialization",
+                                    class_display, prop_display
+                                );
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    continue;
                                 }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
                             } else if matches!(prop, Value::Null)
                                 && (hidden_private_prop || !obj.borrow().has_property(&storage_key))
                                 && self.magic_depth < 5
@@ -45304,6 +45219,9 @@ impl Vm {
                         let mut is_avis_error = false; // true if error is from asymmetric visibility
                         let mut readonly_error: Option<String> = None;
                         let mut type_error: Option<String> = None;
+                        // The typed property coerced the value (the assignment
+                        // expression then yields the coerced value).
+                        let mut coerced_for_result = false;
                         let caller_scope_for_prop = self.current_class_scope().map(|s| {
                             s.iter()
                                 .map(|b| b.to_ascii_lowercase())
@@ -45497,11 +45415,14 @@ impl Vm {
                                         );
                                     }
                                     if !skip_coercion {
+                                        let before = std::mem::discriminant(&value);
                                         Self::coerce_value_to_type(
                                             &mut value,
                                             pt,
                                             op_array.strict_types,
                                         );
+                                        coerced_for_result =
+                                            before != std::mem::discriminant(&value);
                                     }
                                     if !continue_to_ref_check
                                         && (incdec_overflow
@@ -45886,6 +45807,13 @@ impl Vm {
                                             message: format!("Uncaught TypeError: {}", msg),
                                             line: op.line,
                                         });
+                                    }
+                                }
+                                if coerced_for_result {
+                                    if let OperandType::Tmp(t) = op.op2 {
+                                        if let Some(slot) = tmps.get_mut(t as usize) {
+                                            *slot = value.clone();
+                                        }
                                     }
                                 }
                                 obj.borrow_mut()
@@ -47475,6 +47403,33 @@ impl Vm {
         }
     }
 
+    /// zend_dval_to_lval_safe for a float array offset: out-of-range floats
+    /// warn and wrap, in-range floats with a fraction are deprecated.
+    pub fn double_offset_to_long(&mut self, f: f64, line: u32) -> i64 {
+        if !f.is_finite() || !crate::value::php_double_fits_long(f) {
+            return self.float_to_int_cast(f, line);
+        }
+        if f.fract() != 0.0 {
+            self.emit_deprecated_at(
+                &format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    crate::value::format_php_float_repr(f)
+                ),
+                line,
+            );
+        }
+        f as i64
+    }
+
+    /// Array key for isset()/unset() of a dimension: like a plain key, but a
+    /// float offset goes through zend_dval_to_lval_safe.
+    fn isset_unset_array_key(&mut self, key: Value, line: u32) -> ArrayKey {
+        match key.deref() {
+            Value::Double(f) => ArrayKey::Int(self.double_offset_to_long(f, line)),
+            _ => Self::value_to_array_key(key),
+        }
+    }
+
     /// Convert a value to an array key (PHP coerces numeric strings to int keys)
     /// Convert a value to an array key, emitting deprecation for null offset
     pub fn value_to_array_key_checked(&mut self, val: &Value, line: u32) -> ArrayKey {
@@ -47491,18 +47446,7 @@ impl Vm {
                     line,
                 );
             }
-            Value::Double(f) => {
-                // Implicit float-to-int conversion for non-integer floats is deprecated since 8.1
-                if f.is_finite() && f.fract() != 0.0 {
-                    self.emit_deprecated_at(
-                        &format!(
-                            "Implicit conversion from float {} to int loses precision",
-                            crate::value::format_php_float(*f)
-                        ),
-                        line,
-                    );
-                }
-            }
+            Value::Double(f) => return ArrayKey::Int(self.double_offset_to_long(*f, line)),
             Value::Resource(id) => {
                 self.emit_warning_at(
                     &format!(

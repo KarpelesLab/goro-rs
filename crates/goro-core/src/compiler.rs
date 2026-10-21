@@ -10177,6 +10177,22 @@ impl Compiler {
                             }
                             _ => self.compile_expr(property)?,
                         };
+                        // The expression's value is the (possibly coerced) value
+                        // stored in a typed property: give it its own tmp, which
+                        // PropertySet updates.
+                        let val = if result_discarded || matches!(val, OperandType::Tmp(_)) {
+                            val
+                        } else {
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::QmAssign,
+                                op1: val,
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(t),
+                                line: expr.span.line,
+                            });
+                            OperandType::Tmp(t)
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertySet,
                             op1: obj,

@@ -14716,31 +14716,14 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.emit_deprecated("Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
     }
 
-    // Float keys with fractional or out-of-range components trigger a
-    // deprecation notice when implicitly truncated to int.
-    if let Value::Double(f) = key_deref {
-        let truncated = f.trunc();
-        let in_range = (i64::MIN as f64) <= truncated && truncated <= (i64::MAX as f64);
-        if !f.is_nan() && (f != truncated || !in_range) {
-            // PHP emits this notice with serialize_precision (-1 / shortest
-            // roundtrip) formatting, matching what var_dump uses for float
-            // values when serialize_precision is the default.
-            // Use shortest-roundtrip formatting (serialize_precision=-1)
-            // matching PHP's deprecation notice format.
-            let prev_prec = goro_core::value::get_php_precision();
-            goro_core::value::set_php_precision(-1);
-            let formatted: String = Value::Double(f)
-                .to_php_string()
-                .to_string_lossy()
-                .to_string();
-            goro_core::value::set_php_precision(prev_prec);
-            let msg = format!(
-                "Implicit conversion from float {} to int loses precision",
-                formatted
-            );
-            vm.emit_deprecated(&msg);
-        }
-    }
+    // Float keys go through zend_dval_to_lval_safe: out-of-range values warn
+    // and wrap, fractional ones are deprecated.
+    let float_key = if let Value::Double(f) = key_deref {
+        let line = vm.current_line;
+        Some(vm.double_offset_to_long(f, line))
+    } else {
+        None
+    };
 
     if let Value::Resource(id) = key_deref {
         vm.emit_warning(&format!(
@@ -14774,7 +14757,10 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     if let Value::Array(a) = arr {
-        let arr_key = goro_core::vm::Vm::value_to_array_key(key.clone());
+        let arr_key = match float_key {
+            Some(n) => goro_core::array::ArrayKey::Int(n),
+            None => goro_core::vm::Vm::value_to_array_key(key.clone()),
+        };
         Ok(if a.borrow().contains_key(&arr_key) {
             Value::True
         } else {
