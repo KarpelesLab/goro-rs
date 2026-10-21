@@ -4016,151 +4016,266 @@ fn shuffle_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn range_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let start_val = args.first().unwrap_or(&Value::Null);
-    let end_val = args.get(1).unwrap_or(&Value::Null);
-    let step_val = args.get(2);
-
-    // Character range
-    if let (Value::String(s1), Value::String(s2)) = (start_val, end_val) {
-        if s1.len() == 1 && s2.len() == 1 {
-            let start_c = s1.as_bytes()[0];
-            let end_c = s2.as_bytes()[0];
-            let step = step_val
-                .map(|v| v.to_long().unsigned_abs().max(1) as u8)
-                .unwrap_or(1);
-            let mut result = PhpArray::new();
-            if start_c <= end_c {
-                let mut c = start_c;
-                while c <= end_c {
-                    result.push(Value::String(PhpString::from_vec(vec![c])));
-                    if c.checked_add(step).is_none() {
-                        break;
-                    }
-                    c += step;
+/// PHP_FUNCTION(range) (ext/standard/array.c)
+fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const HT_MAX_SIZE: u64 = 0x40000000;
+    const T_LONG: u8 = 4;
+    const T_DOUBLE: u8 = 5;
+    const T_STRING: u8 = 6;
+    const T_ARRAY: u8 = 7; // single-byte numeric string
+    fn verr(vm: &mut Vm, msg: String) -> Result<Value, VmError> {
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line: vm.current_line })
+    }
+    fn terr(vm: &mut Vm, msg: String) -> Result<Value, VmError> {
+        let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line: vm.current_line })
+    }
+    let strict = vm.caller_strict_types;
+    // Z_PARAM_NUMBER_OR_STR
+    let mut num_or_str = |vm: &mut Vm, idx: usize, name: &str| -> Result<Value, VmError> {
+        let v = args.get(idx).cloned().unwrap_or(Value::Null).deref();
+        match &v {
+            Value::Long(_) | Value::Double(_) | Value::String(_) => Ok(v),
+            Value::Null | Value::Undef | Value::False | Value::True if !strict => {
+                if matches!(v, Value::Null | Value::Undef) {
+                    vm.emit_deprecated(&format!("range(): Passing null to parameter #{} (${}) of type string|int|float is deprecated", idx + 1, name));
                 }
-            } else {
-                let mut c = start_c;
-                while c >= end_c {
-                    result.push(Value::String(PhpString::from_vec(vec![c])));
-                    if c < step || c - step < end_c {
-                        break;
-                    }
-                    c -= step;
+                Ok(Value::Long(matches!(v, Value::True) as i64))
+            }
+            Value::Object(o) if !strict && vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false) => {
+                Ok(Value::String(vm.value_to_string(&v)))
+            }
+            _ => {
+                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
+                terr(vm, format!("range(): Argument #{} (${}) must be of type string|int|float, {} given", idx + 1, name, tn)).map(|_| Value::Null)
+            }
+        }
+    };
+    let user_start = num_or_str(vm, 0, "start")?;
+    let user_end = num_or_str(vm, 1, "end")?;
+    let mut is_step_double = false;
+    let mut is_step_negative = false;
+    let mut step_double = 1.0f64;
+    let mut step: i64 = 1;
+    if let Some(sv) = args.get(2) {
+        // Z_PARAM_NUMBER
+        let v = sv.deref();
+        let v = match &v {
+            Value::Long(_) | Value::Double(_) => v.clone(),
+            Value::String(s) if !strict => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+                Some((goro_core::value::NumStr::Long(l), _)) => Value::Long(l),
+                Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
+                None => return terr(vm, format!("range(): Argument #3 ($step) must be of type int|float, string given")),
+            },
+            Value::Null | Value::Undef | Value::False | Value::True if !strict => {
+                if matches!(v, Value::Null | Value::Undef) {
+                    vm.emit_deprecated("range(): Passing null to parameter #3 ($step) of type int|float is deprecated");
+                }
+                Value::Long(matches!(v, Value::True) as i64)
+            }
+            _ => {
+                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
+                return terr(vm, format!("range(): Argument #3 ($step) must be of type int|float, {} given", tn));
+            }
+        };
+        match v {
+            Value::Double(d) => {
+                step_double = d;
+                if d.is_infinite() {
+                    return verr(vm, "range(): Argument #3 ($step) must be a finite number, INF provided".into());
+                }
+                if d.is_nan() {
+                    return verr(vm, "range(): Argument #3 ($step) must be a finite number, NAN provided".into());
+                }
+                if step_double < 0.0 {
+                    is_step_negative = true;
+                    step_double = -step_double;
+                }
+                step = if step_double >= -9223372036854775808.0 && step_double < 9223372036854775808.0 { step_double as i64 } else { 0 };
+                if step as f64 != step_double {
+                    is_step_double = true;
                 }
             }
-            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            Value::Long(l) => {
+                step = l;
+                if step < 0 {
+                    if step == i64::MIN {
+                        return verr(vm, format!("range(): Argument #3 ($step) must be greater than {}", step));
+                    }
+                    is_step_negative = true;
+                    step = -step;
+                }
+                step_double = step as f64;
+            }
+            _ => {}
+        }
+        if step_double == 0.0 {
+            return verr(vm, "range(): Argument #3 ($step) cannot be 0".into());
         }
     }
-
-    // Float range (if any argument is float or step is float).
-    // Strings that look like floats (contain '.' or exponent) also force float mode.
-    let looks_like_float = |v: &Value| -> bool {
-        match v {
-            Value::Double(_) => true,
+    // php_range_process_input
+    let process = |vm: &mut Vm, input: &Value, arg_num: usize, name: &str| -> Result<(u8, i64, f64), VmError> {
+        match input {
+            Value::Long(l) => Ok((T_LONG, *l, *l as f64)),
+            Value::Double(d) => {
+                if d.is_infinite() {
+                    return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, INF provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                }
+                if d.is_nan() {
+                    return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, NAN provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                }
+                Ok((T_DOUBLE, 0, *d))
+            }
             Value::String(s) => {
                 let b = s.as_bytes();
-                b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+                if b.is_empty() {
+                    vm.emit_warning(&format!("range(): Argument #{} (${}) must not be empty, casted to 0", arg_num, name));
+                    return Ok((T_LONG, 0, 0.0));
+                }
+                match goro_core::value::parse_numeric_str(b, false) {
+                    Some((goro_core::value::NumStr::Double(d), _)) => {
+                        if d.is_infinite() {
+                            return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, INF provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                        }
+                        if d.is_nan() {
+                            return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, NAN provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                        }
+                        Ok((T_DOUBLE, 0, d))
+                    }
+                    Some((goro_core::value::NumStr::Long(l), _)) => {
+                        Ok((if b.len() == 1 { T_ARRAY } else { T_LONG }, l, l as f64))
+                    }
+                    None => {
+                        if b.len() != 1 {
+                            vm.emit_warning(&format!("range(): Argument #{} (${}) must be a single byte, subsequent bytes are ignored", arg_num, name));
+                        }
+                        Ok((T_STRING, 0, 0.0))
+                    }
+                }
             }
-            _ => false,
+            _ => Ok((T_LONG, 0, 0.0)),
         }
     };
-    // PHP treats whole-number float values (e.g. 2.0) as integer-equivalent if
-    // the start/end are ints and the step has no fractional component. Numeric
-    // strings with no decimal point are also int-equivalent.
-    let is_int_equivalent = |v: &Value| -> bool {
-        match v {
-            Value::Long(_) | Value::True | Value::False | Value::Null | Value::Undef => true,
-            Value::Double(d) => d.is_finite() && d.fract() == 0.0,
-            Value::String(s) => {
-                let b = s.as_bytes();
-                !b.iter().any(|&c| c == b'.' || c == b'e' || c == b'E')
+    let (mut start_type, start_long, start_double) = process(vm, &user_start, 1, "start")?;
+    let (mut end_type, end_long, end_double) = process(vm, &user_end, 2, "end")?;
+    let boundary = "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)";
+    let negative = "range(): Argument #3 ($step) must be greater than 0 for increasing ranges";
+    let mut result = PhpArray::new();
+    let mut chars = false;
+    if start_type >= T_STRING || end_type >= T_STRING {
+        if start_type < T_STRING || end_type < T_STRING {
+            if start_type < T_STRING {
+                if end_type != T_ARRAY {
+                    vm.emit_warning("range(): Argument #1 ($start) must be a single byte string if argument #2 ($end) is a single byte string, argument #2 ($end) converted to 0");
+                }
+                end_type = T_LONG;
+            } else if end_type < T_STRING {
+                if start_type != T_ARRAY {
+                    vm.emit_warning("range(): Argument #2 ($end) must be a single byte string if argument #1 ($start) is a single byte string, argument #1 ($start) converted to 0");
+                }
+                start_type = T_LONG;
             }
-            _ => false,
+        } else if is_step_double {
+            if start_type == T_STRING || end_type == T_STRING {
+                vm.emit_warning("range(): Argument #3 ($step) must be of type int when generating an array of characters, inputs converted to 0");
+            }
+            end_type = T_LONG;
+            start_type = T_LONG;
+        } else {
+            chars = true;
         }
-    };
-    let all_int_equivalent = is_int_equivalent(start_val)
-        && is_int_equivalent(end_val)
-        && step_val.is_none_or(is_int_equivalent);
-    let use_float = !all_int_equivalent
-        && (looks_like_float(start_val)
-            || looks_like_float(end_val)
-            || step_val.is_some_and(looks_like_float));
-
-    if use_float {
-        let start = start_val.to_double();
-        let end = end_val.to_double();
-        if start.is_nan() || end.is_nan() || start.is_infinite() || end.is_infinite() {
-            return Err(VmError {
-                message: format!(
-                    "range(): Argument #1 ($start) must be a finite number, {} provided",
-                    if start.is_nan() { "NAN" } else if start.is_infinite() { "INF" } else { "value" }
-                ),
-                line: 0,
-            });
-        }
-        let step = step_val
-            .map(|v| v.to_double().abs())
-            .unwrap_or(1.0)
-            .max(f64::EPSILON);
-        let mut result = PhpArray::new();
-        // Use iteration counter to avoid accumulated floating point errors.
-        // PHP computes count = floor((|end - start|) / step + EPSILON) + 1
-        let diff = (end - start).abs();
-        let count = (diff / step + 1e-9).floor() as i64 + 1;
-        let count = count.min(10_000_001);
-        if start <= end {
-            for i in 0..count {
-                let v = start + (i as f64) * step;
-                if v > end + 1e-9 { break; }
-                result.push(Value::Double(v));
+    }
+    // Inputs "converted to 0" keep their zeroed numeric values.
+    let (start_long, start_double) = if start_type == T_LONG && matches!(user_start, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none()) { (0, 0.0) } else { (start_long, start_double) };
+    let (end_long, end_double) = if end_type == T_LONG && matches!(user_end, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none()) { (0, 0.0) } else { (end_long, end_double) };
+    if chars {
+        let mut low = match &user_start { Value::String(s) => s.as_bytes()[0] as i64, _ => 0 };
+        let high = match &user_end { Value::String(s) => s.as_bytes()[0] as i64, _ => 0 };
+        if low > high {
+            if low - high < step {
+                return verr(vm, boundary.into());
+            }
+            while low >= high {
+                result.push(Value::String(PhpString::from_vec(vec![low as u8])));
+                if low - step < 0 {
+                    break;
+                }
+                low -= step;
+            }
+        } else if high > low {
+            if is_step_negative {
+                return verr(vm, negative.into());
+            }
+            if high - low < step {
+                return verr(vm, boundary.into());
+            }
+            while low <= high {
+                result.push(Value::String(PhpString::from_vec(vec![low as u8])));
+                if low + step > 255 {
+                    break;
+                }
+                low += step;
             }
         } else {
-            for i in 0..count {
-                let v = start - (i as f64) * step;
-                if v < end - 1e-9 { break; }
-                result.push(Value::Double(v));
-            }
+            result.push(Value::String(PhpString::from_vec(vec![low as u8])));
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
-
-    // Integer range
-    let start = start_val.to_long();
-    let end = end_val.to_long();
-    let step = step_val
-        .map(|v| v.to_long().unsigned_abs().max(1) as i64)
-        .unwrap_or(1);
-
-    // Check for excessive size
-    let size = if step > 0 {
-        ((end as i128 - start as i128).unsigned_abs() / step as u128) + 1
-    } else {
-        1
-    };
-    if size > 10_000_000 {
-        // Just return empty array for extremely large ranges to avoid memory issues
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-
-    let mut result = PhpArray::new();
-    if start <= end {
-        let mut i = start;
-        while i <= end {
-            result.push(Value::Long(i));
-            i = match i.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
+    let fmt1 = |f: f64| format!("{:.1}", f);
+    if start_type == T_DOUBLE || end_type == T_DOUBLE || is_step_double {
+        let (hi, lo, dec) = if start_double > end_double { (start_double, end_double, true) } else { (end_double, start_double, false) };
+        if start_double == end_double {
+            result.push(Value::Double(start_double));
+        } else {
+            if !dec && is_step_negative {
+                return verr(vm, negative.into());
+            }
+            if hi - lo < step_double {
+                return verr(vm, boundary.into());
+            }
+            let calc = ((hi - lo) / step_double) + 1.0;
+            if calc >= HT_MAX_SIZE as f64 {
+                return verr(vm, format!("The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Max size: {:.0}",
+                    fmt1(calc - HT_MAX_SIZE as f64), fmt1(lo), fmt1(hi), fmt1(step_double), HT_MAX_SIZE as f64));
+            }
+            let size = crate::math::php_math_round(calc, 0, 1) as u64;
+            let mut i = 0u64;
+            loop {
+                let element = if dec { start_double - (i as f64 * step_double) } else { start_double + (i as f64 * step_double) };
+                if i >= size || (dec && element < end_double) || (!dec && element > end_double) {
+                    break;
+                }
+                result.push(Value::Double(element));
+                i += 1;
+            }
         }
     } else {
-        let mut i = start;
-        while i >= end {
-            result.push(Value::Long(i));
-            i = match i.checked_sub(step) {
-                Some(v) => v,
-                None => break,
-            };
+        let ustep = step as u64;
+        if start_long == end_long {
+            result.push(Value::Long(start_long));
+        } else {
+            let dec = start_long > end_long;
+            if !dec && is_step_negative {
+                return verr(vm, negative.into());
+            }
+            let span = if dec { (start_long as u64).wrapping_sub(end_long as u64) } else { (end_long as u64).wrapping_sub(start_long as u64) };
+            if span < ustep {
+                return verr(vm, boundary.into());
+            }
+            let calc = span / ustep;
+            if calc >= HT_MAX_SIZE - 1 {
+                let (a, b) = if dec { (start_long, end_long) } else { (end_long, start_long) };
+                return verr(vm, format!("The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Calculated size: {}. Maximum size: {}.",
+                    calc - (HT_MAX_SIZE - 1), b, a, ustep, calc, HT_MAX_SIZE));
+            }
+            for i in 0..=calc {
+                let off = i.wrapping_mul(ustep);
+                let v = if dec { (start_long as u64).wrapping_sub(off) as i64 } else { (start_long as u64).wrapping_add(off) as i64 };
+                result.push(Value::Long(v));
+            }
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
