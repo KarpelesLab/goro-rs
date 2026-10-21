@@ -2711,6 +2711,78 @@ impl Vm {
         None
     }
 
+    /// zendi_try_get_long() for an already type-checked operand: floats are
+    /// converted modularly with the "not representable" warning or the
+    /// "loses precision" deprecation, float strings are capped.
+    pub fn op_to_long(&mut self, v: &Value) -> i64 {
+        match v.deref() {
+            Value::Double(d) => self.dval_to_lval_safe(d),
+            Value::String(s) => match crate::value::parse_numeric_str(s.as_bytes(), true) {
+                Some((crate::value::NumStr::Long(n), _)) => n,
+                Some((crate::value::NumStr::Double(d), _)) => {
+                    let l = if d.is_nan() { 0 } else { d as i64 };
+                    if !d.is_finite() || (l as f64) != d {
+                        let msg = format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            s.to_string_lossy()
+                        );
+                        self.emit_deprecated(&msg);
+                    }
+                    l
+                }
+                None => 0,
+            },
+            other => other.to_long(),
+        }
+    }
+
+    /// zend_dval_to_lval_safe(): modular conversion of out-of-range floats with
+    /// a warning, deprecation for in-range floats with a fractional part.
+    pub fn dval_to_lval_safe(&mut self, d: f64) -> i64 {
+        let two63 = 9223372036854775808.0f64;
+        if !d.is_finite() {
+            let msg = format!(
+                "The float {} is not representable as an int, cast occurred",
+                crate::value::format_php_float_repr(d)
+            );
+            self.emit_warning(&msg);
+            return 0;
+        }
+        if !(d >= -two63 && d < two63) {
+            let msg = format!(
+                "The float {} is not representable as an int, cast occurred",
+                crate::value::format_php_float_repr(d)
+            );
+            self.emit_warning(&msg);
+            let two64 = 18446744073709551616.0f64;
+            let mut dmod = d % two64;
+            if dmod < 0.0 {
+                dmod += two64;
+            }
+            return (dmod as u64) as i64;
+        }
+        let l = d as i64;
+        if (l as f64) != d {
+            let msg = format!(
+                "Implicit conversion from float {} to int loses precision",
+                crate::value::format_php_float_repr(d)
+            );
+            self.emit_deprecated(&msg);
+        }
+        l
+    }
+
+    /// shift_left_function / shift_right_function on converted operands.
+    pub fn php_shift(a: i64, b: i64, left: bool) -> Result<i64, &'static str> {
+        if (b as u64) >= 64 {
+            if b > 0 {
+                return Ok(if left || a >= 0 { 0 } else { -1 });
+            }
+            return Err("Bit shift by negative number");
+        }
+        Ok(if left { ((a as u64) << b) as i64 } else { a >> b })
+    }
+
     /// True if `is_numeric_string_ex(..., allow_errors=true)` would accept the
     /// string (optionally leading whitespace, sign, then a digit or ".digit").
     pub fn str_has_numeric_prefix(bytes: &[u8]) -> bool {
@@ -15840,7 +15912,9 @@ impl Vm {
                             }
                         }
                     }
-                    match a.modulo(&b) {
+                    let mod_a = Value::Long(self.op_to_long(&a));
+                    let mod_b = Value::Long(self.op_to_long(&b));
+                    match mod_a.modulo(&mod_b) {
                         Ok(result) => self.write_operand(
                             &op.result,
                             result,
@@ -15993,6 +16067,22 @@ impl Vm {
 
                 OpCode::Negate => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    if matches!(a.deref(), Value::String(_) | Value::Array(_)) {
+                        if let Some(err) = Self::check_unsupported_operand_types(&a, &Value::Long(-1), "*") {
+                            let exc = self.create_exception(b"TypeError", &err, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught TypeError: {}", err), line: op.line });
+                        }
+                        if let Value::String(sv) = a.deref() {
+                            if matches!(crate::value::parse_numeric_str(sv.as_bytes(), true), Some((_, true))) {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
+                    }
                     self.write_operand(
                         &op.result,
                         a.negate(),
@@ -16038,7 +16128,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] & bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(a.to_long() & b.to_long())
+                        { let al = self.op_to_long(&a); let bl = self.op_to_long(&b); Value::Long(al & bl) }
                     };
                     self.write_operand(
                         &op.result,
@@ -16088,7 +16178,7 @@ impl Vm {
                         }).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(a.to_long() | b.to_long())
+                        { let al = self.op_to_long(&a); let bl = self.op_to_long(&b); Value::Long(al | bl) }
                     };
                     self.write_operand(
                         &op.result,
@@ -16134,7 +16224,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] ^ bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(a.to_long() ^ b.to_long())
+                        { let al = self.op_to_long(&a); let bl = self.op_to_long(&b); Value::Long(al ^ bl) }
                     };
                     self.write_operand(
                         &op.result,
@@ -16192,7 +16282,8 @@ impl Vm {
                         let res: Vec<u8> = bytes.iter().map(|b| !b).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(!a.to_long())
+                        let al = self.op_to_long(&a);
+                        Value::Long(!al)
                     };
                     self.write_operand(
                         &op.result,
@@ -16221,8 +16312,7 @@ impl Vm {
                         }
                     }
                     // Check for unsupported operand types
-                    if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
-                        let err = format!("Unsupported operand types: {} << {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
+                    if let Some(err) = Self::check_unsupported_operand_types(&a, &b, "<<") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -16231,13 +16321,33 @@ impl Vm {
                         }
                         return Err(VmError { message: err, line: op.line });
                     }
-                    self.write_operand(
-                        &op.result,
-                        Value::Long(a.to_long().wrapping_shl(b.to_long() as u32)),
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
+                    for v in [&a, &b] {
+                        if let Value::String(sv) = v.deref() {
+                            if matches!(crate::value::parse_numeric_str(sv.as_bytes(), true), Some((_, true))) {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
+                    }
+                    let al = self.op_to_long(&a);
+                    let bl = self.op_to_long(&b);
+                    match Self::php_shift(al, bl, true) {
+                        Ok(r) => self.write_operand(
+                            &op.result,
+                            Value::Long(r),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
+                        Err(msg) => {
+                            let exc = self.create_exception(b"ArithmeticError", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught ArithmeticError: {}", msg), line: op.line });
+                        }
+                    }
                 }
                 OpCode::ShiftRight => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -16258,8 +16368,7 @@ impl Vm {
                         }
                     }
                     // Check for unsupported operand types
-                    if matches!(&a, Value::Array(_)) || matches!(&b, Value::Array(_)) {
-                        let err = format!("Unsupported operand types: {} >> {}", Vm::value_type_name(&a), Vm::value_type_name(&b));
+                    if let Some(err) = Self::check_unsupported_operand_types(&a, &b, ">>") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -16268,13 +16377,33 @@ impl Vm {
                         }
                         return Err(VmError { message: err, line: op.line });
                     }
-                    self.write_operand(
-                        &op.result,
-                        Value::Long(a.to_long().wrapping_shr(b.to_long() as u32)),
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
+                    for v in [&a, &b] {
+                        if let Value::String(sv) = v.deref() {
+                            if matches!(crate::value::parse_numeric_str(sv.as_bytes(), true), Some((_, true))) {
+                                self.emit_warning_at("A non-numeric value encountered", op.line);
+                            }
+                        }
+                    }
+                    let al = self.op_to_long(&a);
+                    let bl = self.op_to_long(&b);
+                    match Self::php_shift(al, bl, false) {
+                        Ok(r) => self.write_operand(
+                            &op.result,
+                            Value::Long(r),
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        ),
+                        Err(msg) => {
+                            let exc = self.create_exception(b"ArithmeticError", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError { message: format!("Uncaught ArithmeticError: {}", msg), line: op.line });
+                        }
+                    }
                 }
 
                 OpCode::BooleanNot => {

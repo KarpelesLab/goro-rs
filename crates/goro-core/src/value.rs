@@ -1234,6 +1234,11 @@ pub fn format_php_float(f: f64) -> String {
     format_php_float_with_precision(f, precision as usize)
 }
 
+/// Shortest round-trip representation (`%.*H` with precision -1).
+pub fn format_php_float_repr(f: f64) -> String {
+    format_php_float_shortest(f)
+}
+
 /// Format a float using shortest-roundtrip representation (like precision=-1).
 fn format_php_float_shortest(f: f64) -> String {
     if f.is_nan() {
@@ -1482,17 +1487,7 @@ fn parse_leading_float(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
     }
-    // Check for INF/NAN
-    let trimmed = s.trim();
-    if trimmed.eq_ignore_ascii_case("inf") || trimmed.eq_ignore_ascii_case("infinity") {
-        return f64::INFINITY;
-    }
-    if trimmed.eq_ignore_ascii_case("-inf") || trimmed.eq_ignore_ascii_case("-infinity") {
-        return f64::NEG_INFINITY;
-    }
-    if trimmed.eq_ignore_ascii_case("nan") {
-        return f64::NAN;
-    }
+    // zend_strtod() does not accept "inf"/"nan" spellings.
     // Find the longest valid prefix that's a number
     let bytes = s.as_bytes();
     let mut i = 0;
