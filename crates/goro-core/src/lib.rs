@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod fiber;
 pub mod function;
 pub mod generator;
+pub mod ini_quantity;
 pub mod object;
 pub mod ob;
 pub mod opcode;

@@ -1326,6 +1326,25 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         }
         vm.constants.insert(key.as_bytes().to_vec(), val);
     }
+    // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
+    // clamped with a startup warning.
+    if let (Some(ml), Some(mx)) = (
+        vm.constants.get(b"memory_limit".as_ref()).map(|v| v.to_php_string()),
+        vm.constants.get(b"max_memory_limit".as_ref()).map(|v| v.to_php_string()),
+    ) {
+        let (v, _) = goro_core::ini_quantity::parse_quantity(ml.as_bytes(), false);
+        let (max, _) = goro_core::ini_quantity::parse_quantity(mx.as_bytes(), false);
+        if v > max {
+            if v != u64::MAX {
+                vm.write_output(format!(
+                    "\nWarning: Failed to set memory_limit to {} bytes. Setting to max_memory_limit instead (currently: {} bytes) in Unknown on line 0\n",
+                    v as i64, max as i64
+                ).as_bytes());
+            }
+            set_memory_limit(max as i64);
+            vm.constants.insert(b"memory_limit".to_vec(), Value::String(mx));
+        }
+    }
     // Extension startup (MINIT/RINIT) now that INI settings are in place;
     // startup messages come before any compile-time diagnostics.
     if !vm.startup_hooks.is_empty() {

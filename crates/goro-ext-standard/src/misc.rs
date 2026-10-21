@@ -3951,10 +3951,33 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    // Handle memory_limit
+    // max_memory_limit is PHP_INI_SYSTEM
+    if key == b"max_memory_limit" {
+        return Ok(Value::False);
+    }
+    // Handle memory_limit (OnChangeMemoryLimit: clamp to max_memory_limit)
     if key == b"memory_limit" {
-        let limit = parse_memory_value(&value);
-        goro_core::value::set_memory_limit(limit);
+        let vs = value.to_php_string();
+        let (v, err) = goro_core::ini_quantity::parse_quantity(vs.as_bytes(), false);
+        if let Some(e) = err {
+            vm.emit_warning(&e);
+        }
+        let max_s = vm.constants.get(b"max_memory_limit".as_ref()).map(|m| m.to_php_string());
+        if let Some(max_s) = max_s {
+            let (max, _) = goro_core::ini_quantity::parse_quantity(max_s.as_bytes(), false);
+            if v > max {
+                if v != u64::MAX {
+                    vm.emit_warning(&format!(
+                        "Failed to set memory_limit to {} bytes. Setting to max_memory_limit instead (currently: {} bytes)",
+                        v as i64, max as i64
+                    ));
+                }
+                goro_core::value::set_memory_limit(max as i64);
+                vm.constants.insert(key, Value::String(max_s));
+                return Ok(old.unwrap_or(Value::False));
+            }
+        }
+        goro_core::value::set_memory_limit(if v == u64::MAX { -1 } else { v as i64 });
     }
     // Handle error_reporting
     if key == b"error_reporting" {
@@ -17671,39 +17694,12 @@ fn cli_get_process_title_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 }
 
 fn ini_parse_quantity_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Ok(Value::Long(0));
+    let s = args.first().unwrap_or(&Value::Null).to_php_string();
+    let (v, err) = goro_core::ini_quantity::parse_quantity(s.as_bytes(), true);
+    if let Some(e) = err {
+        vm.emit_warning(&e);
     }
-    let s = args[0].to_php_string();
-    let s_str = s.to_string();
-    let trimmed = s_str.trim();
-    if trimmed.is_empty() {
-        return Ok(Value::Long(0));
-    }
-    // Parse numeric part
-    let (num_str, suffix) = if let Some(pos) = trimmed.find(|c: char| c.is_ascii_alphabetic()) {
-        (&trimmed[..pos], &trimmed[pos..])
-    } else {
-        (trimmed, "")
-    };
-    let base_val: i64 = match num_str.parse() {
-        Ok(v) => v,
-        Err(_) => {
-            vm.emit_warning(&format!("Invalid quantity \"{}\": no valid leading digits, interpreting as \"0\" for backwards compatibility", s_str));
-            return Ok(Value::Long(0));
-        }
-    };
-    let multiplier = match suffix.to_ascii_uppercase().as_str() {
-        "K" => 1024,
-        "M" => 1024 * 1024,
-        "G" => 1024 * 1024 * 1024,
-        "" => 1,
-        _ => {
-            vm.emit_warning(&format!("Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"{}\" for backwards compatibility", s_str, suffix, base_val));
-            1
-        }
-    };
-    Ok(Value::Long(base_val * multiplier))
+    Ok(Value::Long(v as i64))
 }
 
 fn dl_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
