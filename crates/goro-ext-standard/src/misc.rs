@@ -15153,7 +15153,7 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
                 val.clone(),
             );
         }
-        Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(RefCell::new(arr)))))
     } else {
         Ok(Value::Null)
     }

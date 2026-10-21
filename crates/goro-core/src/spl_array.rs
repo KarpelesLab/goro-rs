@@ -348,6 +348,45 @@ impl Vm {
         drop(old);
     }
 
+    /// Whether the object's (user) class overrides an ArrayAccess method.
+    pub(crate) fn ao_user_has(&self, obj: &Rc<RefCell<PhpObject>>, m: &[u8]) -> bool {
+        let cl = obj_class_lower(obj);
+        self.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false)
+    }
+
+    /// ARRAY_AS_PROPS routes a property access to the storage when no real
+    /// property of that name exists (zend_std_has_property(EXISTS)).
+    pub(crate) fn ao_prop_as_dim(&self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+        if name.starts_with(b"__spl_") {
+            return false;
+        }
+        let cl = obj_class_lower(obj);
+        if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_none() {
+            return false;
+        }
+        ao_flags(obj) & ARRAY_AS_PROPS != 0 && !obj.borrow().has_property(name)
+    }
+
+    /// spl_array_has_dimension_ex(check_inherited=true, check_empty=0): isset().
+    pub(crate) fn ao_has_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) -> bool {
+        if self.ao_user_has(obj, b"offsetexists") {
+            let ov = Value::Object(obj.clone());
+            let r = self.call_object_method(&ov, b"offsetExists", &[offset.clone()]).unwrap_or(Value::False);
+            return self.current_exception.is_none() && r.is_truthy();
+        }
+        self.ao_offset_exists(obj, offset, 0)
+    }
+
+    /// spl_array_unset_dimension_ex(check_inherited=true).
+    pub(crate) fn ao_unset_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) {
+        if self.ao_user_has(obj, b"offsetunset") {
+            let ov = Value::Object(obj.clone());
+            self.call_object_method(&ov, b"offsetUnset", &[offset.clone()]);
+            return;
+        }
+        self.ao_offset_unset(obj, offset)
+    }
+
     /// spl_array_has_dimension_ex(check_inherited=false): check_empty 0/1/2.
     pub(crate) fn ao_offset_exists(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value, check_empty: u8) -> bool {
         let k = match self.ao_hash_key(obj, offset) {
@@ -736,6 +775,15 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // RecursiveArrayIterator inherits ArrayIterator's methods (parent::
+        // calls name the immediate parent).
+        let class: &[u8] = if class == b"recursivearrayiterator"
+            && crate::spl_stubs::spl_stub_method(class, method).is_none()
+        {
+            b"arrayiterator"
+        } else {
+            class
+        };
         let declared = crate::spl_stubs::spl_stub_method(class, method).is_some();
         if !declared || method == b"__construct" {
             return None;

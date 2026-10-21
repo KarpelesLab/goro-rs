@@ -4627,7 +4627,25 @@ impl Vm {
             }
         }
         drop(ob);
-        self.object_props_mangled(&target)
+        Self::proptable_to_symtable(self.object_props_mangled(&target))
+    }
+
+    /// zend_proptable_to_symtable(): numeric string property names become
+    /// integer keys.
+    pub fn proptable_to_symtable(arr: Rc<RefCell<PhpArray>>) -> Rc<RefCell<PhpArray>> {
+        let needs = arr.borrow().iter().any(|(k, _)| matches!(k, ArrayKey::String(s) if matches!(Self::value_to_array_key(Value::String(s.clone())), ArrayKey::Int(_))));
+        if !needs {
+            return arr;
+        }
+        let mut out = PhpArray::new();
+        for (k, v) in arr.borrow().iter() {
+            let k = match k {
+                ArrayKey::String(s) => Self::value_to_array_key(Value::String(s.clone())),
+                k => k.clone(),
+            };
+            out.set(k, v.clone());
+        }
+        Rc::new(RefCell::new(out))
     }
 
     /// The object's property table with PHP-mangled keys ("\0Class\0name"
@@ -24644,6 +24662,23 @@ impl Vm {
                             return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                         }
                     }
+                    // ArrayObject ARRAY_AS_PROPS: isset($ao->p) -> has_dimension
+                    if let Value::Object(obj) = &obj_val {
+                        if self.ao_prop_as_dim(obj, prop_name.as_bytes()) {
+                            let o = obj.clone();
+                            let r = self.ao_has_dimension(&o, &Value::String(prop_name.clone()));
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".to_string(), line: op.line });
+                                }
+                            self.write_operand(&op.result, if r { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
+                    }
                     let result = if let Value::Object(obj) = &obj_val {
                         let ob = obj.borrow();
                         let class_lower: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -25001,6 +25036,22 @@ impl Vm {
                     } else {
                         obj_val_raw.clone()
                     };
+                    // ArrayObject ARRAY_AS_PROPS: unset($ao->p) -> unset_dimension
+                    if let Value::Object(obj) = &obj_val {
+                        if self.ao_prop_as_dim(obj, prop_name.as_bytes()) {
+                            let o = obj.clone();
+                            self.ao_unset_dimension(&o, &Value::String(prop_name.clone()));
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".to_string(), line: op.line });
+                                }
+                            continue;
+                        }
+                    }
                     // PHP refuses property names starting with NUL. When __unset exists, dispatch
                     // first; the inner unset will trigger this check again under magic_depth > 0.
                     if prop_name.as_bytes().first() == Some(&0u8) {
@@ -25890,6 +25941,20 @@ impl Vm {
                             Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
                             _ => Value::False,
                         }
+                    } else if let Some(o) = match &arr_val {
+                        Value::Object(o) if self.spl_find_base(&crate::spl::obj_class_lower(o), &[b"arrayobject", b"arrayiterator"]).is_some() => Some(o.clone()),
+                        _ => None,
+                    } {
+                        let r = self.ao_has_dimension(&o, &key_val);
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".to_string(), line: op.line });
+                                }
+                        if r { Value::True } else { Value::False }
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: isset($obj[$key]) -> offsetExists($key)
                         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
