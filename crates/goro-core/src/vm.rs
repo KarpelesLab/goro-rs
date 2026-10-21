@@ -14468,11 +14468,23 @@ impl Vm {
                     // [internal function] is encoded by file="" and line=0.
                     self.call_stack
                         .push((handler_name, String::new(), 0, frame_args, false));
+                    // zend_user_exception_handler(): the handler is pushed on the
+                    // handler stack while it runs, and the top of the stack is
+                    // restored afterwards unless the handler set another one.
+                    self.exception_handler_stack.push(Some(handler.clone()));
                     let handler_result = self.call_callback(&handler, std::slice::from_ref(&exc));
                     self.call_stack.pop();
+                    let restore = |vm: &mut Vm| {
+                        if vm.exception_handler.is_none() {
+                            if let Some(top) = vm.exception_handler_stack.pop() {
+                                vm.exception_handler = top;
+                            }
+                        }
+                    };
                     match handler_result {
                         Ok(_) => {
                             result = Ok(Value::Null);
+                            restore(self);
                             break;
                         }
                         Err(new_err) => {
@@ -14483,6 +14495,7 @@ impl Vm {
                             {
                                 continue;
                             }
+                            restore(self);
                             break;
                         }
                     }
@@ -31364,7 +31377,23 @@ impl Vm {
                             .class_implements_interface(&class_lower, b"iteratoraggregate")
                         {
                             // IteratorAggregate: call getIterator() and iterate the result
+                            let had_exc = self.current_exception.is_some();
                             let iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            // An exception from getIterator() (or the rewind of what
+                            // it returns) leaves the foreach.
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
                             if let (
                                 Some(Value::Object(_) | Value::Generator(_)),
                                 OperandType::Tmp(t),
@@ -31378,6 +31407,19 @@ impl Vm {
                                     Value::Object(_) => {
                                         // Call rewind() on the returned Iterator
                                         self.spl_call_method(&iter_val, b"rewind", &[]);
+                                        if !had_exc && self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                                exception_handlers.pop()
+                                            {
+                                                pending_calls_catch_depth = Some(saved_pc);
+                                                ip = catch_target as usize;
+                                                return Ok(Flow::Continue);
+                                            }
+                                            return Err(VmError {
+                                                message: self.uncaught_exception_message(),
+                                                line: op.line,
+                                            });
+                                        }
                                         // Store the iterator object for ForeachNext
                                         self.write_operand(
                                             &op.result,
@@ -31437,7 +31479,21 @@ impl Vm {
                                 let h = self.foreach_iterator_handle();
                                 foreach_iter_handles.insert(t, h);
                             }
+                            let had_exc = self.current_exception.is_some();
                             self.spl_call_method(&iter_obj, b"rewind", &[]);
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
                             self.write_operand(
                                 &op.result,
                                 iter_obj,
