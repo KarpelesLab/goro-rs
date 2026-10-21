@@ -4001,6 +4001,18 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
+    // OnUpdateFiberStackSize
+    if key == b"fiber.stack_size" {
+        let vs = value.to_php_string();
+        let (v, err) = goro_core::ini_quantity::parse_quantity(vs.as_bytes(), true);
+        if let Some(e) = err {
+            vm.emit_warning(&e);
+        }
+        if (v as i64) < 0 {
+            vm.emit_warning("fiber.stack_size must be a positive number");
+            return Ok(Value::False);
+        }
+    }
     // max_memory_limit is PHP_INI_SYSTEM
     if key == b"max_memory_limit" {
         return Ok(Value::False);

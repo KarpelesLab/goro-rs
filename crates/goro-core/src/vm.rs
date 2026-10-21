@@ -11769,7 +11769,15 @@ impl Vm {
         if self.exit_requested {
             return result.map(|_| Value::Null);
         }
+        let exc_before_dtors = self.current_exception.is_some();
         self.run_pending_destructors();
+        // An exception thrown by a destructor run as the function's locals
+        // are released propagates to the caller.
+        let result = if result.is_ok() && !exc_before_dtors && self.current_exception.is_some() {
+            Err(VmError { message: "Uncaught exception".into(), line: self.current_line })
+        } else {
+            result
+        };
 
         // Check return type if declared
         // Detect implicit return: the compiler emits `Return Null` with line=0 for implicit returns
@@ -33544,6 +33552,21 @@ impl Vm {
             });
         }
 
+        // zend_fiber_stack_allocate(): fiber.stack_size must allow at least
+        // one usable page plus the guard page.
+        if let Some(sz) = self.constants.get(b"fiber.stack_size".as_slice()) {
+            if !matches!(sz, Value::Null | Value::Undef) {
+                let bytes = sz.to_php_string();
+                let (v, _) = crate::ini_quantity::parse_quantity(bytes.as_bytes(), true);
+                const MIN_FIBER_STACK: i64 = 4096 * 2;
+                if (v as i64) < MIN_FIBER_STACK {
+                    let msg = format!("Fiber stack size is too small, it needs to be at least {} bytes", MIN_FIBER_STACK);
+                    let exc = self.create_exception(b"Exception", &msg, line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError { message: format!("Uncaught Exception: {}", msg), line });
+                }
+            }
+        }
         let callback = obj_rc.borrow().get_property(b"__fiber_callback");
         let args_owned: Vec<Value> = args.to_vec();
 
