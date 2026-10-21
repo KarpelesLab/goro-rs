@@ -27,7 +27,8 @@ pub enum GeneratorState {
 #[derive(Debug, Clone)]
 pub struct PhpGenerator {
     /// The compiled function body
-    pub op_array: OpArray,
+    /// Shared with the function's definition (a generator never patches it).
+    pub op_array: Rc<OpArray>,
     /// Current instruction pointer (where to resume)
     pub ip: usize,
     /// Compiled variables (function locals)
@@ -145,7 +146,8 @@ impl PhpGenerator {
     }
 
     /// Create a new generator from a compiled op_array and initial CVs
-    pub fn new(op_array: OpArray, cvs: Vec<Value>) -> Self {
+    pub fn new(op_array: impl Into<Rc<OpArray>>, cvs: Vec<Value>) -> Self {
+        let op_array: Rc<OpArray> = op_array.into();
         let temp_count = op_array.temp_count as usize;
         Self {
             op_array,
