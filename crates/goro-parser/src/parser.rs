@@ -2811,7 +2811,13 @@ impl Parser {
                                 get_hook_by_ref: false,
                             });
                         } else {
-                            break;
+                            return Err(ParseError {
+                                message: format!(
+                                    "syntax error, unexpected {}, expecting variable",
+                                    self.peek().to_php_unexpected()
+                                ),
+                                span: self.span(),
+                            });
                         }
                     }
                     self.expect_semicolon()?;
@@ -2961,7 +2967,13 @@ impl Parser {
                                 get_hook_by_ref: false,
                             });
                         } else {
-                            break;
+                            return Err(ParseError {
+                                message: format!(
+                                    "syntax error, unexpected {}, expecting variable",
+                                    self.peek().to_php_unexpected()
+                                ),
+                                span: self.span(),
+                            });
                         }
                     }
                     self.expect_semicolon()?;
