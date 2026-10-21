@@ -1,0 +1,894 @@
+//! Arginfo of internal functions, generated from php-src's `*.stub.php`
+//! (tools/gen_arginfo.py -> arginfo_table.rs), and the generic
+//! zend_parse_parameters-style layer built on it: argument count errors,
+//! weak/strict scalar parameter checks and coercion, null-to-non-nullable
+//! deprecations, and named arguments (incl. default values of skipped
+//! parameters).
+//!
+//! The checks are enabled per function only where tools/verify_arginfo.py
+//! confirmed against a real PHP that the stub reproduces the function's zpp
+//! diagnostics exactly (arginfo_verified.rs).
+
+use crate::string::PhpString;
+use crate::value::Value;
+use crate::vm::Vm;
+
+#[path = "arginfo_verified.rs"]
+mod verified;
+
+// Type mask bits (keep in sync with tools/verify_arginfo.py)
+pub const T_NULL: u16 = 1;
+pub const T_FALSE: u16 = 2;
+pub const T_TRUE: u16 = 4;
+pub const T_BOOL: u16 = T_FALSE | T_TRUE;
+pub const T_INT: u16 = 8;
+pub const T_FLOAT: u16 = 16;
+pub const T_STRING: u16 = 32;
+pub const T_ARRAY: u16 = 64;
+pub const T_OBJECT: u16 = 128;
+pub const T_CALLABLE: u16 = 256;
+pub const T_MIXED: u16 = 1024;
+pub const T_VOID: u16 = 2048;
+pub const T_NEVER: u16 = 4096;
+pub const T_STATIC: u16 = 8192;
+pub const T_CLASS: u16 = 16384;
+
+/// Verified flag: argument count errors match php-src.
+pub const CHECK_ARITY: u8 = 1;
+/// Verified flag: parameter type errors / coercions match php-src.
+pub const CHECK_TYPES: u8 = 2;
+
+/// One parameter of an internal function, derived from its stub
+/// (`crate::stubs::StubArg`) in the form the zpp layer needs.
+#[derive(Debug)]
+pub struct ArgInfo {
+    pub name: &'static str,
+    /// zend_type_to_string() of the declared type ("" when untyped)
+    pub ty: String,
+    pub mask: u16,
+    /// Default value as written in the stub (None: required, or `= UNKNOWN`)
+    pub default: Option<&'static str>,
+    /// 0 = by value, 1 = by reference, 2 = prefer-ref
+    pub by_ref: u8,
+    pub variadic: bool,
+    pub sensitive: bool,
+}
+
+#[derive(Debug)]
+pub struct FuncInfo {
+    /// Declared name
+    pub name: &'static str,
+    /// Module ("extension") name
+    pub module: &'static str,
+    pub params: Vec<ArgInfo>,
+    pub required: u8,
+    pub stub: &'static crate::stubs::StubFunc,
+}
+
+impl FuncInfo {
+    fn from_stub(f: &'static crate::stubs::StubFunc) -> FuncInfo {
+        use crate::stubs::{A_BY_REF, A_PREFER_REF, A_SENSITIVE, A_VARIADIC};
+        let params = f
+            .args
+            .iter()
+            .map(|a| ArgInfo {
+                name: a.name,
+                ty: type_display(a.ty),
+                mask: type_mask(a.ty),
+                default: a.default,
+                by_ref: if a.flags & A_PREFER_REF != 0 {
+                    2
+                } else if a.flags & A_BY_REF != 0 {
+                    1
+                } else {
+                    0
+                },
+                variadic: a.flags & A_VARIADIC != 0,
+                sensitive: a.flags & A_SENSITIVE != 0,
+            })
+            .collect();
+        FuncInfo {
+            name: f.name,
+            module: f.ext,
+            params,
+            required: f.required_args() as u8,
+            stub: f,
+        }
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        self.params.last().is_some_and(|p| p.variadic)
+    }
+
+    /// Number of declared parameters, excluding a variadic one (num_args).
+    pub fn num_args(&self) -> usize {
+        self.params.len() - self.is_variadic() as usize
+    }
+
+    /// The arginfo describing argument `i` (the variadic one for extra args).
+    pub fn param(&self, i: usize) -> Option<&ArgInfo> {
+        match self.params.get(i) {
+            Some(p) if !p.variadic => Some(p),
+            _ => self.params.last().filter(|p| p.variadic),
+        }
+    }
+
+    /// Argument name as shown in errors: variadic arguments have none
+    /// (get_function_arg_name()).
+    pub fn arg_name(&self, i: usize) -> Option<&'static str> {
+        if i < self.num_args() {
+            Some(self.params[i].name)
+        } else {
+            None
+        }
+    }
+
+    /// zend_wrong_parameters_count_error() for `given` arguments, if out of range.
+    pub fn arity_error(&self, given: usize) -> Option<String> {
+        let min = self.required as usize;
+        let max = if self.is_variadic() {
+            None
+        } else {
+            Some(self.num_args())
+        };
+        if given >= min && max.is_none_or(|m| given <= m) {
+            return None;
+        }
+        let (kind, n) = if max == Some(min) {
+            ("exactly", min)
+        } else if given < min {
+            ("at least", min)
+        } else {
+            ("at most", max.unwrap_or(min))
+        };
+        Some(format!(
+            "{}() expects {} {} argument{}, {} given",
+            self.name,
+            kind,
+            n,
+            if n == 1 { "" } else { "s" },
+            given
+        ))
+    }
+
+    /// "f(): Argument #N ($name)" prefix of zend_argument_error().
+    pub fn arg_prefix(&self, i: usize) -> String {
+        match self.arg_name(i) {
+            Some(n) => format!("{}(): Argument #{} (${})", self.name, i + 1, n),
+            None => format!("{}(): Argument #{}", self.name, i + 1),
+        }
+    }
+}
+
+/// Type mask of a stub type (`iterable` is Traversable|array, as zend_compile makes it).
+pub fn type_mask(t: &str) -> u16 {
+    let mut t = t.trim();
+    if t.is_empty() {
+        return 0;
+    }
+    let mut mask = 0;
+    if let Some(r) = t.strip_prefix('?') {
+        mask |= T_NULL;
+        t = r;
+    }
+    for part in t.split('|') {
+        let part = part.trim().trim_matches(|c| c == '(' || c == ')');
+        mask |= match part.to_ascii_lowercase().as_str() {
+            _ if part.contains('&') => T_CLASS,
+            "null" => T_NULL,
+            "false" => T_FALSE,
+            "true" => T_TRUE,
+            "bool" => T_BOOL,
+            "int" => T_INT,
+            "float" => T_FLOAT,
+            "string" => T_STRING,
+            "array" => T_ARRAY,
+            "object" => T_OBJECT,
+            "callable" => T_CALLABLE,
+            "mixed" => T_MIXED | T_NULL,
+            "void" => T_VOID,
+            "never" => T_NEVER,
+            "static" | "self" => T_STATIC,
+            "iterable" => T_ARRAY | T_CLASS,
+            _ => T_CLASS,
+        };
+    }
+    mask
+}
+
+/// zend_type_to_string() of a stub type.
+pub fn type_display(t: &str) -> String {
+    let orig = t.trim();
+    let mut t = orig;
+    if t.is_empty() {
+        return String::new();
+    }
+    if let Some(r) = t.strip_prefix('?') {
+        t = r;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for part in t.split('|') {
+        let part = part.trim().trim_matches(|c| c == '(' || c == ')');
+        let lp = part.to_ascii_lowercase();
+        if part.contains('&') {
+            parts.push(part.to_string());
+        } else if lp == "iterable" {
+            parts.push("Traversable".to_string());
+        } else if !matches!(
+            lp.as_str(),
+            "null"
+                | "false"
+                | "true"
+                | "bool"
+                | "int"
+                | "float"
+                | "string"
+                | "array"
+                | "object"
+                | "callable"
+                | "mixed"
+                | "void"
+                | "never"
+                | "static"
+                | "self"
+        ) {
+            parts.push(part.trim_start_matches('\\').to_string());
+        }
+    }
+    let mask = type_mask(orig);
+    if mask & T_MIXED != 0 {
+        parts.push("mixed".to_string());
+        return parts.join("|");
+    }
+    for (bit, name) in [
+        (T_STATIC, "static"),
+        (T_CALLABLE, "callable"),
+        (T_OBJECT, "object"),
+        (T_ARRAY, "array"),
+        (T_STRING, "string"),
+        (T_INT, "int"),
+        (T_FLOAT, "float"),
+    ] {
+        if mask & bit != 0 {
+            parts.push(name.to_string());
+        }
+    }
+    if mask & T_BOOL == T_BOOL {
+        parts.push("bool".to_string());
+    } else if mask & T_FALSE != 0 {
+        parts.push("false".to_string());
+    } else if mask & T_TRUE != 0 {
+        parts.push("true".to_string());
+    }
+    if mask & T_VOID != 0 {
+        parts.push("void".to_string());
+    }
+    if mask & T_NEVER != 0 {
+        parts.push("never".to_string());
+    }
+    if mask & T_NULL != 0 {
+        if parts.len() == 1 && !parts[0].contains('&') {
+            return format!("?{}", parts[0]);
+        }
+        parts.push("null".to_string());
+    }
+    parts.join("|")
+}
+
+/// Arginfo of the internal function `lname` (lowercase), from its stub.
+pub fn lookup(lname: &[u8]) -> Option<&'static FuncInfo> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<&'static str, FuncInfo>> =
+        std::sync::OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        crate::stub_sigs::FUNCTIONS
+            .iter()
+            .map(|f| (f.name, FuncInfo::from_stub(f)))
+            .collect()
+    });
+    let s = std::str::from_utf8(lname).ok()?;
+    match map.get(s) {
+        Some(f) => Some(f),
+        None => {
+            let f = crate::stubs::find_function(lname)?;
+            map.get(f.name)
+        }
+    }
+}
+
+/// CHECK_* flags verified for `lname`.
+pub fn verified_flags(lname: &[u8]) -> u8 {
+    let t = verified::VERIFIED;
+    t.binary_search_by(|(n, _)| n.as_bytes().cmp(lname))
+        .map(|i| t[i].1)
+        .unwrap_or(0)
+}
+
+/// Why a call to an internal function failed before it ran.
+pub enum ZppError {
+    /// Throw a new `class` exception with this message.
+    Throw(&'static [u8], String),
+    /// An exception is already pending (a user error handler threw).
+    Pending,
+}
+
+/// zend_zval_value_name()
+fn value_name(v: &Value) -> String {
+    Vm::value_type_name(v)
+}
+
+fn arg_type_display(p: &ArgInfo) -> &str {
+    &p.ty
+}
+
+/// is_numeric_string() without errors allowed (whitespace around is fine).
+fn numeric(s: &PhpString) -> Option<Value> {
+    match crate::value::parse_numeric_str(s.as_bytes(), false) {
+        Some((crate::value::NumStr::Long(n), false)) => Some(Value::Long(n)),
+        Some((crate::value::NumStr::Double(d), false)) => Some(Value::Double(d)),
+        _ => None,
+    }
+}
+
+impl Vm {
+    /// "Uncaught Class: message" for the pending exception (VmError text).
+    pub(crate) fn uncaught_exception_message(&self) -> String {
+        match &self.current_exception {
+            Some(Value::Object(o)) => {
+                let ob = o.borrow();
+                let class = crate::value::display_class_name(&ob.class_name);
+                format!(
+                    "Uncaught {}: {}",
+                    class,
+                    ob.get_property(b"message")
+                        .to_php_string()
+                        .to_string_lossy()
+                )
+            }
+            _ => "Uncaught exception".to_string(),
+        }
+    }
+
+    /// Arginfo and verified flags of a registered builtin, if the generic
+    /// zpp layer is enabled for it. Cheap: one hash lookup.
+    #[inline]
+    pub(crate) fn zpp_info(&mut self, lname: &[u8]) -> Option<(&'static FuncInfo, u8)> {
+        if self.zpp_map_fn_count != self.functions.len() {
+            self.zpp_rebuild_map();
+        }
+        self.zpp_map.get(lname).copied()
+    }
+
+    fn zpp_rebuild_map(&mut self) {
+        self.zpp_map.clear();
+        for name in self.functions.keys() {
+            let flags = verified_flags(name);
+            if flags != 0 {
+                if let Some(info) = lookup(name) {
+                    self.zpp_map.insert(name.clone(), (info, flags));
+                }
+            }
+        }
+        self.zpp_map_fn_count = self.functions.len();
+    }
+
+    /// Evaluate a stub default value (zend_get_default_from_internal_arg_info).
+    /// None for UNKNOWN or an expression this evaluator does not handle.
+    pub fn arginfo_default_value(&mut self, src: &str) -> Option<Value> {
+        let src = src.trim();
+        if src == "UNKNOWN" {
+            return None;
+        }
+        // Bitwise-or of constants (e.g. ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)
+        if src.contains('|') && !src.starts_with('"') && !src.starts_with('\'') {
+            let mut acc = 0i64;
+            for part in src.split('|') {
+                acc |= self.arginfo_default_value(part)?.to_long();
+            }
+            return Some(Value::Long(acc));
+        }
+        match src {
+            "null" | "NULL" => return Some(Value::Null),
+            "true" => return Some(Value::True),
+            "false" => return Some(Value::False),
+            "[]" => {
+                return Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::array::PhpArray::new(),
+                ))));
+            }
+            _ => {}
+        }
+        let b = src.as_bytes();
+        if b[0] == b'"' || b[0] == b'\'' {
+            return Some(Value::String(PhpString::from_vec(unquote(src)?)));
+        }
+        if b[0].is_ascii_digit() || b[0] == b'-' || b[0] == b'+' {
+            let (neg, digits) = match b[0] {
+                b'-' => (true, &src[1..]),
+                b'+' => (false, &src[1..]),
+                _ => (false, src),
+            };
+            let v = if let Some(o) = digits
+                .strip_prefix("0o")
+                .or_else(|| digits.strip_prefix("0O"))
+            {
+                Value::Long(i64::from_str_radix(o, 8).ok()?)
+            } else if let Some(h) = digits
+                .strip_prefix("0x")
+                .or_else(|| digits.strip_prefix("0X"))
+            {
+                Value::Long(i64::from_str_radix(h, 16).ok()?)
+            } else if digits.len() > 1
+                && digits.starts_with('0')
+                && digits.bytes().all(|c| c.is_ascii_digit())
+            {
+                Value::Long(i64::from_str_radix(&digits[1..], 8).ok()?)
+            } else if let Ok(n) = digits.parse::<i64>() {
+                Value::Long(n)
+            } else {
+                match self.arginfo_default_value(digits)? {
+                    Value::Double(d) => Value::Double(d),
+                    Value::Long(n) => Value::Long(n),
+                    _ => Value::Double(digits.parse::<f64>().ok()?),
+                }
+            };
+            return Some(match (neg, v) {
+                (true, Value::Long(n)) => Value::Long(n.wrapping_neg()),
+                (true, Value::Double(d)) => Value::Double(-d),
+                (_, v) => v,
+            });
+        }
+        if let Ok(d) = src.parse::<f64>() {
+            return Some(Value::Double(d));
+        }
+        if let Some(cls) = src.strip_suffix("::class") {
+            return Some(Value::String(PhpString::from_string(
+                cls.trim_start_matches('\\').to_string(),
+            )));
+        }
+        if src.contains("::") {
+            // Class constant / enum case: resolve like constant()
+            let f = self.functions.get(b"constant".as_slice()).copied()?;
+            let had = self.current_exception.is_some();
+            let r = f(
+                self,
+                &[Value::String(PhpString::from_string(
+                    src.trim_start_matches('\\').to_string(),
+                ))],
+            )
+            .ok();
+            if !had && self.current_exception.is_some() {
+                self.current_exception = None;
+                return None;
+            }
+            return r;
+        }
+        self.constants
+            .get(src.trim_start_matches('\\').as_bytes())
+            .cloned()
+    }
+
+    /// Map named arguments of a call to builtin `info` onto positions, the
+    /// way zend_handle_named_arg + zend_handle_undef_args do for internal
+    /// functions: skipped optional parameters get their stub default value.
+    /// Returns the positions that were filled with defaults.
+    pub(crate) fn zpp_resolve_named(
+        &mut self,
+        info: &'static FuncInfo,
+        args: &mut Vec<Value>,
+        named: Vec<(Vec<u8>, Value)>,
+    ) -> Result<Vec<usize>, ZppError> {
+        let positional = args.len();
+        let mut set = vec![false; positional];
+        set.iter_mut().for_each(|s| *s = true);
+        let num_args = info.num_args();
+        for (name, val) in named {
+            let idx = info.params[..num_args]
+                .iter()
+                .position(|p| p.name.as_bytes() == name.as_slice());
+            let Some(idx) = idx else {
+                if info.is_variadic() {
+                    return Err(ZppError::Throw(
+                        b"ArgumentCountError",
+                        format!("{}() does not accept unknown named parameters", info.name),
+                    ));
+                }
+                return Err(ZppError::Throw(
+                    b"Error",
+                    format!(
+                        "Unknown named parameter ${}",
+                        String::from_utf8_lossy(&name)
+                    ),
+                ));
+            };
+            if idx < set.len() && set[idx] {
+                return Err(ZppError::Throw(
+                    b"Error",
+                    format!(
+                        "Named parameter ${} overwrites previous argument",
+                        String::from_utf8_lossy(&name)
+                    ),
+                ));
+            }
+            while args.len() <= idx {
+                args.push(Value::Undef);
+                set.push(false);
+            }
+            args[idx] = val;
+            set[idx] = true;
+        }
+        let mut defaulted = Vec::new();
+        for i in positional..args.len() {
+            if set[i] {
+                continue;
+            }
+            let p = &info.params[i];
+            if i < info.required as usize {
+                return Err(ZppError::Throw(
+                    b"ArgumentCountError",
+                    format!("{} not passed", info.arg_prefix(i)),
+                ));
+            }
+            let dv = match p.default {
+                Some(d) => self.arginfo_default_value(d),
+                None => None,
+            };
+            if self.current_exception.is_some() {
+                return Err(ZppError::Pending);
+            }
+            let Some(dv) = dv else {
+                return Err(ZppError::Throw(
+                    b"ArgumentCountError",
+                    format!(
+                        "{} must be passed explicitly, because the default value is not known",
+                        info.arg_prefix(i)
+                    ),
+                ));
+            };
+            args[i] = if p.by_ref != 0 {
+                Value::Reference(std::rc::Rc::new(std::cell::RefCell::new(dv)))
+            } else {
+                dv
+            };
+            defaulted.push(i);
+        }
+        Ok(defaulted)
+    }
+
+    /// zend_parse_parameters for a builtin whose arginfo was verified:
+    /// argument count, then each scalar/array typed by-value parameter is
+    /// checked and coerced in place (weak or strict mode).
+    ///
+    /// Like zpp, coercions to string (and int|float) replace the argument in
+    /// the call frame while int/float/bool ones only change the value the
+    /// function sees: when one of the latter happens, `orig` receives the
+    /// arguments as passed, for the frame shown in backtraces.
+    pub(crate) fn zpp_check(
+        &mut self,
+        info: &'static FuncInfo,
+        flags: u8,
+        args: &mut [Value],
+        orig: &mut Option<Vec<Value>>,
+        strict: bool,
+        line: u32,
+    ) -> Result<(), ZppError> {
+        if flags & CHECK_ARITY != 0 {
+            if let Some(msg) = info.arity_error(args.len()) {
+                return Err(ZppError::Throw(b"ArgumentCountError", msg));
+            }
+        }
+        if flags & CHECK_TYPES == 0 {
+            return Ok(());
+        }
+        for i in 0..args.len() {
+            let Some(p) = info.param(i) else { break };
+            let m = p.mask;
+            if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
+                continue;
+            }
+            if p.by_ref != 0 || m == 0 || m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0 {
+                // Validated by the function itself; leave the rest to it too
+                // so errors keep zpp's left-to-right order.
+                break;
+            }
+            let mut v = args[i].deref();
+            let vt = match &v {
+                Value::Undef | Value::Null => T_NULL,
+                Value::False => T_FALSE,
+                Value::True => T_TRUE,
+                Value::Long(_) => T_INT,
+                Value::Double(_) => T_FLOAT,
+                Value::String(_) => T_STRING,
+                Value::Array(_) => T_ARRAY,
+                _ => T_OBJECT,
+            };
+            if m & vt != 0 {
+                if matches!(args[i], Value::Reference(_) | Value::Undef) {
+                    args[i] = if vt == T_NULL { Value::Null } else { v };
+                }
+                continue;
+            }
+            if strict {
+                if vt == T_INT && m & T_FLOAT != 0 {
+                    if let Value::Long(n) = v {
+                        self.zpp_set_arg(args, orig, i, m, Value::Double(n as f64));
+                    }
+                    continue;
+                }
+                return Err(self.zpp_type_error(info, i, p, &v));
+            }
+            if vt == T_NULL {
+                if m & (T_BOOL | T_INT | T_FLOAT | T_STRING) == 0 {
+                    return Err(self.zpp_type_error(info, i, p, &v));
+                }
+                let msg = match info.arg_name(i) {
+                    Some(n) => format!(
+                        "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+                        info.name,
+                        i + 1,
+                        n,
+                        arg_type_display(p)
+                    ),
+                    None => format!(
+                        "{}(): Passing null to parameter #{} of type {} is deprecated",
+                        info.name,
+                        i + 1,
+                        arg_type_display(p)
+                    ),
+                };
+                self.emit_deprecated_at(&msg, line);
+                if self.current_exception.is_some() {
+                    return Err(ZppError::Pending);
+                }
+                let nv = if m & T_INT != 0 {
+                    Value::Long(0)
+                } else if m & T_FLOAT != 0 {
+                    Value::Double(0.0)
+                } else if m & T_STRING != 0 {
+                    Value::String(PhpString::empty())
+                } else {
+                    Value::False
+                };
+                self.zpp_set_arg(args, orig, i, m, nv);
+                continue;
+            }
+            match self.zpp_weak_coerce(m, &mut v, line) {
+                Ok(true) => self.zpp_set_arg(args, orig, i, m, v),
+                Ok(false) => return Err(self.zpp_type_error(info, i, p, &v)),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Store a coerced argument (see zpp_check about `orig`).
+    fn zpp_set_arg(
+        &self,
+        args: &mut [Value],
+        orig: &mut Option<Vec<Value>>,
+        i: usize,
+        m: u16,
+        v: Value,
+    ) {
+        let in_frame = matches!(v, Value::String(_)) || m & (T_INT | T_FLOAT) == (T_INT | T_FLOAT);
+        if !in_frame && orig.is_none() {
+            *orig = Some(args.to_vec());
+        }
+        if in_frame {
+            if let Some(o) = orig.as_mut() {
+                o[i] = v.clone();
+            }
+        }
+        args[i] = v;
+    }
+
+    fn zpp_type_error(&self, info: &FuncInfo, i: usize, p: &ArgInfo, arg: &Value) -> ZppError {
+        ZppError::Throw(
+            b"TypeError",
+            format!(
+                "{} must be of type {}, {} given",
+                info.arg_prefix(i),
+                arg_type_display(p),
+                value_name(arg)
+            ),
+        )
+    }
+
+    /// zend_verify_weak_scalar_type_hint(): int -> float -> string -> bool.
+    /// Ok(false) when the value cannot be coerced (TypeError).
+    fn zpp_weak_coerce(&mut self, m: u16, arg: &mut Value, line: u32) -> Result<bool, ZppError> {
+        if m & T_INT != 0 {
+            if m & T_FLOAT != 0 && matches!(arg, Value::String(_)) {
+                if let Value::String(s) = arg {
+                    if let Some(n) = numeric(s) {
+                        *arg = n;
+                        return Ok(true);
+                    }
+                }
+            } else if let Some(n) = self.zpp_long_weak(arg, line)? {
+                *arg = Value::Long(n);
+                return Ok(true);
+            }
+        }
+        if m & T_FLOAT != 0 {
+            let d = match arg {
+                Value::Long(n) => Some(*n as f64),
+                Value::String(s) => match numeric(s) {
+                    Some(Value::Long(n)) => Some(n as f64),
+                    Some(Value::Double(d)) => Some(d),
+                    _ => None,
+                },
+                Value::False => Some(0.0),
+                Value::True => Some(1.0),
+                _ => None,
+            };
+            if let Some(d) = d {
+                *arg = Value::Double(d);
+                return Ok(true);
+            }
+        }
+        if m & T_STRING != 0 {
+            match arg {
+                Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                    *arg = Value::String(arg.to_php_string());
+                    return Ok(true);
+                }
+                Value::Object(_) => {
+                    if !self.zpp_object_has_tostring(arg) {
+                        return Ok(false);
+                    }
+                    let had = self.current_exception.is_some();
+                    let s = self.value_to_string(arg);
+                    if !had && self.current_exception.is_some() {
+                        return Err(ZppError::Pending);
+                    }
+                    *arg = Value::String(s);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        if m & T_BOOL == T_BOOL
+            && matches!(arg, Value::Long(_) | Value::Double(_) | Value::String(_))
+        {
+            *arg = if arg.is_truthy() {
+                Value::True
+            } else {
+                Value::False
+            };
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// zend_parse_arg_long_weak() for a non-null, non-int value.
+    fn zpp_long_weak(&mut self, arg: &Value, line: u32) -> Result<Option<i64>, ZppError> {
+        let fits = |d: f64| !d.is_nan() && crate::value::php_double_fits_long(d);
+        let r = match arg {
+            Value::Double(d) => {
+                if !fits(*d) {
+                    return Ok(None);
+                }
+                if d.fract() != 0.0 {
+                    let msg = format!(
+                        "Implicit conversion from float {} to int loses precision",
+                        crate::value::format_php_float(*d)
+                    );
+                    self.emit_deprecated_at(&msg, line);
+                    if self.current_exception.is_some() {
+                        return Err(ZppError::Pending);
+                    }
+                }
+                Some(*d as i64)
+            }
+            Value::String(s) => match numeric(s) {
+                Some(Value::Long(n)) => Some(n),
+                Some(Value::Double(d)) => {
+                    if !fits(d) {
+                        return Ok(None);
+                    }
+                    if d.fract() != 0.0 {
+                        let msg = format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            s.to_string_lossy()
+                        );
+                        self.emit_deprecated_at(&msg, line);
+                        if self.current_exception.is_some() {
+                            return Err(ZppError::Pending);
+                        }
+                    }
+                    Some(d as i64)
+                }
+                _ => None,
+            },
+            Value::False => Some(0),
+            Value::True => Some(1),
+            _ => None,
+        };
+        Ok(r)
+    }
+
+    fn zpp_object_has_tostring(&self, v: &Value) -> bool {
+        let Value::Object(o) = v else { return false };
+        let lower: Vec<u8> = o.borrow().class_name.to_ascii_lowercase();
+        if self
+            .classes
+            .get(&lower)
+            .is_some_and(|c| c.methods.contains_key(b"__tostring".as_slice()))
+        {
+            return true;
+        }
+        // Internal classes with a cast handler / __toString (as in
+        // value_to_string_checked)
+        lower == b"exception"
+            || lower == b"error"
+            || crate::vm::is_builtin_subclass(&lower, b"exception")
+            || crate::vm::is_builtin_subclass(&lower, b"error")
+            || self.class_extends(&lower, b"exception")
+            || self.class_extends(&lower, b"error")
+            || lower.starts_with(b"reflection")
+            || matches!(
+                lower.as_slice(),
+                b"gmp"
+                    | b"simplexmlelement"
+                    | b"phptoken"
+                    | b"uri\\whatwg\\url"
+                    | b"uri\\rfc3986\\uri"
+            )
+            || self.spl_has_builtin_tostring(&lower)
+    }
+}
+
+/// Unquote a PHP string literal from a stub ('..' or ".." with escapes).
+fn unquote(src: &str) -> Option<Vec<u8>> {
+    let b = src.as_bytes();
+    let q = b[0];
+    if b.len() < 2 || b[b.len() - 1] != q {
+        return None;
+    }
+    let inner = &b[1..b.len() - 1];
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let c = inner[i];
+        if c == b'\\' && i + 1 < inner.len() {
+            let n = inner[i + 1];
+            if q == b'\'' {
+                if n == b'\'' || n == b'\\' {
+                    out.push(n);
+                    i += 2;
+                    continue;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            let rep = match n {
+                b'n' => Some(b'\n'),
+                b't' => Some(b'\t'),
+                b'r' => Some(b'\r'),
+                b'v' => Some(0x0b),
+                b'f' => Some(0x0c),
+                b'e' => Some(0x1b),
+                b'0' => Some(0),
+                b'\\' => Some(b'\\'),
+                b'"' => Some(b'"'),
+                b'$' => Some(b'$'),
+                _ => None,
+            };
+            match rep {
+                Some(r) => {
+                    out.push(r);
+                    i += 2;
+                }
+                None => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    Some(out)
+}

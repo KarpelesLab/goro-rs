@@ -525,6 +525,14 @@ pub struct Vm {
     /// Argument positions of the builtin being called that were skipped via
     /// named arguments (filled with null). Valid only at the start of the call.
     pub builtin_named_skipped: Vec<usize>,
+    /// Builtins with verified stub arginfo (see arginfo.rs), rebuilt when
+    /// the number of registered functions changes.
+    pub(crate) zpp_map: HashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
+    pub(crate) zpp_map_fn_count: usize,
+    /// Builtin calls in progress (see internal_frames.rs)
+    pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
+    /// Line of a direct call_user_func() call, for its callee's frame.
+    pub(crate) ucf_call_line: Option<u32>,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -1534,6 +1542,10 @@ impl Vm {
             builtin_param_types: HashMap::new(),
             builtin_self_coercing: std::collections::HashSet::new(),
             builtin_named_skipped: Vec::new(),
+            zpp_map: HashMap::new(),
+            zpp_map_fn_count: usize::MAX,
+            builtin_frames: Vec::new(),
+            ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
             startup_hooks: Vec::new(),
             request_startup_hooks: Vec::new(),
@@ -2440,7 +2452,7 @@ impl Vm {
                     return self.execute_fn_with_named_args(&user_fn, args.to_vec(), vec![], None);
                 }
                 if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                    return builtin(self, args);
+                    return self.call_builtin_from_internal(builtin, &func_lower, args);
                 }
                 // Try "Class::method" syntax
                 if let Some(pos) = func_lower.iter().position(|&b| b == b':') {
@@ -3794,6 +3806,7 @@ impl Vm {
     }
 
     pub fn build_exception_trace(&mut self) -> Value {
+        self.sync_builtin_frames();
         let mut trace_arr = PhpArray::new();
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         let sensitive = self.any_sensitive_params();
@@ -5331,8 +5344,14 @@ impl Vm {
         // must not get a duplicate.
         let pushed = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
         if pushed {
+            // call_user_func() called directly is compiled away by php-src: its
+            // callee is located at the call site instead of "[internal function]".
+            let (file, line) = match self.ucf_call_line.take() {
+                Some(l) => (self.current_file.clone(), l),
+                None => (String::new(), 0),
+            };
             self.call_stack
-                .push((frame_display, String::new(), 0, frame_args, is_instance));
+                .push((frame_display, file, line, frame_args, is_instance));
         }
         // Imperative call entry point: run in function scope, not global scope
         // (see execute_fn for why this matters with includes in callbacks).
@@ -13968,6 +13987,8 @@ impl Vm {
 
     /// Execute an op_array with pre-initialized CVs
     fn execute_op_array(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
+        // User code entered from a builtin: its frame becomes visible.
+        self.sync_builtin_frames();
         self.call_depth += 1;
         if self.call_depth > 100 {
             self.call_depth -= 1;
@@ -20821,6 +20842,8 @@ impl Vm {
                     } else if let Some(func) = self.functions.get(&func_name_lower).copied() {
                         // Built-in function - resolve named args if present
                         let mut named_skipped_args: Vec<usize> = Vec::new();
+                        let zpp = self.zpp_info(&func_name_lower);
+                        let mut zpp_err: Option<crate::arginfo::ZppError> = None;
                         if !call.named_args.is_empty() {
                             // Special functions that forward named args to their callbacks
                             let forwards_named = func_name_lower == b"call_user_func"
@@ -20830,6 +20853,13 @@ impl Vm {
                             if forwards_named {
                                 // Store named args on VM for forwarding
                                 self.pending_named_args = std::mem::take(&mut call.named_args);
+                            } else if let Some(info) = crate::arginfo::lookup(&func_name_lower) {
+                                // Stub arginfo: map names to positions, fill skipped defaults
+                                let named = std::mem::take(&mut call.named_args);
+                                match self.zpp_resolve_named(info, &mut call.args, named) {
+                                    Ok(d) => named_skipped_args = d,
+                                    Err(e) => zpp_err = Some(e),
+                                }
                             } else if let Some(param_names) =
                                 self.builtin_param_names.get(&func_name_lower).cloned()
                             {
@@ -20895,10 +20925,64 @@ impl Vm {
                                 }
                             }
                         }
+                        // Generic zpp (verified stub arginfo): argument count and
+                        // scalar parameter checks/coercion.
+                        let zpp_types =
+                            matches!(zpp, Some((_, f)) if f & crate::arginfo::CHECK_TYPES != 0);
+                        // Arguments as passed, when zpp coerced some (for the frame).
+                        let mut zpp_orig: Option<Vec<Value>> = None;
+                        let mut zpp_err_in_call = false;
+                        if zpp_err.is_none() {
+                            if let Some((info, flags)) = zpp {
+                                if let Err(e) = self.zpp_check(
+                                    info,
+                                    flags,
+                                    &mut call.args,
+                                    &mut zpp_orig,
+                                    op_array.strict_types,
+                                    op.line,
+                                ) {
+                                    zpp_err = Some(e);
+                                    zpp_err_in_call = true;
+                                }
+                            }
+                        }
+                        if let Some(e) = zpp_err {
+                            if let crate::arginfo::ZppError::Throw(cls, msg) = e {
+                                // zpp errors are raised inside the function: its frame is in the trace
+                                if zpp_err_in_call {
+                                    self.push_builtin_frame(
+                                        &func_name_lower,
+                                        zpp_orig.as_deref().unwrap_or(&call.args),
+                                        op.line,
+                                    );
+                                }
+                                let exc_val = self.create_exception(cls, &msg, op.line);
+                                if zpp_err_in_call {
+                                    self.pop_builtin_frame();
+                                }
+                                self.current_exception = Some(exc_val);
+                            }
+                            if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = if catch_target > 0 {
+                                    catch_target
+                                } else {
+                                    finally_target
+                                } as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
                         // Non-strict mode: emit "Implicit conversion from float X to int loses precision".
                         // Also throws TypeError for NaN/Inf passed to int params (PHP 8.1+).
                         // Also emit "Passing null to parameter #N is deprecated" for null -> non-nullable scalar.
-                        if !op_array.strict_types {
+                        if !op_array.strict_types && !zpp_types {
                             if let Some(param_types) =
                                 self.builtin_param_types.get(&func_name_lower).cloned()
                             {
@@ -20986,7 +21070,7 @@ impl Vm {
                             }
                         }
                         // Strict type checking for builtin function parameters
-                        if op_array.strict_types {
+                        if op_array.strict_types && !zpp_types {
                             let mut strict_type_err: Option<String> = None;
                             if let Some(param_types) =
                                 self.builtin_param_types.get(&func_name_lower).cloned()
@@ -21066,7 +21150,29 @@ impl Vm {
                         } else {
                             false
                         };
+                        // call_user_func()/call_user_func_array() have no frame of their
+                        // own in php-src (ZEND_INIT_USER_CALL).
+                        let is_direct_ucf = func_name_lower == b"call_user_func"
+                            || func_name_lower == b"call_user_func_array";
+                        let own_frame = !is_assert_call
+                            && !is_direct_ucf
+                            && !(func_name_lower == b"sprintf"
+                                && crate::internal_frames::sprintf_is_rope(&call.args));
+                        if own_frame {
+                            self.push_builtin_frame(
+                                &func_name_lower,
+                                zpp_orig.as_deref().unwrap_or(&call.args),
+                                op.line,
+                            );
+                        } else if is_direct_ucf {
+                            self.ucf_call_line = Some(op.line);
+                        }
                         let builtin_result = func(self, &call.args);
+                        if own_frame {
+                            self.pop_builtin_frame();
+                        } else {
+                            self.ucf_call_line = None;
+                        }
                         if stashed_globals {
                             if let Some((saved, _)) = self.global_cv_stash.take() {
                                 cvs = saved;
@@ -46192,18 +46298,20 @@ impl Vm {
         self.current_exception = saved_exc;
     }
 
-    fn fiber_stack_bases(&self) -> (usize, usize, usize, usize) {
+    fn fiber_stack_bases(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.call_stack.len(),
             self.class_scope_stack.len(),
             self.called_class_stack.len(),
             self.property_hook_stack.len(),
+            self.builtin_frames.len(),
         )
     }
 
     /// Re-install the frames a suspended fiber had pushed on the shared VM
     /// stacks.
     fn fiber_enter_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber) {
+        self.fiber_restore_builtin_frames(&mut fiber.saved_builtin_frames);
         self.call_stack.append(&mut fiber.saved_call_stack);
         self.class_scope_stack
             .append(&mut fiber.saved_class_scope_stack);
@@ -46218,11 +46326,12 @@ impl Vm {
     fn fiber_leave_stacks(
         &mut self,
         fiber: &mut crate::fiber::PhpFiber,
-        bases: (usize, usize, usize, usize),
+        bases: (usize, usize, usize, usize, usize),
         suspended: bool,
     ) {
-        let (a, b, c, d) = bases;
+        let (a, b, c, d, e) = bases;
         if suspended {
+            fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
             if self.call_stack.len() > a {
                 fiber.saved_call_stack = self.call_stack.split_off(a);
             }
@@ -46236,6 +46345,7 @@ impl Vm {
                 fiber.saved_property_hook_stack = self.property_hook_stack.split_off(d);
             }
         } else {
+            self.builtin_frames.truncate(e);
             self.call_stack.truncate(a);
             self.class_scope_stack.truncate(b);
             self.called_class_stack.truncate(c);

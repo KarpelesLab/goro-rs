@@ -93,6 +93,8 @@ pub struct PhpFiber {
     /// property hooks) owned by the suspended fiber; moved off the shared
     /// VM stacks while the fiber is suspended and restored on resume.
     pub saved_call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
+    /// Builtin calls in progress inside the suspended fiber
+    pub(crate) saved_builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     pub saved_class_scope_stack: Vec<Vec<u8>>,
     pub saved_called_class_stack: Vec<Vec<u8>>,
     pub saved_property_hook_stack: Vec<Vec<u8>>,
@@ -146,6 +148,7 @@ impl PhpFiber {
             saved_error_reporting_stack: Vec::new(),
             start_args: Vec::new(),
             saved_call_stack: Vec::new(),
+            saved_builtin_frames: Vec::new(),
             saved_class_scope_stack: Vec::new(),
             saved_called_class_stack: Vec::new(),
             saved_property_hook_stack: Vec::new(),

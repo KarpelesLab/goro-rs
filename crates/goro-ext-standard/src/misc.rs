@@ -2071,8 +2071,9 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             // For builtins, forward named args via pending_named_args
             if !named_args.is_empty() {
                 vm.pending_named_args = named_args;
+                return builtin(vm, &call_args);
             }
-            return builtin(vm, &call_args);
+            return vm.call_builtin_from_internal(builtin, &func_lower, &call_args);
         }
 
         // Try user function (but not "Class::method" strings - those need proper LSB handling below)
@@ -13694,6 +13695,8 @@ pub(crate) fn strip_os_error(msg: &str) -> String {
 }
 
 fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Frames of the builtins being run (not debug_backtrace() itself)
+    vm.materialize_builtin_frames(true);
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
@@ -13786,6 +13789,8 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Frames of the builtins being run (not debug_backtrace() itself)
+    vm.materialize_builtin_frames(true);
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2

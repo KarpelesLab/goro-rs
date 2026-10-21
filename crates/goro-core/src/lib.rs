@@ -1,3 +1,4 @@
+pub mod arginfo;
 pub mod array;
 pub mod basedir;
 pub mod closure;
@@ -9,6 +10,7 @@ pub mod function;
 pub mod gc;
 pub mod generator;
 pub mod ini_quantity;
+pub mod internal_frames;
 pub mod ob;
 pub mod object;
 pub mod opcode;
