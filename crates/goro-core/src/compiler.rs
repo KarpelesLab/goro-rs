@@ -12916,9 +12916,24 @@ impl Compiler {
                         }
                     }
                 }
-                // Compile the yielded value (if any)
+                // Compile the yielded value (if any); a by-ref generator yields
+                // the variable / element / property itself.
                 let val_operand = if let Some(val_expr) = value {
-                    self.compile_expr(val_expr)?
+                    if self.op_array.returns_by_ref
+                        && matches!(
+                            val_expr.kind,
+                            ExprKind::Variable(_)
+                                | ExprKind::ArrayAccess { index: Some(_), .. }
+                                | ExprKind::PropertyAccess {
+                                    nullsafe: false,
+                                    ..
+                                }
+                        )
+                    {
+                        self.compile_ref_fetch(val_expr)?
+                    } else {
+                        self.compile_expr(val_expr)?
+                    }
                 } else {
                     OperandType::Unused
                 };

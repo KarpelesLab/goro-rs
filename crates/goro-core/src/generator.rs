@@ -101,6 +101,8 @@ pub struct PhpGenerator {
     pub(crate) saved_calls: Vec<crate::vm::PendingCall>,
     /// Registered with the cycle collector.
     pub(crate) gc_tracked: std::cell::Cell<bool>,
+    /// The reference yielded by a by-ref generator (bound by `foreach (... as &$v)`).
+    pub(crate) current_ref: Option<Rc<RefCell<Value>>>,
 }
 
 impl PhpGenerator {
@@ -140,6 +142,7 @@ impl PhpGenerator {
             advanced_past_first: false,
             saved_calls: Vec::new(),
             gc_tracked: std::cell::Cell::new(false),
+            current_ref: None,
         }
     }
 
@@ -270,6 +273,9 @@ impl PhpGenerator {
                 f(v);
             }
         }
+        if let Some(r) = &self.current_ref {
+            f(&Value::Reference(r.clone()));
+        }
     }
 
     /// Detach everything the frame owns (the generator is garbage).
@@ -288,6 +294,9 @@ impl PhpGenerator {
         for c in std::mem::take(&mut self.saved_calls) {
             out.extend(c.args);
             out.extend(c.named_args.into_iter().map(|(_, v)| v));
+        }
+        if let Some(r) = self.current_ref.take() {
+            out.push(Value::Reference(r));
         }
         self.state = GeneratorState::Completed;
         out
@@ -655,6 +664,18 @@ impl PhpGenerator {
                         key
                     };
 
+                    // `function &gen()` yields the variable's reference.
+                    self.current_ref = None;
+                    if op_array.returns_by_ref {
+                        let raw = match op.op1 {
+                            OperandType::Cv(i) => self.cvs.get(i as usize).cloned(),
+                            OperandType::Tmp(i) => self.tmps.get(i as usize).cloned(),
+                            _ => None,
+                        };
+                        if let Some(Value::Reference(r)) = raw {
+                            self.current_ref = Some(r);
+                        }
+                    }
                     self.current_value = yielded_value;
                     self.current_key = yielded_key;
                     self.state = GeneratorState::Suspended;
@@ -1729,17 +1750,44 @@ impl PhpGenerator {
                 }
 
                 OpCode::ForeachInitRef => {
-                    // In generators, treat by-ref foreach like by-value
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, arr_val);
+                    // By-ref foreach over an array iterates (and modifies) the
+                    // variable's own array, separated from other holders.
                     let iter_idx = match op.result {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
                     };
+                    let src = match op.op1 {
+                        OperandType::Cv(i) => {
+                            let i = i as usize;
+                            let cur = self.cvs.get(i).map(|v| v.deref()).unwrap_or(Value::Undef);
+                            match cur {
+                                Value::Array(a) => {
+                                    let a = if Rc::strong_count(&a) > 2 {
+                                        let sep = Rc::new(RefCell::new(a.borrow().clone()));
+                                        match &mut self.cvs[i] {
+                                            Value::Reference(r) => {
+                                                *r.borrow_mut() = Value::Array(sep.clone())
+                                            }
+                                            slot => *slot = Value::Array(sep.clone()),
+                                        }
+                                        sep
+                                    } else {
+                                        a
+                                    };
+                                    Value::Array(a)
+                                }
+                                other => other,
+                            }
+                        }
+                        _ => match self.read_operand(&op.op1, &op_array.literals) {
+                            Value::Reference(r) => r.borrow().clone(),
+                            v => v,
+                        },
+                    };
+                    self.write_operand(&op.result, src);
                     self.foreach_positions.insert(iter_idx, 0usize);
                 }
                 OpCode::ForeachNextRef => {
-                    // In generators, treat by-ref foreach like by-value
                     let iter_idx = match op.op1 {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -1747,15 +1795,30 @@ impl PhpGenerator {
                     let pos = self.foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let arr_val = self.read_operand(&op.op1, &op_array.literals);
                     if let Value::Array(arr) = &arr_val {
-                        let arr_borrow = arr.borrow();
-                        let entries: Vec<_> = arr_borrow.iter().collect();
-                        if pos >= entries.len() {
+                        let n = arr.borrow().len();
+                        if pos >= n {
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
                             }
                         } else {
-                            let (_, value) = entries[pos];
-                            self.write_operand(&op.result, value.clone());
+                            // The element becomes a reference shared with the loop variable.
+                            let r = {
+                                let mut b = arr.borrow_mut();
+                                let slot = b.iter_mut().nth(pos).map(|(_, v)| v);
+                                match slot {
+                                    Some(Value::Reference(r)) => r.clone(),
+                                    Some(v) => {
+                                        let r = Rc::new(RefCell::new(std::mem::replace(
+                                            v,
+                                            Value::Null,
+                                        )));
+                                        *v = Value::Reference(r.clone());
+                                        r
+                                    }
+                                    None => Rc::new(RefCell::new(Value::Null)),
+                                }
+                            };
+                            self.write_operand(&op.result, Value::Reference(r));
                             self.foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {

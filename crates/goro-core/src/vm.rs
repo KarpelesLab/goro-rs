@@ -29551,14 +29551,23 @@ impl Vm {
                         // On first call (pos==0), the generator was already primed by ForeachInitRef
                         if pos == 0 {
                             let val = gen_borrow.current_value.clone();
+                            let r = gen_borrow.current_ref.clone();
                             drop(gen_borrow);
-                            self.write_operand(
-                                &op.result,
-                                val,
-                                &mut cvs,
-                                &mut tmps,
-                                &static_cv_keys,
-                            );
+                            match (r, &op.result) {
+                                (Some(r), OperandType::Cv(i)) => {
+                                    cvs[*i as usize] = Value::Reference(r)
+                                }
+                                (Some(r), OperandType::Tmp(i)) => {
+                                    tmps[*i as usize] = Value::Reference(r)
+                                }
+                                _ => self.write_operand(
+                                    &op.result,
+                                    val,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                ),
+                            }
                             foreach_positions.insert(iter_idx, pos + 1);
                         } else {
                             drop(gen_borrow);
@@ -29567,14 +29576,23 @@ impl Vm {
                             match gen_borrow.resume(self) {
                                 Ok(true) => {
                                     let val = gen_borrow.current_value.clone();
+                                    let r = gen_borrow.current_ref.clone();
                                     drop(gen_borrow);
-                                    self.write_operand(
-                                        &op.result,
-                                        val,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
+                                    match (r, &op.result) {
+                                        (Some(r), OperandType::Cv(i)) => {
+                                            cvs[*i as usize] = Value::Reference(r)
+                                        }
+                                        (Some(r), OperandType::Tmp(i)) => {
+                                            tmps[*i as usize] = Value::Reference(r)
+                                        }
+                                        _ => self.write_operand(
+                                            &op.result,
+                                            val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        ),
+                                    }
                                     foreach_positions.insert(iter_idx, pos + 1);
                                 }
                                 _ => {
