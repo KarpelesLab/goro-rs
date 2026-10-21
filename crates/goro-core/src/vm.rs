@@ -25377,6 +25377,11 @@ impl Vm {
                     } else {
                         0
                     };
+                    // Reaching a handler's catch target means that handler was
+                    // dispatched; drop it if the dispatch site didn't pop it.
+                    if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
+                        exception_handlers.pop();
+                    }
                     exception_handlers.push((catch_target, finally_target, exc_tmp, self.error_reporting_stack.len(), self.pending_calls.len()));
                 }
 
@@ -25385,6 +25390,9 @@ impl Vm {
                 }
 
                 OpCode::CatchException => {
+                    if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
+                        exception_handlers.pop();
+                    }
                     // Restore pending_calls depth saved when we jumped to this catch block
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
@@ -34573,24 +34581,22 @@ impl Vm {
                                 // Not an object - throw "Call to a member function on <type>"
                                 let type_name = Vm::value_type_name(&obj_val);
                                 let method_str = method_name.to_string_lossy();
-                                let err_msg = format!("Call to a member function {}() on {}", method_str, type_name);
-                                let err_id = self.next_object_id;
-                                self.next_object_id += 1;
-                                let mut err_obj = PhpObject::new(b"Error".to_vec(), err_id);
-                                err_obj.set_property(
-                                    b"message".to_vec(),
-                                    Value::String(PhpString::from_string(err_msg.clone())),
-                                );
-                                err_obj.set_property(b"code".to_vec(), Value::Long(0));
-                                err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_bytes(b"")));
-                                err_obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
-                                self.current_exception = Some(Value::Object(Rc::new(RefCell::new(err_obj))));
+                                let is_this_cv = matches!(op.op1, OperandType::Cv(i)
+                                    if op_array.cv_names.get(i as usize).map(|n| n.as_slice()) == Some(b"this"))
+                                    && matches!(obj_val, Value::Null | Value::Undef);
+                                let err_msg = if is_this_cv {
+                                    "Using $this when not in object context".to_string()
+                                } else {
+                                    format!("Call to a member function {}() on {}", method_str, type_name)
+                                };
+                                let err = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(err);
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
                                     continue;
                                 } else {
                                     return Err(VmError {
-                                        message: err_msg,
+                                        message: format!("Uncaught Error: {}", err_msg),
                                         line: op.line,
                                     });
                                 }
