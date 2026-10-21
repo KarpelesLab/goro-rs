@@ -3933,7 +3933,20 @@ impl Compiler {
                                     }
                                     ExprKind::Identifier(cname) => {
                                         let lower: Vec<u8> = cname.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        self.resolve_class_const_magic(&lower, &qualified_name, expr.span.line)
+                                        let v = self.resolve_class_const_magic(&lower, &qualified_name, expr.span.line);
+                                        if matches!(v, Value::Null) && lower != b"null" && !*is_static {
+                                            // User constant: resolved when the object is created.
+                                            let mut marker = b"__deferred_global_const__::".to_vec();
+                                            let bare = if cname.first() == Some(&b'\\') { &cname[1..] } else { &cname[..] };
+                                            if !self.current_namespace.is_empty() && cname.first() != Some(&b'\\') {
+                                                marker.extend_from_slice(&self.current_namespace);
+                                                marker.push(b'\\');
+                                            }
+                                            marker.extend_from_slice(bare);
+                                            Value::String(PhpString::from_vec(marker))
+                                        } else {
+                                            v
+                                        }
                                     }
                                     ExprKind::Closure {
                                         params: closure_params,

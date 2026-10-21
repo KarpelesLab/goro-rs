@@ -30153,6 +30153,14 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                                // Check: class cannot extend a trait
+                                if !class.is_trait && parent.is_trait {
+                                    return Err(VmError {
+                                        message: format!("Class {} cannot extend trait {}",
+                                            String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&parent.name)),
+                                        line: op.line,
+                                    });
+                                }
                                 // Check: class cannot extend an interface
                                 if !class.is_interface && parent.is_interface {
                                     let child_display = String::from_utf8_lossy(&class.name).to_string();
@@ -31302,6 +31310,7 @@ impl Vm {
                         // Track which trait contributed each method name so we can detect
                         // composition collisions between two traits with the same method.
                         let mut method_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
+                        let mut prop_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
                         for trait_name in &trait_names {
                             let trait_lower: Vec<u8> =
                                 trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -31437,80 +31446,75 @@ impl Vm {
                                         method_from_trait.insert(key, trait_def.name.clone());
                                     }
                                 }
-                                // Copy trait properties
-                                let child_prop_names: Vec<Vec<u8>> =
-                                    class.properties.iter().map(|p| p.name.clone()).collect();
+                                // Copy trait properties (zend_do_traits_property_binding): a
+                                // property already declared by the class or an earlier trait must
+                                // be compatible; inherited private ones are shadowed, other
+                                // inherited ones replaced.
                                 let trait_name_original = trait_def.name.clone();
                                 for prop in &trait_def.properties {
-                                    if own_prop_names.contains(&prop.name) {
-                                        // Class directly defines this property - check compatibility
-                                        if let Some(class_prop) = class.properties.iter().find(|p| p.name == prop.name) {
+                                    let prev_trait = prop_from_trait.get(&prop.name).cloned();
+                                    if own_prop_names.contains(&prop.name) || prev_trait.is_some() {
+                                        let first_def = prev_trait.clone().unwrap_or_else(|| class.name.clone());
+                                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                        let first_display = String::from_utf8_lossy(&first_def).to_string();
+                                        let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
+                                        let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                        if let Some(class_prop) = class.properties.iter().find(|p| p.name == prop.name && p.declaring_class == class_name_lower) {
                                             // Hooked properties cannot be merged with trait hooked properties
                                             let trait_has_hooks = prop.has_get_hook || prop.has_set_hook;
                                             let class_has_hooks = class_prop.has_get_hook || class_prop.has_set_hook;
                                             if trait_has_hooks || class_has_hooks {
-                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
                                                 return Err(VmError {
                                                     message: format!("{} and {} define the same hooked property (${}) in the composition of {}. Conflict resolution between hooked properties is currently not supported. Class was composed",
-                                                        class_display, trait_display, prop_display, class_display),
+                                                        first_display, trait_display, prop_display, class_display),
                                                     line: op.line,
                                                 });
                                             }
-                                            // Check: static vs non-static mismatch
-                                            if prop.is_static != class_prop.is_static {
-                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
+                                            let types_ok = match (&prop.property_type, &class_prop.property_type) {
+                                                (None, None) => true,
+                                                (Some(_), Some(_)) => self.variance_property_types(&class, &class_name_lower, &class_prop.property_type, &prop.property_type, 0).0 == variance::Status::Success,
+                                                _ => false,
+                                            };
+                                            let d1 = self.resolve_deferred_value(&prop.default);
+                                            let d2 = self.resolve_deferred_value(&class_prop.default);
+                                            if prop.is_static != class_prop.is_static
+                                                || prop.visibility != class_prop.visibility
+                                                || prop.is_readonly != class_prop.is_readonly
+                                                || !types_ok
+                                                || !Self::values_identical(&d1, &d2)
+                                            {
                                                 return Err(VmError {
                                                     message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                        class_display, trait_display, prop_display, class_display),
-                                                    line: op.line,
-                                                });
-                                            }
-                                            // Check: visibility mismatch
-                                            if prop.visibility != class_prop.visibility {
-                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
-                                                return Err(VmError {
-                                                    message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                        class_display, trait_display, prop_display, class_display),
-                                                    line: op.line,
-                                                });
-                                            }
-                                            // Check: default value mismatch (strict equality)
-                                            if !Self::values_identical(&prop.default, &class_prop.default) {
-                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                                let trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                                let prop_display = String::from_utf8_lossy(&prop.name).to_string();
-                                                return Err(VmError {
-                                                    message: format!("{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                        class_display, trait_display, prop_display, class_display),
+                                                        first_display, trait_display, prop_display, class_display),
                                                     line: op.line,
                                                 });
                                             }
                                         }
-                                    } else if !child_prop_names.contains(&prop.name) {
-                                        // Check if enum - enums cannot include properties from traits
-                                        if class.is_enum {
-                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                            return Err(VmError {
-                                                message: format!("Enum {} cannot include properties", class_display),
-                                                line: op.line,
-                                            });
-                                        }
-                                        let mut p = prop.clone();
-                                        p.declaring_class = class_name_lower.clone();
-                                        // Patch __CLASS__ in property defaults
-                                        if let Value::String(s) = &p.default {
-                                            if s.as_bytes() == trait_name_original.as_slice() {
-                                                p.default = Value::String(PhpString::from_vec(class.name.clone()));
-                                            }
-                                        }
-                                        class.properties.push(p);
+                                        continue;
                                     }
+                                    // Check if enum - enums cannot include properties from traits
+                                    if class.is_enum {
+                                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                        return Err(VmError {
+                                            message: format!("Enum {} cannot include properties", class_display),
+                                            line: op.line,
+                                        });
+                                    }
+                                    let mut p = prop.clone();
+                                    p.declaring_class = class_name_lower.clone();
+                                    // Patch __CLASS__ in property defaults
+                                    if let Value::String(s) = &p.default {
+                                        if s.as_bytes() == trait_name_original.as_slice() {
+                                            p.default = Value::String(PhpString::from_vec(class.name.clone()));
+                                        }
+                                    }
+                                    match class.properties.iter().position(|cp| cp.name == prop.name) {
+                                        Some(idx) if class.properties[idx].visibility != Visibility::Private => {
+                                            class.properties[idx] = p;
+                                        }
+                                        _ => class.properties.push(p),
+                                    }
+                                    prop_from_trait.insert(prop.name.clone(), trait_def.name.clone());
                                 }
                                 // Copy trait constants (zend_do_traits_constant_binding /
                                 // do_trait_constant_check): a constant already declared by the
@@ -33003,9 +33007,11 @@ impl Vm {
                     }
                     // Check for abstract class, interface, or enum
                     if let Some(class) = self.classes.get(&name_lower) {
-                        if class.is_abstract || class.is_interface || class.is_enum {
+                        if class.is_abstract || class.is_interface || class.is_enum || class.is_trait {
                             // Create an Error object and throw it
-                            let err_msg = if class.is_interface {
+                            let err_msg = if class.is_trait {
+                                format!("Cannot instantiate trait {}", crate::value::display_class_name(&class.name))
+                            } else if class.is_interface {
                                 format!(
                                     "Cannot instantiate interface {}",
                                     class_name.to_string_lossy()

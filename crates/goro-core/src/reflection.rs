@@ -1346,6 +1346,17 @@ pub fn reflection_class_method(
                     }
                 }
             }
+            // Resolve deferred constant-expression markers in defaults.
+            let keys: Vec<ArrayKey> = result.iter()
+                .filter(|(_, v)| matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_global_const__::")))
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys {
+                if let Some(v) = result.get(&k).cloned() {
+                    let r = vm.resolve_deferred_value(&v);
+                    result.set(k, r);
+                }
+            }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getstaticproperties" => {
@@ -4335,6 +4346,7 @@ pub fn reflection_property_method(
             }
             let result = match default_val {
                 Value::Undef => Value::Null,
+                v @ Value::String(_) => vm.resolve_deferred_value(&v),
                 v => v,
             };
             Some(result)
