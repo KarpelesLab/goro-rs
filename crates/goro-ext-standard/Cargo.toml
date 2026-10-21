@@ -16,5 +16,6 @@ libc = "0.2"
 md-5 = "0.10"
 sha2 = "0.10"
 flate2 = "1"
+goro-zlib = { path = "../goro-zlib" }
 bzip2 = "0.6"
 tempfile = "3"

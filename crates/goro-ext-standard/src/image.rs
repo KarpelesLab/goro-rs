@@ -438,20 +438,15 @@ fn swf_dims(buf: &[u8]) -> (u32, u32) {
 /// zlib `uncompress()` emulation: returns (ok, output). `ok` is true only
 /// when the whole zlib stream was decoded and fit in `max_out` bytes.
 fn zlib_uncompress(input: &[u8], max_out: usize) -> (bool, Vec<u8>) {
-    let mut d = flate2::Decompress::new(true);
     let mut out = vec![0u8; max_out];
-    match d.decompress(input, &mut out, flate2::FlushDecompress::Finish) {
-        Ok(flate2::Status::StreamEnd) => {
-            let n = d.total_out() as usize;
-            out.truncate(n);
-            (true, out)
-        }
-        _ => {
-            let n = d.total_out() as usize;
-            out.truncate(n);
-            (false, out)
-        }
-    }
+    let Ok(mut d) = goro_zlib::Inflate::new(goro_zlib::MAX_WBITS) else {
+        return (false, Vec::new());
+    };
+    let mut io = goro_zlib::Io::new(input, &mut out);
+    let st = d.inflate(&mut io, goro_zlib::Z_FINISH);
+    let n = io.out_pos;
+    out.truncate(n);
+    (st == goro_zlib::Z_STREAM_END, out)
 }
 
 fn handle_swc(s: &mut ImgStream) -> Option<GfxInfo> {

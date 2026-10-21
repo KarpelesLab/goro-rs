@@ -1379,83 +1379,52 @@ fn param_find(params: &Value, key: &[u8]) -> Option<Value> {
     }
 }
 
-/// Raw / zlib / gzip framing chosen by windowBits.
-#[derive(Clone, Copy, PartialEq)]
-enum ZFormat {
-    Raw,
-    Zlib,
-    Gzip,
-    /// Inflate: detect zlib or gzip (windowBits + 32).
-    Auto,
-}
-
-fn zformat(window: i64, inflate: bool) -> ZFormat {
-    if window < 0 {
-        ZFormat::Raw
-    } else if window > 15 + 16 && inflate {
-        ZFormat::Auto
-    } else if window > 15 {
-        ZFormat::Gzip
-    } else {
-        ZFormat::Zlib
-    }
-}
-
+/// php_zlib_filter_data for zlib.inflate
 pub struct ZlibInflate {
-    fmt: ZFormat,
-    dec: Option<flate2::Decompress>,
-    /// Header bytes collected before the format is known / gzip header.
-    header: Vec<u8>,
-    header_done: bool,
+    strm: Box<goro_zlib::Inflate>,
+    /// Pending output (data->outbuf / strm.avail_out).
+    outbuf: Vec<u8>,
     finished: bool,
 }
 
+/// php_zlib_filter_data for zlib.deflate
 pub struct ZlibDeflate {
-    fmt: ZFormat,
-    enc: flate2::Compress,
+    strm: Box<goro_zlib::Deflate>,
+    outbuf: Vec<u8>,
+    /// signals that no flush is pending
     finished: bool,
-    started: bool,
-    crc: flate2::Crc,
-    trailer_done: bool,
 }
 
+/// php_zlib_filter_create()
 fn zlib_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Builtin> {
+    use goro_zlib::*;
     if name.eq_ignore_ascii_case(b"zlib.inflate") {
-        let mut window: i64 = -15;
+        let mut window_bits: i64 = -(MAX_WBITS as i64);
         if let Some(p) = params {
             if matches!(p.deref(), Value::Array(_) | Value::Object(_)) {
                 if let Some(t) = param_find(p, b"window") {
                     let tmp = t.to_long();
-                    if !(-15..=15 + 32).contains(&tmp) {
+                    if tmp < -(MAX_WBITS as i64) || tmp > MAX_WBITS as i64 + 32 {
                         docref_warning(
                             vm,
                             &format!("Invalid parameter given for window size ({})", tmp),
                         );
                     } else {
-                        window = tmp;
+                        window_bits = tmp;
                     }
                 }
             }
         }
-        let fmt = zformat(window, true);
-        // inflateInit2() rejects windowBits 0..7 and a few others.
-        if (0..8).contains(&window) || (-7..0).contains(&window) {
-            return None;
-        }
+        let strm = Inflate::new(window_bits as i32).ok()?;
         Some(Builtin::ZlibInflate(Box::new(ZlibInflate {
-            fmt,
-            dec: match fmt {
-                ZFormat::Raw => Some(flate2::Decompress::new(false)),
-                ZFormat::Zlib => Some(flate2::Decompress::new(true)),
-                _ => None,
-            },
-            header: Vec::new(),
-            header_done: matches!(fmt, ZFormat::Raw | ZFormat::Zlib),
+            strm,
+            outbuf: Vec::new(),
             finished: false,
         })))
     } else if name.eq_ignore_ascii_case(b"zlib.deflate") {
-        let mut level: i64 = -1;
-        let mut window: i64 = -15;
+        let mut level: i64 = Z_DEFAULT_COMPRESSION as i64;
+        let mut window_bits: i64 = -(MAX_WBITS as i64);
+        let mut mem_level: i64 = MAX_MEM_LEVEL as i64;
         let set_level = |vm: &mut Vm, tmp: i64, level: &mut i64| {
             if !(-1..=9).contains(&tmp) {
                 docref_warning(
@@ -1471,22 +1440,24 @@ fn zlib_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Built
                 Value::Array(_) | Value::Object(_) => {
                     if let Some(t) = param_find(p, b"memory") {
                         let tmp = t.to_long();
-                        if !(1..=9).contains(&tmp) {
+                        if !(1..=MAX_MEM_LEVEL as i64).contains(&tmp) {
                             docref_warning(
                                 vm,
                                 &format!("Invalid parameter given for memory level ({})", tmp),
                             );
+                        } else {
+                            mem_level = tmp;
                         }
                     }
                     if let Some(t) = param_find(p, b"window") {
                         let tmp = t.to_long();
-                        if !(-15..=15 + 16).contains(&tmp) {
+                        if tmp < -(MAX_WBITS as i64) || tmp > MAX_WBITS as i64 + 16 {
                             docref_warning(
                                 vm,
                                 &format!("Invalid parameter given for window size ({})", tmp),
                             );
                         } else {
-                            window = tmp;
+                            window_bits = tmp;
                         }
                     }
                     if let Some(t) = param_find(p, b"level") {
@@ -1499,57 +1470,49 @@ fn zlib_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Built
                 _ => docref_warning(vm, "Invalid filter parameter, ignored"),
             }
         }
-        if (0..8).contains(&window) || (-8..0).contains(&window) {
-            return None;
-        }
-        let lvl = if level < 0 { 6 } else { level as u32 };
-        let fmt = zformat(window, false);
+        let strm = Deflate::new(
+            level as i32,
+            Z_DEFLATED,
+            window_bits as i32,
+            mem_level as i32,
+            0,
+        )
+        .ok()?;
         Some(Builtin::ZlibDeflate(Box::new(ZlibDeflate {
-            fmt,
-            enc: flate2::Compress::new(flate2::Compression::new(lvl), fmt == ZFormat::Zlib),
+            strm,
+            outbuf: Vec::new(),
             finished: true,
-            started: false,
-            crc: flate2::Crc::new(),
-            trailer_done: false,
         })))
     } else {
         None
     }
 }
 
-/// Parse a gzip member header; Some(len) once complete.
-fn gzip_header_len(h: &[u8]) -> Option<Result<usize, ()>> {
-    if h.len() < 10 {
-        return None;
+/// One inflate()/deflate() round on `input` with a ZLIB_BUF output
+/// window: returns (status, bytes consumed); new output is appended to
+/// `outbuf`.
+fn zlib_round(
+    outbuf: &mut Vec<u8>,
+    input: &[u8],
+    f: impl FnOnce(&mut goro_zlib::Io) -> i32,
+) -> (i32, usize) {
+    let used = outbuf.len();
+    outbuf.resize(ZLIB_BUF, 0);
+    let mut io = goro_zlib::Io::new(input, outbuf);
+    io.out_pos = used;
+    let st = f(&mut io);
+    let (consumed, produced) = (io.in_pos, io.out_pos);
+    outbuf.truncate(produced);
+    (st, consumed)
+}
+
+/// Pass the filled part of the output buffer on as a bucket.
+fn zlib_emit(outbuf: &mut Vec<u8>, out: &mut Brigade) -> bool {
+    if outbuf.is_empty() {
+        return false;
     }
-    if h[0] != 0x1f || h[1] != 0x8b || h[2] != 8 {
-        return Some(Err(()));
-    }
-    let flg = h[3];
-    let mut p = 10;
-    if flg & 4 != 0 {
-        if h.len() < p + 2 {
-            return None;
-        }
-        let xlen = h[p] as usize | (h[p + 1] as usize) << 8;
-        p += 2 + xlen;
-        if h.len() < p {
-            return None;
-        }
-    }
-    for bit in [8u8, 16] {
-        if flg & bit != 0 {
-            let z = h[p..].iter().position(|&c| c == 0)?;
-            p += z + 1;
-        }
-    }
-    if flg & 2 != 0 {
-        p += 2;
-        if h.len() < p {
-            return None;
-        }
-    }
-    Some(Ok(p))
+    out.append(new_bucket(std::mem::take(outbuf)));
+    true
 }
 
 impl ZlibInflate {
@@ -1562,105 +1525,44 @@ impl ZlibInflate {
         consumed: Option<&mut usize>,
         flags: i32,
     ) -> i32 {
+        use goro_zlib::*;
         let mut exit = PSFS_FEED_ME;
         let mut total = 0usize;
+        let flush = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+            Z_FINISH
+        } else {
+            Z_SYNC_FLUSH
+        };
         while let Some(b) = inp.pop_front() {
             let buf = std::mem::take(&mut b.borrow_mut().buf);
-            total += buf.len();
-            if self.finished {
-                continue;
-            }
-            let mut data: &[u8] = &buf;
-            let owned;
-            if !self.header_done {
-                self.header.extend_from_slice(data);
-                if self.fmt == ZFormat::Auto && self.header.len() >= 2 {
-                    if self.header[0] == 0x1f && self.header[1] == 0x8b {
-                        self.fmt = ZFormat::Gzip;
-                    } else {
-                        self.fmt = ZFormat::Zlib;
-                        self.dec = Some(flate2::Decompress::new(true));
-                        self.header_done = true;
-                    }
+            let mut bin = 0usize;
+            while bin < buf.len() && !self.finished {
+                let desired = (buf.len() - bin).min(ZLIB_BUF);
+                let chunk = &buf[bin..bin + desired];
+                let strm = &mut self.strm;
+                let (status, used) =
+                    zlib_round(&mut self.outbuf, chunk, |io| strm.inflate(io, flush));
+                if status == Z_STREAM_END {
+                    self.finished = true;
+                    exit = PSFS_PASS_ON;
+                } else if status != Z_OK && status != Z_BUF_ERROR {
+                    docref_notice(vm, &format!("zlib: {}", z_error(status)));
+                    return PSFS_ERR_FATAL;
                 }
-                if self.fmt == ZFormat::Gzip {
-                    match gzip_header_len(&self.header) {
-                        None => continue,
-                        Some(Err(())) => {
-                            docref_notice(vm, "zlib: data error");
-                            return PSFS_ERR_FATAL;
-                        }
-                        Some(Ok(n)) => {
-                            owned = self.header.split_off(n);
-                            self.header.clear();
-                            self.dec = Some(flate2::Decompress::new(false));
-                            self.header_done = true;
-                            data = &owned;
-                        }
-                    }
-                } else if !self.header_done {
-                    continue;
-                } else {
-                    owned = std::mem::take(&mut self.header);
-                    data = &owned;
-                }
-            }
-            let flush = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
-                flate2::FlushDecompress::Finish
-            } else {
-                flate2::FlushDecompress::Sync
-            };
-            let dec = self.dec.as_mut().unwrap();
-            let mut pos = 0;
-            loop {
-                let mut obuf = vec![0u8; ZLIB_BUF];
-                let before_in = dec.total_in();
-                let before_out = dec.total_out();
-                let r = dec.decompress(&data[pos..], &mut obuf, flush);
-                let used = (dec.total_in() - before_in) as usize;
-                let made = (dec.total_out() - before_out) as usize;
-                pos += used;
-                if made > 0 {
-                    obuf.truncate(made);
-                    out.append(new_bucket(obuf));
+                bin += used;
+                if zlib_emit(&mut self.outbuf, out) {
                     exit = PSFS_PASS_ON;
                 }
-                match r {
-                    Ok(flate2::Status::StreamEnd) => {
-                        self.finished = true;
-                        exit = PSFS_PASS_ON;
-                        break;
-                    }
-                    Ok(_) => {
-                        if pos >= data.len() && made < ZLIB_BUF {
-                            break;
-                        }
-                        if used == 0 && made == 0 {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        docref_notice(vm, "zlib: data error");
-                        return PSFS_ERR_FATAL;
-                    }
-                }
             }
+            total += buf.len();
         }
         if !self.finished && flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
-            if let Some(dec) = self.dec.as_mut() {
-                loop {
-                    let mut obuf = vec![0u8; ZLIB_BUF];
-                    let before_out = dec.total_out();
-                    let r = dec.decompress(&[], &mut obuf, flate2::FlushDecompress::Finish);
-                    let made = (dec.total_out() - before_out) as usize;
-                    if made > 0 {
-                        obuf.truncate(made);
-                        out.append(new_bucket(obuf));
-                        exit = PSFS_PASS_ON;
-                    }
-                    if made == 0 || !matches!(r, Ok(flate2::Status::Ok)) {
-                        break;
-                    }
+            let mut status = Z_OK;
+            while status == Z_OK {
+                let strm = &mut self.strm;
+                status = zlib_round(&mut self.outbuf, &[], |io| strm.inflate(io, Z_FINISH)).0;
+                if zlib_emit(&mut self.outbuf, out) {
+                    exit = PSFS_PASS_ON;
                 }
             }
         }
@@ -1672,44 +1574,6 @@ impl ZlibInflate {
 }
 
 impl ZlibDeflate {
-    fn gzip_header(&mut self, out: &mut Brigade) {
-        if self.fmt == ZFormat::Gzip && !self.started {
-            out.append(new_bucket(vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]));
-        }
-        self.started = true;
-    }
-
-    fn run(&mut self, input: &[u8], mode: flate2::FlushCompress, out: &mut Brigade) -> (bool, i32) {
-        let mut exit = false;
-        let mut pos = 0;
-        loop {
-            let mut obuf = vec![0u8; ZLIB_BUF];
-            let before_in = self.enc.total_in();
-            let before_out = self.enc.total_out();
-            let r = self.enc.compress(&input[pos..], &mut obuf, mode);
-            let used = (self.enc.total_in() - before_in) as usize;
-            let made = (self.enc.total_out() - before_out) as usize;
-            pos += used;
-            if made > 0 {
-                obuf.truncate(made);
-                out.append(new_bucket(obuf));
-                exit = true;
-            }
-            match r {
-                Ok(flate2::Status::StreamEnd) => return (exit, 1),
-                Ok(_) => {
-                    if pos >= input.len() && made < ZLIB_BUF {
-                        return (exit, 0);
-                    }
-                    if used == 0 && made == 0 {
-                        return (exit, 0);
-                    }
-                }
-                Err(_) => return (exit, -1),
-            }
-        }
-    }
-
     /// php_zlib_deflate_filter()
     fn filter(
         &mut self,
@@ -1718,58 +1582,53 @@ impl ZlibDeflate {
         consumed: Option<&mut usize>,
         flags: i32,
     ) -> i32 {
+        use goro_zlib::*;
         let mut exit = PSFS_FEED_ME;
         let mut total = 0usize;
         while let Some(b) = inp.pop_front() {
             let buf = std::mem::take(&mut b.borrow_mut().buf);
+            let mut bin = 0usize;
+            while bin < buf.len() {
+                let desired = (buf.len() - bin).min(ZLIB_BUF);
+                let chunk = &buf[bin..bin + desired];
+                let flush_mode = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                    Z_FULL_FLUSH
+                } else if flags & PSFS_FLAG_FLUSH_INC != 0 {
+                    Z_SYNC_FLUSH
+                } else {
+                    Z_NO_FLUSH
+                };
+                self.finished = flush_mode != Z_NO_FLUSH;
+                let strm = &mut self.strm;
+                let (status, used) =
+                    zlib_round(&mut self.outbuf, chunk, |io| strm.deflate(io, flush_mode));
+                if status != Z_OK {
+                    return PSFS_ERR_FATAL;
+                }
+                bin += used;
+                if zlib_emit(&mut self.outbuf, out) {
+                    exit = PSFS_PASS_ON;
+                }
+            }
             total += buf.len();
-            if buf.is_empty() {
-                continue;
-            }
-            self.gzip_header(out);
-            self.crc.update(&buf);
-            let mode = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
-                flate2::FlushCompress::Full
-            } else if flags & PSFS_FLAG_FLUSH_INC != 0 {
-                flate2::FlushCompress::Sync
-            } else {
-                flate2::FlushCompress::None
-            };
-            self.finished = !matches!(mode, flate2::FlushCompress::None);
-            let (made, st) = self.run(&buf, mode, out);
-            if made {
-                exit = PSFS_PASS_ON;
-            }
-            if st < 0 {
-                return PSFS_ERR_FATAL;
-            }
         }
         if flags & PSFS_FLAG_FLUSH_CLOSE != 0
             || (flags & PSFS_FLAG_FLUSH_INC != 0 && !self.finished)
         {
-            self.gzip_header(out);
-            let close = flags & PSFS_FLAG_FLUSH_CLOSE != 0;
-            if !(close && self.trailer_done) {
-                let mode = if close {
-                    flate2::FlushCompress::Finish
-                } else {
-                    flate2::FlushCompress::Sync
-                };
-                let (made, st) = self.run(&[], mode, out);
-                if made {
+            let mode = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                Z_FINISH
+            } else {
+                Z_SYNC_FLUSH
+            };
+            let mut status = Z_OK;
+            while status == Z_OK {
+                let strm = &mut self.strm;
+                status = zlib_round(&mut self.outbuf, &[], |io| strm.deflate(io, mode)).0;
+                self.finished = true;
+                if zlib_emit(&mut self.outbuf, out) {
                     exit = PSFS_PASS_ON;
-                }
-                if close && st == 1 && self.fmt == ZFormat::Gzip && !self.trailer_done {
-                    let mut t = self.crc.sum().to_le_bytes().to_vec();
-                    t.extend_from_slice(&self.crc.amount().to_le_bytes());
-                    out.append(new_bucket(t));
-                    exit = PSFS_PASS_ON;
-                }
-                if close {
-                    self.trailer_done = true;
                 }
             }
-            self.finished = true;
         }
         if let Some(c) = consumed {
             *c = total;
