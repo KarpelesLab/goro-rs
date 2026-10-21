@@ -6205,192 +6205,257 @@ fn php_urldecode(s: &str) -> String {
 
 // === URL ===
 
-fn parse_url_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    use goro_core::array::ArrayKey;
-    let url = args.first().unwrap_or(&Value::Null).to_php_string();
-    let component = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
-    let url_str = url.to_string_lossy();
+#[derive(Default)]
+struct PhpUrl {
+    scheme: Option<Vec<u8>>,
+    user: Option<Vec<u8>>,
+    pass: Option<Vec<u8>>,
+    host: Option<Vec<u8>>,
+    port: u16,
+    has_port: bool,
+    path: Option<Vec<u8>>,
+    query: Option<Vec<u8>>,
+    fragment: Option<Vec<u8>>,
+}
 
-    // Simple URL parser
-    let mut scheme = "";
-    let mut host = "";
-    let mut port: Option<i64> = None;
-    let mut user = "";
-    let mut pass = "";
-    let mut path = "";
-    let mut query = "";
-    let mut fragment = "";
-
-    let mut rest = url_str.as_str();
-
-    // Extract fragment
-    if let Some(pos) = rest.find('#') {
-        fragment = &rest[pos + 1..];
-        rest = &rest[..pos];
+/// php_url_parse_ex2() (ext/standard/url.c)
+fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
+    fn ctl(v: &[u8]) -> Vec<u8> {
+        v.iter().map(|&c| if c < 0x20 || c == 0x7f { b'_' } else { c }).collect()
     }
-
-    // Extract query
-    if let Some(pos) = rest.find('?') {
-        query = &rest[pos + 1..];
-        rest = &rest[..pos];
+    fn memchr(b: &[u8], from: usize, to: usize, c: u8) -> Option<usize> {
+        b[from..to].iter().position(|&x| x == c).map(|p| p + from)
     }
-
-    // Extract scheme
-    if let Some(pos) = rest.find("://") {
-        scheme = &rest[..pos];
-        rest = &rest[pos + 3..];
+    fn memrchr(b: &[u8], from: usize, to: usize, c: u8) -> Option<usize> {
+        b[from..to].iter().rposition(|&x| x == c).map(|p| p + from)
     }
-
-    // Extract user:pass@host:port
-    if !scheme.is_empty() || rest.starts_with("//") {
-        if rest.starts_with("//") {
-            rest = &rest[2..];
+    fn strcspn(b: &[u8], from: usize, to: usize, chars: &[u8]) -> usize {
+        let mut e = to;
+        for &c in chars {
+            if let Some(p) = memchr(b, from, e, c) {
+                e = p;
+            }
         }
-        // Find path start
-        let authority_end = rest.find('/').unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        rest = &rest[authority_end..];
-
-        // user:pass@host:port
-        let (userinfo, hostport) = if let Some(at) = authority.find('@') {
-            (&authority[..at], &authority[at + 1..])
-        } else {
-            ("", authority)
-        };
-
-        if !userinfo.is_empty() {
-            if let Some(colon) = userinfo.find(':') {
-                user = &userinfo[..colon];
-                pass = &userinfo[colon + 1..];
+        e
+    }
+    fn parse_port_num(digits: &[u8]) -> Option<u16> {
+        // ZEND_STRTOL: leading digits only (the caller already checked them)
+        let mut v: i64 = 0;
+        let mut any = false;
+        for &c in digits {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            any = true;
+            v = v * 10 + (c - b'0') as i64;
+            if v > 100000 {
+                break;
+            }
+        }
+        if any && (0..=65535).contains(&v) { Some(v as u16) } else { None }
+    }
+    #[derive(PartialEq)]
+    enum L { ParsePort, ParseHost, JustPath }
+    let mut ret = PhpUrl::default();
+    let ue = b.len();
+    let mut s = 0usize;
+    let mut e_opt = memchr(b, 0, ue, b':');
+    let label: L;
+    'scheme: {
+        if let Some(e) = e_opt.filter(|&e| e != s) {
+            // validate scheme
+            let mut p = s;
+            while p < e {
+                let c = b[p];
+                if !c.is_ascii_alphabetic() && !c.is_ascii_digit() && c != b'+' && c != b'.' && c != b'-' {
+                    if e + 1 < ue && e < strcspn(b, s, ue, b"?#") {
+                        label = L::ParsePort;
+                    } else if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
+                        s += 2;
+                        e_opt = None;
+                        label = L::ParseHost;
+                    } else {
+                        label = L::JustPath;
+                    }
+                    break 'scheme;
+                }
+                p += 1;
+            }
+            if e + 1 == ue {
+                ret.scheme = Some(ctl(&b[s..e]));
+                return Some(ret);
+            }
+            if b[e + 1] != b'/' {
+                let mut p = e + 1;
+                while p < ue && b[p].is_ascii_digit() {
+                    p += 1;
+                }
+                if (p == ue || b[p] == b'/') && (p - e) < 7 {
+                    label = L::ParsePort;
+                    break 'scheme;
+                }
+                ret.scheme = Some(ctl(&b[s..e]));
+                s = e + 1;
+                label = L::JustPath;
+                break 'scheme;
             } else {
-                user = userinfo;
+                ret.scheme = Some(ctl(&b[s..e]));
+                if e + 2 < ue && b[e + 2] == b'/' {
+                    s = e + 3;
+                    if ret.scheme.as_deref().map(|x| x.eq_ignore_ascii_case(b"file")).unwrap_or(false)
+                        && e + 3 < ue && b[e + 3] == b'/'
+                    {
+                        if e + 5 < ue && b[e + 5] == b':' {
+                            s = e + 4;
+                        }
+                        label = L::JustPath;
+                        break 'scheme;
+                    }
+                    label = L::ParseHost;
+                } else {
+                    s = e + 1;
+                    label = L::JustPath;
+                }
+                break 'scheme;
             }
-        }
-
-        // host:port
-        if let Some(colon) = hostport.rfind(':') {
-            host = &hostport[..colon];
-            port = hostport[colon + 1..].parse().ok();
+        } else if e_opt.is_some() {
+            label = L::ParsePort;
+        } else if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
+            s += 2;
+            label = L::ParseHost;
         } else {
-            host = hostport;
+            label = L::JustPath;
         }
     }
-
-    if rest.is_empty() && scheme.is_empty() {
-        path = &url_str;
-    } else {
-        path = rest;
+    let mut label = label;
+    if label == L::ParsePort {
+        let e = e_opt.unwrap();
+        let p = e + 1;
+        let mut pp = p;
+        while pp < ue && pp - p < 6 && b[pp].is_ascii_digit() {
+            pp += 1;
+        }
+        if pp - p > 0 && pp - p < 6 && (pp == ue || b[pp] == b'/') {
+            match parse_port_num(&b[p..pp]) {
+                Some(port) => {
+                    ret.has_port = true;
+                    ret.port = port;
+                    if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
+                        s += 2;
+                    }
+                    label = L::ParseHost;
+                }
+                None => return None,
+            }
+        } else if p == pp && pp == ue {
+            return None;
+        } else if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
+            s += 2;
+            label = L::ParseHost;
+        } else {
+            label = L::JustPath;
+        }
     }
+    if label == L::ParseHost {
+        let e = strcspn(b, s, ue, b"/?#");
+        if let Some(p) = memrchr(b, s, e, b'@') {
+            if let Some(pp) = memchr(b, s, p, b':') {
+                ret.user = Some(ctl(&b[s..pp]));
+                ret.pass = Some(ctl(&b[pp + 1..p]));
+            } else {
+                ret.user = Some(ctl(&b[s..p]));
+            }
+            s = p + 1;
+        }
+        let pcolon = if s < ue && b[s] == b'[' && e > 0 && b[e - 1] == b']' {
+            None
+        } else {
+            memrchr(b, s, e.max(s), b':')
+        };
+        let p = match pcolon {
+            Some(pc) => {
+                if ret.port == 0 {
+                    let pd = pc + 1;
+                    if e - pd > 5 {
+                        return None;
+                    } else if e - pd > 0 {
+                        match parse_port_num(&b[pd..e]) {
+                            Some(port) => {
+                                ret.has_port = true;
+                                ret.port = port;
+                            }
+                            None => return None,
+                        }
+                    }
+                }
+                pc
+            }
+            None => e,
+        };
+        if p < s + 1 {
+            return None;
+        }
+        ret.host = Some(ctl(&b[s..p]));
+        if e == ue {
+            return Some(ret);
+        }
+        s = e;
+    }
+    // just_path
+    let mut e = ue;
+    if let Some(p) = memchr(b, s, e, b'#') {
+        let p1 = p + 1;
+        ret.fragment = Some(if p1 < e { ctl(&b[p1..e]) } else { Vec::new() });
+        e = p;
+    }
+    if let Some(p) = memchr(b, s, e, b'?') {
+        let p1 = p + 1;
+        ret.query = Some(if p1 < e { ctl(&b[p1..e]) } else { Vec::new() });
+        e = p;
+    }
+    if s < e || s == ue {
+        ret.path = Some(ctl(&b[s..e]));
+    }
+    Some(ret)
+}
 
-    // Return specific component or full array
-    if component >= 0 {
-        // PHP_URL_SCHEME=0, PHP_URL_HOST=1, PHP_URL_PORT=2, PHP_URL_USER=3,
-        // PHP_URL_PASS=4, PHP_URL_PATH=5, PHP_URL_QUERY=6, PHP_URL_FRAGMENT=7
-        return Ok(match component {
-            0 => {
-                if scheme.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(scheme.to_string()))
-                }
+fn parse_url_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let st = vm.value_to_string(args.first().unwrap_or(&Value::Null));
+    let key = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
+    let res = match php_url_parse_ex2(st.as_bytes()) {
+        Some(r) => r,
+        None => return Ok(Value::False),
+    };
+    let sv = |v: &Option<Vec<u8>>| v.as_ref().map(|x| Value::String(PhpString::from_vec(x.clone()))).unwrap_or(Value::Null);
+    if key > -1 {
+        return Ok(match key {
+            0 => sv(&res.scheme),
+            1 => sv(&res.host),
+            2 => if res.has_port { Value::Long(res.port as i64) } else { Value::Null },
+            3 => sv(&res.user),
+            4 => sv(&res.pass),
+            5 => sv(&res.path),
+            6 => sv(&res.query),
+            7 => sv(&res.fragment),
+            _ => {
+                let msg = format!("parse_url(): Argument #2 ($component) must be a valid URL component identifier, {} given", key);
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
-            1 => {
-                if host.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(host.to_string()))
-                }
-            }
-            2 => port.map(Value::Long).unwrap_or(Value::Null),
-            3 => {
-                if user.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(user.to_string()))
-                }
-            }
-            4 => {
-                if pass.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(pass.to_string()))
-                }
-            }
-            5 => {
-                if path.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(path.to_string()))
-                }
-            }
-            6 => {
-                if query.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(query.to_string()))
-                }
-            }
-            7 => {
-                if fragment.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(PhpString::from_string(fragment.to_string()))
-                }
-            }
-            _ => Value::Null,
         });
     }
-
-    let mut result = PhpArray::new();
-    if !scheme.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"scheme")),
-            Value::String(PhpString::from_string(scheme.to_string())),
-        );
-    }
-    if !host.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"host")),
-            Value::String(PhpString::from_string(host.to_string())),
-        );
-    }
-    if let Some(p) = port {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"port")),
-            Value::Long(p),
-        );
-    }
-    if !user.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"user")),
-            Value::String(PhpString::from_string(user.to_string())),
-        );
-    }
-    if !pass.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"pass")),
-            Value::String(PhpString::from_string(pass.to_string())),
-        );
-    }
-    if !path.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"path")),
-            Value::String(PhpString::from_string(path.to_string())),
-        );
-    }
-    if !query.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"query")),
-            Value::String(PhpString::from_string(query.to_string())),
-        );
-    }
-    if !fragment.is_empty() {
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"fragment")),
-            Value::String(PhpString::from_string(fragment.to_string())),
-        );
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    let mut out = PhpArray::new();
+    let mut put = |k: &[u8], v: Value| out.set(ArrayKey::String(PhpString::from_bytes(k)), v);
+    if res.scheme.is_some() { put(b"scheme", sv(&res.scheme)); }
+    if res.host.is_some() { put(b"host", sv(&res.host)); }
+    if res.has_port { put(b"port", Value::Long(res.port as i64)); }
+    if res.user.is_some() { put(b"user", sv(&res.user)); }
+    if res.pass.is_some() { put(b"pass", sv(&res.pass)); }
+    if res.path.is_some() { put(b"path", sv(&res.path)); }
+    if res.query.is_some() { put(b"query", sv(&res.query)); }
+    if res.fragment.is_some() { put(b"fragment", sv(&res.fragment)); }
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
 fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
