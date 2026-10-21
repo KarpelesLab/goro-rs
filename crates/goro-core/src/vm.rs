@@ -554,6 +554,10 @@ pub struct Vm {
     vm_call: bool,
     /// The emulated C stack was sized from the INI settings.
     stack_configured: bool,
+    /// The function found by fast_fcall_target()
+    fast_fcall_fn: Option<Rc<OpArray>>,
+    /// (and where "::" is in its name, for a method)
+    fast_fcall_sep: Option<usize>,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -883,6 +887,8 @@ impl Vm {
             call_depth: 0,
             vm_call: false,
             stack_configured: false,
+            fast_fcall_fn: None,
+            fast_fcall_sep: None,
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
             pending_return: None,
@@ -14797,6 +14803,101 @@ impl Vm {
         crate::stack::configure(max, reserved);
     }
 
+    /// Whether the call DO_FCALL is about to make is a plain call that the
+    /// general handler would run without any of its special cases: a user
+    /// function, or a public instance method of a class declared in a file
+    /// called on an object, without attributes, parameter types or
+    /// variadics, given enough positional arguments. The function is left
+    /// in `fast_fcall_fn` (and for a method, where "::" is in the name, in
+    /// `fast_fcall_sep`).
+    fn fast_fcall_target(&mut self) -> bool {
+        let Some(call) = self.pending_calls.last() else {
+            return false;
+        };
+        let name = call.name.as_bytes();
+        if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 || name[0] == b'_' {
+            return false;
+        }
+        let mut buf = [0u8; 128];
+        for (d, s) in buf.iter_mut().zip(name) {
+            *d = s.to_ascii_lowercase();
+        }
+        let lower = &buf[..name.len()];
+        let sep = match lower.iter().position(|&b| b == b':') {
+            None => None,
+            Some(p) => {
+                if p == 0 || lower.get(p + 1) != Some(&b':') {
+                    return false;
+                }
+                let method = &lower[p + 2..];
+                if method.is_empty()
+                    || method.contains(&b':')
+                    || method.starts_with(b"__")
+                    || method == b"tokenize"
+                    || lower.starts_with(b"static::")
+                    || lower.starts_with(b"self::")
+                    || lower.starts_with(b"parent::")
+                    || !matches!(call.args.first(), Some(Value::Object(_)))
+                {
+                    return false;
+                }
+                // A user class declared in a file, not an enum, and the
+                // method is public.
+                let Some(class) = self.classes.get(&lower[..p]) else {
+                    return false;
+                };
+                if class.filename.is_none()
+                    || class.is_enum
+                    || !class
+                        .get_method(method)
+                        .is_some_and(|m| m.visibility == Visibility::Public && !m.is_abstract)
+                {
+                    return false;
+                }
+                Some(p)
+            }
+        };
+        if self.functions.contains_key(lower) {
+            return false;
+        }
+        let Some(f) = self.user_functions.get(lower) else {
+            return false;
+        };
+        let implicit = usize::from(sep.is_some());
+        let nargs = call.args.len();
+        let required = f.required_param_count as usize;
+        let simple = f.attributes.is_empty()
+            && !f.is_generator
+            && (sep.is_some() || f.scope_class.is_none())
+            && f.variadic_param.is_none()
+            && (f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")) == sep.is_some()
+            && !crate::closure::is_closure_fn_name(&f.name)
+            && f.param_types.iter().all(|t| t.is_none())
+            && nargs >= implicit + required
+            && !call.args[implicit..implicit + required]
+                .iter()
+                .any(|a| matches!(a, Value::Undef));
+        if simple {
+            self.fast_fcall_fn = Some(f.clone());
+            self.fast_fcall_sep = sep;
+        }
+        simple
+    }
+
+    /// The user function called `name` (case-insensitively).
+    #[inline]
+    pub(crate) fn user_fn_lookup(&self, name: &[u8]) -> Option<&Rc<OpArray>> {
+        let mut buf = [0u8; 64];
+        if name.len() <= buf.len() {
+            for (d, s) in buf.iter_mut().zip(name) {
+                *d = s.to_ascii_lowercase();
+            }
+            self.user_functions.get(&buf[..name.len()])
+        } else {
+            self.user_functions.get(&name.to_ascii_lowercase())
+        }
+    }
+
     /// zend_call_stack_size_error(): the (emulated) C stack is used up.
     #[cold]
     pub(crate) fn stack_size_error(&mut self, size: usize) -> VmError {
@@ -19767,14 +19868,7 @@ impl Vm {
                             .pending_calls
                             .last()
                             .and_then(|call| {
-                                let name_lower: Vec<u8> = call
-                                    .name
-                                    .as_bytes()
-                                    .iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect();
-                                self.user_functions
-                                    .get(&name_lower)
+                                self.user_fn_lookup(call.name.as_bytes())
                                     .and_then(|f| f.by_ref_params.get(arg_index).copied())
                             })
                             .unwrap_or(false)
@@ -20047,13 +20141,7 @@ impl Vm {
                         .pending_calls
                         .last()
                         .and_then(|call| {
-                            let name_lower: Vec<u8> = call
-                                .name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            self.user_functions.get(&name_lower).map(|f| {
+                            self.user_fn_lookup(call.name.as_bytes()).map(|f| {
                                 let var_is_ref = f.variadic_param.is_some()
                                     && f.by_ref_params.last().copied().unwrap_or(false);
                                 (f.by_ref_params.clone(), var_is_ref)
@@ -20452,6 +20540,178 @@ impl Vm {
                     Flow::Continue => continue 'exec,
                     Flow::Return(v) => return Ok(v),
                 },
+                // A plain call of a user function or method (see
+                // fast_fcall_target): the general handler below, without its
+                // special cases.
+                OpCode::DoFCall if self.fast_fcall_target() => {
+                    match outlined(|| -> Result<Flow, VmError> {
+                        let user_fn = self.fast_fcall_fn.take().expect("fast call target");
+                        // Instance method: where "::" is in the name
+                        let method_sep = self.fast_fcall_sep.take();
+                        self.last_call_by_ref = false;
+                        let mut call = self.pending_calls.pop().expect("pending call");
+                        while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                        {
+                            self.closure_pending_calls.pop();
+                        }
+                        if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
+                            self.closure_pending_calls.pop();
+                        }
+                        // Push call stack frame early for proper error stack traces
+                        let display = if !user_fn.display_name.is_empty() {
+                            String::from_utf8_lossy(&user_fn.display_name).to_string()
+                        } else if let (Some(sep), Some(scope)) = (method_sep, &user_fn.scope_class)
+                        {
+                            // The method's declaring class, as written
+                            let method_name =
+                                String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..]);
+                            let class_display = match self.classes.get(scope) {
+                                Some(c) => String::from_utf8_lossy(&c.name),
+                                None => String::from_utf8_lossy(scope),
+                            };
+                            let mut d =
+                                String::with_capacity(class_display.len() + 2 + method_name.len());
+                            d.push_str(&class_display);
+                            d.push_str("::");
+                            d.push_str(&method_name);
+                            d
+                        } else {
+                            String::from_utf8_lossy(call.name.as_bytes()).into_owned()
+                        };
+                        let is_method = method_sep.is_some();
+                        self.call_stack.push((
+                            display,
+                            self.current_file.clone(),
+                            op.line,
+                            call.args[usize::from(is_method)..].to_vec(),
+                            is_method,
+                        ));
+                        let was_global = self.is_global_scope;
+                        self.is_global_scope = false;
+                        if let Some(sep) = method_sep {
+                            // Late static binding: the object's class; the scope:
+                            // the class declaring the method.
+                            let called_class = match call.args.first() {
+                                Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
+                                _ => unreachable!("instance call without $this"),
+                            };
+                            self.called_class_stack.push(called_class);
+                            let name = call.name.as_bytes();
+                            let mut buf = [0u8; 128];
+                            for (d, s) in buf.iter_mut().zip(name) {
+                                *d = s.to_ascii_lowercase();
+                            }
+                            let class_lower = &buf[..sep];
+                            let defining_class = self
+                                .classes
+                                .get(class_lower)
+                                .and_then(|c| c.get_method(&name[sep + 2..]))
+                                .map(|m| m.declaring_class.clone())
+                                .unwrap_or_else(|| class_lower.to_vec());
+                            self.class_scope_stack.push(defining_class);
+                        }
+                        let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                        for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()) {
+                            *slot = arg.clone();
+                        }
+                        // By-value array parameters get their own copy so writes in
+                        // the callee don't leak into the caller's array.
+                        for (ci, slot) in func_cvs.iter_mut().enumerate() {
+                            if user_fn.by_ref_params.get(ci).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            if let Value::Array(a) = slot {
+                                if Rc::strong_count(a) > 1 {
+                                    let copy = a.borrow().clone();
+                                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                                }
+                            }
+                        }
+                        let saved_pending_return = self.pending_return.take();
+                        let saved_pending_jump = self.pending_finally_jump.take();
+                        if !matches!(op.op2, OperandType::Unused) && user_fn.returns_by_ref {
+                            // `$x = &f()` & co.: keep the returned reference.
+                            self.keep_ref_depth = Some(self.call_depth + 1);
+                        }
+                        let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
+                        self.keep_ref_depth = None;
+                        if self.pending_return.is_none() {
+                            self.pending_return = saved_pending_return;
+                        }
+                        if self.pending_finally_jump.is_none() {
+                            self.pending_finally_jump = saved_pending_jump;
+                        }
+                        // The frame stays on the call stack for the trace of an error.
+                        let call_failed = call_result.is_err();
+                        if !call_failed {
+                            self.call_stack.pop();
+                        }
+                        if is_method {
+                            self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                        }
+                        self.is_global_scope = was_global;
+                        let result = match call_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if self.fiber_suspended {
+                                    if call_failed {
+                                        self.call_stack.pop();
+                                    }
+                                    // (as the general handler does)
+                                    if is_method {
+                                        self.called_class_stack.pop();
+                                        self.class_scope_stack.pop();
+                                    }
+                                    return Err(e);
+                                }
+                                if let Some(exc) = self.current_exception.take() {
+                                    if let Some((
+                                        catch_target,
+                                        _,
+                                        _,
+                                        saved_depth,
+                                        saved_pending_calls,
+                                    )) = exception_handlers.pop()
+                                    {
+                                        if call_failed {
+                                            self.call_stack.pop();
+                                        }
+                                        self.pending_calls.truncate(saved_pending_calls);
+                                        while self.error_reporting_stack.len() > saved_depth {
+                                            if let Some(saved) = self.error_reporting_stack.pop() {
+                                                self.error_reporting = saved;
+                                            }
+                                        }
+                                        self.current_exception = Some(exc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    self.current_exception = Some(exc);
+                                }
+                                return Err(e);
+                            }
+                        };
+                        // The arguments are released when the call returns.
+                        if self.has_release_work() && !call.args.is_empty() {
+                            call.args.clear();
+                            self.current_line = op.line;
+                            release_point!(outlined);
+                        }
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
+                }
                 OpCode::DoFCall => match outlined(|| -> Result<Flow, VmError> {
                     self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
@@ -38500,13 +38760,7 @@ impl Vm {
                         .last()
                         .and_then(|call| {
                             let idx = call.args.len();
-                            let name_lower: Vec<u8> = call
-                                .name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            self.user_functions.get(&name_lower).map(|f| {
+                            self.user_fn_lookup(call.name.as_bytes()).map(|f| {
                                 match f.by_ref_params.get(idx) {
                                     Some(b) => *b,
                                     None => {
@@ -48688,27 +48942,27 @@ impl Vm {
                                                                     .collect();
                                                             if cm_declaring_lower == caller_lower {
                                                                 // Use the caller's own private method instead
-                                                                Some(caller_method.clone())
+                                                                Some(caller_method)
                                                             } else {
-                                                                initial_method.cloned()
+                                                                initial_method
                                                             }
                                                         } else {
-                                                            initial_method.cloned()
+                                                            initial_method
                                                         }
                                                     } else {
-                                                        initial_method.cloned()
+                                                        initial_method
                                                     }
                                                 } else {
-                                                    initial_method.cloned()
+                                                    initial_method
                                                 }
                                             } else {
-                                                initial_method.cloned()
+                                                initial_method
                                             }
                                         } else {
-                                            initial_method.cloned()
+                                            initial_method
                                         }
                                     } else {
-                                        initial_method.cloned()
+                                        initial_method
                                     }
                                 } else {
                                     None
@@ -48752,7 +49006,6 @@ impl Vm {
                                     // MethodDef stores attributes separately from OpArray, but
                                     // DoFCall's deprecation/nodiscard checks look at
                                     // user_fn.attributes — propagate them here.
-                                    let call_name = PhpString::from_vec(func_name.clone());
                                     let mut method_op_array = method.op_array.clone();
                                     if method_op_array.attributes.is_empty()
                                         && !method.attributes.is_empty()
@@ -48760,16 +49013,25 @@ impl Vm {
                                         std::rc::Rc::make_mut(&mut method_op_array).attributes =
                                             method.attributes.clone();
                                     }
-                                    self.user_functions
-                                        .insert(func_name.to_ascii_lowercase(), method_op_array);
+                                    // (Usually it is already there.)
+                                    if !self
+                                        .user_fn_lookup(&func_name)
+                                        .is_some_and(|f| Rc::ptr_eq(f, &method_op_array))
+                                    {
+                                        self.user_functions.insert(
+                                            func_name.to_ascii_lowercase(),
+                                            method_op_array,
+                                        );
+                                    }
+                                    let call_name = PhpString::from_vec(func_name);
 
                                     // Push the pending call with $this as the first implicit arg
                                     // For static methods, don't pass $this
-                                    let args = if method.is_static {
-                                        vec![]
-                                    } else {
-                                        vec![obj_val.clone()] // $this is first arg, mapped to CV 0
-                                    };
+                                    // (room for the arguments sent next)
+                                    let mut args = Vec::with_capacity(4);
+                                    if !method.is_static {
+                                        args.push(obj_val.clone()); // $this is first arg, mapped to CV 0
+                                    }
                                     self.pending_calls.push(PendingCall {
                                         name: call_name,
                                         args,

@@ -21,24 +21,18 @@ impl Vm {
         class_lower: &[u8],
         bases: &[&'static [u8]],
     ) -> Option<&'static [u8]> {
-        let mut cur: Vec<u8> = class_lower.to_vec();
+        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
         for _ in 0..64 {
-            if let Some(b) = bases.iter().find(|b| **b == cur.as_slice()) {
+            if let Some(b) = bases.iter().find(|b| **b == &*cur) {
                 return Some(b);
             }
             let next: Option<Vec<u8>> = self
                 .classes
-                .get(&cur)
-                .and_then(|c| c.parent.clone())
-                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                .or_else(|| {
-                    crate::vm::get_builtin_parent(&cur)
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                });
-            {
-                let n = next?;
-                cur = n
-            }
+                .get(&*cur)
+                .and_then(|c| c.parent.as_ref())
+                .map(|p| p.to_ascii_lowercase())
+                .or_else(|| crate::vm::get_builtin_parent(&cur).map(|p| p.to_ascii_lowercase()));
+            cur = std::borrow::Cow::Owned(next?);
         }
         None
     }
