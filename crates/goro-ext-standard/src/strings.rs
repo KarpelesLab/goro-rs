@@ -560,11 +560,31 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg, line: vm.current_line });
     }
     let total_len = s.len().saturating_mul(times as usize);
-    if total_len > 256 * 1024 * 1024 {
-        // 256MB string limit (matches PHP default memory_limit)
-        return Ok(Value::String(PhpString::empty()));
+    // zend_string_safe_alloc(): bail out like the Zend allocator would.
+    let mem_limit = goro_core::value::memory_get_limit();
+    let over = if mem_limit > 0 {
+        goro_core::value::memory_get_usage().saturating_add(total_len) > mem_limit
+    } else {
+        total_len > (1usize << 40)
+    };
+    if over {
+        let msg = format!(
+            "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+            mem_limit, total_len.saturating_add(25) & !7,
+        );
+        let line = vm.current_line;
+        return Err(vm.emit_fatal_at(&msg, line));
     }
-    let repeated = s.as_bytes().repeat(times as usize);
+    let mut repeated: Vec<u8> = Vec::new();
+    if repeated.try_reserve_exact(total_len).is_err() {
+        let msg = format!("Out of memory (allocated {}) (tried to allocate {} bytes)",
+            goro_core::value::memory_get_usage(), total_len);
+        let line = vm.current_line;
+        return Err(vm.emit_fatal_at(&msg, line));
+    }
+    for _ in 0..times {
+        repeated.extend_from_slice(s.as_bytes());
+    }
     Ok(Value::String(PhpString::from_vec(repeated)))
 }
 
@@ -1094,11 +1114,15 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
             let mut num = 0usize;
             let mut has_num = false;
             while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                num = num * 10 + (format_bytes[i] - b'0') as usize;
+                num = num.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
                 has_num = true;
                 i += 1;
             }
             if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
+                if num == 0 || num >= i32::MAX as usize {
+                    // Invalid argnum: the formatting pass raises the ValueError.
+                    return Ok(());
+                }
                 if num > max_arg {
                     max_arg = num;
                 }
@@ -1233,7 +1257,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
         let mut overflow = false;
         while *i < fmt.len() && fmt[*i].is_ascii_digit() {
             num = num.saturating_mul(10).saturating_add((fmt[*i] - b'0') as u64);
-            if num > i32::MAX as u64 { overflow = true; }
+            if num >= i32::MAX as u64 { overflow = true; }
             *i += 1;
         }
         *i += 1; // skip $
@@ -5150,7 +5174,19 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'H' | b'h' => {
                 // H = hex string, high nibble first; h = hex string, low nibble first
-                // PHP: count must not exceed INT_MAX / 2
+                // PHP: size = (arg + (arg > 0)) / 2 bytes must be available
+                // before the repeater limit is checked.
+                if count != u32::MAX {
+                    let size = ((count as i64) + (count > 0) as i64) / 2;
+                    let avail = bytes.len() as i64 - pos as i64;
+                    if size > avail {
+                        _vm.emit_warning(&format!(
+                            "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
+                            code as char, size as i32, avail, if avail == 1 { "was" } else { "were" }
+                        ));
+                        return Ok(Value::False);
+                    }
+                }
                 if count != u32::MAX && count > (i32::MAX as u32) / 2 {
                     let msg = format!(
                         "unpack(): Argument #1 ($format) repeater must be less than or equal to {}",
