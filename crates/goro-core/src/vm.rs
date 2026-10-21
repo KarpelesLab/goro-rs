@@ -35317,26 +35317,6 @@ impl Vm {
                             });
                         }
                     }
-                    // The unset property no longer holds its reference.
-                    if typed_ref::any() {
-                        if let Value::Object(o) = &obj_val_raw {
-                            let slot_ref =
-                                o.borrow().properties.iter().find_map(|(k, v)| match v {
-                                    Value::Reference(r) if k.as_slice() == prop_name.as_bytes() => {
-                                        Some(r.clone())
-                                    }
-                                    _ => None,
-                                });
-                            if let Some(r) = slot_ref {
-                                let cl = o.borrow().class_name.to_ascii_lowercase();
-                                if let Some((_, decl, _, Some(_), _)) =
-                                    self.find_property_def(&cl, prop_name.as_bytes())
-                                {
-                                    self.typed_ref_unregister(&r, &decl, prop_name.as_bytes());
-                                }
-                            }
-                        }
-                    }
                     if let Value::Object(obj) = &obj_val_raw {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.unset_property) {
                             if f(self, obj, prop_name.as_bytes()) {
