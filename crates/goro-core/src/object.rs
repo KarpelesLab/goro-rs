@@ -184,6 +184,14 @@ std::thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+std::thread_local! {
+    /// Extension hook run when an object is freed, with the address of the
+    /// `PhpObject` (`Rc::as_ptr`). Used by ext/xmlwriter to flush output when
+    /// the writer object goes away, as PHP's object dtor does.
+    pub static OBJECT_FREE_HOOK: std::cell::Cell<Option<fn(usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// A PHP object instance
 #[derive(Debug, Clone)]
 pub struct PhpObject {
@@ -239,6 +247,9 @@ impl GcFlag {
 
 impl Drop for PhpObject {
     fn drop(&mut self) {
+        if let Ok(Some(hook)) = OBJECT_FREE_HOOK.try_with(|h| h.get()) {
+            hook(self as *const PhpObject as usize);
+        }
         for (_, v) in self.properties.iter() {
             crate::gc::on_child_released(v);
         }

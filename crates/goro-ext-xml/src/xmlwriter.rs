@@ -10,9 +10,7 @@ use goro_core::vm::{NativeClassHandler, Vm, VmError};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use textwriter::{
-    EncKind, Encoder, MINLEN, OutBuf, TextWriter, builtin_encoder, utf8_char, valid_name,
-};
+use textwriter::{EncKind, Encoder, MbConv, TextWriter, builtin_encoder, valid_name};
 
 type R<T> = Result<T, VmError>;
 type Obj = Rc<RefCell<PhpObject>>;
@@ -22,7 +20,10 @@ type Obj = Rc<RefCell<PhpObject>>;
 enum Sink {
     /// openMemory/toMemory: PHP's smart_str output buffer.
     Memory(Vec<u8>),
-    /// openUri (owned: closed with the writer) or toStream (borrowed).
+    /// openUri on a local file.
+    File(std::fs::File),
+    /// openUri through a stream wrapper (owned: closed with the writer) or
+    /// toStream (borrowed).
     Stream { res: Value, owned: bool },
 }
 
@@ -43,10 +44,44 @@ thread_local! {
     /// hold keeps the allocation (and thus the address) reserved.
     static WRITERS: RefCell<HashMap<usize, Slot>> = RefCell::new(HashMap::new());
     static NEXT_SEQ: Cell<u64> = const { Cell::new(1) };
+    /// Writers of freed objects whose output needs the VM to be flushed.
+    static DEFERRED: RefCell<Vec<Box<PhpWriter>>> = const { RefCell::new(Vec::new()) };
 }
 
+impl PhpWriter {
+    /// Whether flushing needs the VM (PHP streams, mbstring conversion).
+    fn needs_vm(&self) -> bool {
+        matches!(self.sink, Sink::Stream { .. })
+            || matches!(
+                self.tw.out.encoder.as_ref().map(|e| &e.kind),
+                Some(EncKind::Mb(_))
+            )
+    }
+}
+
+/// OBJECT_FREE_HOOK: the XMLWriter object went away — free its writer now
+/// (xmlwriter_object_dtor), or as soon as the VM is available.
+fn on_object_free(addr: usize) {
+    let slot = WRITERS
+        .try_with(|w| w.try_borrow_mut().ok().and_then(|mut m| m.remove(&addr)))
+        .ok()
+        .flatten();
+    if let Some(Slot {
+        writer: Some(mut w),
+        ..
+    }) = slot
+    {
+        if w.needs_vm() {
+            let _ = DEFERRED.try_with(|d| d.borrow_mut().push(w));
+        } else {
+            pump(None, &mut w, true);
+        }
+    }
+}
+
+/// Address of the PhpObject itself (what OBJECT_FREE_HOOK reports).
 fn obj_key(o: &Obj) -> usize {
-    Rc::as_ptr(o) as *const () as usize
+    o.as_ptr() as usize
 }
 
 fn take_writer(o: &Obj) -> Option<Box<PhpWriter>> {
@@ -92,6 +127,10 @@ fn set_writer(vm: &mut Vm, o: &Obj, writer: Box<PhpWriter>) {
 
 /// Free writers whose object is gone (PHP frees them in the object dtor).
 fn sweep(vm: &mut Vm) {
+    let deferred: Vec<Box<PhpWriter>> = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    for w in deferred {
+        close_writer(vm, w);
+    }
     let dead: Vec<Slot> = WRITERS.with(|w| {
         let mut map = w.borrow_mut();
         let keys: Vec<usize> = map
@@ -112,6 +151,7 @@ fn sweep(vm: &mut Vm) {
 
 /// End of request: every remaining writer is freed (flushed and closed).
 fn shutdown(vm: &mut Vm) {
+    sweep(vm);
     let mut all: Vec<Slot> = WRITERS.with(|w| w.borrow_mut().drain().map(|(_, s)| s).collect());
     all.sort_by_key(|s| std::cmp::Reverse(s.seq));
     for s in all {
@@ -123,7 +163,7 @@ fn shutdown(vm: &mut Vm) {
 
 /// xmlFreeTextWriter: flush the output buffer, then close it.
 fn close_writer(vm: &mut Vm, mut w: Box<PhpWriter>) {
-    pump(vm, &mut w, true);
+    pump(Some(vm), &mut w, true);
     if let Sink::Stream { res, owned: true } = &w.sink {
         let res = res.clone();
         if let Value::Resource(id) = res {
@@ -163,13 +203,24 @@ fn stream_is_valid(res: &Value) -> bool {
     }
 }
 
-fn sink_write(vm: &mut Vm, sink: &mut Sink, data: &[u8]) -> i64 {
+fn sink_write(vm: Option<&mut Vm>, sink: &mut Sink, data: &[u8]) -> i64 {
     match sink {
         Sink::Memory(v) => {
             v.extend_from_slice(data);
             data.len() as i64
         }
+        Sink::File(f) => {
+            use std::io::Write;
+            match f.write_all(data) {
+                Ok(()) => data.len() as i64,
+                Err(_) => -1,
+            }
+        }
         Sink::Stream { res, .. } => {
+            let vm = match vm {
+                Some(vm) => vm,
+                None => return -1,
+            };
             if !stream_is_valid(res) {
                 return -1;
             }
@@ -193,124 +244,72 @@ fn s(v: &[u8]) -> Value {
     Value::String(PhpString::from_bytes(v))
 }
 
-fn encode_char(vm: &mut Vm, enc: &mut Encoder, c: u32) -> Option<Vec<u8>> {
-    match &enc.kind {
-        EncKind::Utf8 => char::from_u32(c).map(|ch| ch.to_string().into_bytes()),
-        EncKind::Latin1 => (c < 0x100).then(|| vec![c as u8]),
-        EncKind::Ascii => (c < 0x80).then(|| vec![c as u8]),
-        EncKind::Utf16 | EncKind::Utf16Le | EncKind::Utf16Be => {
-            let ch = char::from_u32(c)?;
-            let mut units = [0u16; 2];
-            let be = matches!(enc.kind, EncKind::Utf16Be);
-            let mut out = Vec::new();
-            for u in ch.encode_utf16(&mut units) {
-                out.extend_from_slice(&if be { u.to_be_bytes() } else { u.to_le_bytes() });
+fn mb_convert(vm: &mut Vm, name: &str, c: u32) -> Option<Vec<u8>> {
+    let ch = char::from_u32(c)?;
+    let utf8 = ch.to_string();
+    match call_builtin(
+        vm,
+        b"mb_convert_encoding",
+        &[s(utf8.as_bytes()), s(name.as_bytes()), s(b"UTF-8")],
+    ) {
+        Some(Value::String(out)) => {
+            let b = out.as_bytes();
+            // mbstring substitutes unmappable characters.
+            if b.is_empty() || (b == b"?" && c != b'?' as u32) {
+                None
+            } else {
+                Some(b.to_vec())
             }
-            Some(out)
         }
-        EncKind::Mb(name) => {
-            if let Some(r) = enc.cache.get(&c) {
-                return r.clone();
-            }
-            let name = name.clone();
-            let ch = char::from_u32(c)?;
-            let utf8 = ch.to_string();
-            let r = match call_builtin(
-                vm,
-                b"mb_convert_encoding",
-                &[s(utf8.as_bytes()), s(name.as_bytes()), s(b"UTF-8")],
-            ) {
-                Some(Value::String(out)) => {
-                    let b = out.as_bytes();
-                    if b.is_empty() || (b == b"?" && c != b'?' as u32) {
-                        None
-                    } else {
-                        Some(b.to_vec())
-                    }
-                }
-                _ => None,
-            };
-            enc.cache.insert(c, r.clone());
-            r
-        }
+        _ => None,
     }
 }
 
-/// xmlCharEncOutput: convert the complete characters of `out.buffer` into
-/// `out.conv`; unmappable characters become decimal character references.
-fn convert(vm: &mut Vm, out: &mut OutBuf) {
-    let mut enc = match out.encoder.take() {
-        Some(e) => e,
-        None => return,
-    };
-    let buf = std::mem::take(&mut out.buffer);
-    let mut conv = out.conv.take().unwrap_or_default();
-    let mut i = 0;
-    while i < buf.len() {
-        let (c, len) = match utf8_char(&buf[i..]) {
-            Ok(v) => v,
-            Err(true) => break,
-            Err(false) => (0xFFFD, 1),
-        };
-        match encode_char(vm, &mut enc, c) {
-            Some(b) => conv.extend_from_slice(&b),
-            None => {
-                for b in format!("&#{};", c).bytes() {
-                    if let Some(e) = encode_char(vm, &mut enc, b as u32) {
-                        conv.extend_from_slice(&e);
-                    }
-                }
+/// Deliver output to the sink: first the chunks xmlOutputBufferWrite
+/// released, then (with `force`, i.e. xmlOutputBufferFlush) everything that
+/// is left. Returns the result of the last write callback.
+fn pump(mut vm: Option<&mut Vm>, w: &mut PhpWriter, force: bool) -> i64 {
+    if w.tw.out.is_mb() {
+        if let Some(vm) = vm.as_deref_mut() {
+            let mut f = |name: &str, c: u32| mb_convert(vm, name, c);
+            let mut mb: MbConv = Some(&mut f);
+            w.tw.out.auto_flush(&mut mb);
+            if force {
+                w.tw.out.convert(&mut mb);
             }
         }
-        i += len;
+    } else if force {
+        w.tw.out.convert(&mut None);
     }
-    out.buffer = buf[i..].to_vec();
-    out.conv = Some(conv);
-    out.encoder = Some(enc);
-}
-
-/// Hand buffered output to the sink. Without `force` this only happens once
-/// MINLEN bytes are pending (xmlOutputBufferWrite); with it, everything goes
-/// (xmlOutputBufferFlush). Returns the write callback's result.
-fn pump(vm: &mut Vm, w: &mut PhpWriter, force: bool) -> i64 {
-    if w.tw.out.error {
-        return -1;
+    let mut ret = 0;
+    let mut chunks = std::mem::take(&mut w.tw.out.ready);
+    if force {
+        chunks.push(w.tw.out.take_pending());
     }
-    let has_enc = w.tw.out.encoder.is_some();
-    if has_enc && (force || w.tw.out.buffer.len() >= 256) {
-        convert(vm, &mut w.tw.out);
-    }
-    let pending = if has_enc {
-        w.tw.out.conv.as_ref().map(|c| c.len()).unwrap_or(0)
-    } else {
-        w.tw.out.buffer.len()
-    };
-    if !force && pending < MINLEN {
-        return 0;
-    }
-    let data = if has_enc {
-        std::mem::take(w.tw.out.conv.get_or_insert_with(Vec::new))
-    } else {
-        std::mem::take(&mut w.tw.out.buffer)
-    };
-    let ret = sink_write(vm, &mut w.sink, &data);
-    let consumed = if ret < 0 {
-        w.tw.out.error = true;
-        0
-    } else {
-        (ret as usize).min(data.len())
-    };
-    if consumed < data.len() {
-        let rest = &data[consumed..];
-        if has_enc {
-            let c = w.tw.out.conv.get_or_insert_with(Vec::new);
-            let mut v = rest.to_vec();
-            v.extend_from_slice(c);
-            *c = v;
+    for data in chunks {
+        if w.tw.out.error {
+            return -1;
+        }
+        ret = sink_write(vm.as_deref_mut(), &mut w.sink, &data);
+        let consumed = if ret < 0 {
+            w.tw.out.error = true;
+            0
         } else {
-            let mut v = rest.to_vec();
-            v.extend_from_slice(&w.tw.out.buffer);
-            w.tw.out.buffer = v;
+            (ret as usize).min(data.len())
+        };
+        if consumed < data.len() {
+            // Keep what the callback did not take at the front of the queue.
+            let rest = data[consumed..].to_vec();
+            if w.tw.out.encoder.is_some() {
+                let c = w.tw.out.conv.get_or_insert_with(Vec::new);
+                let mut v = rest;
+                v.extend_from_slice(c);
+                *c = v;
+            } else {
+                let mut v = rest;
+                v.extend_from_slice(&w.tw.out.buffer);
+                w.tw.out.buffer = v;
+            }
         }
     }
     ret
@@ -848,8 +847,7 @@ fn expand_filepath(p: &[u8]) -> Option<Vec<u8>> {
     Some(full)
 }
 
-/// zend_dirname length semantics: "" when there is no directory part
-/// would give "."; we only need whether a directory component must exist.
+/// zend_dirname.
 fn dirname(p: &[u8]) -> Vec<u8> {
     let mut end = p.len();
     while end > 1 && p[end - 1] == b'/' {
@@ -868,7 +866,9 @@ fn dirname(p: &[u8]) -> Vec<u8> {
     }
 }
 
-fn resolve_uri(source: &[u8]) -> Option<Vec<u8>> {
+/// Returns the path to open and whether it is a local file (as opposed to
+/// a URI handed to a stream wrapper).
+fn resolve_uri(source: &[u8]) -> Option<(Vec<u8>, bool)> {
     let mut src = source;
     let scheme = has_uri_scheme(source);
     let mut is_file = false;
@@ -889,7 +889,7 @@ fn resolve_uri(source: &[u8]) -> Option<Vec<u8>> {
         }
     }
     if scheme && !is_file {
-        return Some(source.to_vec());
+        return Some((source.to_vec(), false));
     }
     let path_str = String::from_utf8_lossy(src).into_owned();
     let resolved = match std::fs::canonicalize(&path_str) {
@@ -900,13 +900,34 @@ fn resolve_uri(source: &[u8]) -> Option<Vec<u8>> {
     if !dir.is_empty() && std::fs::metadata(String::from_utf8_lossy(&dir).as_ref()).is_err() {
         return None;
     }
-    Some(resolved)
+    Some((resolved, true))
 }
 
-fn open_uri_stream(vm: &mut Vm, path: &[u8]) -> Option<Value> {
-    match call_builtin(vm, b"fopen", &[s(path), s(b"wb")]) {
-        Some(v @ Value::Resource(_)) => Some(v),
-        _ => None,
+/// The output side of php_libxml_output_buffer_create_filename ("wb").
+fn open_uri_sink(vm: &mut Vm, ctx: &Ctx, path: &[u8], local: bool) -> Option<Sink> {
+    if !local {
+        return match call_builtin(vm, b"fopen", &[s(path), s(b"wb")]) {
+            Some(v @ Value::Resource(_)) => Some(Sink::Stream {
+                res: v,
+                owned: true,
+            }),
+            _ => None,
+        };
+    }
+    let p = String::from_utf8_lossy(path).into_owned();
+    match std::fs::File::create(&p) {
+        Ok(f) => Some(Sink::File(f)),
+        Err(e) => {
+            let mut msg = e.to_string();
+            if let Some(i) = msg.find(" (os error") {
+                msg.truncate(i);
+            }
+            vm.emit_warning(&format!(
+                "{}({}): Failed to open stream: {}",
+                ctx.fname, p, msg
+            ));
+            None
+        }
     }
 }
 
@@ -927,7 +948,7 @@ fn name_check(vm: &mut Vm, ctx: &Ctx, n: usize, subject: &str, name: &[u8]) -> R
 /// Run one operation of the writer attached to `o`.
 fn with_writer(
     vm: &mut Vm,
-    ctx: &Ctx,
+    _ctx: &Ctx,
     o: &Obj,
     f: impl FnOnce(&mut Vm, &mut PhpWriter) -> R<Value>,
 ) -> R<Value> {
@@ -946,18 +967,18 @@ fn with_writer(
     let mut r = r;
     if w.tw.flush_requested {
         w.tw.flush_requested = false;
-        if pump(vm, &mut w, true) < 0 {
+        if pump(Some(vm), &mut w, true) < 0 {
             if let Ok(Value::True) = r {
                 r = Ok(Value::False);
             }
         }
     } else {
-        pump(vm, &mut w, false);
+        pump(Some(vm), &mut w, false);
     }
     put_writer(o, w);
-    for e in errors {
-        vm.emit_warning(&format!("{}(): error : {}", ctx.fname, e));
-    }
+    // libxml2 raises writer errors without a channel: they only update
+    // xmlLastError and never reach PHP's error handler.
+    drop(errors);
     r
 }
 
@@ -974,7 +995,7 @@ fn dispatch(vm: &mut Vm, ctx: &Ctx, this: Option<Obj>, called: &[u8], args: &[Va
             if uri.is_empty() {
                 return Err(ctx.value_error(vm, 1, "must not be empty"));
             }
-            let path = match resolve_uri(&uri) {
+            let (path, local) = match resolve_uri(&uri) {
                 Some(p) => p,
                 None => {
                     if m == "toUri" {
@@ -984,7 +1005,7 @@ fn dispatch(vm: &mut Vm, ctx: &Ctx, this: Option<Obj>, called: &[u8], args: &[Va
                     return Ok(Value::False);
                 }
             };
-            let res = match open_uri_stream(vm, &path) {
+            let sink = match open_uri_sink(vm, ctx, &path, local) {
                 Some(r) => r,
                 None => {
                     if m == "toUri" {
@@ -995,7 +1016,7 @@ fn dispatch(vm: &mut Vm, ctx: &Ctx, this: Option<Obj>, called: &[u8], args: &[Va
             };
             let w = Box::new(PhpWriter {
                 tw: TextWriter::new(false),
-                sink: Sink::Stream { res, owned: true },
+                sink,
             });
             if m == "toUri" {
                 return create_static(vm, called, w);
@@ -1306,7 +1327,7 @@ fn writer_op(vm: &mut Vm, ctx: &Ctx, o: &Obj, args: &[Value]) -> R<Value> {
             let r = if force_string && !matches!(w.sink, Sink::Memory(_)) {
                 s(b"")
             } else {
-                let bytes = pump(vm, &mut w, true);
+                let bytes = pump(Some(vm), &mut w, true);
                 match &mut w.sink {
                     Sink::Memory(out) => {
                         if empty {
@@ -1390,6 +1411,15 @@ fn call_method(
         is_method: true,
         spec,
     };
+    // The engine names the frame after the lowercased native class.
+    for sep in ["->", "::"] {
+        let canonical = format!("XMLWriter{}{}", sep, spec.method);
+        if let Some(top) = vm.call_stack.last_mut() {
+            if top.0.eq_ignore_ascii_case(&canonical) {
+                top.0 = canonical;
+            }
+        }
+    }
     let this_obj = this.and_then(|t| match t.deref() {
         Value::Object(o) => Some(o),
         _ => None,
@@ -1488,6 +1518,8 @@ procedural! {
 pub fn register(vm: &mut Vm) {
     // A fresh VM: forget writers of a previous request on this thread.
     WRITERS.with(|w| w.borrow_mut().clear());
+    DEFERRED.with(|d| d.borrow_mut().clear());
+    goro_core::object::OBJECT_FREE_HOOK.with(|h| h.set(Some(on_object_free)));
     vm.register_extension(b"xmlwriter");
     register_functions(vm);
     vm.classes.insert(

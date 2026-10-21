@@ -134,6 +134,40 @@ pub struct OutBuf {
     pub encoder: Option<Encoder>,
     /// Latched write error: every further write fails.
     pub error: bool,
+    /// Chunks that xmlOutputBufferWrite handed to the write callback (the
+    /// PHP layer delivers them to the sink, in order).
+    pub ready: Vec<Vec<u8>>,
+}
+
+/// Converter for `EncKind::Mb` characters (None = unmappable). Only
+/// available when the VM is.
+pub type MbConv<'a> = Option<&'a mut dyn FnMut(&str, u32) -> Option<Vec<u8>>>;
+
+fn encode_char(enc: &mut Encoder, c: u32, mb: &mut MbConv) -> Option<Vec<u8>> {
+    match &enc.kind {
+        EncKind::Utf8 => char::from_u32(c).map(|ch| ch.to_string().into_bytes()),
+        EncKind::Latin1 => (c < 0x100).then(|| vec![c as u8]),
+        EncKind::Ascii => (c < 0x80).then(|| vec![c as u8]),
+        EncKind::Utf16 | EncKind::Utf16Le | EncKind::Utf16Be => {
+            let ch = char::from_u32(c)?;
+            let be = matches!(enc.kind, EncKind::Utf16Be);
+            let mut units = [0u16; 2];
+            let mut out = Vec::new();
+            for u in ch.encode_utf16(&mut units) {
+                out.extend_from_slice(&if be { u.to_be_bytes() } else { u.to_le_bytes() });
+            }
+            Some(out)
+        }
+        EncKind::Mb(name) => {
+            if let Some(r) = enc.cache.get(&c) {
+                return r.clone();
+            }
+            let f = mb.as_mut()?;
+            let r = f(name, c);
+            enc.cache.insert(c, r.clone());
+            r
+        }
+    }
 }
 
 impl OutBuf {
@@ -143,15 +177,84 @@ impl OutBuf {
             conv: None,
             encoder: None,
             error: false,
+            ready: Vec::new(),
         }
     }
 
+    pub fn is_mb(&self) -> bool {
+        matches!(self.encoder.as_ref().map(|e| &e.kind), Some(EncKind::Mb(_)))
+    }
+
+    /// xmlOutputBufferWrite: append, convert and hand full buffers out.
     pub fn write(&mut self, data: &[u8]) -> i32 {
         if self.error {
             return -1;
         }
         self.buffer.extend_from_slice(data);
+        if !self.is_mb() {
+            self.auto_flush(&mut None);
+        }
         data.len() as i32
+    }
+
+    /// The MINLEN / 256-byte thresholds of xmlOutputBufferWrite.
+    pub fn auto_flush(&mut self, mb: &mut MbConv) {
+        if self.encoder.is_none() {
+            if self.buffer.len() >= MINLEN {
+                self.ready.push(std::mem::take(&mut self.buffer));
+            }
+            return;
+        }
+        if self.buffer.len() >= 256 {
+            self.convert(mb);
+        }
+        if let Some(conv) = self.conv.as_mut() {
+            if conv.len() >= MINLEN {
+                self.ready.push(std::mem::take(conv));
+            }
+        }
+    }
+
+    /// xmlCharEncOutput: convert the complete characters of `buffer` into
+    /// `conv`; unmappable characters become decimal character references.
+    pub fn convert(&mut self, mb: &mut MbConv) {
+        let mut enc = match self.encoder.take() {
+            Some(e) => e,
+            None => return,
+        };
+        let buf = std::mem::take(&mut self.buffer);
+        let mut conv = self.conv.take().unwrap_or_default();
+        let mut i = 0;
+        while i < buf.len() {
+            let (c, len) = match utf8_char(&buf[i..]) {
+                Ok(v) => v,
+                Err(true) => break,
+                Err(false) => (0xFFFD, 1),
+            };
+            match encode_char(&mut enc, c, mb) {
+                Some(b) => conv.extend_from_slice(&b),
+                None => {
+                    for b in format!("&#{};", c).bytes() {
+                        if let Some(e) = encode_char(&mut enc, b as u32, mb) {
+                            conv.extend_from_slice(&e);
+                        }
+                    }
+                }
+            }
+            i += len;
+        }
+        self.buffer = buf[i..].to_vec();
+        self.conv = Some(conv);
+        self.encoder = Some(enc);
+    }
+
+    /// Take everything pending for xmlOutputBufferFlush.
+    pub fn take_pending(&mut self) -> Vec<u8> {
+        if self.encoder.is_some() {
+            std::mem::take(self.conv.get_or_insert_with(Vec::new))
+        } else {
+            std::mem::take(&mut self.buffer)
+        }
     }
 
     fn set_encoder(&mut self, enc: Option<Encoder>) {
