@@ -843,7 +843,7 @@ impl Compiler {
     /// an error message if the attribute cannot be placed in this context.
     /// `target` is one of: "class", "function", "method", "parameter",
     /// "property", "class constant", "constant".
-    fn validate_internal_attr(name: &[u8], target: &str) -> Option<String> {
+    pub(crate) fn validate_internal_attr(name: &[u8], target: &str) -> Option<String> {
         // Strip leading backslash for fully-qualified names
         let bare: &[u8] = if name.first() == Some(&b'\\') {
             &name[1..]

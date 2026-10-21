@@ -5234,6 +5234,12 @@ impl Parser {
                 let attr_doc = self.take_doc_comment();
                 let attributes = self.parse_attributes()?;
                 let span = self.span();
+                // `#[A] static function () {}` / `#[A] static fn () => ...`
+                let is_static = matches!(self.peek(), TokenKind::Static)
+                    && matches!(self.peek_at(1), TokenKind::Function | TokenKind::Fn);
+                if is_static {
+                    self.advance();
+                }
                 match self.peek() {
                     TokenKind::Function => {
                         self.advance();
@@ -5275,7 +5281,7 @@ impl Parser {
                         Ok(Expr {
                             span,
                             kind: ExprKind::Closure {
-                                is_static: false,
+                                is_static,
                                 params,
                                 use_vars,
                                 return_type,
@@ -5304,7 +5310,7 @@ impl Parser {
                         Ok(Expr {
                             span,
                             kind: ExprKind::ArrowFunction {
-                                is_static: false,
+                                is_static,
                                 params,
                                 return_type,
                                 body: Box::new(body),
