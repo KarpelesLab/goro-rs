@@ -358,6 +358,140 @@ impl Vm {
         true
     }
 
+    /// include_once a file in a fresh function scope (used by spl_autoload).
+    /// Returns false if it could not be read/compiled.
+    pub fn spl_include_once(&mut self, abs_path: &str) -> bool {
+        if self.included_files.contains(abs_path) {
+            return true;
+        }
+        let source = match std::fs::read(abs_path) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        self.included_files.insert(abs_path.to_string());
+        let mut lexer = goro_parser::Lexer::new(&source);
+        let tokens = lexer.tokenize();
+        let mut parser = goro_parser::Parser::new(tokens);
+        let program = match parser.parse() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.source_file = abs_path.as_bytes().to_vec();
+        let old_file = std::mem::replace(&mut self.current_file, abs_path.to_string());
+        let ok = match compiler.compile(&program) {
+            Ok((op_array, classes, warnings)) => {
+                for (msg, wline) in &warnings {
+                    self.emit_warning_at(msg, *wline);
+                }
+                let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
+                let cvs = vec![Value::Undef; op_array.cv_names.len()];
+                let _ = self.execute_op_array_pub(&op_array, cvs);
+                self.pending_classes = saved_pending;
+                true
+            }
+            Err(_) => false,
+        };
+        self.current_file = old_file;
+        ok
+    }
+
+    /// Invoke one registered autoloader (normalized as by
+    /// spl_autoload_register: function name, [class|object, method], or a
+    /// closure/invokable) with the class name. Pushes an
+    /// "[internal function]" frame like zend_call_known_function.
+    pub fn spl_call_autoloader(&mut self, cb: &Value, class_name: &Value) -> Option<crate::vm::VmError> {
+        let mut fatal: Option<crate::vm::VmError> = None;
+        let args = vec![class_name.clone()];
+        // Invokable objects: call __invoke with the object's class scope.
+        if let Value::Object(o) = cb {
+            let cl = obj_class_lower(o);
+            if cl != b"closure" && self.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false) {
+                let mut a = PhpArray::new();
+                a.push(cb.clone());
+                a.push(Value::String(PhpString::from_bytes(b"__invoke")));
+                return self.spl_call_autoloader(&val_arr(a), class_name);
+            }
+        }
+        match cb {
+            Value::Array(a) => {
+                let vals: Vec<Value> = a.borrow().values().cloned().collect();
+                if vals.len() == 2 {
+                    let method = vals[1].to_php_string();
+                    let mlower: Vec<u8> = method.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let (called_lower, this, disp_cls) = match &vals[0] {
+                        Value::Object(o) => (
+                            obj_class_lower(o),
+                            Some(vals[0].clone()),
+                            crate::value::display_class_name(&o.borrow().class_name).to_string(),
+                        ),
+                        other => {
+                            let s = other.to_php_string();
+                            (
+                                s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
+                                None,
+                                s.to_string_lossy(),
+                            )
+                        }
+                    };
+                    let mut mdef = self.classes.get(&called_lower).and_then(|c| c.get_method(&mlower)).cloned();
+                    // Non-public methods are not callable from the internal
+                    // scope: route through __call when available.
+                    if let Some(m) = &mdef {
+                        if m.visibility != crate::object::Visibility::Public && this.is_some() {
+                            if let Some(call) = self.classes.get(&called_lower).and_then(|c| c.get_method(b"__call")).cloned() {
+                                let mut argv = PhpArray::new();
+                                for a in &args {
+                                    argv.push(a.clone());
+                                }
+                                let call_args = vec![Value::String(method.clone()), val_arr(argv)];
+                                self.called_class_stack.push(called_lower.clone());
+                                self.push_class_scope(call.declaring_class.clone());
+                                if let Err(e) = self.execute_fn_with_named_args(&call.op_array, call_args, vec![], this.clone()) { fatal = Some(e); }
+                                self.pop_class_scope();
+                                self.called_class_stack.pop();
+                                return fatal;
+                            }
+                            mdef = Some(m.clone());
+                        }
+                    }
+                    if let Some(m) = mdef {
+                        let sep = if this.is_some() { "->" } else { "::" };
+                        let decl_disp = self
+                            .classes
+                            .get(&m.declaring_class)
+                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .unwrap_or(disp_cls);
+                        let fname = format!("{}{}{}", decl_disp, sep, String::from_utf8_lossy(&m.name));
+                        self.call_stack.push((fname, String::new(), 0, args.clone(), this.is_some()));
+                        self.called_class_stack.push(called_lower.clone());
+                        self.push_class_scope(m.declaring_class.clone());
+                        if let Err(e) = self.execute_fn_with_named_args(&m.op_array, args, vec![], this) { fatal = Some(e); }
+                        self.pop_class_scope();
+                        self.called_class_stack.pop();
+                        self.call_stack.pop();
+                        return fatal;
+                    }
+                }
+                if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+            }
+            Value::String(s) => {
+                let lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                if self.user_functions.contains_key(&lower) {
+                    self.call_stack.push((s.to_string_lossy(), String::new(), 0, args.clone(), false));
+                    if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                    self.call_stack.pop();
+                } else {
+                    if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                }
+            }
+            _ => {
+                if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+            }
+        }
+        fatal
+    }
+
     /// Allocate a new object of `class` (user or built-in) with property
     /// defaults applied; the constructor is not called.
     pub(crate) fn spl_instantiate(&mut self, class: &[u8]) -> Rc<RefCell<PhpObject>> {
@@ -534,6 +668,32 @@ pub fn spl_class_interfaces(class_lower: &[u8]) -> Option<Vec<&'static str>> {
 pub fn spl_class_implements(class_lower: &[u8], iface_lower: &[u8]) -> Option<bool> {
     let list = spl_class_interfaces(class_lower)?;
     Some(list.iter().any(|i| i.as_bytes().eq_ignore_ascii_case(iface_lower)))
+}
+
+std::thread_local! {
+    static AUTOLOADING: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Recursion guard for autoloading: returns false if `class_lower` is
+/// already being autoloaded.
+pub(crate) fn autoload_enter(class_lower: &[u8]) -> bool {
+    AUTOLOADING.with(|a| {
+        let mut a = a.borrow_mut();
+        if a.iter().any(|c| c == class_lower) {
+            return false;
+        }
+        a.push(class_lower.to_vec());
+        true
+    })
+}
+
+pub(crate) fn autoload_leave(class_lower: &[u8]) {
+    AUTOLOADING.with(|a| {
+        let mut a = a.borrow_mut();
+        if let Some(p) = a.iter().rposition(|c| c == class_lower) {
+            a.remove(p);
+        }
+    });
 }
 
 pub(crate) fn mangle_private(class: &[u8], name: &[u8]) -> Vec<u8> {

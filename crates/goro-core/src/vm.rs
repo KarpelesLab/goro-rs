@@ -341,7 +341,7 @@ pub struct Vm {
     /// infinite recursion when the initializer accesses properties on $this.
     lazy_init_in_progress: std::collections::HashSet<u64>,
     /// Pending class definitions (from compiler, indexed by position)
-    pending_classes: Vec<ClassEntry>,
+    pub(crate) pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
     is_global_scope: bool,
     /// User-defined constants (from define())
@@ -453,7 +453,7 @@ pub struct Vm {
     /// CVs returned from the most recent include/eval execution (for scope sharing)
     include_return_cvs: Option<Vec<(Vec<u8>, Value)>>,
     /// Set of files that have been included via include_once/require_once (canonical paths)
-    included_files: std::collections::HashSet<String>,
+    pub(crate) included_files: std::collections::HashSet<String>,
     /// Autoload callback functions (spl_autoload_register)
     pub autoload_functions: Vec<Value>,
     /// Shutdown functions registered via register_shutdown_function
@@ -2192,53 +2192,32 @@ impl Vm {
         // Clone autoload functions to avoid borrow issues
         let autoloaders = self.autoload_functions.clone();
         let class_str = Value::String(PhpString::from_vec(class_name.to_vec()));
+        // Never autoload the same class recursively.
+        if !crate::spl::autoload_enter(&class_lower) {
+            return false;
+        }
+        let mut found = false;
         for callback in &autoloaders {
-            let call_args = vec![class_str.clone()];
-            match callback {
-                Value::String(s) => {
-                    let func_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                        if let Err(e) = self.execute_fn(&user_fn, call_args) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
-                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        let _ = builtin(self, &call_args);
-                    }
+            if let Some(e) = self.spl_call_autoloader(callback, &class_str) {
+                if self.current_exception.is_none() {
+                    variance::set_autoload_fatal(e);
+                    crate::spl::autoload_leave(&class_lower);
+                    return false;
                 }
-                Value::Array(arr) => {
-                    let arr_borrow = arr.borrow();
-                    let vals: Vec<Value> = arr_borrow.values().cloned().collect();
-                    drop(arr_borrow);
-                    if vals.len() >= 2 {
-                        let name = vals[0].to_php_string().as_bytes().to_vec();
-                        let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                            let captured: Vec<Value> = vals[1..].to_vec();
-                            let mut combined_args = captured;
-                            combined_args.extend(call_args);
-                            if let Err(e) = self.execute_fn(&user_fn, combined_args) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
-                        }
-                    }
-                }
-                Value::Object(obj) => {
-                    // Check if it has __invoke
-                    let class_lower_cb: Vec<u8> = {
-                        let obj_borrow = obj.borrow();
-                        obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
-                    };
-                    if let Some(class) = self.classes.get(&class_lower_cb).cloned() {
-                        if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
-                            let op = method.op_array.clone();
-                            if let Err(e) = self.execute_fn_with_named_args(&op, call_args, vec![], Some(Value::Object(obj.clone()))) { if self.current_exception.is_none() { variance::set_autoload_fatal(e); return false; } }
-                        }
-                    }
-                }
-                _ => {}
+            }
+            // An exception thrown by an autoloader stops the chain.
+            if self.current_exception.is_some() {
+                found = self.classes.contains_key(&class_lower);
+                break;
             }
             // Check if the class was loaded
             if self.classes.contains_key(&class_lower) {
-                return true;
+                found = true;
+                break;
             }
         }
-        false
+        crate::spl::autoload_leave(&class_lower);
+        found
     }
 
     pub fn emit_warning(&mut self, msg: &str) {
@@ -31559,8 +31538,11 @@ impl Vm {
                     {
                         let class_display = crate::value::display_class_name(class_name.as_bytes());
                         let err_msg = format!("Class \"{}\" not found", class_display);
-                        let exc = self.create_exception(b"Error", &err_msg, op.line);
-                        self.current_exception = Some(exc);
+                        // An exception thrown by an autoloader wins.
+                        if self.current_exception.is_none() {
+                            let exc = self.create_exception(b"Error", &err_msg, op.line);
+                            self.current_exception = Some(exc);
+                        }
                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
