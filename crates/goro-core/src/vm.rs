@@ -16001,7 +16001,10 @@ impl Vm {
                                 // the dispatcher (e.g. "Cannot call method X when
                                 // function X is disabled") produce a proper stack trace
                                 // with the method entry.
-                                let class_display = self.builtin_canonical_name(spl_class);
+                                // The frame names the class declaring the method.
+                                let class_display = crate::stubs::find_method(spl_class, spl_method)
+                                    .map(|(c, _)| c.name.to_string())
+                                    .unwrap_or_else(|| self.builtin_canonical_name(spl_class));
                                 let method_display = String::from_utf8_lossy(orig_method).to_string();
                                 let frame_name = format!("{}->{}", class_display, method_display);
                                 let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
