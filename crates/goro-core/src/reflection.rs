@@ -456,6 +456,12 @@ pub(crate) fn resolve_class_constant(
     if !is_deferred_const_value(&raw) {
         return Some(raw);
     }
+    // zend_update_class_constant() in the declaring class.
+    match vm.class_constant_value(class_lower, name) {
+        Some(Ok(v)) => return Some(v),
+        Some(Err(())) => return None,
+        None => {}
+    }
     let cname_s = String::from_utf8_lossy(&cname).to_string();
     let simple = !cname_s.is_empty()
         && cname_s
@@ -675,6 +681,25 @@ pub fn class_method_list(
 /// scope of `scope_lower` (so private/protected access, hooks, magic
 /// methods and type checks behave as for code in that class). Returns None
 /// if it threw (the exception is left in `vm.current_exception`).
+/// zend_call_function(): a by-reference constructor parameter given a
+/// value warns (the call goes on with the value).
+fn ctor_by_ref_warnings(vm: &mut Vm, class: &[u8], op: &OpArray, args: &[Value]) {
+    for (i, a) in args.iter().enumerate().skip(1) {
+        if op.by_ref_params.get(i).copied().unwrap_or(false) && !matches!(a, Value::Reference(_)) {
+            let msg = format!(
+                "{}::__construct(): Argument #{} (${}) must be passed by reference, value given",
+                crate::value::display_class_name(class),
+                i,
+                op.cv_names
+                    .get(i)
+                    .map(|n| String::from_utf8_lossy(n).to_string())
+                    .unwrap_or_default()
+            );
+            vm.emit_warning(&msg);
+        }
+    }
+}
+
 pub(crate) fn run_snippet_in_scope(
     vm: &mut Vm,
     src: &str,
@@ -2982,6 +3007,14 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let mut result = PhpArray::new();
                 if let Some(ce) = rcls(vm, &class_lower) {
                     for (name, val) in &ce.constants {
+                        // A parent's private constant is not inherited.
+                        if ce.constants_meta.get(name).is_some_and(|m| {
+                            m.visibility == Visibility::Private
+                                && !m.declaring_class.eq_ignore_ascii_case(&class_lower)
+                                && !m.declaring_class.is_empty()
+                        }) {
+                            continue;
+                        }
                         if filter != -1 {
                             let vis_flag = ce
                                 .constants_meta
@@ -3017,7 +3050,13 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     })
                     .collect();
                 for k in keys {
-                    match resolve_class_constant(vm, &class_lower, &k) {
+                    // Evaluated in the declaring class (self:: there).
+                    let decl = rcls(vm, &class_lower)
+                        .and_then(|c| c.constants_meta.get(&k))
+                        .map(|m| m.declaring_class.to_ascii_lowercase())
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or_else(|| class_lower.clone());
+                    match resolve_class_constant(vm, &decl, &k) {
                         Some(v) => result.set(ArrayKey::String(PhpString::from_vec(k)), v),
                         None => return Some(Value::Null),
                     }
@@ -3654,7 +3693,6 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     return Some(Value::Null);
                 }
                 // Create instance and call constructor with remaining args
-                let obj_id = vm.alloc_object_id();
                 let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -3704,6 +3742,28 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 }
 
+                // An internal constructor: construct like `new` does.
+                if rmethod(vm, &class_lower, b"__construct")
+                    .is_some_and(|m| m.op_array.internal_sig.is_some())
+                {
+                    let mut a = PhpArray::new();
+                    for arg in args.iter().skip(1) {
+                        a.push(arg.clone());
+                    }
+                    return Some(
+                        run_snippet_in_scope(
+                            vm,
+                            "return new $__c(...$__a);",
+                            &[
+                                ("__c", Value::String(PhpString::from_vec(canonical.clone()))),
+                                ("__a", Value::Array(Rc::new(RefCell::new(a)))),
+                            ],
+                            &class_lower,
+                        )
+                        .unwrap_or(Value::Null),
+                    );
+                }
+                let obj_id = vm.alloc_object_id();
                 let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
                 // Set default property values
                 if let Some(ce) = rcls(vm, &class_lower) {
@@ -3771,6 +3831,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                                 cvs[i] = arg.clone();
                             }
                         }
+                        ctor_by_ref_warnings(vm, &canonical, &ctor_method.op_array, &ctor_args);
                         let _ = vm.execute_op_array_pub(&ctor_method.op_array, cvs);
                     }
                 }
@@ -3812,7 +3873,6 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     vec![]
                 };
 
-                let obj_id = vm.alloc_object_id();
                 let canonical = rcls(vm, &class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -3862,6 +3922,24 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 }
 
+                // An internal constructor: construct like `new` does.
+                if rmethod(vm, &class_lower, b"__construct")
+                    .is_some_and(|m| m.op_array.internal_sig.is_some())
+                {
+                    return Some(
+                        run_snippet_in_scope(
+                            vm,
+                            "return new $__c(...$__a);",
+                            &[
+                                ("__c", Value::String(PhpString::from_vec(canonical.clone()))),
+                                ("__a", args_arr.clone()),
+                            ],
+                            &class_lower,
+                        )
+                        .unwrap_or(Value::Null),
+                    );
+                }
+                let obj_id = vm.alloc_object_id();
                 let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
                 if let Some(ce) = rcls(vm, &class_lower) {
                     let props: Vec<_> = ce
@@ -3915,6 +3993,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                                 cvs[i] = arg.clone();
                             }
                         }
+                        ctor_by_ref_warnings(vm, &canonical, &ctor_method.op_array, &all_args);
                         let _ = vm.execute_op_array_pub(&ctor_method.op_array, cvs);
                     }
                 }
@@ -7568,6 +7647,15 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     //   setValue($obj_or_null, $value)  — two args (canonical)
                     //   setValue($value)                — one arg (deprecated)
                     // (args[0] is the ReflectionProperty $this slot.)
+                    if args.len() >= 3 && !matches!(args[1].deref(), Value::Null | Value::Object(_))
+                    {
+                        vm.emit_deprecated(
+                            "Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated",
+                        );
+                        if vm.current_exception.is_some() {
+                            return Some(Value::Null);
+                        }
+                    }
                     let value = if args.len() >= 3 {
                         args[2].clone()
                     } else if args.len() >= 2 {
@@ -7818,8 +7906,14 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
+                    // Hooked properties cannot be unset: virtual and untyped
+                    // backed ones always exist.
+                    let hooked = find_prop_decl(vm, &class_lower, pn)
+                        .filter(|d| d.has_get_hook || d.has_set_hook)
+                        .map(|d| d.is_virtual || d.property_type.is_none());
                     let ob = target_obj.borrow();
-                    let has = ob.has_property(pn) && !matches!(ob.get_property(pn), Value::Undef);
+                    let has = hooked == Some(true)
+                        || (ob.has_property(pn) && !matches!(ob.get_property(pn), Value::Undef));
                     Some(if has { Value::True } else { Value::False })
                 } else {
                     let exc = vm.create_exception(
@@ -10080,6 +10174,17 @@ pub fn reflection_class_constant_method(
         .unwrap_or(Visibility::Public);
     let is_final = meta.as_ref().map(|m| m.is_final).unwrap_or(false);
 
+    // `unset($r->name)`: the typed property is uninitialized.
+    if matches!(method, b"getname" | b"__tostring") && !ob.has_property(b"name") {
+        drop(ob);
+        let msg = format!(
+            "Typed property {}::$name must not be accessed before initialization",
+            crate::value::display_class_name(&obj.borrow().class_name)
+        );
+        let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Some(Value::Null);
+    }
     match method {
         b"getname" => Some(ob.get_property(b"name")),
         b"getvalue" => {
@@ -11579,6 +11684,14 @@ fn reflection_collect_parent_constants(vm: &Vm, class_lower: &[u8], result: &mut
             let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
             if let Some(pce) = rcls(vm, &parent_lower) {
                 for (name, val) in &pce.constants {
+                    // Private constants are not inherited.
+                    if pce
+                        .constants_meta
+                        .get(name)
+                        .is_some_and(|m| m.visibility == Visibility::Private)
+                    {
+                        continue;
+                    }
                     let key = ArrayKey::String(PhpString::from_vec(name.clone()));
                     if result.get(&key).is_none() {
                         result.set(key, val.deref());
