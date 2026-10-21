@@ -28966,10 +28966,39 @@ impl Vm {
                                                 let method_display = String::from_utf8_lossy(&method.name).to_string();
                                                 format!("Cannot override final method {}::{}()", parent_display, method_display)
                                             };
+                                            // Reported at the overriding method's declaration
+                                            let report_line = if is_hook {
+                                                op.line
+                                            } else {
+                                                class.methods.get(method_name)
+                                                    .map(|m| m.op_array.decl_line)
+                                                    .filter(|l| *l > 0)
+                                                    .unwrap_or(op.line)
+                                            };
                                             return Err(VmError {
                                                 message: msg,
-                                                line: op.line,
+                                                line: report_line,
                                             });
+                                        }
+                                        // Static-ness must match (do_inheritance_check_on_method)
+                                        if method.visibility != Visibility::Private {
+                                            if let Some(cm) = class.methods.get(method_name) {
+                                                if cm.is_static != method.is_static {
+                                                    let parent_display = self.classes
+                                                        .get(&method.declaring_class.to_ascii_lowercase())
+                                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                                        .unwrap_or_else(|| String::from_utf8_lossy(parent_name).to_string());
+                                                    let mdisp = String::from_utf8_lossy(&cm.name).to_string();
+                                                    let cdisp = String::from_utf8_lossy(&class.name).to_string();
+                                                    let msg = if cm.is_static {
+                                                        format!("Cannot make non static method {}::{}() static in class {}", parent_display, mdisp, cdisp)
+                                                    } else {
+                                                        format!("Cannot make static method {}::{}() non static in class {}", parent_display, mdisp, cdisp)
+                                                    };
+                                                    let report_line = if cm.op_array.decl_line > 0 { cm.op_array.decl_line } else { op.line };
+                                                    return Err(VmError { message: msg, line: report_line });
+                                                }
+                                            }
                                         }
                                         // Check visibility: child must have same or weaker visibility
                                         let mn_lower = method_name.as_slice();
