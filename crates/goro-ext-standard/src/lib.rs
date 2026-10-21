@@ -14,6 +14,7 @@ pub mod strings;
 pub mod type_funcs;
 pub mod url_scanner;
 pub mod zsort;
+pub mod arrdiff;
 
 // Alias for code referencing `stream_filters` (the gitignore unfortunately
 // matches anything starting with "stream").
@@ -30,6 +31,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     math::register(vm);
     misc::register(vm);
     ob::register(vm);
+    arrdiff::register(vm);
     html::register(vm);
     regex::register(vm);
     request::register(vm);

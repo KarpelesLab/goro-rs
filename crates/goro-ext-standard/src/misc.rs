@@ -1359,7 +1359,7 @@ fn set_callable_name_and_return(_vm: &mut Vm, args: &[Value], callable_name: Opt
     }
     Ok(result)
 }
-fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Null);
     }
@@ -3756,14 +3756,22 @@ fn php_key_sort_cmp_flags(a: &ArrayKey, b: &ArrayKey, flags: i64) -> std::cmp::O
 
 /// String conversion used by the sort comparators (zval_get_tmp_string):
 /// arrays warn, objects use __toString.
-fn sort_cmp_string(vm: &mut Vm, v: &Value) -> Vec<u8> {
+pub(crate) fn sort_cmp_string(vm: &mut Vm, v: &Value) -> Vec<u8> {
     let v = v.deref();
     match &v {
         Value::Array(_) => {
             vm.emit_warning("Array to string conversion");
             b"Array".to_vec()
         }
-        Value::Object(_) => vm.value_to_string(&v).as_bytes().to_vec(),
+        Value::Object(_) => {
+            if vm.current_exception.is_some() {
+                return Vec::new();
+            }
+            match vm.value_to_string_checked(&v) {
+                Ok(s) => s.as_bytes().to_vec(),
+                Err(_) => Vec::new(),
+            }
+        }
         _ => v.to_php_string().as_bytes().to_vec(),
     }
 }
@@ -3837,11 +3845,11 @@ fn php_data_cmp(vm: &mut Vm, a: &Value, b: &Value, flags: i64) -> i32 {
     }
 }
 
-fn key_to_bytes(k: &ArrayKey) -> Vec<u8> {
+pub(crate) fn key_to_bytes(k: &ArrayKey) -> Vec<u8> {
     match k { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() }
 }
 
-fn key_to_value(k: &ArrayKey) -> Value {
+pub(crate) fn key_to_value(k: &ArrayKey) -> Value {
     match k { ArrayKey::Int(n) => Value::Long(*n), ArrayKey::String(s) => Value::String(s.clone()) }
 }
 
