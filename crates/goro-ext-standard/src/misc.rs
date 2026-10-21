@@ -12875,6 +12875,41 @@ thread_local! {
     pub(crate) static RESPONSE_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(200) };
     // Request body for php://input
     pub(crate) static REQUEST_BODY: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    // SG(sapi_headers).http_status_line: set by header("HTTP/...")
+    pub(crate) static STATUS_LINE: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
+/// sapi_update_response_code(): a new code drops the custom status line.
+fn sapi_update_response_code(code: i64) {
+    if RESPONSE_CODE.with(|c| c.get()) == code {
+        return;
+    }
+    STATUS_LINE.with(|s| *s.borrow_mut() = None);
+    RESPONSE_CODE.with(|c| c.set(code));
+}
+/// SG(sapi_headers).http_response_code
+pub fn peek_response_code() -> i64 {
+    RESPONSE_CODE.with(|c| c.get())
+}
+/// sapi_header_op() with an "HTTP/x.y NNN ..." line (for SAPIs).
+pub fn set_status_line(line: &[u8]) {
+    let code = line
+        .iter()
+        .position(|&c| c == b' ')
+        .map(|p| {
+            let d: Vec<u8> = line[p + 1..]
+                .iter()
+                .copied()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            String::from_utf8_lossy(&d).parse::<i64>().unwrap_or(0)
+        })
+        .unwrap_or(200);
+    sapi_update_response_code(code);
+    STATUS_LINE.with(|s| *s.borrow_mut() = Some(line.to_vec()));
+}
+/// The status line set by header("HTTP/..."), if any (cleared).
+pub fn take_status_line() -> Option<Vec<u8>> {
+    STATUS_LINE.with(|s| s.borrow_mut().take())
 }
 pub fn set_request_body(body: Vec<u8>) {
     REQUEST_BODY.with(|b| *b.borrow_mut() = body);
@@ -12974,13 +13009,28 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let header_str = header.to_string_lossy();
-    // Special case: "HTTP/1.x NNN ..." sets the status code.
-    if header_str.starts_with("HTTP/") {
-        if let Some(rest) = header_str.split_whitespace().nth(1) {
-            if let Ok(code) = rest.parse::<i64>() {
-                RESPONSE_CODE.with(|c| c.set(code));
+    // Special case: "HTTP/1.x NNN ..." sets the status code and becomes the
+    // response status line.
+    if header.len() >= 5 && header.as_bytes()[..5].eq_ignore_ascii_case(b"HTTP/") {
+        let mut line = header.as_bytes().to_vec();
+        while line.last().is_some_and(|c| c.is_ascii_whitespace()) {
+            line.pop();
+        }
+        // sapi_extract_response_code()
+        let mut code = 200;
+        for i in 0..line.len() {
+            if line[i] == b' ' && line.get(i + 1) != Some(&b' ') {
+                let digits: Vec<u8> = line[i + 1..]
+                    .iter()
+                    .copied()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                code = String::from_utf8_lossy(&digits).parse::<i64>().unwrap_or(0);
+                break;
             }
         }
+        sapi_update_response_code(code);
+        STATUS_LINE.with(|s| *s.borrow_mut() = Some(line));
         return Ok(Value::Null);
     }
     // Parse "Name: Value" or "Name:Value"
@@ -13455,6 +13505,11 @@ fn http_response_code_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                 return Ok(Value::False);
             }
             let code = v.to_long();
+            if code != 0 && STATUS_LINE.with(|s| s.borrow().is_some()) {
+                vm.emit_warning(
+                    "http_response_code(): Calling http_response_code() after header('HTTP/...') has no effect",
+                );
+            }
             let prev = RESPONSE_CODE.with(|c| c.replace(code));
             return Ok(if prev == 0 {
                 Value::True
@@ -18170,6 +18225,8 @@ fn php_exec(
     };
     #[cfg(not(unix))]
     let cmd_os = std::ffi::OsString::from(String::from_utf8_lossy(cmd).into_owned());
+    // Output written so far reaches the terminal before the child's.
+    vm.flush_cli_output();
     let child = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(cmd_os)
@@ -18200,6 +18257,7 @@ fn php_exec(
                     break;
                 }
                 vm.write_output(&buf[..n]);
+                vm.flush_cli_output();
             }
         } else {
             let mut last: Option<Vec<u8>> = None;
@@ -18211,6 +18269,7 @@ fn php_exec(
                 }
                 if mode == 1 {
                     vm.write_output(&line);
+                    vm.flush_cli_output();
                 } else if let Some(arr) = array {
                     let stripped = exec_strip_trailing_whitespace(&line).to_vec();
                     arr.borrow_mut()
@@ -18267,22 +18326,52 @@ fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(ret)
 }
 
-fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args
+fn shell_exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    let cmd = args
         .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let output = std::process::Command::new("sh")
+        .map(|v| v.deref())
+        .unwrap_or(Value::Null)
+        .to_php_string();
+    if cmd.as_bytes().contains(&0) {
+        return Err(throw_value_error_msg(
+            vm,
+            "shell_exec(): Argument #1 ($command) must not contain any null bytes",
+        ));
+    }
+    if cmd.as_bytes().is_empty() {
+        return Err(throw_value_error_msg(
+            vm,
+            "shell_exec(): Argument #1 ($command) must not be empty",
+        ));
+    }
+    vm.flush_cli_output();
+    let child = std::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg(&command)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            Ok(Value::String(PhpString::from_string(stdout)))
+        .arg(std::ffi::OsStr::from_bytes(cmd.as_bytes()))
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => {
+            vm.emit_warning(&format!(
+                "shell_exec(): Unable to execute '{}'",
+                cmd.to_string_lossy()
+            ));
+            return Ok(Value::False);
         }
-        Err(_) => Ok(Value::Null),
+    };
+    let mut out = Vec::new();
+    if let Some(mut so) = child.stdout.take() {
+        let _ = so.read_to_end(&mut out);
+    }
+    let _ = child.wait();
+    // PHP returns null when the command produced no output
+    if out.is_empty() {
+        Ok(Value::Null)
+    } else {
+        Ok(Value::String(PhpString::from_vec(out)))
     }
 }
 
@@ -20064,6 +20153,7 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.flush_cli_output();
     let command = args.first().unwrap_or(&Value::Null).to_php_string();
     let mode = args
         .get(1)

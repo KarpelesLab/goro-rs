@@ -638,7 +638,6 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
 /// Categories:
 /// 1. opcache JIT tests — we don't have a JIT.
 /// 2. phpdbg tests — we don't have phpdbg.
-/// 3. CLI server tests (`php -S`) — we don't have a built-in HTTP server.
 /// 4. Real MySQL tests (bind_param/bind_result on a live server).
 /// 5. External `php` binary spawn (proc_open/shell_exec/popen of $PHP_BINARY).
 /// 6. Real network tests (live DNS/sockets to non-localhost endpoints).
@@ -668,14 +667,6 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     //    Either the test lives under sapi/phpdbg, or it has a --PHPDBG-- section.
     if filename.contains("/sapi/phpdbg/") || test.sections.contains_key("PHPDBG") {
         return Some("phpdbg SAPI not implemented".into());
-    }
-
-    // 3. CLI server (`php -S`) — we don't implement the built-in HTTP server.
-    //    Match either the path or use of php_cli_server_start() in the FILE.
-    if filename.contains("/sapi/cli/tests/php_cli_server")
-        || file_section.contains("php_cli_server_start(")
-    {
-        return Some("CLI server (`php -S`) not implemented".into());
     }
 
     // 4. Real MySQL — bind_param / bind_result against a live server.
@@ -716,11 +707,12 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     }
 
     // 7. Curl live — only skip if the test actually calls curl_exec() and
-    //    points CURLOPT_URL at a non-loopback URL, OR uses curl_cli_server_start
-    //    (whose whole purpose is to spawn `php -S`).
+    //    points CURLOPT_URL at a non-loopback URL (tests using
+    //    curl_cli_server_start() talk to a local `php -S`).
     if filename.contains("/ext/curl/tests/")
-        && (file_section.contains("curl_cli_server_start(")
-            || (file_section.contains("curl_exec(") && has_remote_curl_url(file_section)))
+        && !file_section.contains("curl_cli_server_start(")
+        && file_section.contains("curl_exec(")
+        && has_remote_curl_url(file_section)
     {
         return Some("Live HTTP server required for curl".into());
     }
@@ -1152,10 +1144,13 @@ fn execute_php_with_timeout_and_filename(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 execute_php_inner(source, ini_settings, filename)
             }));
+            // Output that was flushed to descriptor 1 is in the capture file
+            // together with stderr, in order; what is still buffered in the
+            // engine comes last.
             let result = match (result, capture_stderr_end(stderr_cap)) {
-                (Ok(Ok(mut bytes)), extra) => {
-                    bytes.extend_from_slice(&extra);
-                    Ok(Ok(bytes))
+                (Ok(Ok(bytes)), mut captured) => {
+                    captured.extend_from_slice(&bytes);
+                    Ok(Ok(captured))
                 }
                 (r, _) => r,
             };
@@ -1690,6 +1685,10 @@ fn execute_php_inner_impl(
 
     // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
     if let Some(req) = PHPT_REQUEST.with(|r| r.borrow_mut().take()) {
+        // CLI tests: pending output reaches descriptor 1 (shared with
+        // stderr) when a child process is spawned or STDERR is written,
+        // keeping the order run-tests.php sees.
+        vm.cli_direct_output = !req.info.cgi;
         for (k, v) in &req.env {
             unsafe {
                 std::env::set_var(k, v);
@@ -2761,10 +2760,10 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     PhptRequest { info, env, stdin }
 }
 
-/// Redirect descriptor 2 to an anonymous temporary file; returns
-/// (saved stderr, capture file) descriptors.
+/// Redirect descriptors 1 and 2 to an anonymous temporary file; returns
+/// (saved stdout, saved stderr, capture file) descriptors.
 #[cfg(unix)]
-fn capture_stderr_start() -> Option<(i32, i32)> {
+fn capture_stderr_start() -> Option<(i32, i32, i32)> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("goro-phpt-stderr-{}", std::process::id()));
     let f = std::fs::OpenOptions::new()
@@ -2783,18 +2782,28 @@ fn capture_stderr_start() -> Option<(i32, i32)> {
             libc::close(fd);
             return None;
         }
-        Some((saved, fd))
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let saved_out = libc::dup(1);
+        if saved_out >= 0 {
+            libc::dup2(fd, 1);
+        }
+        Some((saved_out, saved, fd))
     }
 }
 
-/// Restore descriptor 2 and return what was written to it.
+/// Restore descriptors 1 and 2 and return what was written to them.
 #[cfg(unix)]
-fn capture_stderr_end(cap: Option<(i32, i32)>) -> Vec<u8> {
-    let Some((saved, fd)) = cap else {
+fn capture_stderr_end(cap: Option<(i32, i32, i32)>) -> Vec<u8> {
+    let Some((saved_out, saved, fd)) = cap else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     unsafe {
+        if saved_out >= 0 {
+            libc::dup2(saved_out, 1);
+            libc::close(saved_out);
+        }
         libc::dup2(saved, 2);
         libc::close(saved);
         libc::lseek(fd, 0, libc::SEEK_SET);
