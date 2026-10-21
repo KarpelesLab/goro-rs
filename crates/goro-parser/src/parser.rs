@@ -3845,18 +3845,13 @@ impl Parser {
                 self.advance();
                 let right = self.parse_assignment()?;
                 let span = left.span.merge(right.span);
-                // $x ??= val  →  $x = $x ?? val
+                // The target is evaluated once (zend_compile_assign_coalesce).
                 Ok(Expr {
                     span,
-                    kind: ExprKind::Assign {
-                        target: Box::new(left.clone()),
-                        value: Box::new(Expr {
-                            span,
-                            kind: ExprKind::NullCoalesce {
-                                left: Box::new(left),
-                                right: Box::new(right),
-                            },
-                        }),
+                    kind: ExprKind::CompoundAssign {
+                        op: BinaryOp::Coalesce,
+                        target: Box::new(left),
+                        value: Box::new(right),
                     },
                 })
             }

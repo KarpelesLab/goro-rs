@@ -307,6 +307,8 @@ pub enum BinaryOp {
     LessEqual,
     GreaterEqual,
     Spaceship,
+    /// Only as `CompoundAssign` op: `$x ??= v` (ZEND_ASSIGN_COALESCE).
+    Coalesce,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {

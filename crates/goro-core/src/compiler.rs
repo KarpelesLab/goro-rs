@@ -101,6 +101,12 @@ struct LoopContext {
 /// Compiles an AST into bytecode
 pub struct Compiler {
     op_array: OpArray,
+    /// `??=` memoization (CG(memoize_mode)): 0 = off, 1 = compile (record
+    /// the operands of the target's sub-expressions), 2 = fetch (reuse them).
+    memoize_mode: u8,
+    memoized_exprs: HashMap<usize, OperandType>,
+    /// The synthetic isset / assign node being compiled in memoize mode.
+    memoize_root: usize,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
     /// Compiled class entries (stored in the compiler, passed to VM)
@@ -320,6 +326,9 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             op_array: OpArray::new(),
+            memoize_mode: 0,
+            memoized_exprs: HashMap::new(),
+            memoize_root: 0,
             loop_stack: Vec::new(),
             compiled_classes: Vec::new(),
             current_class: None,
@@ -9214,6 +9223,12 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        if self.memoize_mode != 0
+            && Self::is_memoizable(expr)
+            && expr as *const Expr as usize != self.memoize_root
+        {
+            return self.compile_memoized_expr(expr);
+        }
         match &expr.kind {
             ExprKind::Int(n) => {
                 let idx = self.op_array.add_literal(Value::Long(*n));
@@ -9571,6 +9586,9 @@ impl Compiler {
                         message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
                         line: expr.span.line,
                     });
+                }
+                if *op == BinaryOp::Coalesce {
+                    return self.compile_assign_coalesce(expr, target, value);
                 }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
@@ -9941,7 +9959,8 @@ impl Compiler {
                     BinaryOp::BooleanAnd
                     | BinaryOp::BooleanOr
                     | BinaryOp::LogicalAnd
-                    | BinaryOp::LogicalOr => unreachable!(),
+                    | BinaryOp::LogicalOr
+                    | BinaryOp::Coalesce => unreachable!(),
                 };
                 self.op_array.emit(Op {
                     opcode,
@@ -15176,6 +15195,154 @@ impl Compiler {
         )
     }
 
+    /// Sub-expressions of a `??=` target that are evaluated once: everything
+    /// but the variable/dim/property path itself (whose fetch mode differs
+    /// between the BP_VAR_IS and the BP_VAR_W pass) and literals.
+    fn is_memoizable(expr: &Expr) -> bool {
+        !matches!(
+            expr.kind,
+            ExprKind::Variable(_)
+                | ExprKind::DynamicVariable(_)
+                | ExprKind::ArrayAccess { .. }
+                | ExprKind::PropertyAccess { .. }
+                | ExprKind::StaticPropertyAccess { .. }
+                | ExprKind::DynamicStaticPropertyAccess { .. }
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::String(_)
+                | ExprKind::True
+                | ExprKind::False
+                | ExprKind::Null
+                | ExprKind::Identifier(_)
+        )
+    }
+
+    /// zend_compile_memoized_expr()
+    fn compile_memoized_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let key = expr as *const Expr as usize;
+        let mode = self.memoize_mode;
+        if mode == 2 {
+            if let Some(op) = self.memoized_exprs.get(&key) {
+                return Ok(*op);
+            }
+        }
+        self.memoize_mode = 0;
+        let r = self.compile_expr(expr);
+        self.memoize_mode = mode;
+        let r = r?;
+        if mode == 1 {
+            self.memoized_exprs.insert(key, r);
+        }
+        Ok(r)
+    }
+
+    /// `$target ??= $value` (zend_compile_assign_coalesce): the target is
+    /// fetched for isset (BP_VAR_IS); only when that yields null is $value
+    /// evaluated and the target fetched again for write, reusing the
+    /// operands of its sub-expressions instead of evaluating them twice.
+    fn compile_assign_coalesce(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        let line = expr.span.line;
+        let saved_mode = self.memoize_mode;
+        let saved_exprs = std::mem::take(&mut self.memoized_exprs);
+        let saved_root = self.memoize_root;
+        // The target subtree is moved (not cloned) from the isset pass into
+        // the assignment, so the memo keys (node addresses) stay valid.
+        let is_expr = Expr {
+            kind: ExprKind::NullCoalesce {
+                left: Box::new(target.clone()),
+                right: Box::new(Expr {
+                    kind: ExprKind::Null,
+                    span: expr.span,
+                }),
+            },
+            span: expr.span,
+        };
+        self.memoize_mode = 1;
+        self.memoize_root = &is_expr as *const Expr as usize;
+        let is_val = self.compile_expr(&is_expr);
+        self.memoize_mode = 0;
+        let result = (|| -> CompileResult<OperandType> {
+            let is_val = is_val?;
+            let result_tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::QmAssign,
+                op1: is_val,
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(result_tmp),
+                line,
+            });
+            let set_tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::IssetCheck,
+                op1: OperandType::Tmp(result_tmp),
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(set_tmp),
+                line,
+            });
+            let jmp_end = self.op_array.emit(Op {
+                opcode: OpCode::JmpNz,
+                op1: OperandType::Tmp(set_tmp),
+                op2: OperandType::JmpTarget(0),
+                result: OperandType::Unused,
+                line,
+            });
+            let ExprKind::NullCoalesce { left, .. } = is_expr.kind else {
+                unreachable!()
+            };
+            let assign = Expr {
+                kind: ExprKind::Assign {
+                    target: left,
+                    value: Box::new(value.clone()),
+                },
+                span: expr.span,
+            };
+            self.memoize_mode = 2;
+            self.memoize_root = &assign as *const Expr as usize;
+            let assigned = self.compile_expr(&assign);
+            self.memoize_mode = 0;
+            let assigned = assigned?;
+            self.op_array.emit(Op {
+                opcode: OpCode::QmAssign,
+                op1: assigned,
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(result_tmp),
+                line,
+            });
+            let end = self.op_array.current_offset();
+            self.op_array.patch_jump(jmp_end, end);
+            // Free the memoized temporaries (their destructors run here).
+            let mut memo_tmps: Vec<u32> = self
+                .memoized_exprs
+                .values()
+                .filter_map(|o| match o {
+                    OperandType::Tmp(t) => Some(*t),
+                    _ => None,
+                })
+                .collect();
+            memo_tmps.sort_unstable();
+            memo_tmps.dedup();
+            for t in memo_tmps {
+                self.op_array.emit(Op {
+                    opcode: OpCode::FreeTmps,
+                    op1: OperandType::Tmp(t),
+                    op2: OperandType::Tmp(t + 1),
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+            Ok(OperandType::Tmp(result_tmp))
+        })();
+        self.memoize_mode = saved_mode;
+        self.memoized_exprs = saved_exprs;
+        self.memoize_root = saved_root;
+        result
+    }
+
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
         match &expr.kind {
             ExprKind::Int(n) => Some(Value::Long(*n)),
@@ -16962,6 +17129,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 BinaryOp::LessEqual => "<=",
                 BinaryOp::GreaterEqual => ">=",
                 BinaryOp::Spaceship => "<=>",
+                BinaryOp::Coalesce => "??",
             };
             format!(
                 "{} {} {}",
@@ -17096,6 +17264,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 BinaryOp::BitwiseXor => "^=",
                 BinaryOp::ShiftLeft => "<<=",
                 BinaryOp::ShiftRight => ">>=",
+                BinaryOp::Coalesce => "??=",
                 _ => "?=",
             };
             format!(
