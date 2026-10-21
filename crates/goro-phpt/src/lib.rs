@@ -210,6 +210,31 @@ pub enum TestResult {
 }
 
 /// Run a PHPT test against the goro engine
+thread_local! {
+    static TEST_ARGS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Split --ARGS-- like a POSIX shell would (whitespace, single/double quotes).
+fn split_test_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '\'' || c == '"' => { quote = Some(c); in_word = true; }
+            None if c.is_whitespace() => {
+                if in_word { out.push(std::mem::take(&mut cur)); in_word = false; }
+            }
+            None => { cur.push(c); in_word = true; }
+        }
+    }
+    if in_word { out.push(cur); }
+    out
+}
+
 pub fn run_test(test: &PhptTest) -> TestResult {
     run_test_with_dir(test, None)
 }
@@ -240,6 +265,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             *v = format!("{}tee {} >/dev/null{}", &v[..start], path, &rest[end + 1..]);
         }
     }
+    // --ARGS-- are passed to the script as $argv (inherited by the forked child).
+    TEST_ARGS.with(|a| *a.borrow_mut() = test.sections.get("ARGS").map(|s| s.trim().to_string()));
 
     // Check goro skip-list: tests that depend on infrastructure goro doesn't have
     // (JIT, phpdbg, CLI server, real MySQL, external php spawn, real network, live curl).
@@ -1460,6 +1487,26 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             b"_SERVER".to_vec(),
             Value::Array(std::rc::Rc::new(std::cell::RefCell::new(server))),
         );
+    }
+
+    if let Some(args) = TEST_ARGS.with(|a| a.borrow().clone()) {
+        use goro_core::array::{ArrayKey, PhpArray};
+        let mut argv = PhpArray::new();
+        argv.push(Value::String(PhpString::from_string(filename.to_string())));
+        for a in split_test_args(&args) {
+            argv.push(Value::String(PhpString::from_string(a)));
+        }
+        let argc = argv.len() as i64;
+        let argv_val = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(argv)));
+        vm.set_global(b"argv".to_vec(), argv_val.clone());
+        vm.set_global(b"argc".to_vec(), Value::Long(argc));
+        let server = match vm.get_global(b"_SERVER") {
+            Some(Value::Array(a)) => a,
+            _ => std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new())),
+        };
+        server.borrow_mut().set(ArrayKey::String(PhpString::from_bytes(b"argv")), argv_val);
+        server.borrow_mut().set(ArrayKey::String(PhpString::from_bytes(b"argc")), Value::Long(argc));
+        vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
     }
 
     match vm.execute(&op_array) {

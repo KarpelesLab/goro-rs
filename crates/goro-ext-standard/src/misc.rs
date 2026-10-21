@@ -15168,9 +15168,235 @@ fn escapeshellcmd(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn getopt_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // getopt() parses CLI options - return empty array as stub since we're not a real CLI
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+struct GetoptOpt {
+    opt_char: u8,
+    opt_name: Option<Vec<u8>>,
+    need_param: u8,
+}
+
+/// Port of main/getopt.c php_getopt(). Returns the option char (0 for a long
+/// option, -2 for an invalid argument, -1 at the end) and sets *optidx.
+fn php_getopt(argv: &[Vec<u8>], opts: &[GetoptOpt], optarg: &mut Option<Vec<u8>>, optind: &mut usize,
+              optchr: &mut usize, dash: &mut bool, optidx: &mut isize) -> i32 {
+    const INVALID: i32 = -2;
+    let argc = argv.len();
+    *optidx = -1;
+    if *optind >= argc {
+        return -1;
+    }
+    let at = |i: usize, j: usize| -> u8 { argv[i].get(j).copied().unwrap_or(0) };
+    if !*dash {
+        if at(*optind, 0) != b'-' {
+            return -1;
+        } else if at(*optind, 1) == 0 {
+            return -1;
+        }
+    }
+    let mut arg_start: usize;
+    if at(*optind, 0) == b'-' && at(*optind, 1) == b'-' {
+        if at(*optind, 2) == 0 {
+            *optind += 1;
+            return -1;
+        }
+        arg_start = 2;
+        let arg = &argv[*optind];
+        let mut arg_end = arg.len() - 1;
+        let search_end = (arg_start + arg_end.saturating_sub(arg_start)).min(arg.len());
+        if let Some(pos) = arg[arg_start..search_end].iter().position(|&c| c == b'=') {
+            arg_end = pos;
+            arg_start += 1;
+        } else {
+            arg_end -= 1;
+        }
+        loop {
+            *optidx += 1;
+            let o = &opts[*optidx as usize];
+            if o.opt_char == b'-' {
+                *optind += 1;
+                return INVALID;
+            }
+            if let Some(name) = &o.opt_name {
+                let cand = &arg[2..];
+                let n = arg_end.min(cand.len());
+                let name_prefix = &name[..arg_end.min(name.len())];
+                if &cand[..n] == name_prefix && arg_end == name.len() {
+                    break;
+                }
+            }
+        }
+        *optchr = 0;
+        *dash = false;
+        arg_start += opts[*optidx as usize].opt_name.as_ref().map(|n| n.len()).unwrap_or(0);
+    } else {
+        if !*dash {
+            *dash = true;
+            *optchr = 1;
+        }
+        if at(*optind, *optchr) == b':' {
+            *dash = false;
+            *optind += 1;
+            return INVALID;
+        }
+        arg_start = 1 + *optchr;
+    }
+    if *optidx < 0 {
+        loop {
+            *optidx += 1;
+            let o = &opts[*optidx as usize];
+            if o.opt_char == b'-' {
+                if at(*optind, *optchr + 1) == 0 {
+                    *dash = false;
+                    *optind += 1;
+                } else {
+                    *optchr += 1;
+                }
+                return INVALID;
+            } else if at(*optind, *optchr) == o.opt_char {
+                break;
+            }
+        }
+    }
+    let o = &opts[*optidx as usize];
+    if o.need_param > 0 {
+        *dash = false;
+        if at(*optind, arg_start) == 0 {
+            *optind += 1;
+            if *optind == argc {
+                if o.need_param == 1 {
+                    return INVALID;
+                }
+            } else if o.need_param == 1 {
+                *optarg = Some(argv[*optind].clone());
+                *optind += 1;
+            }
+        } else if at(*optind, arg_start) == b'=' {
+            *optarg = Some(argv[*optind][arg_start + 1..].to_vec());
+            *optind += 1;
+        } else {
+            *optarg = Some(argv[*optind][arg_start..].to_vec());
+            *optind += 1;
+        }
+        o.opt_char as i32
+    } else {
+        if arg_start >= 2 && !(at(*optind, 0) == b'-' && at(*optind, 1) == b'-') {
+            if at(*optind, *optchr + 1) == 0 {
+                *dash = false;
+                *optind += 1;
+            } else {
+                *optchr += 1;
+            }
+        } else {
+            *optind += 1;
+        }
+        o.opt_char as i32
+    }
+}
+
+fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let options = args.first().map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let optind_ref = match args.get(2) {
+        Some(Value::Reference(r)) => Some(r.clone()),
+        _ => None,
+    };
+    if let Some(r) = &optind_ref {
+        *r.borrow_mut() = Value::Long(1);
+    }
+    // argv from $_SERVER['argv'], else the global $argv.
+    let argv_val = match vm.get_global(b"_SERVER") {
+        Some(Value::Array(server)) => server.borrow().get_str(b"argv").cloned(),
+        _ => None,
+    // The CLI SAPI always provides $_SERVER['argv'] (at least the script name).
+    }.or_else(|| Some(Value::Array(Rc::new(RefCell::new({
+        let mut a = PhpArray::new();
+        a.push(Value::String(PhpString::from_string(vm.current_file.clone())));
+        a
+    })))));
+    let argv: Vec<Vec<u8>> = match argv_val.map(|v| v.deref()) {
+        Some(Value::Array(a)) => a.borrow().values().map(|v| v.to_php_string().as_bytes().to_vec()).collect(),
+        Some(_) => return Ok(Value::False),
+        None => return Ok(Value::False),
+    };
+    // parse_opts()
+    let mut opts: Vec<GetoptOpt> = Vec::new();
+    let mut i = 0;
+    while i < options.len() && options[i].is_ascii_alphanumeric() {
+        let c = options[i];
+        i += 1;
+        let mut need = 0;
+        if options.get(i) == Some(&b':') {
+            need = 1;
+            i += 1;
+            if options.get(i) == Some(&b':') {
+                need = 2;
+                i += 1;
+            }
+        }
+        opts.push(GetoptOpt { opt_char: c, opt_name: None, need_param: need });
+    }
+    if let Some(Value::Array(longopts)) = args.get(1).map(|v| v.deref()) {
+        for v in longopts.borrow().values() {
+            let mut name = v.to_php_string().as_bytes().to_vec();
+            let mut need = 0;
+            if name.last() == Some(&b':') {
+                need += 1;
+                name.pop();
+                if name.last() == Some(&b':') {
+                    need += 1;
+                    name.pop();
+                }
+            }
+            opts.push(GetoptOpt { opt_char: 0, opt_name: Some(name), need_param: need });
+        }
+    }
+    opts.push(GetoptOpt { opt_char: b'-', opt_name: None, need_param: 0 });
+
+    let mut result = PhpArray::new();
+    let mut optind = 1usize;
+    let mut optchr = 0usize;
+    let mut dash = false;
+    let mut optidx: isize = -1;
+    loop {
+        let mut optarg: Option<Vec<u8>> = None;
+        let o = php_getopt(&argv, &opts, &mut optarg, &mut optind, &mut optchr, &mut dash, &mut optidx);
+        if o == -1 {
+            break;
+        }
+        if o == -2 {
+            continue;
+        }
+        let optname: Vec<u8> = if o == 0 {
+            opts[optidx as usize].opt_name.clone().unwrap_or_default()
+        } else {
+            vec![if o == 1 { b'-' } else { o as u8 }]
+        };
+        let val = match optarg {
+            Some(a) => Value::String(PhpString::from_vec(a)),
+            None => Value::False,
+        };
+        let key = if !(optname.len() > 1 && optname[0] == b'0') {
+            match std::str::from_utf8(&optname).ok().and_then(|s| s.parse::<i64>().ok()) {
+                Some(n) => ArrayKey::Int(n),
+                None => ArrayKey::String(PhpString::from_vec(optname.clone())),
+            }
+        } else {
+            ArrayKey::String(PhpString::from_vec(optname.clone()))
+        };
+        let existing = result.get(&key).cloned();
+        match existing {
+            Some(Value::Array(a)) => a.borrow_mut().push(val),
+            Some(other) => {
+                let mut a = PhpArray::new();
+                a.push(other);
+                a.push(val);
+                result.set(key, Value::Array(Rc::new(RefCell::new(a))));
+            }
+            None => result.set(key, val),
+        }
+    }
+    if let Some(r) = &optind_ref {
+        *r.borrow_mut() = Value::Long(optind as i64);
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn gethostbyname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

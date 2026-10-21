@@ -199,6 +199,8 @@ impl Compiler {
                     (b"similar_text", 2) => true,
                     // settype(&$var, $type)
                     (b"settype", 0) => true,
+                    // getopt($short, $long, &$rest_index)
+                    (b"getopt", 2) => true,
                     // parse_str($string, &$result)
                     (b"parse_str", 1) => true,
                     // is_callable($value, $syntax_only, &$callable_name)
