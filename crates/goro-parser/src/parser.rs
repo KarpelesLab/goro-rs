@@ -2278,7 +2278,7 @@ impl Parser {
                 let method_line = self.span().line;
                 self.advance();
                 // Optional & for return-by-reference
-                self.eat(&TokenKind::Ampersand);
+                let method_by_ref = self.eat(&TokenKind::Ampersand);
                 let name = match self.peek().clone() {
                     TokenKind::Identifier(name) => {
                         self.advance();
@@ -2347,6 +2347,7 @@ impl Parser {
                     end_line: method_end_line,
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,
+                    returns_by_ref: method_by_ref,
                 })
             }
             TokenKind::Const => {
@@ -4536,20 +4537,20 @@ impl Parser {
                 let span = self.span();
                 match self.peek() {
                     TokenKind::Function => {
-                        self.advance(); self.eat(&TokenKind::Ampersand);
+                        self.advance(); let by_ref_return = self.eat(&TokenKind::Ampersand);
                         self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
                         let use_vars = if matches!(self.peek(), TokenKind::Use) { self.advance(); self.expect(&TokenKind::OpenParen)?; let mut v = Vec::new(); loop { let br = self.eat(&TokenKind::Ampersand); match self.peek().clone() { TokenKind::Variable(n) => { self.advance(); v.push(ClosureUse{variable:n,by_ref:br}); } _ => break }; if !self.eat(&TokenKind::Comma) { break; } } self.expect(&TokenKind::CloseParen)?; v } else { Vec::new() };
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
                         let (body, end_line) = self.parse_block_with_end()?;
-                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line, doc_comment: attr_doc } })
+                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line, doc_comment: attr_doc, returns_by_ref: by_ref_return } })
                     }
                     TokenKind::Fn => {
-                        self.advance(); self.eat(&TokenKind::Ampersand);
+                        self.advance(); let by_ref_return = self.eat(&TokenKind::Ampersand);
                         self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
                         let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
                         self.expect(&TokenKind::DoubleArrow)?; let body = self.parse_expression()?;
                         let end_line = body.span.line;
-                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line, doc_comment: attr_doc } })
+                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line, doc_comment: attr_doc, returns_by_ref: by_ref_return } })
                     }
                     _ => Err(ParseError { message: "expected function or fn after attribute".into(), span: self.span() })
                 }
@@ -5270,7 +5271,7 @@ impl Parser {
                     .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
-                let _by_ref_return = self.eat(&TokenKind::Ampersand);
+                let by_ref_return = self.eat(&TokenKind::Ampersand);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -5330,6 +5331,7 @@ impl Parser {
                         attributes: Vec::new(),
                         end_line,
                         doc_comment: closure_doc,
+                        returns_by_ref: by_ref_return,
                     },
                 })
             }
@@ -5343,7 +5345,7 @@ impl Parser {
                     .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
-                let _by_ref_return = self.eat(&TokenKind::Ampersand);
+                let by_ref_return = self.eat(&TokenKind::Ampersand);
                 self.expect(&TokenKind::OpenParen)?;
                 let params = self.parse_params()?;
                 self.expect(&TokenKind::CloseParen)?;
@@ -5365,6 +5367,7 @@ impl Parser {
                         attributes: Vec::new(),
                         end_line,
                         doc_comment: arrow_doc,
+                        returns_by_ref: by_ref_return,
                     },
                 })
             }
@@ -5379,7 +5382,7 @@ impl Parser {
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
                     self.advance();
-                    let _by_ref_return = self.eat(&TokenKind::Ampersand);
+                    let by_ref_return = self.eat(&TokenKind::Ampersand);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
@@ -5401,11 +5404,12 @@ impl Parser {
                             attributes: Vec::new(),
                             end_line,
                             doc_comment: static_doc,
+                            returns_by_ref: by_ref_return,
                         },
                     })
                 } else {
                     self.advance(); // function
-                    let _by_ref_return = self.eat(&TokenKind::Ampersand);
+                    let by_ref_return = self.eat(&TokenKind::Ampersand);
                     self.expect(&TokenKind::OpenParen)?;
                     let params = self.parse_params()?;
                     self.expect(&TokenKind::CloseParen)?;
@@ -5454,6 +5458,7 @@ impl Parser {
                             attributes: Vec::new(),
                             end_line,
                             doc_comment: static_doc,
+                            returns_by_ref: by_ref_return,
                         },
                     })
                 }

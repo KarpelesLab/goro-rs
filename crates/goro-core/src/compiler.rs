@@ -4034,6 +4034,7 @@ impl Compiler {
                             end_line: method_end_line,
                             attributes: method_attributes,
                             doc_comment: method_doc_comment,
+                            returns_by_ref: method_returns_by_ref,
                         } => {
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
@@ -4617,6 +4618,7 @@ impl Compiler {
                                 method_compiler.is_in_trait = modifiers.is_trait;
                                 method_compiler.is_in_class_method = true;
                                 method_compiler.op_array.decl_line = *method_line;
+                                method_compiler.op_array.returns_by_ref = *method_returns_by_ref;
                                 method_compiler.op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
                                 method_compiler.op_array.doc_comment = method_doc_comment.clone();
                                 method_compiler.op_array.filename = self.source_file.clone();
@@ -4831,6 +4833,8 @@ impl Compiler {
                                 method_compiler.check_pending_gotos()?;
 
                                 // Implicit return null
+                                let implicit_line = method_compiler.op_array.end_line;
+                                method_compiler.emit_by_ref_return_notice(None, implicit_line);
                                 let null_idx = method_compiler.op_array.add_literal(Value::Null);
                                 method_compiler.op_array.emit(Op {
                                     opcode: OpCode::Return,
@@ -8949,6 +8953,7 @@ impl Compiler {
                 attributes: closure_attributes,
                 end_line: closure_end_line,
                 doc_comment: closure_doc_comment,
+                returns_by_ref: closure_returns_by_ref,
                 ..
             } => {
                 // Compile closure body as a child function
@@ -8967,6 +8972,7 @@ impl Compiler {
                 closure_compiler.op_array.is_generator = is_generator;
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.returns_by_ref = *closure_returns_by_ref;
                 closure_compiler.op_array.end_line = if *closure_end_line > 0 { *closure_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
@@ -9108,6 +9114,8 @@ impl Compiler {
                 }
                 closure_compiler.check_pending_gotos()?;
 
+                let implicit_line = closure_compiler.op_array.end_line;
+                closure_compiler.emit_by_ref_return_notice(None, implicit_line);
                 let null_idx = closure_compiler.op_array.add_literal(Value::Null);
                 closure_compiler.op_array.emit(Op {
                     opcode: OpCode::Return,
@@ -9210,7 +9218,7 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, .. } => {
+            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, returns_by_ref: arrow_returns_by_ref, .. } => {
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -9236,6 +9244,7 @@ impl Compiler {
                 closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
+                closure_compiler.op_array.returns_by_ref = *arrow_returns_by_ref;
                 closure_compiler.op_array.end_line = if *arrow_end_line > 0 { *arrow_end_line } else { expr.span.line };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
@@ -9296,6 +9305,7 @@ impl Compiler {
                     closure_compiler.op_array.param_types[cv as usize] = type_info;
                 }
 
+                closure_compiler.emit_by_ref_return_notice(Some(body), expr.span.line);
                 let body_val = closure_compiler.compile_expr(body)?;
                 closure_compiler.op_array.emit(Op {
                     opcode: OpCode::Return,

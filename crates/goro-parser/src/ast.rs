@@ -34,8 +34,8 @@ pub enum ExprKind {
     DynamicStaticMethodCall { class: Box<Expr>, method: Box<Expr>, args: Vec<Argument> }, ArrayAccess { array: Box<Expr>, index: Option<Box<Expr>> },
     FunctionCall { name: Box<Expr>, args: Vec<Argument> }, Ternary { condition: Box<Expr>, if_true: Option<Box<Expr>>, if_false: Box<Expr> },
     NullCoalesce { left: Box<Expr>, right: Box<Expr> }, Match { subject: Box<Expr>, arms: Vec<MatchArm> },
-    Closure { is_static: bool, params: Vec<Param>, use_vars: Vec<ClosureUse>, return_type: Option<TypeHint>, body: Vec<Statement>, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>> },
-    ArrowFunction { is_static: bool, params: Vec<Param>, return_type: Option<TypeHint>, body: Box<Expr>, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>> },
+    Closure { is_static: bool, params: Vec<Param>, use_vars: Vec<ClosureUse>, return_type: Option<TypeHint>, body: Vec<Statement>, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>>, returns_by_ref: bool },
+    ArrowFunction { is_static: bool, params: Vec<Param>, return_type: Option<TypeHint>, body: Box<Expr>, attributes: Vec<Attribute>, end_line: u32, doc_comment: Option<Vec<u8>>, returns_by_ref: bool },
     New { class: Box<Expr>, args: Vec<Argument> }, Instanceof { expr: Box<Expr>, class: Box<Expr> },
     Cast(CastType, Box<Expr>), Print(Box<Expr>), Exit(Option<Box<Expr>>), Empty(Box<Expr>), Isset(Vec<Expr>), Eval(Box<Expr>),
     Include { kind: IncludeKind, path: Box<Expr> }, Yield(Option<Box<Expr>>, Option<Box<Expr>>), YieldFrom(Box<Expr>),
@@ -78,7 +78,7 @@ pub struct ClassModifiers { pub is_abstract: bool, pub is_final: bool, pub is_re
 #[derive(Debug, Clone)]
 pub enum ClassMember {
     Property { name: Vec<u8>, type_hint: Option<TypeHint>, default: Option<Expr>, visibility: Visibility, set_visibility: Option<Visibility>, is_static: bool, is_readonly: bool, is_abstract: bool, is_final: bool, get_hook: Option<Vec<Statement>>, set_hook: Option<(Vec<u8>, Vec<Statement>)>, get_hook_final: bool, set_hook_final: bool, get_hook_abstract: bool, set_hook_abstract: bool, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>> },
-    Method { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Option<Vec<Statement>>, visibility: Visibility, is_static: bool, is_abstract: bool, is_final: bool, line: u32, end_line: u32, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>> },
+    Method { name: Vec<u8>, params: Vec<Param>, return_type: Option<TypeHint>, body: Option<Vec<Statement>>, visibility: Visibility, is_static: bool, is_abstract: bool, is_final: bool, line: u32, end_line: u32, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>>, returns_by_ref: bool },
     ClassConstant { name: Vec<u8>, value: Expr, visibility: Visibility, is_final: bool, attributes: Vec<Attribute>, type_hint: Option<TypeHint>, doc_comment: Option<Vec<u8>> },
     TraitUse { traits: Vec<Vec<u8>>, adaptations: Vec<TraitAdaptation> },
     EnumCase { name: Vec<u8>, value: Option<Expr>, attributes: Vec<Attribute>, doc_comment: Option<Vec<u8>> },

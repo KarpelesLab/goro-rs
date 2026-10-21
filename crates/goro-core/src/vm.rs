@@ -23423,7 +23423,12 @@ impl Vm {
                 }
 
                 OpCode::Return => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // By-ref returns fetch the operand for writing (no warning).
+                    let val = if op_array.returns_by_ref {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    } else {
+                        self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line)
+                    };
                     self.last_return_line = op.line;
                     // Emit implicit float-to-int deprecation BEFORE finally blocks run
                     // (so the warning appears in source order, before any side effects in finally).
@@ -28488,10 +28493,22 @@ impl Vm {
                             break;
                         }
                     }
+                    let mut defined = false;
+                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                        if cv_name == name_bytes {
+                            defined = !matches!(cvs.get(i).map(|v| v.deref()), None | Some(Value::Undef));
+                            break;
+                        }
+                    }
                     if matches!(found, Value::Null | Value::Undef) {
                         if let Some(val) = self.globals.get(name_bytes) {
                             found = val.clone();
+                            defined = true;
                         }
+                    }
+                    if !defined && name_bytes != b"this" {
+                        let varname = String::from_utf8_lossy(name_bytes).to_string();
+                        self.emit_warning_at(&format!("Undefined variable ${}", varname), op.line);
                     }
                     self.write_operand(&op.result, found, &mut cvs, &mut tmps, &static_cv_keys);
                 }
@@ -32458,6 +32475,7 @@ impl Vm {
                 }
 
                 OpCode::PropertyGet | OpCode::PropertyGetRW => {
+                    self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -35526,8 +35544,16 @@ impl Vm {
                 };
                 if is_undef {
                     if let Some(name) = op_array.cv_names.get(i) {
-                        let varname = String::from_utf8_lossy(name);
-                        self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
+                        if name.as_slice() != b"this" && name.as_slice() != b"GLOBALS" {
+                            let varname = String::from_utf8_lossy(name);
+                            if is_auto_global_name(name) {
+                                if !self.globals.contains_key(name.as_slice()) {
+                                    self.emit_warning_at(&format!("Undefined global variable ${}", varname), line);
+                                }
+                            } else {
+                                self.emit_warning_at(&format!("Undefined variable ${}", varname), line);
+                            }
+                        }
                     }
                 }
             }
