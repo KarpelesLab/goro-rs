@@ -834,8 +834,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         .or_else(|| c.properties.iter().find(|p| p.name == bare_name && !p.is_static))
                 });
                 let vis = prop_def.map(|p| p.visibility);
-                // Detect integer-like property names (e.g. set via {1} = ...) and
-                // render them as bare integers, matching PHP's var_dump output.
+                // Integer property keys only arise from object_properties_load()
+                // (e.g. GMP::__unserialize); other objects always use string keys.
                 let is_int_key = !bare_name.is_empty()
                     && (bare_name[0] == b'-' || bare_name[0].is_ascii_digit())
                     && bare_name.iter().enumerate().all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
@@ -850,7 +850,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                             false
                         }
                     };
-                let display_name = if is_int_key && vis.is_none() {
+                let display_name = if is_int_key && vis.is_none() && class_lower == b"gmp" {
                     name_str.to_string()
                 } else {
                     match vis {

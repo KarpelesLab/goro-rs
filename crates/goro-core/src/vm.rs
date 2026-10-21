@@ -6943,19 +6943,16 @@ impl Vm {
                 Some(Value::Null)
             }
             b"__serialize" => {
-                // MVP format: ['flags' => ..., 'storage' => [...], 'iteratorClass' => ...]
+                // ArrayObject::__serialize(): [flags, storage, members, iteratorClass]
+                // where iteratorClass is NULL for the default ArrayIterator.
                 let ob = obj.borrow();
                 let flags = ob.get_property(b"__spl_flags");
                 let storage = ob.get_property(b"__spl_array");
                 let iter_class = ob.get_property(b"__spl_iterator_class");
-                let iter_class = if matches!(iter_class, Value::Null | Value::Undef) {
-                    Value::String(PhpString::from_bytes(b"ArrayIterator"))
-                } else {
-                    iter_class
+                let iter_class = match iter_class {
+                    Value::String(ref s) if !s.as_bytes().eq_ignore_ascii_case(b"ArrayIterator") => iter_class.clone(),
+                    _ => Value::Null,
                 };
-                // Collect remaining user properties (anything that isn't an
-                // internal slot). Property names already carry their declared
-                // visibility encoding for protected/private members.
                 let mut props = PhpArray::new();
                 for (name, val) in ob.properties.iter() {
                     if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
@@ -6966,23 +6963,14 @@ impl Vm {
                     if matches!(val, Value::Undef) {
                         continue;
                     }
-                    props.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    props.set(Self::value_to_array_key(Value::String(PhpString::from_vec(name.clone()))), val.clone());
                 }
                 drop(ob);
                 let mut arr = PhpArray::new();
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"flags")),
-                    if matches!(flags, Value::Null | Value::Undef) { Value::Long(0) } else { flags },
-                );
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"storage")), storage);
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"iteratorClass")),
-                    iter_class,
-                );
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"properties")),
-                    Value::Array(Rc::new(RefCell::new(props))),
-                );
+                arr.push(if matches!(flags, Value::Null | Value::Undef) { Value::Long(0) } else { flags });
+                arr.push(storage);
+                arr.push(Value::Array(Rc::new(RefCell::new(props))));
+                arr.push(iter_class);
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
             }
             _ => None,
@@ -10089,7 +10077,7 @@ impl Vm {
                                 let iter_class_v = a_borrow.get(&ArrayKey::Int(3)).cloned();
                                 let iter_class_is_ok = match &iter_class_v {
                                     None => true,
-                                    Some(Value::String(_)) => true,
+                                    Some(Value::String(_)) | Some(Value::Null) => true,
                                     _ => false,
                                 };
                                 if !iter_class_is_ok {
@@ -10124,7 +10112,7 @@ impl Vm {
                                 }
                                 // Optional iteratorClass at i:3 must reference
                                 // an existing class that implements Iterator.
-                                if let Some(ic) = &iter_class_v {
+                                if let Some(ic) = iter_class_v.as_ref().filter(|v| !matches!(v, Value::Null)) {
                                     let icn = ic.to_php_string();
                                     let icn_bytes = icn.as_bytes();
                                     let icn_lower: Vec<u8> = icn_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -10171,7 +10159,17 @@ impl Vm {
                                 if let Some(Value::Array(p)) = props_v {
                                     for (k, v) in p.borrow().iter() {
                                         if let ArrayKey::String(s) = k {
-                                            ob.set_property(s.as_bytes().to_vec(), v.clone());
+                                            // Members use mangled names (\0*\0prop, \0Class\0prop).
+                                            let b = s.as_bytes();
+                                            let name = if b.first() == Some(&0) {
+                                                match b[1..].iter().position(|&c| c == 0) {
+                                                    Some(sep) => &b[sep + 2..],
+                                                    None => b,
+                                                }
+                                            } else {
+                                                b
+                                            };
+                                            ob.set_property(name.to_vec(), v.clone());
                                         }
                                     }
                                 }
