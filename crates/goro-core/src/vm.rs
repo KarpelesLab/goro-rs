@@ -535,6 +535,15 @@ pub struct Vm {
     pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
     /// OG(output_start_filename/lineno): where output started.
     pub output_start: Option<(String, u32)>,
+    /// Stream-wrapper include hook: returns the source of an include/require
+    /// target served by a userspace stream wrapper (None: not handled).
+    pub include_stream_hook: Option<fn(&mut Vm, &str, u8) -> Option<Result<Vec<u8>, VmError>>>,
+    /// Resolves an include target to a stream-wrapper URL (verbatim
+    /// wrapper URLs, or relative names found through include_path entries
+    /// served by userspace wrappers). None: use the plain-file logic.
+    pub include_resolve_hook: Option<fn(&mut Vm, &str) -> Option<Result<String, VmError>>>,
+    /// Run at request shutdown after destructors (resource list destruction).
+    pub resource_shutdown_hooks: Vec<fn(&mut Vm)>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1182,10 +1191,10 @@ impl Vm {
                 c.insert(b"STREAM_URL_STAT_QUIET".to_vec(), Value::Long(2));
                 c.insert(b"STREAM_MKDIR_RECURSIVE".to_vec(), Value::Long(1));
                 c.insert(b"STREAM_META_TOUCH".to_vec(), Value::Long(1));
-                c.insert(b"STREAM_META_OWNER".to_vec(), Value::Long(2));
-                c.insert(b"STREAM_META_OWNER_NAME".to_vec(), Value::Long(3));
-                c.insert(b"STREAM_META_GROUP".to_vec(), Value::Long(4));
-                c.insert(b"STREAM_META_GROUP_NAME".to_vec(), Value::Long(5));
+                c.insert(b"STREAM_META_OWNER_NAME".to_vec(), Value::Long(2));
+                c.insert(b"STREAM_META_OWNER".to_vec(), Value::Long(3));
+                c.insert(b"STREAM_META_GROUP_NAME".to_vec(), Value::Long(4));
+                c.insert(b"STREAM_META_GROUP".to_vec(), Value::Long(5));
                 c.insert(b"STREAM_META_ACCESS".to_vec(), Value::Long(6));
                 c.insert(b"STREAM_BUFFER_NONE".to_vec(), Value::Long(0));
                 c.insert(b"STREAM_BUFFER_LINE".to_vec(), Value::Long(1));
@@ -1448,6 +1457,9 @@ impl Vm {
             rfc1867_callback: None,
             internal_deprecated_constants: HashMap::new(),
             output_start: None,
+            include_stream_hook: None,
+            include_resolve_hook: None,
+            resource_shutdown_hooks: Vec::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
             weak_refs: HashMap::new(),
@@ -7104,6 +7116,19 @@ impl Vm {
                 crate::random::dispatch_random_method(self, class_lower, method_lower, obj)
             }
             b"directory" => {
+                // Directory objects for userspace wrapper streams carry no
+                // entry snapshot: forward to readdir()/rewinddir()/closedir().
+                if !obj.borrow().has_property(b"__dir_entries") {
+                    let fname: &[u8] = match method_lower {
+                        b"read" => b"readdir",
+                        b"rewind" => b"rewinddir",
+                        b"close" => b"closedir",
+                        _ => return None,
+                    };
+                    let handle = obj.borrow().get_property(b"handle");
+                    let f = self.functions.get(fname).copied()?;
+                    return Some(f(self, &[handle]).unwrap_or(Value::False));
+                }
                 match method_lower {
                     b"read" => {
                         let mut ob = obj.borrow_mut();
@@ -11823,6 +11848,9 @@ impl Vm {
         } else {
             self.run_shutdown_destructors();
         }
+        for hook in std::mem::take(&mut self.resource_shutdown_hooks) {
+            hook(self);
+        }
 
         // Module request shutdown (RSHUTDOWN), e.g. session write. Output
         // buffers are flushed first (php_request_shutdown step 3).
@@ -15973,10 +16001,6 @@ impl Vm {
                                         }
                                     } else {
                                         named_ok = self.spl_map_named_args(spl_class, spl_method, &mut spl_args, &call.named_args);
-                                    }
-                                } else if !call.named_args.is_empty() {
-                                    if let Err(n) = crate::spl_csv::merge_spl_file_named_args(spl_class, spl_method, &mut spl_args, &call.named_args) {
-                                        named_err = n;
                                     }
                                 }
                                 let result = if let Some(n) = named_err {
@@ -23752,10 +23776,30 @@ impl Vm {
                     let is_once = include_kind == 1 || include_kind == 3;
                     let is_require = include_kind == 2 || include_kind == 3;
 
+                    // Stream-wrapper URLs are used verbatim.
+                    let resolved_stream_path = match self.include_resolve_hook {
+                        Some(resolve) => match resolve(self, &path_str) {
+                            Some(Ok(p)) => Some(p),
+                            Some(Err(e)) => {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                }
+                                return Err(e);
+                            }
+                            None => None,
+                        },
+                        None => None,
+                    };
+                    let is_stream_path = resolved_stream_path.is_some();
                     // Try to read and execute the file
-                    let path: &str = &path_str;
+                    let path: &str = resolved_stream_path.as_deref().unwrap_or(&path_str);
                     // Resolve to absolute path for __DIR__/__FILE__
-                    let abs_path = if std::path::Path::new(path).is_absolute() {
+                    let abs_path = if is_stream_path {
+                        path.to_string()
+                    } else if std::path::Path::new(path).is_absolute() {
                         path.to_string()
                     } else {
                         // Resolve relative to the directory of the current file
@@ -23777,8 +23821,32 @@ impl Vm {
                         continue;
                     }
 
+                    // Userspace stream wrappers provide the source themselves.
+                    let hooked_source = match self.include_stream_hook {
+                        Some(hook) if is_stream_path => hook(self, &abs_path, include_kind as u8),
+                        _ => None,
+                    };
+                    let hooked_source = match hooked_source {
+                        Some(Err(e)) => {
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(e);
+                            }
+                            if !e.message.is_empty() {
+                                return Err(e);
+                            }
+                            self.write_operand(&op.result, Value::False, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
+                        Some(Ok(src)) => Some(src),
+                        None => None,
+                    };
+
                     let old_file = self.current_file.clone();
-                    let result = match std::fs::read(&abs_path) {
+                    let result = match hooked_source.map(Ok).unwrap_or_else(|| std::fs::read(&abs_path)) {
                         Ok(source) => {
                             // Track file for _once variants
                             self.included_files.insert(abs_path.clone());

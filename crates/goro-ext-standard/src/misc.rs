@@ -6843,17 +6843,22 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(res);
     }
     // php://filter routes through fopen so the filter chain is applied.
+    // (Dispatch through the registered functions: the inner resource may be
+    // served by a userspace stream wrapper.)
     if path_str.starts_with("php://filter/") {
-        let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
-        let fp = fopen_fn(vm, &inner_args)?;
+        let mut inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r")), Value::False];
+        if let Some(ctx) = args.get(2) {
+            inner_args.push(ctx.clone());
+        }
+        let fp = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
         let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
         let get_args = if length.is_some() {
             vec![Value::Resource(fid), Value::Long(length.unwrap()), Value::Long(offset)]
         } else {
             vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
         };
-        let res = stream_get_contents_fn(vm, &get_args)?;
-        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        let res = call_registered(vm, b"stream_get_contents", stream_get_contents_fn, &get_args)?;
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::Resource(fid)]);
         return Ok(res);
     }
     // php://input - request body for HTTP requests served by the built-in CLI server.
@@ -8671,6 +8676,10 @@ fn php_compare_for_sort(a: &Value, b: &Value, sort_type: i64) -> std::cmp::Order
 use std::collections::HashMap as StdHashMap;
 use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom, BufRead, BufReader};
 
+/// Userspace stream wrappers (stream_wrapper_register classes).
+#[path = "userstream.rs"]
+pub(crate) mod userstream;
+
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
     static NEXT_FILE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(100) }; // Start at 100 to avoid clashing with STDIN/STDOUT/STDERR
@@ -8963,6 +8972,13 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
     }
 }
 
+/// Call a builtin through the function table (so wrappers installed over
+/// it, e.g. userspace stream dispatch, apply), falling back to `f`.
+fn call_registered(vm: &mut Vm, name: &[u8], f: fn(&mut Vm, &[Value]) -> Result<Value, VmError>, args: &[Value]) -> Result<Value, VmError> {
+    let g = vm.functions.get(name).copied().unwrap_or(f);
+    g(vm, args)
+}
+
 pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     // Empty filename → ValueError, matching PHP's behavior.
@@ -9104,9 +9120,13 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             (rest, "")
         };
-        // Recurse on the inner URL.
-        let inner_args = vec![Value::String(PhpString::from_string(inner_url.to_string())), Value::String(PhpString::from_string(mode.clone()))];
-        let inner = fopen_fn(vm, &inner_args)?;
+        // Recurse on the inner URL (through the registered fopen, so
+        // userspace wrappers can serve it).
+        let mut inner_args = vec![Value::String(PhpString::from_string(inner_url.to_string())), Value::String(PhpString::from_string(mode.clone())), Value::False];
+        if let Some(ctx) = args.get(3) {
+            inner_args.push(ctx.clone());
+        }
+        let inner = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
         let inner_fid = match inner {
             Value::Resource(n) => n,
             _ => return Ok(Value::False),

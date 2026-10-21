@@ -48,6 +48,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     request::register(vm);
     basedir_guard::register(vm);
     url_scanner::register(vm);
+    misc::userstream::register(vm);
     register_builtin_param_names(vm);
 }
 
