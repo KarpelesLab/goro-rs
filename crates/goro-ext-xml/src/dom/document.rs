@@ -1171,24 +1171,59 @@ fn m_validate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(b(validate_doc(vm, d, &f)))
 }
 
+/// dom_xinclude_strip_fallback_references: libxml2 copies the contents
+/// of xi:include elements and frees the originals, so PHP objects of nodes
+/// inside them are detached first (GH-14702, GH-17847).
+fn xinclude_strip_references(doc: NodeId) {
+    let wrappers = tree::with(|t| {
+        let mut out = Vec::new();
+        let mut take = |t: &mut Tree, n: NodeId| {
+            if let Some(w) = t.nodes[n].wrapper.take() {
+                out.push(w);
+            }
+        };
+        for x in t.descendants(doc) {
+            if !crate::xinclude::is_include(t, x) {
+                continue;
+            }
+            let mut sub = vec![x];
+            sub.extend(t.descendants(x));
+            for n in sub {
+                take(t, n);
+                for a in t.attrs_of(n) {
+                    take(t, a);
+                    for c in t.children_of(a) {
+                        take(t, c);
+                    }
+                }
+            }
+        }
+        out
+    });
+    for w in wrappers {
+        if let Some(o) = w.upgrade() {
+            if let Some(d) = data_of(&o) {
+                *d.kind.borrow_mut() = Kind::None;
+            }
+        }
+    }
+}
+
 fn m_xinclude(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 0, 1)?;
     let flags = a.long(vm, 0, "options", 0)?;
-    if flags > i32::MAX as i64 || flags < 0 && flags < i32::MIN as i64 {
-        throw_error(
-            vm,
-            b"ValueError",
-            &format!("{}(): Argument #1 ($options) is too large", a.f),
-        );
-        return Err(());
+    if flags > i32::MAX as i64 || flags < i32::MIN as i64 {
+        warn(vm, "Invalid flags");
+        return Ok(Value::False);
     }
     let d = doc_node(vm, o)?;
-    let n = crate::xinclude::process(vm, d, flags);
-    if n < 0 {
-        Ok(Value::False)
-    } else {
+    xinclude_strip_references(d);
+    let n = crate::xinclude::process(vm, &a.f, d, flags | crate::xinclude::XML_PARSE_NOXINCNODE);
+    if n != 0 {
         Ok(Value::Long(n))
+    } else {
+        Ok(Value::False)
     }
 }
 

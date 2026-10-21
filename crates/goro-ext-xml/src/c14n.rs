@@ -721,7 +721,7 @@ fn execute(
 /// output, which `open_output` opens). `xpath_argno` is the 1-based
 /// position of $xpath.
 /// Returns None when canonicalization failed (PHP returns false).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::result_unit_err)]
 pub fn canonicalize(
     vm: &mut Vm,
     fname: &str,
