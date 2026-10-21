@@ -59,14 +59,18 @@ fn main() {
                 process::exit(1);
             }
             let dir = Path::new(&args[2]);
-            let (pass, fail, skip, error) = goro_phpt::run_test_dir(dir);
+            let c = goro_phpt::run_test_dir(dir);
             println!("\n=== Test Results ===");
-            println!("Pass:  {}", pass);
-            println!("Fail:  {}", fail);
-            println!("Skip:  {}", skip);
-            println!("Error: {}", error);
-            println!("Total: {}", pass + fail + skip + error);
-            if fail > 0 || error > 0 {
+            println!("Pass:  {}", c.pass);
+            println!("Fail:  {}", c.fail);
+            println!("Skip:  {}", c.skip);
+            println!("Error: {}", c.error);
+            // Expected failures (--XFAIL--) are not failures, like in
+            // run-tests.php; XPass: XFAIL tests that passed.
+            println!("XFail: {}", c.xfail);
+            println!("XPass: {}", c.xpass);
+            println!("Total: {}", c.total());
+            if c.fail > 0 || c.error > 0 {
                 process::exit(1);
             }
             return;

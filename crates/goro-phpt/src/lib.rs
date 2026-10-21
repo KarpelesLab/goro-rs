@@ -243,9 +243,23 @@ impl PhptTest {
 #[derive(Debug)]
 pub enum TestResult {
     Pass,
-    Fail { expected: String, actual: String },
+    Fail {
+        expected: String,
+        actual: String,
+    },
     Skip(String),
     Error(String),
+    /// The test failed, but it has an --XFAIL-- section (or its SKIPIF
+    /// printed "xfail ..."): an expected failure, not counted as one.
+    XFail(String),
+    /// The test passed although it is marked --XFAIL-- (run-tests.php
+    /// reports it as a warning, not a failure).
+    XPass,
+}
+
+thread_local! {
+    /// Reason given by a SKIPIF section that printed "xfail <reason>".
+    static SKIPIF_XFAIL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 // Run a PHPT test against the goro engine
@@ -299,6 +313,22 @@ pub fn run_test_with_dir_and_filename(
     test_dir: Option<&Path>,
     filename: &str,
 ) -> TestResult {
+    SKIPIF_XFAIL.with(|x| *x.borrow_mut() = None);
+    let result = run_test_inner(test, test_dir, filename);
+    // --XFAIL-- (run-tests.php): a failure is expected, a pass is notable.
+    let xfail = test
+        .sections
+        .get("XFAIL")
+        .map(|r| r.trim().to_string())
+        .or_else(|| SKIPIF_XFAIL.with(|x| x.borrow_mut().take()));
+    match (result, xfail) {
+        (TestResult::Fail { .. }, Some(reason)) => TestResult::XFail(reason),
+        (TestResult::Pass, Some(_)) => TestResult::XPass,
+        (r, _) => r,
+    }
+}
+
+fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
     let mut ini_settings = parse_ini_settings(test.ini_section());
     // run-tests.php placeholders: {PWD}, {TMP}, {MAIL:path}
@@ -414,6 +444,13 @@ pub fn run_test_with_dir_and_filename(
                         return TestResult::Skip(
                             String::from_utf8_lossy(&output).trim().to_string(),
                         );
+                    }
+                    // "xfail <reason>" marks the test as expected to fail.
+                    let trimmed = output_str.trim_start();
+                    if trimmed.starts_with("xfail") {
+                        let raw = String::from_utf8_lossy(&output);
+                        let reason = raw.trim_start()[5..].trim().to_string();
+                        SKIPIF_XFAIL.with(|x| *x.borrow_mut() = Some(reason));
                     }
                 }
                 Err(_) => {
@@ -2249,8 +2286,27 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
     ai >= ab.len()
 }
 
+/// Outcome counts of a test run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TestCounts {
+    pub pass: usize,
+    pub fail: usize,
+    pub skip: usize,
+    pub error: usize,
+    /// Expected failures (--XFAIL--); not failures.
+    pub xfail: usize,
+    /// --XFAIL-- tests that passed.
+    pub xpass: usize,
+}
+
+impl TestCounts {
+    pub fn total(&self) -> usize {
+        self.pass + self.fail + self.skip + self.error + self.xfail + self.xpass
+    }
+}
+
 /// Run all .phpt files in a directory (recursively)
-pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
+pub fn run_test_dir(dir: &Path) -> TestCounts {
     // Each test runs with its own directory as cwd, so a relative test path
     // would no longer name the script (or its includes) from there.
     let abs_dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
@@ -2265,6 +2321,8 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     let mut fail = 0;
     let mut skip = 0;
     let mut error = 0;
+    let mut xfail = 0;
+    let mut xpass = 0;
 
     // Make sure subprocesses launched by tests (e.g. via proc_open from
     // php_cli_server.inc) use this goro binary rather than the system `php`.
@@ -2385,6 +2443,17 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                         error += 1;
                         println!("ERROR: {} [{}] ({})", test_name, _dbg_name, msg);
                     }
+                    Ok(TestResult::XFail(reason)) => {
+                        xfail += 1;
+                        println!("XFAIL: {} [{}] ({})", test_name, _dbg_name, reason);
+                    }
+                    Ok(TestResult::XPass) => {
+                        xpass += 1;
+                        println!(
+                            "XPASS: {} [{}] (warn: XFAIL section but test passes)",
+                            test_name, _dbg_name
+                        );
+                    }
                     Err(_) => {
                         error += 1;
                         println!(
@@ -2399,7 +2468,14 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
 
     // Stop the embedded MySQL server, if one was started.
     mysqli_test::shutdown();
-    (pass, fail, skip, error)
+    TestCounts {
+        pass,
+        fail,
+        skip,
+        error,
+        xfail,
+        xpass,
+    }
 }
 
 fn collect_phpt_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {

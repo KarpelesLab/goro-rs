@@ -122,7 +122,7 @@ jobs:
       - name: Summarize
         run: |
           total() { cat results/*/test_results.txt | grep "^$1:" | awk '{s+=$2} END {print s+0}'; }
-          PASS=$(total Pass); FAIL=$(total Fail); SKIP=$(total Skip); ERROR=$(total Error); TOTAL=$(total Total)
+          PASS=$(total Pass); FAIL=$(total Fail); SKIP=$(total Skip); ERROR=$(total Error); XFAIL=$(total XFail); XPASS=$(total XPass); TOTAL=$(total Total)
           SHARDS=$(ls results | wc -l)
           {
             echo "## Test Results: ${PASS}/${TOTAL} passing (${SHARDS}/8 shards reported)"
@@ -133,6 +133,8 @@ jobs:
             echo "| Fail | $FAIL |"
             echo "| Skip | $SKIP |"
             echo "| Error | $ERROR |"
+            echo "| XFail | $XFAIL |"
+            echo "| XPass | $XPASS |"
             echo "| Total | $TOTAL |"
           } | tee -a $GITHUB_STEP_SUMMARY
           cat results/*/test_results.txt | grep -A 2 "^FAIL:" > test_failures.txt || true
