@@ -4653,7 +4653,8 @@ impl Vm {
 
         // By-value array parameters get their own copy.
         for (ci, slot) in func_cvs.iter_mut().enumerate() {
-            if ci < hidden_cvs || op_array.by_ref_params.get(ci).copied().unwrap_or(false) {
+            // (A by-ref parameter given a plain value gets a temporary copy too.)
+            if ci < hidden_cvs {
                 continue;
             }
             if let Value::Array(a) = slot {
@@ -4671,12 +4672,31 @@ impl Vm {
             return Ok(Value::Generator(gen_rc));
         }
 
+        // Record an "[internal function]" frame for the callback so backtraces
+        // and func_get_args() see it (zend_call_function pushes a frame too).
+        let frame_display = if !op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&op_array.display_name).to_string()
+        } else if let Some(fcc) = &op_array.fcc_target_name {
+            String::from_utf8_lossy(fcc).to_string()
+        } else if let Some(sc) = &op_array.scope_class {
+            let raw = String::from_utf8_lossy(&op_array.name).to_string();
+            let m = raw.rsplit("::").next().unwrap_or(&raw).to_string();
+            let cname = self.classes.get(sc).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+            format!("{}::{}", cname, m)
+        } else {
+            String::from_utf8_lossy(&op_array.name).to_string()
+        };
+        let frame_args: Vec<Value> = call.args.iter().skip(lead).map(|v| v.deref()).collect();
+        let is_instance = this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
+        self.call_stack.push((frame_display, String::new(), 0, frame_args, is_instance));
         // Imperative call entry point: run in function scope, not global scope
         // (see execute_fn for why this matters with includes in callbacks).
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
         let result = self.execute_op_array(op_array, func_cvs);
         self.is_global_scope = was_global;
+        self.call_stack.pop();
         result
     }
 
