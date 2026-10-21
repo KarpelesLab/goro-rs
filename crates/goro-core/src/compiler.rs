@@ -177,12 +177,19 @@ pub struct Compiler {
     /// the hoisting pass can decide whether a `extends Parent` class can itself be
     /// hoisted (its parent must already be hoisted or be an internal class).
     hoisted_class_names: std::collections::HashSet<Vec<u8>>,
+    /// The hoisted (early-bound) class declaration statements, by address: a
+    /// same-named declaration elsewhere in the file is not that statement.
+    hoisted_class_stmts: std::collections::HashSet<usize>,
     /// Top-level functions declared in this compilation unit: lowercased
     /// qualified name -> (display name, declaration line).
     hoisted_function_names: HashMap<Vec<u8>, (Vec<u8>, u32)>,
     /// Classes declared so far (source order) in the main compile pass,
     /// lowercased qualified names. Used for `use` name conflict checks.
     seen_class_symbols: std::collections::HashSet<Vec<u8>>,
+    /// Functions (lowercased qualified names) and constants (qualified
+    /// names) declared so far in the main pass (FC(seen_symbols)).
+    seen_function_symbols: std::collections::HashSet<Vec<u8>>,
+    seen_const_symbols: std::collections::HashSet<Vec<u8>>,
     /// True while running the main (second) top-level compile pass.
     in_main_pass: bool,
     /// True when compiling the body of a free (non-closure, non-method)
@@ -400,8 +407,11 @@ impl Compiler {
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
             hoisted_class_names: std::collections::HashSet::new(),
+            hoisted_class_stmts: std::collections::HashSet::new(),
             hoisted_function_names: HashMap::new(),
             seen_class_symbols: std::collections::HashSet::new(),
+            seen_function_symbols: std::collections::HashSet::new(),
+            seen_const_symbols: std::collections::HashSet::new(),
             in_main_pass: false,
             in_free_function: false,
             is_in_trait: false,
@@ -560,6 +570,64 @@ impl Compiler {
             result.extend_from_slice(name);
             result
         }
+    }
+
+    /// zend_reset_import_tables(): the seen symbols are per namespace.
+    fn reset_seen_symbols(&mut self) {
+        self.seen_class_symbols.clear();
+        self.seen_function_symbols.clear();
+        self.seen_const_symbols.clear();
+    }
+
+    /// A function / class / constant declaration of (unqualified) `name` in
+    /// the main pass, in source order: the collision with a `use` import of
+    /// that name in the current namespace (zend_begin_func_decl,
+    /// zend_compile_class_decl, zend_compile_const_decl), then
+    /// zend_register_seen_symbol() for the `use` checks of later imports.
+    fn note_symbol_decl(&mut self, kind: &UseKind, name: &[u8], line: u32) -> CompileResult<()> {
+        let qn = self.prefix_with_namespace(name);
+        let lc = qn.to_ascii_lowercase();
+        let msg = match kind {
+            UseKind::Function => self
+                .use_function_map
+                .get(&name.to_ascii_lowercase())
+                .filter(|imp| !imp.eq_ignore_ascii_case(&lc))
+                .map(|_| {
+                    format!(
+                        "Cannot redeclare function {}() (previously declared as local import)",
+                        String::from_utf8_lossy(&qn)
+                    )
+                }),
+            UseKind::Normal => self
+                .use_map
+                .get(&name.to_ascii_lowercase())
+                .filter(|imp| !imp.eq_ignore_ascii_case(&lc))
+                .map(|_| {
+                    format!(
+                        "Cannot redeclare class {} (previously declared as local import)",
+                        String::from_utf8_lossy(&qn)
+                    )
+                }),
+            UseKind::Constant => self
+                .use_const_map
+                .get(name)
+                .filter(|imp| imp.as_slice() != qn.as_slice())
+                .map(|_| {
+                    format!(
+                        "Cannot declare const {} because the name is already in use",
+                        String::from_utf8_lossy(&qn)
+                    )
+                }),
+        };
+        if let Some(message) = msg {
+            return Err(CompileError { message, line });
+        }
+        match kind {
+            UseKind::Function => self.seen_function_symbols.insert(lc),
+            UseKind::Normal => self.seen_class_symbols.insert(lc),
+            UseKind::Constant => self.seen_const_symbols.insert(qn),
+        };
+        Ok(())
     }
 
     /// Resolve a class/interface/trait name. Rules:
@@ -1824,8 +1892,9 @@ impl Compiler {
         self.in_main_pass = true;
         for stmt in &program.statements {
             match &stmt.kind {
-                StmtKind::FunctionDecl { .. } => {
+                StmtKind::FunctionDecl { name, .. } => {
                     // Already compiled in first pass
+                    self.note_symbol_decl(&UseKind::Function, name, stmt.span.line)?;
                 }
                 StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
                     // Hoisted (early-bound) classes were already compiled in the first
@@ -1835,8 +1904,11 @@ impl Compiler {
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
-                    self.seen_class_symbols.insert(qn_lower.clone());
-                    if !self.hoisted_class_names.contains(&qn_lower) {
+                    self.note_symbol_decl(&UseKind::Normal, name, stmt.span.line)?;
+                    if !self
+                        .hoisted_class_stmts
+                        .contains(&(stmt as *const Statement as usize))
+                    {
                         self.compile_stmt(stmt)?;
                     } else {
                         self.emit_late_hoisted_decl(&qn_lower, stmt.span.line);
@@ -1859,13 +1931,15 @@ impl Compiler {
                     self.use_map = HashMap::new();
                     self.use_function_map = HashMap::new();
                     self.use_const_map = HashMap::new();
+                    self.reset_seen_symbols();
 
                     if let Some(body_stmts) = body {
                         // Bracketed namespace: compile body statements (except func/class decls)
                         for s in body_stmts {
                             match &s.kind {
-                                StmtKind::FunctionDecl { .. } => {
+                                StmtKind::FunctionDecl { name, .. } => {
                                     // Already compiled in first pass
+                                    self.note_symbol_decl(&UseKind::Function, name, s.span.line)?;
                                 }
                                 StmtKind::ClassDecl { name, .. }
                                     if !name.starts_with(b"__anonymous_class_") =>
@@ -1877,8 +1951,11 @@ impl Compiler {
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
-                                    self.seen_class_symbols.insert(qn_lower.clone());
-                                    if !self.hoisted_class_names.contains(&qn_lower) {
+                                    self.note_symbol_decl(&UseKind::Normal, name, s.span.line)?;
+                                    if !self
+                                        .hoisted_class_stmts
+                                        .contains(&(s as *const Statement as usize))
+                                    {
                                         self.compile_stmt(s)?;
                                     } else {
                                         self.emit_late_hoisted_decl(&qn_lower, s.span.line);
@@ -1894,6 +1971,7 @@ impl Compiler {
                         self.use_map = HashMap::new();
                         self.use_function_map = HashMap::new();
                         self.use_const_map = HashMap::new();
+                        self.reset_seen_symbols();
                     }
                 }
                 _ => {
@@ -1962,6 +2040,7 @@ impl Compiler {
                         self.use_map = HashMap::new();
                         self.use_function_map = HashMap::new();
                         self.use_const_map = HashMap::new();
+                        self.reset_seen_symbols();
                     }
                 }
                 StmtKind::UseDecl(_) => {
@@ -1984,7 +2063,10 @@ impl Compiler {
                     }
                     self.hoisted_function_names
                         .insert(qn_lower, (qn, stmt.span.line));
-                    self.compile_stmt(stmt)?;
+                    self.in_hoisting_pass = true;
+                    let r = self.compile_stmt(stmt);
+                    self.in_hoisting_pass = false;
+                    r?;
                 }
                 StmtKind::ClassDecl {
                     name,
@@ -2009,6 +2091,8 @@ impl Compiler {
                         self.hoisted_class_idx
                             .insert(qn_lower.clone(), self.compiled_classes.len() as i64 - 1);
                         self.hoisted_class_names.insert(qn_lower);
+                        self.hoisted_class_stmts
+                            .insert(stmt as *const Statement as usize);
                     }
                 }
                 _ => {}
@@ -3304,6 +3388,11 @@ impl Compiler {
                 returns_by_ref: func_returns_by_ref,
                 ..
             } => {
+                if self.in_main_pass {
+                    // A conditional / nested declaration (top-level ones are
+                    // noted at their position in the main pass).
+                    self.note_symbol_decl(&UseKind::Function, name, stmt.span.line)?;
+                }
                 if name.eq_ignore_ascii_case(b"assert") {
                     return Err(CompileError {
                         message: "Defining a custom assert() function is not allowed, as the function has special semantics".to_string(),
@@ -3677,12 +3766,20 @@ impl Compiler {
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(qualified_name)));
                 let idx_literal = self.op_array.add_literal(Value::Long(func_idx as i64));
+                // result = Const(error type): a named function declaration,
+                // bound with do_bind_function()'s redeclaration check (closures
+                // share the opcode but are re-declared on every evaluation).
+                // A top-level declaration is bound at compile time in PHP
+                // (E_COMPILE_ERROR), a conditional / nested one at run time.
+                let named_marker = self
+                    .op_array
+                    .add_literal(Value::Long(if self.in_hoisting_pass { 64 } else { 1 }));
 
                 self.op_array.emit(Op {
                     opcode: OpCode::DeclareFunction,
                     op1: OperandType::Const(name_idx),
                     op2: OperandType::Const(idx_literal),
-                    result: OperandType::Unused,
+                    result: OperandType::Const(named_marker),
                     line: stmt.span.line,
                 });
 
@@ -3779,6 +3876,18 @@ impl Compiler {
                             line: value.span.line,
                         });
                     }
+                    // zend_compile_const_decl(): true/false/null cannot be
+                    // redeclared; then the collision with a `use const`.
+                    if matches!(name_lower.as_slice(), b"true" | b"false" | b"null") {
+                        return Err(CompileError {
+                            message: format!(
+                                "Cannot redeclare constant '{}'",
+                                String::from_utf8_lossy(name)
+                            ),
+                            line: stmt.span.line,
+                        });
+                    }
+                    self.note_symbol_decl(&UseKind::Constant, name, stmt.span.line)?;
                     // Check for invalid spreads BEFORE emitting the define() call.
                     // PHP only allows arrays (or constant arrays) to be spread in constant expressions.
                     // A non-constant spread (e.g. `[...new ArrayObject()]`) is compiled as a runtime
@@ -4537,6 +4646,9 @@ impl Compiler {
                         message: "Class declarations may not be nested".into(),
                         line: stmt.span.line,
                     });
+                }
+                if !is_anonymous && self.in_main_pass {
+                    self.note_symbol_decl(&UseKind::Normal, name, stmt.span.line)?;
                 }
                 let qualified_name = if is_anonymous {
                     // Look up from pre-built map (built before hoisting pass)
@@ -8885,9 +8997,16 @@ impl Compiler {
                             UseKind::Constant => self.use_const_map.contains_key(&alias),
                         };
                         let mut conflict = already_imported;
-                        if !conflict && matches!(item.kind, UseKind::Normal) {
+                        if !conflict {
+                            // zend_have_seen_symbol(): a declaration of that name
+                            // earlier in the file (constants: case-sensitive).
+                            let lookup: &[u8] = if matches!(item.kind, UseKind::Constant) {
+                                &alias
+                            } else {
+                                &alias_lower
+                            };
                             let check: Vec<u8> = if self.current_namespace.is_empty() {
-                                alias_lower.clone()
+                                lookup.to_vec()
                             } else {
                                 let mut c: Vec<u8> = self
                                     .current_namespace
@@ -8895,10 +9014,15 @@ impl Compiler {
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
                                 c.push(b'\\');
-                                c.extend_from_slice(&alias_lower);
+                                c.extend_from_slice(lookup);
                                 c
                             };
-                            if self.seen_class_symbols.contains(&check) && check != fqn_lower {
+                            let seen = match item.kind {
+                                UseKind::Normal => self.seen_class_symbols.contains(&check),
+                                UseKind::Function => self.seen_function_symbols.contains(&check),
+                                UseKind::Constant => self.seen_const_symbols.contains(&check),
+                            };
+                            if seen && !check.eq_ignore_ascii_case(&fqn_lower) {
                                 conflict = true;
                             }
                         }

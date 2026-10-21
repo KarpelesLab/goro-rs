@@ -229,10 +229,16 @@ impl Vm {
         } else {
             self.ucf_call_line = Some(line);
         }
+        let fatal_before = self.fatal_emitted;
         let r = self.call_callback(&handler, &args);
         self.ucf_call_line = saved_ucf;
         if self.error_handler.is_none() {
             self.error_handler = saved;
+        }
+        // A fatal error inside the handler ends the script (bailout): the
+        // code that raised the error does not continue.
+        if !fatal_before && self.fatal_emitted && self.current_exception.is_none() {
+            self.fatal_bailout = true;
         }
         match r {
             Ok(v) => {

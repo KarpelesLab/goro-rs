@@ -550,6 +550,10 @@ pub struct Vm {
     /// Set when a user error handler throws an exception during warning/notice emission.
     /// The main execution loop checks this after each opcode to dispatch the exception.
     pub error_handler_threw: bool,
+    /// A fatal error was raised (and displayed) inside a callback whose
+    /// caller cannot propagate it (the user error handler): every frame
+    /// unwinds, like zend_bailout(); cleared before shutdown functions run.
+    pub fatal_bailout: bool,
     /// User exception handler callback (from set_exception_handler)
     pub exception_handler: Option<Value>,
     /// Stack of previous exception handlers (for restore_exception_handler)
@@ -845,6 +849,7 @@ impl Vm {
             tick_functions: Vec::new(),
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
+            fatal_bailout: false,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
@@ -6650,6 +6655,30 @@ impl Vm {
     /// closure capture vars (`use` bindings) are forwarded correctly.
     fn call_closure_value(&mut self, callable: &Value, args: Vec<Value>) -> Option<Value> {
         self.call_callback(callable, &args).ok()
+    }
+
+    /// do_bind_function(): the "Cannot redeclare function" fatal error when
+    /// a named function declaration `name` finds the name already bound
+    /// (do_bind_function_error: with the previous declaration's location for
+    /// a user function).
+    pub fn function_redeclaration_error(&self, name: &[u8]) -> Option<String> {
+        let lower = name.to_ascii_lowercase();
+        let shown = String::from_utf8_lossy(name);
+        if let Some(old) = self.user_functions.get(&lower) {
+            if !old.filename.is_empty() {
+                return Some(format!(
+                    "Cannot redeclare function {}() (previously declared in {}:{})",
+                    shown,
+                    String::from_utf8_lossy(&old.filename),
+                    old.decl_line
+                ));
+            }
+            return Some(format!("Cannot redeclare function {}()", shown));
+        }
+        if self.functions.contains_key(&lower) {
+            return Some(format!("Cannot redeclare function {}()", shown));
+        }
+        None
     }
 
     /// Register a user-defined function
@@ -14648,6 +14677,7 @@ impl Vm {
         // stops the remaining ones.
         let exited = self.exit_requested;
         self.exit_requested = false;
+        self.fatal_bailout = false;
         'shutdown: loop {
             let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
             if shutdown_fns.is_empty() {
@@ -15475,6 +15505,12 @@ impl Vm {
             // exit() unwinds every frame (zend_throw_unwind_exit).
             if self.exit_requested {
                 return Ok(Value::Null);
+            }
+            if self.fatal_bailout {
+                return Err(VmError {
+                    message: String::new(),
+                    line: self.current_line,
+                });
             }
             // An allocation went over memory_limit (zend_mm_safe_error()).
             if crate::value::memory_exhausted() != 0 {
@@ -31935,6 +31971,12 @@ impl Vm {
                             }
                         }
                         let name = name_val.to_php_string();
+                        if let OperandType::Const(c) = op.result {
+                            if let Some(msg) = self.function_redeclaration_error(name.as_bytes()) {
+                                let ty = op_array.literals[c as usize].to_long();
+                                return Err(self.emit_fatal_typed_at(ty, &msg, op.line));
+                            }
+                        }
                         // Emit deprecation for implicitly nullable parameters.
                         // For closures, prefer the canonical PHP display name (e.g. {closure:file:line}).
                         let func_display = if !func_op_array.display_name.is_empty() {
@@ -42818,37 +42860,37 @@ impl Vm {
                         if (self.classes.contains_key(&name_lower) || is_builtin_class)
                             && !is_anonymous_class
                         {
-                            // Use the canonical (original case) name from the existing class or builtin table
-                            let (canonical, prev_info) =
+                            // zend_class_redeclaration_error(): the existing
+                            // class's name and kind, and where it was declared
+                            // (user classes only).
+                            let (canonical, prev_info, kind) =
                                 if let Some(existing) = self.classes.get(&name_lower) {
                                     let name = String::from_utf8_lossy(&existing.name).to_string();
-                                    let prev = if existing.start_line > 0 {
-                                        format!(
+                                    let prev = match &existing.filename {
+                                        Some(f) if existing.start_line > 0 => format!(
                                             " (previously declared in {}:{})",
-                                            self.current_file, existing.start_line
-                                        )
-                                    } else {
-                                        String::new()
+                                            f, existing.start_line
+                                        ),
+                                        _ => String::new(),
                                     };
-                                    (name, prev)
+                                    let kind = if existing.is_interface {
+                                        "interface"
+                                    } else if existing.is_trait {
+                                        "trait"
+                                    } else if existing.is_enum {
+                                        "enum"
+                                    } else {
+                                        "class"
+                                    };
+                                    (name, prev, kind)
                                 } else {
                                     // Builtin class - use proper casing
                                     let name = match name_lower.as_slice() {
                                         b"stdclass" => "stdClass".to_string(),
                                         _ => String::from_utf8_lossy(&class.name).to_string(),
                                     };
-                                    (name, String::new())
+                                    (name, String::new(), "class")
                                 };
-                            // Determine the kind: class/interface/trait/enum
-                            let kind = if class.is_interface {
-                                "interface"
-                            } else if class.is_trait {
-                                "trait"
-                            } else if class.is_enum {
-                                "enum"
-                            } else {
-                                "class"
-                            };
                             let msg =
                                 format!("Cannot redeclare {} {}{}", kind, canonical, prev_info);
                             // zend_bind_class_in_slot(): E_COMPILE_ERROR at the

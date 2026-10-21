@@ -1978,6 +1978,12 @@ impl PhpGenerator {
                     let func_idx = func_idx_val.to_long() as usize;
                     if let Some(func_op_array) = op_array.child_functions.get(func_idx) {
                         let name = name_val.to_php_string();
+                        if let OperandType::Const(c) = op.result {
+                            if let Some(msg) = vm.function_redeclaration_error(name.as_bytes()) {
+                                let ty = op_array.literals[c as usize].to_long();
+                                return Err(vm.emit_fatal_typed_at(ty, &msg, op.line));
+                            }
+                        }
                         vm.register_user_function(name.as_bytes(), func_op_array.clone());
                     }
                 }
