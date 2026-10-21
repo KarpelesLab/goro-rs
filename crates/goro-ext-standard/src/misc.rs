@@ -694,7 +694,7 @@ final class StreamBucket {
     vm.register_function(b"unregister_tick_function", unregister_tick_function_fn);
     vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
     vm.register_function(b"output_reset_rewrite_vars", output_reset_rewrite_vars_fn);
-    vm.register_function(b"get_browser", get_browser_fn);
+    vm.register_function(b"get_browser", crate::browscap::get_browser);
     vm.register_function(b"stream_socket_accept", xp_socket::stream_socket_accept);
     vm.register_function(b"stream_isatty", stream_isatty_fn);
     vm.register_function(b"is_uploaded_file", is_uploaded_file_fn);
@@ -19168,9 +19168,6 @@ fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
 }
 fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
-}
-fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
 }
 
 fn stream_isatty_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
