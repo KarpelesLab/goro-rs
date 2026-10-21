@@ -4687,8 +4687,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
-    // max_memory_limit is PHP_INI_SYSTEM
-    if key == b"max_memory_limit" {
+    // max_memory_limit and the stack limits are PHP_INI_SYSTEM
+    if key == b"max_memory_limit"
+        || key == b"zend.max_allowed_stack_size"
+        || key == b"zend.reserved_stack_size"
+    {
         return Ok(Value::False);
     }
     // Handle memory_limit (OnChangeMemoryLimit: clamp to max_memory_limit)

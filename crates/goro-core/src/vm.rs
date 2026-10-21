@@ -42,15 +42,16 @@ pub(crate) fn clear_current_vm_ptr() {
     CURRENT_VM_PTR.with(|c| c.set(std::ptr::null_mut()));
 }
 
-/// In the execute loop: when a native handler left an exception pending,
-/// jump to the innermost catch handler or return it as uncaught.
+/// In an opcode handler run by `outlined`: when a native handler left an
+/// exception pending, jump to the innermost catch handler or return it as
+/// uncaught.
 macro_rules! native_exc_check {
     ($self:ident, $handlers:ident, $pending:ident, $ip:ident, $line:expr) => {
         if $self.current_exception.is_some() {
             if let Some((catch_target, _, _, _, saved_pc)) = $handlers.pop() {
                 $pending = Some(saved_pc);
                 $ip = catch_target as usize;
-                continue;
+                return Ok(Flow::Continue);
             }
             let msg = match &$self.current_exception {
                 Some(Value::Object(o)) => o
@@ -266,6 +267,24 @@ impl std::fmt::Display for VmError {
 }
 
 impl std::error::Error for VmError {}
+
+/// What an opcode handler run out of line (see `outlined`) tells the
+/// dispatch loop of execute_frame to do next.
+pub(crate) enum Flow {
+    /// Go on with the next opcode.
+    Next,
+    /// Restart the loop (the handler moved `ip`).
+    Continue,
+    /// Leave the frame with this value.
+    Return(Value),
+}
+
+/// Runs a big opcode handler in its own stack frame: the dispatch loop's
+/// frame stays small, which is what every nested PHP call pays for.
+#[inline(never)]
+pub(crate) fn outlined<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
 
 /// Pending function call being assembled
 #[derive(Debug, Clone)]
@@ -528,8 +547,13 @@ pub struct Vm {
     consts_updated: std::collections::HashSet<Vec<u8>>,
     /// Typed properties a reference is bound to (ZEND_REF_HAS_TYPE_SOURCES),
     /// keyed by the reference cell's address.
-    /// Current call depth (to prevent stack overflow from infinite recursion)
+    /// Current call depth
     pub(crate) call_depth: u32,
+    /// The next execute_op_array() is a call made by the executor itself
+    /// (see execute_op_array_vm).
+    vm_call: bool,
+    /// The emulated C stack was sized from the INI settings.
+    stack_configured: bool,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -857,6 +881,8 @@ impl Vm {
             const_thunks_active: Vec::new(),
             consts_updated: std::collections::HashSet::new(),
             call_depth: 0,
+            vm_call: false,
+            stack_configured: false,
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
             pending_return: None,
@@ -1145,6 +1171,15 @@ impl Vm {
                 c.insert(b"HASH_HMAC".to_vec(), Value::Long(1));
                 // Assert/INI defaults
                 c.insert(b"zend.assertions".to_vec(), Value::Long(1));
+                // (INI_SYSTEM; see stack.rs)
+                c.insert(
+                    b"zend.max_allowed_stack_size".to_vec(),
+                    Value::String(PhpString::from_bytes(b"0")),
+                );
+                c.insert(
+                    b"zend.reserved_stack_size".to_vec(),
+                    Value::String(PhpString::from_bytes(b"0")),
+                );
                 c.insert(b"assert.active".to_vec(), Value::Long(1));
                 c.insert(b"assert.exception".to_vec(), Value::Long(1));
                 // Assert option constants
@@ -14696,16 +14731,113 @@ impl Vm {
     fn execute_op_array(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
         // User code entered from a builtin: its frame becomes visible.
         self.sync_builtin_frames();
-        self.call_depth += 1;
-        if self.call_depth > 100 {
-            self.call_depth -= 1;
-            self.bind_next_frame = false;
-            self.bind_next_tab = None;
-            return Err(VmError {
-                message: "Maximum call depth exceeded (possible infinite recursion)".into(),
-                line: self.current_line,
-            });
+        // Calls made by the executor itself (see execute_op_array_vm) do
+        // not re-enter it in php-src; everything else uses C stack there.
+        let vm_call = std::mem::take(&mut self.vm_call);
+        if !self.stack_configured {
+            self.configure_stack();
         }
+        if !vm_call {
+            if let Err(size) = crate::stack::enter_reentry() {
+                self.bind_next_frame = false;
+                self.bind_next_tab = None;
+                return Err(self.stack_size_error(size));
+            }
+        }
+        let r = crate::stack::with_room(|| self.execute_op_array_frame(op_array, cvs));
+        if !vm_call {
+            crate::stack::leave_reentry();
+        }
+        match r {
+            Ok(r) => r,
+            Err(crate::stack::Exhausted) => {
+                self.bind_next_frame = false;
+                self.bind_next_tab = None;
+                Err(self.stack_exhausted_error(vm_call))
+            }
+        }
+    }
+
+    /// execute_op_array() for a call made by the executor itself (a user
+    /// function called by DO_FCALL, an included file).
+    #[inline]
+    fn execute_op_array_vm(
+        &mut self,
+        op_array: &OpArray,
+        cvs: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        self.vm_call = true;
+        self.execute_op_array(op_array, cvs)
+    }
+
+    /// Size the emulated C stack from zend.max_allowed_stack_size and
+    /// zend.reserved_stack_size (INI_SYSTEM: read once).
+    #[cold]
+    fn configure_stack(&mut self) {
+        self.stack_configured = true;
+        let ini = |vm: &Vm, key: &[u8]| -> i64 {
+            vm.constants
+                .get(key)
+                .map(|v| {
+                    let s = v.to_php_string();
+                    crate::ini_quantity::parse_quantity(s.as_bytes(), true).0 as i64
+                })
+                .unwrap_or(0)
+        };
+        let max = ini(self, b"zend.max_allowed_stack_size");
+        let reserved = ini(self, b"zend.reserved_stack_size");
+        // OnUpdateReservedStackSize: below the minimum is rejected.
+        let reserved = if reserved > 0 && (reserved as usize) >= crate::stack::DEFAULT_RESERVED {
+            reserved as usize
+        } else {
+            0
+        };
+        // OnUpdateMaxAllowedStackSize: below -1 (unchecked) is rejected.
+        let max = if max < -1 { 0 } else { max };
+        crate::stack::configure(max, reserved);
+    }
+
+    /// zend_call_stack_size_error(): the (emulated) C stack is used up.
+    #[cold]
+    pub(crate) fn stack_size_error(&mut self, size: usize) -> VmError {
+        let msg = format!(
+            "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?",
+            size
+        );
+        let line = self.current_line;
+        let exc = self.create_exception(b"Error", &msg, line);
+        self.current_exception = Some(exc);
+        VmError {
+            message: format!("Uncaught Error: {}", msg),
+            line,
+        }
+    }
+
+    /// No stack is left for another call. php-src runs out of memory for
+    /// the frames of a runaway user recursion (they live on the VM stack),
+    /// and out of C stack when native code recurses.
+    #[cold]
+    pub(crate) fn stack_exhausted_error(&mut self, vm_call: bool) -> VmError {
+        let limit = crate::value::memory_get_limit();
+        if vm_call && limit > 0 {
+            // zend_vm_stack_extend() asking for a new VM stack page
+            let msg = format!(
+                "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+                limit, 262144
+            );
+            let line = self.current_line;
+            return self.emit_fatal_at(&msg, line);
+        }
+        let size = crate::stack::emulated_size();
+        self.stack_size_error(size)
+    }
+
+    fn execute_op_array_frame(
+        &mut self,
+        op_array: &OpArray,
+        cvs: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        self.call_depth += 1;
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);
         let prev_global = self.is_global_scope;
@@ -15140,6 +15272,13 @@ impl Vm {
         // exception thrown by one of them unwinds from this opcode.
         macro_rules! release_point {
             ($exec:lifetime) => {
+                release_point!(@jump continue $exec)
+            };
+            // Inside a handler run by `outlined`.
+            (outlined) => {
+                release_point!(@jump return Ok(Flow::Continue))
+            };
+            (@jump $($jump:tt)+) => {
                 if self.has_release_work() {
                     let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
@@ -15151,7 +15290,7 @@ impl Vm {
                             } else if finally > 0 {
                                 ip = finally as usize;
                             }
-                            continue $exec;
+                            $($jump)+;
                         }
                         return Err(VmError { message: "Uncaught exception from destructor".into(), line: self.current_line });
                     }
@@ -15348,7 +15487,7 @@ impl Vm {
                         }
                     }
                 }
-                OpCode::FreeLoopVar => {
+                OpCode::FreeLoopVar => match outlined(|| -> Result<Flow, VmError> {
                     if let OperandType::Tmp(t) = op.op1 {
                         let depth = match op.op2 {
                             OperandType::Tmp(d) => match tmps.get(d as usize) {
@@ -15380,7 +15519,7 @@ impl Vm {
                                     } else if finally > 0 {
                                         ip = finally as usize;
                                     }
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception from destructor".into(),
@@ -15389,8 +15528,13 @@ impl Vm {
                             }
                         }
                     }
-                }
-                OpCode::FreeTmps => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::FreeTmps => match outlined(|| -> Result<Flow, VmError> {
                     if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
                         let mut freed = false;
                         // Iteration copies of foreach loops abandoned by an exception.
@@ -15421,14 +15565,19 @@ impl Vm {
                         }
                         // Values released inside the statement (call arguments,
                         // overwritten properties, ...) are destroyed by now too.
-                        release_point!('exec);
+                        release_point!(outlined);
                         if freed {
                             self.gc_maybe_auto();
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Echo => {
+                OpCode::Echo => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -15440,7 +15589,7 @@ impl Vm {
                     // Temporaries consumed while computing the operand (e.g.
                     // `echo (new Foo)->p`) are already destroyed in PHP.
                     if !matches!(val, Value::Object(_)) {
-                        release_point!('exec);
+                        release_point!(outlined);
                     }
                     if matches!(val, Value::Array(_))
                         || matches!(&val, Value::Reference(r) if matches!(&*r.borrow(), Value::Array(_)))
@@ -15467,14 +15616,19 @@ impl Vm {
                                 } else if finally > 0 {
                                     ip = finally as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(e);
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Print => {
+                OpCode::Print => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -15508,7 +15662,7 @@ impl Vm {
                                 } else if finally > 0 {
                                     ip = finally as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(e);
                         }
@@ -15520,9 +15674,14 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Assign => {
+                OpCode::Assign => match outlined(|| -> Result<Flow, VmError> {
                     let mut val = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -15551,7 +15710,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -15621,16 +15780,21 @@ impl Vm {
                             } else if finally > 0 {
                                 ip = finally as usize;
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from destructor".into(),
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::AssignRef => {
+                OpCode::AssignRef => match outlined(|| -> Result<Flow, VmError> {
                     if let (OperandType::Cv(target_idx), OperandType::Tmp(t)) = (op.op1, op.op2) {
                         if !matches!(tmps.get(t as usize), Some(Value::Reference(_))) {
                             // `$x = &f()` where f() did not return a reference:
@@ -15665,14 +15829,14 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception from destructor".into(),
                                     line: op.line,
                                 });
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     if let OperandType::Cv(target_idx) = op.op1 {
@@ -15745,7 +15909,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception from destructor".into(),
@@ -15758,9 +15922,14 @@ impl Vm {
                             tmps[r as usize] = v;
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Add => {
+                OpCode::Add => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -15798,7 +15967,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -15808,7 +15977,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -15833,7 +16002,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -15842,8 +16011,13 @@ impl Vm {
                         }
                     }
                     self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::Sub => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Sub => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -15872,7 +16046,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -15882,7 +16056,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -15907,7 +16081,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -15916,8 +16090,13 @@ impl Vm {
                         }
                     }
                     self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::Mul => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Mul => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -15946,7 +16125,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -15956,7 +16135,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -15981,7 +16160,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -15990,8 +16169,13 @@ impl Vm {
                         }
                     }
                     self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::Div => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Div => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16020,7 +16204,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16030,7 +16214,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16053,7 +16237,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16086,7 +16270,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught DivisionByZeroError: {}", msg),
@@ -16095,8 +16279,13 @@ impl Vm {
                             }
                         }
                     }
-                }
-                OpCode::Mod => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Mod => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16125,7 +16314,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16135,7 +16324,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16158,7 +16347,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16202,7 +16391,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught DivisionByZeroError: {}", msg),
@@ -16211,8 +16400,13 @@ impl Vm {
                             }
                         }
                     }
-                }
-                OpCode::Pow => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Pow => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16241,7 +16435,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16251,7 +16445,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16274,7 +16468,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16292,8 +16486,13 @@ impl Vm {
                         );
                     }
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::Concat => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Concat => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16331,7 +16530,7 @@ impl Vm {
                                 } else if finally > 0 {
                                     ip = finally as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(e);
                         }
@@ -16351,7 +16550,7 @@ impl Vm {
                                 } else if finally > 0 {
                                     ip = finally as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(e);
                         }
@@ -16365,8 +16564,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::UnaryPlus => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::UnaryPlus => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = match &a {
                         Value::Long(_) | Value::Double(_) => a,
@@ -16395,9 +16599,14 @@ impl Vm {
                         _ => Value::Long(0),
                     };
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Negate => {
+                OpCode::Negate => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     if matches!(a.deref(), Value::String(_) | Value::Array(_)) {
                         if let Some(err) =
@@ -16410,7 +16619,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err),
@@ -16433,9 +16642,14 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::BitwiseAnd => {
+                OpCode::BitwiseAnd => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16464,7 +16678,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16474,7 +16688,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16497,7 +16711,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16523,8 +16737,13 @@ impl Vm {
                         }
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::BitwiseOr => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::BitwiseOr => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16553,7 +16772,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16563,7 +16782,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16586,7 +16805,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16618,8 +16837,13 @@ impl Vm {
                         }
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::BitwiseXor => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::BitwiseXor => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -16648,7 +16872,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16658,7 +16882,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16681,7 +16905,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -16707,7 +16931,12 @@ impl Vm {
                         }
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::BoolXor => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
@@ -16718,7 +16947,7 @@ impl Vm {
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
-                OpCode::BitwiseNot => {
+                OpCode::BitwiseNot => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // Check for GMP unary
                     if let Some(handler) = self.object_do_unary {
@@ -16732,7 +16961,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -16750,10 +16979,10 @@ impl Vm {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             if *catch_target > 0 {
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else if *finally_target > 0 {
                                 ip = *finally_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         return Err(VmError {
@@ -16784,7 +17013,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         Value::Long(!n)
@@ -16793,8 +17022,13 @@ impl Vm {
                         Value::Long(!al)
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::ShiftLeft => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::ShiftLeft => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     if let Some(handler) = self.object_do_operation {
@@ -16809,7 +17043,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16819,7 +17053,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16845,7 +17079,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: err,
@@ -16880,7 +17114,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught ArithmeticError: {}", msg),
@@ -16888,8 +17122,13 @@ impl Vm {
                             });
                         }
                     }
-                }
-                OpCode::ShiftRight => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::ShiftRight => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     if let Some(handler) = self.object_do_operation {
@@ -16904,7 +17143,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -16914,7 +17153,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -16940,7 +17179,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: err,
@@ -16975,7 +17214,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught ArithmeticError: {}", msg),
@@ -16983,7 +17222,12 @@ impl Vm {
                             });
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::BooleanNot => {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -17001,7 +17245,7 @@ impl Vm {
                 }
 
                 // Comparisons
-                OpCode::Equal => {
+                OpCode::Equal => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17023,7 +17267,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17061,7 +17305,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: msg,
@@ -17081,7 +17325,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17091,7 +17335,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17117,8 +17361,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::NotEqual => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::NotEqual => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17140,7 +17389,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17177,7 +17426,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: msg,
@@ -17197,7 +17446,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17207,7 +17456,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17233,8 +17482,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::Identical => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Identical => match outlined(|| -> Result<Flow, VmError> {
                     // Comparisons against a literal Undef are compiler-internal
                     // "was this argument passed" checks; user `===` treats an
                     // undefined variable as null (with a warning).
@@ -17275,8 +17529,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::NotIdentical => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::NotIdentical => match outlined(|| -> Result<Flow, VmError> {
                     let undef_lit = |o: &OperandType| matches!(o, OperandType::Const(i) if matches!(op_array.literals.get(*i as usize), Some(Value::Undef)));
                     let (a, b) = if undef_lit(&op.op1) || undef_lit(&op.op2) {
                         (
@@ -17314,8 +17573,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::Less => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Less => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17337,7 +17601,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17369,7 +17633,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17379,7 +17643,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17406,8 +17670,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::LessEqual => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::LessEqual => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17429,7 +17698,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17461,7 +17730,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17471,7 +17740,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17498,8 +17767,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::Greater => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Greater => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17521,7 +17795,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17553,7 +17827,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17563,7 +17837,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17591,8 +17865,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::GreaterEqual => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::GreaterEqual => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17614,7 +17893,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17646,7 +17925,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17656,7 +17935,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17684,8 +17963,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::Spaceship => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::Spaceship => match outlined(|| -> Result<Flow, VmError> {
                     let a_raw = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -17707,7 +17991,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => o
@@ -17740,7 +18024,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -17752,10 +18036,15 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 // Compound assignments
-                OpCode::AssignAdd => {
+                OpCode::AssignAdd => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -17791,7 +18080,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -17801,7 +18090,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -17825,7 +18114,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -17840,8 +18129,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignSub => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignSub => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -17870,7 +18164,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -17880,7 +18174,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -17904,7 +18198,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -17919,8 +18213,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignMul => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignMul => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -17949,7 +18248,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     Some(Err(msg)) => {
                                         let (class_bytes, clean_msg) =
@@ -17959,7 +18258,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = ct as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             return Err(VmError {
                                                 message: format!(
@@ -17983,7 +18282,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -17998,8 +18297,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignDiv => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignDiv => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18023,7 +18327,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18047,7 +18351,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught DivisionByZeroError: {}", msg),
@@ -18055,8 +18359,13 @@ impl Vm {
                             });
                         }
                     }
-                }
-                OpCode::AssignMod => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignMod => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18080,7 +18389,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18116,7 +18425,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught DivisionByZeroError: {}", msg),
@@ -18124,8 +18433,13 @@ impl Vm {
                             });
                         }
                     }
-                }
-                OpCode::AssignPow => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignPow => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18150,7 +18464,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18165,8 +18479,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignConcat => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignConcat => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18200,8 +18519,14 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignBitwiseAnd => {
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignBitwiseAnd => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18225,7 +18550,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18264,8 +18589,13 @@ impl Vm {
                         Value::Long(self.op_to_long(&cv_val) & self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::AssignBitwiseOr => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignBitwiseOr => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18289,7 +18619,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18334,8 +18664,13 @@ impl Vm {
                         Value::Long(self.op_to_long(&cv_val) | self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::AssignBitwiseXor => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignBitwiseXor => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18359,7 +18694,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -18398,8 +18733,13 @@ impl Vm {
                         Value::Long(self.op_to_long(&cv_val) ^ self.op_to_long(&rhs))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::AssignShiftLeft => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignShiftLeft => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18425,7 +18765,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: err,
@@ -18450,7 +18790,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught ArithmeticError: {}", msg),
@@ -18465,8 +18805,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::AssignShiftRight => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::AssignShiftRight => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -18492,7 +18837,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: err,
@@ -18517,7 +18862,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught ArithmeticError: {}", msg),
@@ -18536,10 +18881,15 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 // Increment / Decrement
-                OpCode::PreIncrement => {
+                OpCode::PreIncrement => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -18568,7 +18918,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -18580,7 +18930,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", err),
@@ -18594,7 +18944,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from error handler".to_string(),
@@ -18610,8 +18960,13 @@ impl Vm {
                         &static_cv_keys,
                     );
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::PreDecrement => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::PreDecrement => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -18639,7 +18994,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -18650,7 +19005,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", err),
@@ -18662,7 +19017,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from error handler".to_string(),
@@ -18678,8 +19033,13 @@ impl Vm {
                         &static_cv_keys,
                     );
                     self.write_operand(&op.result, new_val, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::PostIncrement => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::PostIncrement => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -18707,7 +19067,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -18718,7 +19078,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", err),
@@ -18730,7 +19090,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from error handler".to_string(),
@@ -18740,8 +19100,13 @@ impl Vm {
                     let new_val = php_increment(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
-                }
-                OpCode::PostDecrement => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::PostDecrement => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -18756,7 +19121,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", err),
@@ -18768,7 +19133,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from error handler".to_string(),
@@ -18778,7 +19143,12 @@ impl Vm {
                     let new_val = php_decrement(&val);
                     self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     self.write_operand(&op.op1, new_val, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 // Control flow
                 OpCode::Jmp => {
@@ -18828,7 +19198,7 @@ impl Vm {
                 }
 
                 // Function calls
-                OpCode::InitFCall => {
+                OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // INIT_DYNAMIC_CALL on an undefined CV warns first.
                     if matches!(name_val, Value::Undef) {
@@ -18865,7 +19235,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
@@ -19100,7 +19470,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -19114,7 +19484,7 @@ impl Vm {
                             args: vec![name_val.clone()],
                             named_args: Vec::new(),
                         });
-                        continue;
+                        return Ok(Flow::Continue);
                     }
                     // Check if this is a closure array [name, use_val_1, use_val_2, ...]
                     if let Value::Array(arr) = &name_val {
@@ -19213,7 +19583,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
@@ -19261,8 +19631,13 @@ impl Vm {
                             named_args: Vec::new(),
                         });
                     }
-                }
-                OpCode::InitDynamicStaticCall => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::InitDynamicStaticCall => match outlined(|| -> Result<Flow, VmError> {
                     // Dynamic static call: $obj::method() or $class::method()
                     let class_val = self.read_operand_warn(
                         &op.op1,
@@ -19295,7 +19670,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", err_msg),
@@ -19318,7 +19693,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception".into(),
@@ -19342,7 +19717,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", err_msg),
@@ -19360,7 +19735,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", err_msg),
@@ -19377,123 +19752,136 @@ impl Vm {
                         args: Vec::new(),
                         named_args: Vec::new(),
                     });
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::SendVal | OpCode::SendValChecked => {
-                    // Check if the callee function expects this parameter by-ref
-                    let arg_index = self.pending_calls.last().map(|c| c.args.len()).unwrap_or(0);
-                    let callee_expects_ref = self
-                        .pending_calls
-                        .last()
-                        .and_then(|call| {
-                            let name_lower: Vec<u8> = call
-                                .name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            self.user_functions
-                                .get(&name_lower)
-                                .and_then(|f| f.by_ref_params.get(arg_index).copied())
-                        })
-                        .unwrap_or(false)
-                        || self
+                    match outlined(|| -> Result<Flow, VmError> {
+                        // Check if the callee function expects this parameter by-ref
+                        let arg_index =
+                            self.pending_calls.last().map(|c| c.args.len()).unwrap_or(0);
+                        let callee_expects_ref = self
                             .pending_calls
                             .last()
-                            .map(|call| self.spl_deferred_arg_by_ref(call, arg_index))
-                            .unwrap_or(false);
+                            .and_then(|call| {
+                                let name_lower: Vec<u8> = call
+                                    .name
+                                    .as_bytes()
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
+                                self.user_functions
+                                    .get(&name_lower)
+                                    .and_then(|f| f.by_ref_params.get(arg_index).copied())
+                            })
+                            .unwrap_or(false)
+                            || self
+                                .pending_calls
+                                .last()
+                                .map(|call| self.spl_deferred_arg_by_ref(call, arg_index))
+                                .unwrap_or(false);
 
-                    if callee_expects_ref && matches!(op.opcode, OpCode::SendValChecked) {
-                        let is_call_result = matches!(
-                            self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
-                            Value::Long(0)
-                        );
-                        let returned_ref = self.last_call_by_ref
-                            || matches!(&op.op1, OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Reference(_))));
-                        if is_call_result {
-                            if !returned_ref {
-                                self.emit_notice_at(
-                                    "Only variables should be passed by reference",
-                                    op.line,
-                                );
-                            }
-                        } else {
-                            let msg = self.cannot_pass_by_ref_msg(arg_index);
-                            let exc = self.create_exception(b"Error", &msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                ip = *catch_target as usize;
-                                continue;
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught Error: {}", msg),
-                                line: op.line,
-                            });
-                        }
-                    }
-                    if callee_expects_ref {
-                        // Pass by reference: create a shared reference between caller CV and callee CV
-                        if let OperandType::Cv(idx) = &op.op1 {
-                            let i = *idx as usize;
-                            if let Some(Value::Reference(r)) = cvs.get(i) {
-                                if let Some(call) = self.pending_calls.last_mut() {
-                                    call.args.push(Value::Reference(r.clone()));
+                        if callee_expects_ref && matches!(op.opcode, OpCode::SendValChecked) {
+                            let is_call_result = matches!(
+                                self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
+                                Value::Long(0)
+                            );
+                            let returned_ref = self.last_call_by_ref
+                                || matches!(&op.op1, OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Reference(_))));
+                            if is_call_result {
+                                if !returned_ref {
+                                    self.emit_notice_at(
+                                        "Only variables should be passed by reference",
+                                        op.line,
+                                    );
                                 }
                             } else {
-                                // Create a new reference for the variable
-                                let current = cvs.get(i).cloned().unwrap_or(Value::Null);
-                                let r = Rc::new(RefCell::new(current));
-                                cvs[i] = Value::Reference(r.clone());
+                                let msg = self.cannot_pass_by_ref_msg(arg_index);
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        if callee_expects_ref {
+                            // Pass by reference: create a shared reference between caller CV and callee CV
+                            if let OperandType::Cv(idx) = &op.op1 {
+                                let i = *idx as usize;
+                                if let Some(Value::Reference(r)) = cvs.get(i) {
+                                    if let Some(call) = self.pending_calls.last_mut() {
+                                        call.args.push(Value::Reference(r.clone()));
+                                    }
+                                } else {
+                                    // Create a new reference for the variable
+                                    let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                                    let r = Rc::new(RefCell::new(current));
+                                    cvs[i] = Value::Reference(r.clone());
+                                    if let Some(call) = self.pending_calls.last_mut() {
+                                        call.args.push(Value::Reference(r));
+                                    }
+                                }
+                            } else {
+                                let val = match &op.op1 {
+                                    OperandType::Tmp(t)
+                                        if matches!(
+                                            tmps.get(*t as usize),
+                                            Some(Value::Reference(_))
+                                        ) =>
+                                    {
+                                        tmps[*t as usize].clone()
+                                    }
+                                    _ => self.read_operand_warn(
+                                        &op.op1,
+                                        &cvs,
+                                        &tmps,
+                                        &op_array.literals,
+                                        op_array,
+                                        op.line,
+                                    ),
+                                };
                                 if let Some(call) = self.pending_calls.last_mut() {
-                                    call.args.push(Value::Reference(r));
+                                    call.args.push(val);
                                 }
                             }
                         } else {
-                            let val = match &op.op1 {
-                                OperandType::Tmp(t)
-                                    if matches!(
-                                        tmps.get(*t as usize),
-                                        Some(Value::Reference(_))
-                                    ) =>
-                                {
-                                    tmps[*t as usize].clone()
-                                }
-                                _ => self.read_operand_warn(
-                                    &op.op1,
-                                    &cvs,
-                                    &tmps,
-                                    &op_array.literals,
-                                    op_array,
-                                    op.line,
-                                ),
-                            };
+                            let val = self.read_operand_warn(
+                                &op.op1,
+                                &cvs,
+                                &tmps,
+                                &op_array.literals,
+                                op_array,
+                                op.line,
+                            );
                             if let Some(call) = self.pending_calls.last_mut() {
                                 call.args.push(val);
                             }
                         }
-                    } else {
-                        let val = self.read_operand_warn(
-                            &op.op1,
-                            &cvs,
-                            &tmps,
-                            &op_array.literals,
-                            op_array,
-                            op.line,
-                        );
-                        if let Some(call) = self.pending_calls.last_mut() {
-                            call.args.push(val);
+                        // Free tmp after consuming it (important for WeakReference/WeakMap correctness)
+                        if let OperandType::Tmp(idx) = op.op1 {
+                            if let Some(slot) = tmps.get_mut(idx as usize) {
+                                *slot = Value::Undef;
+                            }
                         }
-                    }
-                    // Free tmp after consuming it (important for WeakReference/WeakMap correctness)
-                    if let OperandType::Tmp(idx) = op.op1 {
-                        if let Some(slot) = tmps.get_mut(idx as usize) {
-                            *slot = Value::Undef;
-                        }
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
                     }
                 }
-                OpCode::SendValRaw => {
+                OpCode::SendValRaw => match outlined(|| -> Result<Flow, VmError> {
                     // Like SendVal but preserves Reference wrappers (for var_dump etc.)
                     let val = if let OperandType::Cv(idx) = &op.op1 {
                         let i = *idx as usize;
@@ -19527,8 +19915,13 @@ impl Vm {
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
-                }
-                OpCode::SendNamedVal => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::SendNamedVal => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name: Vec<u8> = name_val.to_php_string().as_bytes().to_vec();
                     // Known builtin functions that pass a specific named param
@@ -19588,8 +19981,13 @@ impl Vm {
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.named_args.push((name, val));
                     }
-                }
-                OpCode::SendRef => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::SendRef => match outlined(|| -> Result<Flow, VmError> {
                     // Send a value as a reference - for by-ref function arguments
                     // Creates a Reference wrapper so builtins can write back
                     let val = if let OperandType::Cv(idx) = &op.op1 {
@@ -19631,8 +20029,13 @@ impl Vm {
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
-                }
-                OpCode::SendUnpack => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::SendUnpack => match outlined(|| -> Result<Flow, VmError> {
                     // Unpack an array/traversable/generator into individual arguments.
                     // Collect (is_named, name_bytes, value) tuples first so we can release
                     // any borrows before mutating pending_calls (generator resumption calls
@@ -19942,7 +20345,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 let exc_msg = if let Some(Value::Object(obj)) =
                                     &self.current_exception
@@ -20031,7 +20434,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: format!(
@@ -20043,8 +20446,13 @@ impl Vm {
                             });
                         }
                     }
-                }
-                OpCode::DoFCall => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::DoFCall => match outlined(|| -> Result<Flow, VmError> {
                     self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
@@ -20200,7 +20608,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: self.uncaught_exception_message(),
@@ -20308,7 +20716,7 @@ impl Vm {
                                             let catch_target = *catch_target;
                                             self.current_exception = Some(exc_val);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             let msg = if let Value::Object(o) = &exc_val {
                                                 o.borrow()
@@ -20332,7 +20740,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                         }
@@ -20364,7 +20772,7 @@ impl Vm {
                                 } else {
                                     finally_target
                                 } as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught FiberError: {}", msg),
@@ -20382,7 +20790,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught FiberError: {}", msg),
@@ -20427,7 +20835,7 @@ impl Vm {
                                         } else {
                                             finally_target
                                         } as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception thrown into fiber".to_string(),
@@ -20444,7 +20852,7 @@ impl Vm {
                                     });
                                 }
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
 
                         // Legacy generator-backed fiber path
@@ -20492,7 +20900,7 @@ impl Vm {
                                 self.call_stack.pop();
                                 // Check if exit() was called inside the fiber
                                 if self.exit_requested {
-                                    return Ok(Value::Null);
+                                    return Ok(Flow::Return(Value::Null));
                                 }
                                 // Check if there's a current exception from the fiber
                                 if self.current_exception.is_some() {
@@ -20501,7 +20909,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: "Uncaught exception from fiber".into(),
@@ -20525,7 +20933,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.call_stack.pop();
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                 }
                                 return Err(e);
@@ -20604,7 +21012,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -20660,7 +21068,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", msg),
@@ -20676,7 +21084,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -20715,7 +21123,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -20753,7 +21161,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -20784,7 +21192,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -20843,7 +21251,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: "Uncaught TypeError".into(),
@@ -20877,7 +21285,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: "Uncaught TypeError".into(),
@@ -20902,7 +21310,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = match &self.current_exception {
                                 Some(Value::Object(o)) => {
@@ -21366,7 +21774,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", err_msg),
@@ -21493,7 +21901,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", err_msg),
@@ -21630,7 +22038,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             self.current_exception = Some(exc_val);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             self.current_exception = Some(exc_val);
                                             return Err(e);
@@ -21739,7 +22147,7 @@ impl Vm {
                                 let catch_target = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 let msg = if let Value::Object(o) = &exc_val {
                                     let ob = o.borrow();
@@ -21878,7 +22286,7 @@ impl Vm {
                                         let catch_target = *catch_target;
                                         self.current_exception = Some(exc_val);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         // No handler - propagate
                                         let msg = if let Value::Object(o) = &exc_val {
@@ -21935,7 +22343,7 @@ impl Vm {
                                 let catch_target = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 let msg = if let Value::Object(o) = &exc_val {
                                     let ob = o.borrow();
@@ -21978,7 +22386,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: "Uncaught TypeError".into(),
@@ -22020,7 +22428,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(r.err().unwrap_or(VmError {
                                     message: "Uncaught exception".into(),
@@ -22029,7 +22437,7 @@ impl Vm {
                             }
                             let r = r.unwrap_or(Value::Null);
                             self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
-                            continue;
+                            return Ok(Flow::Continue);
                         }
 
                         // Now call the bound closure
@@ -22046,7 +22454,7 @@ impl Vm {
                                     named_args: Vec::new(),
                                 });
                                 ip -= 1;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         } else if let Value::String(name) = &bound {
                             let mut args = Vec::new();
@@ -22057,7 +22465,7 @@ impl Vm {
                                 named_args: Vec::new(),
                             });
                             ip -= 1;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         self.write_operand(
                             &op.result,
@@ -22098,7 +22506,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let exc_msg =
                                         if let Some(Value::Object(obj)) = &self.current_exception {
@@ -22137,7 +22545,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = if let Some(Value::Object(obj)) =
                                     &self.current_exception
@@ -22227,7 +22635,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", msg),
@@ -22247,7 +22655,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = if let Some(Value::Object(obj)) =
                                     &self.current_exception
@@ -22282,7 +22690,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let exc_msg =
                                         if let Some(Value::Object(obj)) = &self.current_exception {
@@ -22333,7 +22741,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                     }
                                     return Err(e);
@@ -22389,7 +22797,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: msg,
@@ -22416,7 +22824,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: msg,
@@ -22434,7 +22842,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: err_msg,
@@ -22481,7 +22889,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: msg,
@@ -22515,7 +22923,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: msg,
@@ -22534,7 +22942,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: err_msg,
@@ -22654,7 +23062,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!(
@@ -22678,7 +23086,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -22734,7 +23142,7 @@ impl Vm {
                                 } else {
                                     finally_target
                                 } as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: self.uncaught_exception_message(),
@@ -22821,7 +23229,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!("Uncaught TypeError: {}", err_msg),
@@ -22875,7 +23283,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", err_msg),
@@ -22941,7 +23349,7 @@ impl Vm {
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
                                         }
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         // Extract exception message for uncaught error
                                         let msg = if let Some(Value::Object(exc_obj)) =
@@ -22969,7 +23377,7 @@ impl Vm {
                                 if self.has_release_work() && !call.args.is_empty() {
                                     call.args.clear();
                                     self.current_line = op.line;
-                                    release_point!('exec);
+                                    release_point!(outlined);
                                 }
                                 self.write_operand(
                                     &op.result,
@@ -23006,7 +23414,7 @@ impl Vm {
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
                                         }
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                 }
                                 // Uncaught - keep assert frame for error display
@@ -23033,7 +23441,7 @@ impl Vm {
                                     } else if finally_target > 0 {
                                         ip = finally_target as usize;
                                     }
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = self
                                     .current_exception
@@ -23107,7 +23515,7 @@ impl Vm {
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
                                         }
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let exc_msg = self
                                         .current_exception
@@ -23182,7 +23590,7 @@ impl Vm {
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
                                         }
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: self.uncaught_exception_message(),
@@ -23224,7 +23632,7 @@ impl Vm {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     self.call_stack.pop();
                                                     ip = *catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!("Uncaught Error: {}", err_msg),
@@ -23333,9 +23741,10 @@ impl Vm {
                                                                     );
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
-                                                                    let r = self.execute_op_array(
-                                                                        &cs_op, fn_cvs,
-                                                                    );
+                                                                    let r = self
+                                                                        .execute_op_array_vm(
+                                                                            &cs_op, fn_cvs,
+                                                                        );
                                                                     self.called_class_stack.pop();
                                                                     self.class_scope_stack.pop();
                                                                     break 'magic_dispatch Some(r);
@@ -23393,9 +23802,10 @@ impl Vm {
                                                                     );
                                                                     self.class_scope_stack
                                                                         .push(call_declaring);
-                                                                    let r = self.execute_op_array(
-                                                                        &call_op, fn_cvs,
-                                                                    );
+                                                                    let r = self
+                                                                        .execute_op_array_vm(
+                                                                            &call_op, fn_cvs,
+                                                                        );
                                                                     self.called_class_stack.pop();
                                                                     self.class_scope_stack.pop();
                                                                     break 'magic_dispatch Some(r);
@@ -23446,9 +23856,10 @@ impl Vm {
                                                                     );
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
-                                                                    let r = self.execute_op_array(
-                                                                        &cs_op, fn_cvs,
-                                                                    );
+                                                                    let r = self
+                                                                        .execute_op_array_vm(
+                                                                            &cs_op, fn_cvs,
+                                                                        );
                                                                     self.called_class_stack.pop();
                                                                     self.class_scope_stack.pop();
                                                                     break 'magic_dispatch Some(r);
@@ -23464,7 +23875,7 @@ impl Vm {
                                                                 &mut tmps,
                                                                 &static_cv_keys,
                                                             );
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                     }
                                                     let exc = self.create_exception(
@@ -23476,7 +23887,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -23525,7 +23936,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -23736,7 +24147,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!(
@@ -23796,7 +24207,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.call_stack.pop();
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!(
@@ -23928,7 +24339,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     self.call_stack.pop(); // pop early-pushed frame
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", err_msg),
@@ -23969,7 +24380,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.call_stack.pop(); // pop early-pushed frame
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
@@ -24148,7 +24559,7 @@ impl Vm {
 
                             // Pop the early-pushed call stack entry for the generator function
                             self.call_stack.pop();
-                            continue;
+                            return Ok(Flow::Continue);
                         }
 
                         // User-defined function - execute its op_array
@@ -24373,7 +24784,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -24438,7 +24849,7 @@ impl Vm {
                             // `$x = &f()` & co.: keep the returned reference.
                             self.keep_ref_depth = Some(self.call_depth + 1);
                         }
-                        let call_result = self.execute_op_array(&user_fn, func_cvs);
+                        let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
                         self.keep_ref_depth = None;
                         // Restore deferred return state from the outer finally scope
                         if self.pending_return.is_none() {
@@ -24521,7 +24932,7 @@ impl Vm {
                                         }
                                         self.current_exception = Some(exc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         self.current_exception = Some(exc);
                                         return Err(e);
@@ -24546,7 +24957,7 @@ impl Vm {
                                             }
                                         }
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         self.current_exception = Some(exc);
                                         return Err(e);
@@ -24560,7 +24971,7 @@ impl Vm {
                         if self.has_release_work() && !call.args.is_empty() {
                             call.args.clear();
                             self.current_line = op.line;
-                            release_point!('exec);
+                            release_point!(outlined);
                         }
 
                         self.write_operand(
@@ -24613,7 +25024,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: self.uncaught_exception_message(),
@@ -24651,7 +25062,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -24826,7 +25237,7 @@ impl Vm {
                                                     &mut tmps,
                                                     &static_cv_keys,
                                                 );
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             Err(_msg) => {
                                                 // current_exception should already be set by the handler.
@@ -24835,7 +25246,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     let class_disp = self
                                                         .current_exception
@@ -24893,7 +25304,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -24957,7 +25368,7 @@ impl Vm {
                                                             pending_calls_catch_depth =
                                                                 Some(saved_pc);
                                                             ip = catch_target as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         } else {
                                                             return Err(VmError {
                                                                 message: format!(
@@ -25010,7 +25421,7 @@ impl Vm {
                                                             pending_calls_catch_depth =
                                                                 Some(saved_pc);
                                                             ip = catch_target as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         } else {
                                                             return Err(VmError {
                                                                 message: format!(
@@ -25100,7 +25511,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -25165,7 +25576,7 @@ impl Vm {
                                                                 Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                         return Err(VmError {
                                                             message: msg,
@@ -25190,7 +25601,7 @@ impl Vm {
                                                                 Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                         return Err(VmError {
                                                             message: msg,
@@ -25215,7 +25626,7 @@ impl Vm {
                                                                 Some(*eh_pc_depth);
                                                             let ct = *catch_target;
                                                             ip = ct as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                         return Err(VmError {
                                                             message: msg,
@@ -25334,7 +25745,7 @@ impl Vm {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -25394,7 +25805,7 @@ impl Vm {
                                                             Some(*eh_pc_depth);
                                                         let ct = *catch_target;
                                                         ip = ct as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     }
                                                     return Err(VmError {
                                                         message: format!(
@@ -25503,7 +25914,7 @@ impl Vm {
                                                                     Some(*eh_pc_depth);
                                                                 let ct = *catch_target;
                                                                 ip = ct as usize;
-                                                                continue;
+                                                                return Ok(Flow::Continue);
                                                             }
                                                             return Err(VmError {
                                                                 message: format!(
@@ -25592,7 +26003,7 @@ impl Vm {
                                                             Some(*eh_pc_depth);
                                                         let ct = *catch_target;
                                                         ip = ct as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     }
                                                     return Err(VmError {
                                                         message: format!(
@@ -25690,7 +26101,7 @@ impl Vm {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -25715,7 +26126,7 @@ impl Vm {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -25773,7 +26184,7 @@ impl Vm {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -25878,7 +26289,7 @@ impl Vm {
                                                                     Some(*eh_pc_depth);
                                                                 let ct = *catch_target;
                                                                 ip = ct as usize;
-                                                                continue;
+                                                                return Ok(Flow::Continue);
                                                             }
                                                             return Err(VmError {
                                                                 message: format!(
@@ -26001,7 +26412,7 @@ impl Vm {
                                                             Some(*eh_pc_depth);
                                                         let ct = *catch_target;
                                                         ip = ct as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     }
                                                     return Err(VmError {
                                                         message: format!(
@@ -26058,7 +26469,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26080,7 +26491,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26102,7 +26513,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26124,7 +26535,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26146,7 +26557,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26167,7 +26578,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: "Uncaught ReflectionException"
@@ -26225,7 +26636,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -26265,7 +26676,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26300,7 +26711,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26385,7 +26796,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26478,7 +26889,7 @@ impl Vm {
                                                             pending_calls_catch_depth =
                                                                 Some(saved_pc);
                                                             ip = catch_target as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         } else {
                                                             return Err(VmError {
                                                                 message: format!(
@@ -26519,7 +26930,7 @@ impl Vm {
                                                             pending_calls_catch_depth =
                                                                 Some(saved_pc);
                                                             ip = catch_target as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         } else {
                                                             return Err(VmError {
                                                                 message: format!(
@@ -26671,7 +27082,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -26718,7 +27129,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26751,7 +27162,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26780,7 +27191,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -26809,7 +27220,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -26855,7 +27266,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 } else {
                                                     return Err(VmError {
                                                         message: format!(
@@ -26939,7 +27350,7 @@ impl Vm {
                                                     {
                                                         pending_calls_catch_depth = Some(saved_pc);
                                                         ip = catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     } else {
                                                         return Err(VmError {
                                                             message: format!(
@@ -27040,7 +27451,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: msg,
@@ -27080,7 +27491,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -27112,7 +27523,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -27194,7 +27605,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: self.uncaught_exception_message(),
@@ -27228,7 +27639,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!(
@@ -27271,7 +27682,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!("Uncaught TypeError: {}", msg),
@@ -27307,7 +27718,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(saved_pc);
                                                     ip = catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
                                                     message: format!("Uncaught Error: {}", msg),
@@ -27490,7 +27901,7 @@ impl Vm {
                                                                 pending_calls_catch_depth =
                                                                     Some(saved_pc);
                                                                 ip = catch_target as usize;
-                                                                continue;
+                                                                return Ok(Flow::Continue);
                                                             }
                                                             return Err(VmError {
                                                                 message: format!(
@@ -27718,7 +28129,7 @@ impl Vm {
                                                 self.called_class_stack.push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result =
-                                                    self.execute_op_array(&call_op, fn_cvs);
+                                                    self.execute_op_array_vm(&call_op, fn_cvs);
                                                 self.called_class_stack.pop();
                                                 self.class_scope_stack.pop();
                                                 self.call_stack.pop();
@@ -27733,7 +28144,7 @@ impl Vm {
                                                                     Some(saved_pc);
                                                                 ip = if ct > 0 { ct } else { ft }
                                                                     as usize;
-                                                                continue;
+                                                                return Ok(Flow::Continue);
                                                             }
                                                         }
                                                         return Err(e);
@@ -27776,7 +28187,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 ip = *catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!("Uncaught Error: {}", err_msg),
@@ -27853,8 +28264,8 @@ impl Vm {
                                                 ));
                                                 self.called_class_stack.push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
-                                                let result =
-                                                    self.execute_op_array(&call_static_op, fn_cvs);
+                                                let result = self
+                                                    .execute_op_array_vm(&call_static_op, fn_cvs);
                                                 self.called_class_stack.pop();
                                                 self.class_scope_stack.pop();
                                                 self.call_stack.pop();
@@ -27869,7 +28280,7 @@ impl Vm {
                                                                     Some(saved_pc);
                                                                 ip = if ct > 0 { ct } else { ft }
                                                                     as usize;
-                                                                continue;
+                                                                return Ok(Flow::Continue);
                                                             }
                                                         }
                                                         return Err(e);
@@ -27922,7 +28333,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 ip = *catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             } else {
                                                 let exc_msg = if let Some(Value::Object(o)) =
                                                     self.current_exception.as_ref()
@@ -28067,7 +28478,7 @@ impl Vm {
                                                 {
                                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                                     ip = *catch_target as usize;
-                                                    continue;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 let msg = if let Some(Value::Object(o)) =
                                                     &self.current_exception
@@ -28098,7 +28509,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 ip = *catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             } else {
                                                 let exc_msg = if let Some(Value::Object(o)) =
                                                     self.current_exception.as_ref()
@@ -28240,7 +28651,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(pc);
                                                 ip = if c > 0 { c } else { f } as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!(
@@ -28297,7 +28708,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         let msg = match &self.current_exception {
                                             Some(Value::Object(o)) => {
@@ -28399,7 +28810,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
@@ -28415,7 +28826,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                 }
                                 return Err(VmError {
@@ -28425,9 +28836,14 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Return => {
+                OpCode::Return => match outlined(|| -> Result<Flow, VmError> {
                     // By-ref returns fetch the operand for writing (no warning).
                     let val = if op_array.returns_by_ref {
                         // Keep the reference the compiler fetched for the
@@ -28488,11 +28904,17 @@ impl Vm {
                             }
                         }
                     }
-                    return Ok(val);
-                }
+                    return Ok(Flow::Return(val));
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 // Casts
-                OpCode::CastInt => {
+                OpCode::CastInt => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -28543,8 +28965,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::CastFloat => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::CastFloat => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let double_val = if let Some(handler) = self.object_to_double {
                         handler(&val)
@@ -28583,8 +29010,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::CastString => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::CastString => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -28613,7 +29045,7 @@ impl Vm {
                                 } else if finally > 0 {
                                     ip = finally as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(e);
                         }
@@ -28625,8 +29057,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::CastBool => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::CastBool => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.warn_nan_coercion(&val, "bool", op.line);
                     // For objects that opt in to scalar casts (e.g. GMP),
@@ -28651,8 +29088,13 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
-                OpCode::CastArray => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::CastArray => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.warn_nan_coercion(&val, "array", op.line);
                     let arr = match val {
@@ -28684,9 +29126,14 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::CastObject => {
+                OpCode::CastObject => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.warn_nan_coercion(&val, "object", op.line);
                     let obj = match val {
@@ -28719,7 +29166,12 @@ impl Vm {
                         }
                     };
                     self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 // Arrays
                 OpCode::ArrayNew => {
@@ -28732,7 +29184,7 @@ impl Vm {
                         &static_cv_keys,
                     );
                 }
-                OpCode::ArrayAppend => {
+                OpCode::ArrayAppend => match outlined(|| -> Result<Flow, VmError> {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let val = self.read_operand_warn(
                         &op.op2,
@@ -28753,7 +29205,7 @@ impl Vm {
                                     ip,
                                     op.line
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                     }
@@ -28775,7 +29227,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -28790,7 +29242,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -28830,7 +29282,7 @@ impl Vm {
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
@@ -28856,7 +29308,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", msg),
@@ -28893,174 +29345,90 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::ArraySet | OpCode::ArraySetIncDec => {
-                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    // The write-back of `$obj[k]++`: FETCH_DIM_RW never calls
-                    // offsetSet().
-                    if matches!(op.opcode, OpCode::ArraySetIncDec)
-                        && matches!(arr_val.deref(), Value::Object(_))
-                        && std::mem::take(&mut self.incdec_skip_set)
-                    {
-                        continue;
-                    }
-                    let key_val = self.read_operand_warn(
-                        &op.result,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
-                    let val = self.read_operand_warn(
-                        &op.op2,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
-                    if let Value::Object(obj) = &arr_val.deref() {
-                        if let Some(f) = native_handlers(obj).and_then(|h| h.write_dimension) {
-                            let v = val.deref();
-                            let k = key_val.deref();
-                            if f(self, obj, Some(&k), &v) {
-                                native_exc_check!(
-                                    self,
-                                    exception_handlers,
-                                    pending_calls_catch_depth,
-                                    ip,
-                                    op.line
-                                );
-                                continue;
-                            }
+                    match outlined(|| -> Result<Flow, VmError> {
+                        let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        // The write-back of `$obj[k]++`: FETCH_DIM_RW never calls
+                        // offsetSet().
+                        if matches!(op.opcode, OpCode::ArraySetIncDec)
+                            && matches!(arr_val.deref(), Value::Object(_))
+                            && std::mem::take(&mut self.incdec_skip_set)
+                        {
+                            return Ok(Flow::Continue);
                         }
-                    }
-                    // `$a[] = $r` with $r a reference to $a itself keeps the
-                    // (recursive) array rather than a copy.
-                    let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
-                        && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
-                    let val = if self_ref {
-                        val
-                    } else {
-                        self.dup_stored_array(&op.op2, val)
-                    };
-                    // Array/object keys on a real array throw TypeError (matches
-                    // zend_illegal_container_offset). value_to_array_key_checked
-                    // silently maps both to Int(0), so check explicitly first.
-                    if matches!(&arr_val, Value::Array(_)) {
-                        let key_inner = match &key_val {
-                            Value::Reference(r) => r.borrow().clone(),
-                            other => other.clone(),
-                        };
-                        let illegal: Option<String> = match &key_inner {
-                            Value::Array(_) => Some("array".to_string()),
-                            Value::Object(o) => {
-                                Some(crate::value::display_class_name(&o.borrow().class_name))
-                            }
-                            _ => None,
-                        };
-                        if let Some(t) = illegal {
-                            let msg = format!("Cannot access offset of type {} on array", t);
-                            let exc = self.create_exception(b"TypeError", &msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                let ct = *catch_target;
-                                ip = ct as usize;
-                                continue;
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", msg),
-                                line: op.line,
-                            });
-                        }
-                    }
-                    if let Value::Array(arr) = &arr_val {
-                        let key = self.value_to_array_key_checked(&key_val, op.line);
-                        // Assigning to an element that is a reference writes through it.
-                        // (Storing a Reference itself rebinds the slot.)
-                        let existing_ref = if matches!(val, Value::Reference(_)) {
-                            None
-                        } else {
-                            match arr.borrow().get(&key) {
-                                Some(Value::Reference(r)) => Some(r.clone()),
-                                _ => None,
-                            }
-                        };
-                        // Overwriting an object/array element may release it.
-                        let may_release = self.has_release_work()
-                            && match &existing_ref {
-                                Some(r) => {
-                                    matches!(&*r.borrow(), Value::Object(_) | Value::Array(_))
+                        let key_val = self.read_operand_warn(
+                            &op.result,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        let val = self.read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        if let Value::Object(obj) = &arr_val.deref() {
+                            if let Some(f) = native_handlers(obj).and_then(|h| h.write_dimension) {
+                                let v = val.deref();
+                                let k = key_val.deref();
+                                if f(self, obj, Some(&k), &v) {
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
+                                    return Ok(Flow::Continue);
                                 }
-                                None => matches!(
-                                    arr.borrow().get(&key),
-                                    Some(Value::Object(_) | Value::Array(_))
-                                ),
+                            }
+                        }
+                        // `$a[] = $r` with $r a reference to $a itself keeps the
+                        // (recursive) array rather than a copy.
+                        let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
+                            && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
+                        let val = if self_ref {
+                            val
+                        } else {
+                            self.dup_stored_array(&op.op2, val)
+                        };
+                        // Array/object keys on a real array throw TypeError (matches
+                        // zend_illegal_container_offset). value_to_array_key_checked
+                        // silently maps both to Int(0), so check explicitly first.
+                        if matches!(&arr_val, Value::Array(_)) {
+                            let key_inner = match &key_val {
+                                Value::Reference(r) => r.borrow().clone(),
+                                other => other.clone(),
                             };
-                        let w = if may_release {
-                            match &existing_ref {
-                                Some(r) => crate::gc::dtor_watch(&r.borrow()),
-                                None => arr.borrow().get(&key).and_then(crate::gc::dtor_watch),
-                            }
-                        } else {
-                            None
-                        };
-                        match existing_ref {
-                            Some(r) => {
-                                // An element bound to typed properties checks the value.
-                                let mut val = val;
-                                if typed_ref::any() {
-                                    let overflow =
-                                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &val);
-                                    if let Err(msg) = self.typed_ref_check(
-                                        &r,
-                                        &mut val,
-                                        op_array.strict_types || overflow.is_some(),
-                                        None,
-                                    ) {
-                                        let msg = match overflow {
-                                            Some(inc) => typed_ref::incdec_msg(&msg, inc),
-                                            None => msg,
-                                        };
-                                        let exc =
-                                            self.create_exception(b"TypeError", &msg, op.line);
-                                        self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                            exception_handlers.last()
-                                        {
-                                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                                            ip = *catch_target as usize;
-                                            continue;
-                                        }
-                                        return Err(VmError {
-                                            message: format!("Uncaught TypeError: {}", msg),
-                                            line: op.line,
-                                        });
-                                    }
+                            let illegal: Option<String> = match &key_inner {
+                                Value::Array(_) => Some("array".to_string()),
+                                Value::Object(o) => {
+                                    Some(crate::value::display_class_name(&o.borrow().class_name))
                                 }
-                                *r.borrow_mut() = val;
-                            }
-                            None => arr.borrow_mut().set(key, val),
-                        }
-                        crate::gc::dtor_watch_end(w);
-                        if may_release {
-                            release_point!('exec);
-                        }
-                    } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
-                        if let OperandType::Cv(ci) = op.op1 {
-                            if let Err(msg) = self.typed_ref_auto_init_check(cvs.get(ci as usize)) {
+                                _ => None,
+                            };
+                            if let Some(t) = illegal {
+                                let msg = format!("Cannot access offset of type {} on array", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
                                 self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                    exception_handlers.pop()
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
                                 {
-                                    pending_calls_catch_depth = Some(saved_pc);
-                                    ip = catch_target as usize;
-                                    continue;
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", msg),
@@ -29068,74 +29436,225 @@ impl Vm {
                                 });
                             }
                         }
-                        // Auto-initialize null/undef/false to array
-                        if matches!(&arr_val, Value::False) {
-                            self.emit_deprecated_at(
-                                "Automatic conversion of false to array is deprecated",
-                                op.line,
-                            );
-                        }
-                        let mut arr = PhpArray::new();
-                        let key = self.value_to_array_key_checked(&key_val, op.line);
-                        arr.set(key, val);
-                        let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
-                        // Write back to the CV or reference
-                        if let OperandType::Cv(cv_idx) = &op.op1 {
-                            let i = *cv_idx as usize;
-                            if let Some(cv_val) = cvs.get_mut(i) {
-                                match cv_val {
-                                    Value::Reference(r) => {
-                                        *r.borrow_mut() = new_arr;
+                        if let Value::Array(arr) = &arr_val {
+                            let key = self.value_to_array_key_checked(&key_val, op.line);
+                            // Assigning to an element that is a reference writes through it.
+                            // (Storing a Reference itself rebinds the slot.)
+                            let existing_ref = if matches!(val, Value::Reference(_)) {
+                                None
+                            } else {
+                                match arr.borrow().get(&key) {
+                                    Some(Value::Reference(r)) => Some(r.clone()),
+                                    _ => None,
+                                }
+                            };
+                            // Overwriting an object/array element may release it.
+                            let may_release = self.has_release_work()
+                                && match &existing_ref {
+                                    Some(r) => {
+                                        matches!(&*r.borrow(), Value::Object(_) | Value::Array(_))
                                     }
-                                    _ => {
-                                        *cv_val = new_arr;
+                                    None => matches!(
+                                        arr.borrow().get(&key),
+                                        Some(Value::Object(_) | Value::Array(_))
+                                    ),
+                                };
+                            let w = if may_release {
+                                match &existing_ref {
+                                    Some(r) => crate::gc::dtor_watch(&r.borrow()),
+                                    None => arr.borrow().get(&key).and_then(crate::gc::dtor_watch),
+                                }
+                            } else {
+                                None
+                            };
+                            match existing_ref {
+                                Some(r) => {
+                                    // An element bound to typed properties checks the value.
+                                    let mut val = val;
+                                    if typed_ref::any() {
+                                        let overflow =
+                                            Self::incdec_overflow_kind(op_array, ip, &op.op2, &val);
+                                        if let Err(msg) = self.typed_ref_check(
+                                            &r,
+                                            &mut val,
+                                            op_array.strict_types || overflow.is_some(),
+                                            None,
+                                        ) {
+                                            let msg = match overflow {
+                                                Some(inc) => typed_ref::incdec_msg(&msg, inc),
+                                                None => msg,
+                                            };
+                                            let exc =
+                                                self.create_exception(b"TypeError", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                                exception_handlers.last()
+                                            {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                return Ok(Flow::Continue);
+                                            }
+                                            return Err(VmError {
+                                                message: format!("Uncaught TypeError: {}", msg),
+                                                line: op.line,
+                                            });
+                                        }
                                     }
+                                    *r.borrow_mut() = val;
+                                }
+                                None => arr.borrow_mut().set(key, val),
+                            }
+                            crate::gc::dtor_watch_end(w);
+                            if may_release {
+                                release_point!(outlined);
+                            }
+                        } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                            if let OperandType::Cv(ci) = op.op1 {
+                                if let Err(msg) =
+                                    self.typed_ref_auto_init_check(cvs.get(ci as usize))
+                                {
+                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", msg),
+                                        line: op.line,
+                                    });
                                 }
                             }
-                        } else if let OperandType::Tmp(t) = &op.op1 {
-                            // A fetched static property: the compiler stores
-                            // the temporary back (StaticPropSet).
-                            if let Some(slot) = tmps.get_mut(*t as usize) {
-                                *slot = new_arr;
+                            // Auto-initialize null/undef/false to array
+                            if matches!(&arr_val, Value::False) {
+                                self.emit_deprecated_at(
+                                    "Automatic conversion of false to array is deprecated",
+                                    op.line,
+                                );
                             }
-                        }
-                    } else if let Some(msg) = matches!(arr_val, Value::Object(_))
-                        .then(|| self.dim_write_container_error(&arr_val, false))
-                        .flatten()
-                    {
-                        let exc = self.create_exception(b"Error", &msg, op.line);
-                        self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
+                            let mut arr = PhpArray::new();
+                            let key = self.value_to_array_key_checked(&key_val, op.line);
+                            arr.set(key, val);
+                            let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                            // Write back to the CV or reference
+                            if let OperandType::Cv(cv_idx) = &op.op1 {
+                                let i = *cv_idx as usize;
+                                if let Some(cv_val) = cvs.get_mut(i) {
+                                    match cv_val {
+                                        Value::Reference(r) => {
+                                            *r.borrow_mut() = new_arr;
+                                        }
+                                        _ => {
+                                            *cv_val = new_arr;
+                                        }
+                                    }
+                                }
+                            } else if let OperandType::Tmp(t) = &op.op1 {
+                                // A fetched static property: the compiler stores
+                                // the temporary back (StaticPropSet).
+                                if let Some(slot) = tmps.get_mut(*t as usize) {
+                                    *slot = new_arr;
+                                }
+                            }
+                        } else if let Some(msg) = matches!(arr_val, Value::Object(_))
+                            .then(|| self.dim_write_container_error(&arr_val, false))
+                            .flatten()
                         {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            ip = *catch_target as usize;
-                            continue;
-                        }
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", msg),
-                            line: op.line,
-                        });
-                    } else if let Value::Object(obj) = &arr_val {
-                        // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        if matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                        ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
-                        {
-                            let t = if matches!(&key_val, Value::Array(_)) {
-                                "array"
-                            } else {
-                                "object"
-                            };
-                            let msg = format!("Cannot access offset of type {} on ArrayObject", t);
-                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        } else if let Value::Object(obj) = &arr_val {
+                            // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
+                            let class_lower: Vec<u8> = obj
+                                .borrow()
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            if matches!(
+                                class_lower.as_slice(),
+                                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                            ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
+                            {
+                                let t = if matches!(&key_val, Value::Array(_)) {
+                                    "array"
+                                } else {
+                                    "object"
+                                };
+                                let msg =
+                                    format!("Cannot access offset of type {} on ArrayObject", t);
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                            let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
+                            if self
+                                .handle_spl_docall(&class_lower, b"offsetset", &spl_args)
+                                .is_none()
+                            {
+                                self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
+                            }
+                            drop(spl_args);
+                            // A value replaced in SPL storage is destroyed now.
+                            if self.current_exception.is_none() && self.has_release_work() {
+                                self.run_pending_destructors();
+                            }
+                            if let Some(exc_val) = self.current_exception.take() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    self.current_exception = Some(exc_val);
+                                    ip = ct as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                let msg = if let Value::Object(o) = &exc_val {
+                                    let ob = o.borrow();
+                                    ob.get_property(b"message")
+                                        .to_php_string()
+                                        .to_string_lossy()
+                                } else {
+                                    "Unknown exception".to_string()
+                                };
+                                self.current_exception = Some(exc_val);
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
+                        } else if matches!(
+                            &arr_val,
+                            Value::True | Value::Long(_) | Value::Double(_)
+                        ) {
+                            // Cannot use a scalar value as an array: $true[k]=v,
+                            // $42[k]=v, etc. PHP throws Error (not TypeError).
+                            let msg = "Cannot use a scalar value as an array".to_string();
+                            let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
@@ -29143,140 +29662,98 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", msg),
+                                message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
-                        }
-                        let spl_args = vec![arr_val.clone(), key_val.clone(), val.clone()];
-                        if self
-                            .handle_spl_docall(&class_lower, b"offsetset", &spl_args)
-                            .is_none()
-                        {
-                            self.call_object_method(&arr_val, b"offsetset", &[key_val, val]);
-                        }
-                        drop(spl_args);
-                        // A value replaced in SPL storage is destroyed now.
-                        if self.current_exception.is_none() && self.has_release_work() {
-                            self.run_pending_destructors();
-                        }
-                        if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                let ct = *catch_target;
-                                self.current_exception = Some(exc_val);
-                                ip = ct as usize;
-                                continue;
-                            }
-                            let msg = if let Value::Object(o) = &exc_val {
-                                let ob = o.borrow();
-                                ob.get_property(b"message")
-                                    .to_php_string()
-                                    .to_string_lossy()
-                            } else {
-                                "Unknown exception".to_string()
-                            };
-                            self.current_exception = Some(exc_val);
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
-                        }
-                    } else if matches!(&arr_val, Value::True | Value::Long(_) | Value::Double(_)) {
-                        // Cannot use a scalar value as an array: $true[k]=v,
-                        // $42[k]=v, etc. PHP throws Error (not TypeError).
-                        let msg = "Cannot use a scalar value as an array".to_string();
-                        let exc = self.create_exception(b"Error", &msg, op.line);
-                        self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
-                        {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            let ct = *catch_target;
-                            ip = ct as usize;
-                            continue;
-                        }
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", msg),
-                            line: op.line,
-                        });
-                    } else if let Value::String(cur_s) = &arr_val {
-                        // String offset write `$str[n] = 'x'`
-                        // (zend_assign_to_string_offset). A string fetched into a
-                        // tmp by a write fetch is stored back where it lives.
-                        let wb = match op.op1 {
-                            OperandType::Tmp(t) => match self.str_offset_wb.take() {
-                                Some((wt, d, loc)) if wt == t && d == self.call_depth => Some(loc),
+                        } else if let Value::String(cur_s) = &arr_val {
+                            // String offset write `$str[n] = 'x'`
+                            // (zend_assign_to_string_offset). A string fetched into a
+                            // tmp by a write fetch is stored back where it lives.
+                            let wb = match op.op1 {
+                                OperandType::Tmp(t) => match self.str_offset_wb.take() {
+                                    Some((wt, d, loc)) if wt == t && d == self.call_depth => {
+                                        Some(loc)
+                                    }
+                                    _ => None,
+                                },
                                 _ => None,
-                            },
-                            _ => None,
-                        };
-                        let result_slot = match op.op2 {
-                            OperandType::Tmp(t) => Some(t as usize),
-                            _ => None,
-                        };
-                        match self.assign_string_offset(cur_s.as_bytes(), &key_val, &val, op.line) {
-                            crate::fetch_w::StrOffsetAssign::Written(bytes, ch) => {
-                                let nv = Value::String(PhpString::from_vec(bytes));
-                                match op.op1 {
-                                    OperandType::Cv(i) => match cvs.get_mut(i as usize) {
-                                        Some(Value::Reference(r)) => *r.borrow_mut() = nv,
-                                        Some(slot) => *slot = nv,
-                                        None => {}
-                                    },
-                                    OperandType::Tmp(t) => {
-                                        if let Some(loc) = &wb {
-                                            self.str_wb_store(loc, nv.clone());
+                            };
+                            let result_slot = match op.op2 {
+                                OperandType::Tmp(t) => Some(t as usize),
+                                _ => None,
+                            };
+                            match self.assign_string_offset(
+                                cur_s.as_bytes(),
+                                &key_val,
+                                &val,
+                                op.line,
+                            ) {
+                                crate::fetch_w::StrOffsetAssign::Written(bytes, ch) => {
+                                    let nv = Value::String(PhpString::from_vec(bytes));
+                                    match op.op1 {
+                                        OperandType::Cv(i) => match cvs.get_mut(i as usize) {
+                                            Some(Value::Reference(r)) => *r.borrow_mut() = nv,
+                                            Some(slot) => *slot = nv,
+                                            None => {}
+                                        },
+                                        OperandType::Tmp(t) => {
+                                            if let Some(loc) = &wb {
+                                                self.str_wb_store(loc, nv.clone());
+                                            }
+                                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                                *slot = nv;
+                                            }
                                         }
-                                        if let Some(slot) = tmps.get_mut(t as usize) {
-                                            *slot = nv;
+                                        _ => {}
+                                    }
+                                    if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
+                                        *slot = ch;
+                                    }
+                                }
+                                crate::fetch_w::StrOffsetAssign::Skipped => {
+                                    if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
+                                        *slot = Value::Null;
+                                    }
+                                }
+                                crate::fetch_w::StrOffsetAssign::Threw => {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    let msg = match &self.current_exception {
+                                        Some(Value::Object(o)) => {
+                                            let ob = o.borrow();
+                                            format!(
+                                                "Uncaught {}: {}",
+                                                String::from_utf8_lossy(&ob.class_name),
+                                                ob.get_property(b"message")
+                                                    .to_php_string()
+                                                    .to_string_lossy()
+                                            )
                                         }
-                                    }
-                                    _ => {}
+                                        _ => "Uncaught exception".to_string(),
+                                    };
+                                    return Err(VmError {
+                                        message: msg,
+                                        line: op.line,
+                                    });
                                 }
-                                if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
-                                    *slot = ch;
-                                }
-                            }
-                            crate::fetch_w::StrOffsetAssign::Skipped => {
-                                if let Some(slot) = result_slot.and_then(|t| tmps.get_mut(t)) {
-                                    *slot = Value::Null;
-                                }
-                            }
-                            crate::fetch_w::StrOffsetAssign::Threw => {
-                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                    exception_handlers.last()
-                                {
-                                    pending_calls_catch_depth = Some(*eh_pc_depth);
-                                    ip = *catch_target as usize;
-                                    continue;
-                                }
-                                let msg = match &self.current_exception {
-                                    Some(Value::Object(o)) => {
-                                        let ob = o.borrow();
-                                        format!(
-                                            "Uncaught {}: {}",
-                                            String::from_utf8_lossy(&ob.class_name),
-                                            ob.get_property(b"message")
-                                                .to_php_string()
-                                                .to_string_lossy()
-                                        )
-                                    }
-                                    _ => "Uncaught exception".to_string(),
-                                };
-                                return Err(VmError {
-                                    message: msg,
-                                    line: op.line,
-                                });
                             }
                         }
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
                     }
                 }
-                OpCode::CompactDyn => {
+                OpCode::CompactDyn => match outlined(|| -> Result<Flow, VmError> {
                     let args_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let mut result = PhpArray::new();
                     let top: Vec<Value> = match &args_val {
@@ -29304,7 +29781,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught Error: Recursion detected".into(),
@@ -29318,7 +29795,12 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::Tick => {
                     let n = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     self.ticks_count += 1;
@@ -29351,7 +29833,7 @@ impl Vm {
                         }
                     }
                 }
-                OpCode::ExitOp => {
+                OpCode::ExitOp => match outlined(|| -> Result<Flow, VmError> {
                     // exit/die: if the value is an integer, it's the exit code (don't print)
                     // if it's a string or other type, echo it
                     // exit(string|int $status = 0): ints set the exit status,
@@ -29431,7 +29913,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", msg),
@@ -29440,12 +29922,18 @@ impl Vm {
                     }
                     self.exit_code = code;
                     self.exit_requested = true;
-                    return Ok(Value::Null);
-                }
+                    return Ok(Flow::Return(Value::Null));
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::ArrayGet
                 | OpCode::ArrayGetRW
                 | OpCode::ArrayGetObjW
-                | OpCode::ArrayGetIncDec => {
+                | OpCode::ArrayGetIncDec => match outlined(|| -> Result<Flow, VmError> {
                     let is_rw = matches!(op.opcode, OpCode::ArrayGetRW | OpCode::ArrayGetIncDec);
                     let obj_w = matches!(op.opcode, OpCode::ArrayGetObjW);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -29516,7 +30004,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                     }
@@ -29535,7 +30023,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -29569,7 +30057,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", msg),
@@ -29613,7 +30101,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", str_err.unwrap_or("")),
@@ -29629,7 +30117,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     let result = if let Value::Array(arr) = &arr_val {
@@ -29737,7 +30225,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", msg),
@@ -29769,7 +30257,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                             }
                             Value::String(PhpString::empty())
@@ -29867,7 +30355,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -29897,7 +30385,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", msg),
@@ -29944,7 +30432,7 @@ impl Vm {
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
@@ -29980,9 +30468,14 @@ impl Vm {
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ListGet => {
+                OpCode::ListGet => match outlined(|| -> Result<Flow, VmError> {
                     // Like ArrayGet but for list() destructuring: emits "Cannot use X as array"
                     // instead of "Trying to access array offset on X", and strings are not indexable.
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -30112,7 +30605,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -30138,7 +30631,7 @@ impl Vm {
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
@@ -30174,9 +30667,14 @@ impl Vm {
                         Value::Null
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ForeachInit => {
+                OpCode::ForeachInit => match outlined(|| -> Result<Flow, VmError> {
                     // SplFixedArray is iterated over its live storage.
                     let mut live_iteration = false;
                     if !foreach_obj.is_empty() {
@@ -30214,7 +30712,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Exception: {}", msg),
@@ -30236,7 +30734,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     // No handler - build a descriptive error from the
                                     // current exception so the Fatal error line is correct.
@@ -30299,7 +30797,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = match &self.current_exception {
                                 Some(Value::Object(o)) => {
@@ -30484,7 +30982,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let msg = match &self.current_exception {
                                     Some(Value::Object(o)) => {
@@ -30576,7 +31074,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(pc);
                                                 ip = if c > 0 { c } else { f } as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                         }
                                         return Err(e);
@@ -30660,9 +31158,14 @@ impl Vm {
                     } else if !foreach_snap.is_empty() {
                         foreach_snap.remove(&iter_idx);
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ForeachNext => {
+                OpCode::ForeachNext => match outlined(|| -> Result<Flow, VmError> {
                     let iter_idx = match op.op1 {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -30700,7 +31203,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     // No handler - propagate
                                     let exc_msg =
@@ -30740,7 +31243,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = if let Some(Value::Object(obj)) =
                                     &self.current_exception
@@ -30801,7 +31304,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = if let Some(Value::Object(o)) =
                                     &self.current_exception
@@ -30837,7 +31340,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let exc_msg = if let Some(Value::Object(o)) = &self.current_exception {
                                 let ob = o.borrow();
@@ -30877,7 +31380,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let exc_msg = if let Some(Value::Object(o)) =
                                     &self.current_exception
@@ -31027,9 +31530,14 @@ impl Vm {
                             ip = target as usize;
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ForeachKey => {
+                OpCode::ForeachKey => match outlined(|| -> Result<Flow, VmError> {
                     let iter_idx = match op.op1 {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -31068,7 +31576,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let msg = match &self.current_exception {
                                     Some(Value::Object(o)) => {
@@ -31140,9 +31648,14 @@ impl Vm {
                             &static_cv_keys,
                         );
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ForeachInitRef => {
+                OpCode::ForeachInitRef => match outlined(|| -> Result<Flow, VmError> {
                     if let OperandType::Tmp(t) = op.result {
                         foreach_obj.remove(&t);
                     }
@@ -31184,7 +31697,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let msg = match &self.current_exception {
                             Some(Value::Object(o)) => format!(
@@ -31216,7 +31729,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Exception: {}", msg),
@@ -31235,7 +31748,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     resume_result?;
                                     return Err(VmError {
@@ -31255,7 +31768,7 @@ impl Vm {
                         if let OperandType::Tmp(iter_idx) = op.result {
                             foreach_positions.insert(iter_idx, 0usize);
                         }
-                        continue;
+                        return Ok(Flow::Continue);
                     }
 
                     // Extension-provided Traversable classes (e.g. DatePeriod) reject by-ref iteration.
@@ -31283,7 +31796,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -31332,7 +31845,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         let msg = match &self.current_exception {
                                             Some(Value::Object(o)) => {
@@ -31357,7 +31870,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             let msg = match &self.current_exception {
                                                 Some(Value::Object(o)) => {
@@ -31479,9 +31992,14 @@ impl Vm {
                     foreach_positions.insert(iter_idx, 0usize);
                     foreach_cur_key.remove(&iter_idx);
                     foreach_cur_ref.remove(&iter_idx);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ForeachNextRef => {
+                OpCode::ForeachNextRef => match outlined(|| -> Result<Flow, VmError> {
                     let iter_idx = match op.op1 {
                         OperandType::Tmp(idx) => idx,
                         _ => 0,
@@ -31501,7 +32019,7 @@ impl Vm {
                             if let OperandType::JmpTarget(target) = op.op2 {
                                 ip = target as usize;
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         // A by-ref loop variable is (re)bound to the yielded reference.
                         let bind = |val: Value, cvs: &mut Vec<Value>| -> Option<Value> {
@@ -31581,7 +32099,7 @@ impl Vm {
                                 }
                             }
                         }
-                        continue;
+                        return Ok(Flow::Continue);
                     }
 
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
@@ -31658,7 +32176,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -31666,7 +32184,7 @@ impl Vm {
                                 });
                             }
                         }
-                        continue;
+                        return Ok(Flow::Continue);
                     }
                     let done = if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
                         let next_pos = {
@@ -31762,9 +32280,14 @@ impl Vm {
                             ip = target as usize;
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::BindGlobal => {
+                OpCode::BindGlobal => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -31781,7 +32304,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     // From a function, the symbol table entry becomes an
                     // IS_REFERENCE, which shutdown's first phase skips.
@@ -31802,7 +32325,7 @@ impl Vm {
                             fs.tab.bind_ref(&name, cell);
                             self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
                         }
-                        continue;
+                        return Ok(Flow::Continue);
                     }
                     let target = Some(op.op1);
                     if let Some(OperandType::Cv(cv_idx)) = target {
@@ -31825,7 +32348,12 @@ impl Vm {
                             cvs[cv_idx as usize] = Value::Reference(cell);
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::StaticVarInitOrJmp => {
                     // Already initialized: skip the initializer; the
@@ -31840,7 +32368,7 @@ impl Vm {
                         }
                     }
                 }
-                OpCode::StaticVarInit => {
+                OpCode::StaticVarInit => match outlined(|| -> Result<Flow, VmError> {
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     let key = key_val.to_php_string().as_bytes().to_vec();
 
@@ -31875,10 +32403,15 @@ impl Vm {
                         }
                         if old_watch.is_some() {
                             crate::gc::dtor_watch_end(old_watch);
-                            release_point!('exec);
+                            release_point!(outlined);
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::RegisterConstAttrs => {
                     let idx_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -31904,7 +32437,7 @@ impl Vm {
                     let obj = self.make_closure_object(inner);
                     self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
                 }
-                OpCode::MakeFcc => {
+                OpCode::MakeFcc => match outlined(|| -> Result<Flow, VmError> {
                     let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let desc = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -31937,7 +32470,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let _ = (cls, msg);
                             return Err(VmError {
@@ -31946,8 +32479,13 @@ impl Vm {
                             });
                         }
                     }
-                }
-                OpCode::DeclareFunction => {
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
+                OpCode::DeclareFunction => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let func_idx_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let func_idx = func_idx_val.to_long() as usize;
@@ -32010,9 +32548,14 @@ impl Vm {
                         );
                         self.register_user_function(name.as_bytes(), func_op_array.clone());
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::TypeCheck => {
+                OpCode::TypeCheck => match outlined(|| -> Result<Flow, VmError> {
                     // instanceof check: op1 = value, op2 = class name
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let class_val = self
@@ -32042,7 +32585,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -32207,9 +32750,14 @@ impl Vm {
                         Value::False
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::TryBegin => {
+                OpCode::TryBegin => match outlined(|| -> Result<Flow, VmError> {
                     let catch_target = match op.op1 {
                         OperandType::JmpTarget(t) => t,
                         _ => 0,
@@ -32236,13 +32784,18 @@ impl Vm {
                         self.error_reporting_stack.len(),
                         self.pending_calls.len(),
                     ));
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::TryEnd => {
                     exception_handlers.pop();
                 }
 
-                OpCode::FinallyEnter => {
+                OpCode::FinallyEnter => match outlined(|| -> Result<Flow, VmError> {
                     // Reaching the finally through a handler that the dispatch
                     // site left on the stack.
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1 || h.1 as usize == ip - 1)
@@ -32269,9 +32822,14 @@ impl Vm {
                             *s = slot;
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::CatchException => {
+                OpCode::CatchException => match outlined(|| -> Result<Flow, VmError> {
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
                         exception_handlers.pop();
                     }
@@ -32303,7 +32861,7 @@ impl Vm {
                             } else {
                                 finally_target
                             } as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Graceful exit".into(),
@@ -32318,9 +32876,14 @@ impl Vm {
                     if let Some(exc) = self.current_exception.take() {
                         self.write_operand(&op.op1, exc, &mut cvs, &mut tmps, &static_cv_keys);
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Throw => {
+                OpCode::Throw => match outlined(|| -> Result<Flow, VmError> {
                     let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
 
                     // Restore error_reporting to the depth it was at when the nearest
@@ -32352,7 +32915,7 @@ impl Vm {
                             } else if finally_target > 0 {
                                 ip = finally_target as usize;
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", err_msg),
@@ -32388,7 +32951,7 @@ impl Vm {
                                 } else if finally_target > 0 {
                                     ip = finally_target as usize;
                                 }
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", err_msg),
@@ -32488,9 +33051,14 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::StaticPropGet => {
+                OpCode::StaticPropGet => match outlined(|| -> Result<Flow, VmError> {
                     let op1_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // If op1 is an object, extract the class name for static access
                     let class_name_raw = if let Value::Object(obj_ref) = &op1_val {
@@ -32533,7 +33101,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", err_msg),
@@ -32619,7 +33187,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception".into(),
@@ -32646,7 +33214,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -32699,7 +33267,7 @@ impl Vm {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 let ct = *catch_target;
                                                 ip = ct as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!("Uncaught Error: {}", msg),
@@ -32803,7 +33371,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -32857,7 +33425,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: "Uncaught exception".into(),
@@ -32925,7 +33493,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -32978,7 +33546,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -32993,7 +33561,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 // Check for deferred closure marker
                                 if s.as_bytes().starts_with(b"__deferred_closure__::") {
@@ -33015,7 +33583,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: self.uncaught_exception_message(),
@@ -33037,7 +33605,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                 }
                                 // Check for deferred binary expression marker (e.g. self::class . '-' . SUFFIX
@@ -33079,7 +33647,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -33126,7 +33694,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: err_msg,
@@ -33164,7 +33732,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: err_msg,
@@ -33212,7 +33780,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", err_msg),
@@ -33229,7 +33797,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", err_msg),
@@ -33277,7 +33845,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", err_msg),
@@ -33417,7 +33985,7 @@ impl Vm {
                             // If a reference emission threw and we set ip into a catch
                             // block, skip the rest of this op and let the outer loop continue.
                             if self.current_exception.is_some() {
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let dep_msg = self
                                 .classes
@@ -33491,7 +34059,7 @@ impl Vm {
                                             } else if finally_target > 0 {
                                                 ip = finally_target as usize;
                                             }
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             let exc = self.current_exception.take().unwrap();
                                             let (class, msg) = if let Value::Object(o) = &exc {
@@ -33525,78 +34093,90 @@ impl Vm {
                         }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::StaticPropSet | OpCode::StaticPropSetRef => {
-                    let class_v = self.read_operand_warn(
-                        &op.op1,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
-                    let by_ref = matches!(op.opcode, OpCode::StaticPropSetRef);
-                    let value = if by_ref {
-                        match &op.op2 {
-                            OperandType::Cv(i) => {
-                                cvs.get(*i as usize).cloned().unwrap_or(Value::Null)
+                    match outlined(|| -> Result<Flow, VmError> {
+                        let class_v = self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        let by_ref = matches!(op.opcode, OpCode::StaticPropSetRef);
+                        let value = if by_ref {
+                            match &op.op2 {
+                                OperandType::Cv(i) => {
+                                    cvs.get(*i as usize).cloned().unwrap_or(Value::Null)
+                                }
+                                OperandType::Tmp(i) => {
+                                    tmps.get(*i as usize).cloned().unwrap_or(Value::Null)
+                                }
+                                other => self.read_operand(other, &cvs, &tmps, &op_array.literals),
                             }
-                            OperandType::Tmp(i) => {
-                                tmps.get(*i as usize).cloned().unwrap_or(Value::Null)
-                            }
-                            other => self.read_operand(other, &cvs, &tmps, &op_array.literals),
-                        }
-                    } else {
-                        let v = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                        self.dup_stored_array(&op.op2, v)
-                    };
-                    let prop_name = self
-                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let overflow = if by_ref {
-                        None
-                    } else {
-                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &value)
-                    };
-                    match self.static_prop_assign(
-                        &class_v,
-                        prop_name.as_bytes(),
-                        value,
-                        by_ref,
-                        op_array,
-                        overflow,
-                        op.line,
-                    ) {
-                        Ok(stored) => {
-                            // The assignment's result is the (coerced) stored value.
-                            if let (false, OperandType::Tmp(t)) = (by_ref, op.op2) {
-                                if let Some(slot) = tmps.get_mut(t as usize) {
-                                    *slot = stored;
+                        } else {
+                            let v = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                            self.dup_stored_array(&op.op2, v)
+                        };
+                        let prop_name = self
+                            .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
+                            .to_php_string();
+                        let overflow = if by_ref {
+                            None
+                        } else {
+                            Self::incdec_overflow_kind(op_array, ip, &op.op2, &value)
+                        };
+                        match self.static_prop_assign(
+                            &class_v,
+                            prop_name.as_bytes(),
+                            value,
+                            by_ref,
+                            op_array,
+                            overflow,
+                            op.line,
+                        ) {
+                            Ok(stored) => {
+                                // The assignment's result is the (coerced) stored value.
+                                if let (false, OperandType::Tmp(t)) = (by_ref, op.op2) {
+                                    if let Some(slot) = tmps.get_mut(t as usize) {
+                                        *slot = stored;
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            let msg = self.sp_raise(e, op.line);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                ip = *catch_target as usize;
-                                continue;
+                            Err(e) => {
+                                let msg = self.sp_raise(e, op.line);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
                             }
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
                         }
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
                     }
                 }
 
                 OpCode::StaticPropFetch
                 | OpCode::StaticPropFetchRW
                 | OpCode::StaticPropFetchW
-                | OpCode::StaticPropGetRef => {
+                | OpCode::StaticPropGetRef => match outlined(|| -> Result<Flow, VmError> {
                     // `C::$p` reads (no class-constant fallback), read-modify-write,
                     // dimension-write container and reference fetches.
                     let class_v = self.read_operand_warn(
@@ -33654,7 +34234,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -33662,9 +34242,14 @@ impl Vm {
                             });
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ConstExprPropCheck => {
+                OpCode::ConstExprPropCheck => match outlined(|| -> Result<Flow, VmError> {
                     let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // op2 set: a dimension fetch, refused on any object.
                     let is_dim = !matches!(op.op2, OperandType::Unused);
@@ -33688,16 +34273,21 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::CheckThis => {
+                OpCode::CheckThis => match outlined(|| -> Result<Flow, VmError> {
                     let bound = match &op.op1 {
                         OperandType::Cv(i) => match cvs.get(*i as usize) {
                             Some(Value::Object(_)) => true,
@@ -33715,63 +34305,75 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::StaticPropIsset | OpCode::StaticPropUnset => {
-                    // isset(C::$p) — bool, never throws for a missing or
-                    // inaccessible property. unset(C::$p) always throws.
-                    let class_v = self.read_operand_warn(
-                        &op.op1,
-                        &cvs,
-                        &tmps,
-                        &op_array.literals,
-                        op_array,
-                        op.line,
-                    );
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let res = if matches!(op.opcode, OpCode::StaticPropUnset) {
-                        Err(self.static_prop_unset(&class_v, prop_name.as_bytes()))
-                    } else {
-                        self.static_prop_isset(&class_v, prop_name.as_bytes(), op_array)
-                    };
-                    match res {
-                        Ok(set) => {
-                            let result = if set { Value::True } else { Value::False };
-                            self.write_operand(
-                                &op.result,
-                                result,
-                                &mut cvs,
-                                &mut tmps,
-                                &static_cv_keys,
-                            );
-                        }
-                        Err(e) => {
-                            let msg = self.sp_raise(e, op.line);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                ip = *catch_target as usize;
-                                continue;
+                    match outlined(|| -> Result<Flow, VmError> {
+                        // isset(C::$p) — bool, never throws for a missing or
+                        // inaccessible property. unset(C::$p) always throws.
+                        let class_v = self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        let prop_name = self
+                            .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                            .to_php_string();
+                        let res = if matches!(op.opcode, OpCode::StaticPropUnset) {
+                            Err(self.static_prop_unset(&class_v, prop_name.as_bytes()))
+                        } else {
+                            self.static_prop_isset(&class_v, prop_name.as_bytes(), op_array)
+                        };
+                        match res {
+                            Ok(set) => {
+                                let result = if set { Value::True } else { Value::False };
+                                self.write_operand(
+                                    &op.result,
+                                    result,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
                             }
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
+                            Err(e) => {
+                                let msg = self.sp_raise(e, op.line);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
                         }
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
                     }
                 }
 
-                OpCode::ConstLookup => {
+                OpCode::ConstLookup => match outlined(|| -> Result<Flow, VmError> {
                     let name = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -33856,7 +34458,7 @@ impl Vm {
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
                                         }
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let exc_msg = self
                                         .current_exception
@@ -33948,16 +34550,21 @@ impl Vm {
                             } else if finally_target > 0 {
                                 ip = finally_target as usize;
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: msg,
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::IncludeFile => {
+                OpCode::IncludeFile => match outlined(|| -> Result<Flow, VmError> {
                     let path_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let path_str = path_val.to_php_string().to_string_lossy();
 
@@ -33980,7 +34587,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                 }
                                 return Err(e);
@@ -34014,7 +34621,7 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     }
 
                     // Userspace stream wrappers provide the source themselves.
@@ -34030,7 +34637,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(e);
                             }
@@ -34044,7 +34651,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         Some(Ok(src)) => Some(src),
                         None => None,
@@ -34134,7 +34741,7 @@ impl Vm {
                                                 false,
                                             ));
                                             let exec_r =
-                                                self.execute_op_array(&inc_op_array, inc_cvs);
+                                                self.execute_op_array_vm(&inc_op_array, inc_cvs);
                                             self.call_stack.pop();
                                             let result = match exec_r {
                                                 Ok(v) => v,
@@ -34154,7 +34761,7 @@ impl Vm {
                                                             pending_calls_catch_depth =
                                                                 Some(saved_pc);
                                                             ip = catch_target as usize;
-                                                            continue;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                         return Err(e);
                                                     }
@@ -34222,7 +34829,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     // Uncaught here: propagates to the callers.
                                     return Err(VmError {
@@ -34285,7 +34892,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -34311,9 +34918,14 @@ impl Vm {
                     };
                     self.current_file = old_file;
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Eval => {
+                OpCode::Eval => match outlined(|| -> Result<Flow, VmError> {
                     let code_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let code_str = code_val.to_php_string().to_string_lossy();
 
@@ -34383,7 +34995,7 @@ impl Vm {
                                             false,
                                         ));
                                         let exec_r =
-                                            self.execute_op_array(&eval_op_array, eval_cvs);
+                                            self.execute_op_array_vm(&eval_op_array, eval_cvs);
                                         self.call_stack.pop();
                                         let eval_result = match exec_r {
                                             Ok(v) => v,
@@ -34403,7 +35015,7 @@ impl Vm {
                                                         pending_calls_catch_depth =
                                                             Some(*eh_pc_depth);
                                                         ip = *catch_target as usize;
-                                                        continue;
+                                                        return Ok(Flow::Continue);
                                                     }
                                                     return Err(e);
                                                 }
@@ -34440,7 +35052,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(eh_pc_depth);
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!(
@@ -34521,7 +35133,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 // Uncaught here: it propagates to the callers like
                                 // any exception (reported as E_PARSE/E_COMPILE_ERROR
@@ -34538,9 +35150,14 @@ impl Vm {
                         }
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::Extract => {
+                OpCode::Extract => match outlined(|| -> Result<Flow, VmError> {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let meta_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let (flags, prefix): (i64, Option<Vec<u8>>) = match &meta_val {
@@ -34746,7 +35363,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!(
@@ -34764,14 +35381,19 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::CloneObj => {
+                OpCode::CloneObj => match outlined(|| -> Result<Flow, VmError> {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     if val.is_closure_obj() {
                         let c = self.clone_closure(&val);
                         self.write_operand(&op.result, c, &mut cvs, &mut tmps, &static_cv_keys);
-                        continue;
+                        return Ok(Flow::Continue);
                     }
                     // Lazy init on clone: ghosts are fully initialized, then cloned.
                     // Proxies initialize their backing object; the clone is a fresh
@@ -34789,7 +35411,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = match &self.current_exception {
                                 Some(Value::Object(o)) => {
@@ -34885,7 +35507,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -35221,7 +35843,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 ip = *catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!("Uncaught Error: {}", msg),
@@ -35277,7 +35899,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                                 ip = *catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             let exc = self.current_exception.clone().unwrap();
                                             let msg = if let Value::Object(e) = &exc {
@@ -35318,7 +35940,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -35338,7 +35960,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -35358,7 +35980,12 @@ impl Vm {
                         }
                     }
                     self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::CloneWithProps => {
                     // Set properties on a cloned object from an array
@@ -35399,7 +36026,7 @@ impl Vm {
                     );
                 }
 
-                OpCode::PropertyIsset => {
+                OpCode::PropertyIsset => match outlined(|| -> Result<Flow, VmError> {
                     // Check if object property is set (with __isset support)
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
@@ -35423,7 +36050,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
@@ -35435,7 +36062,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
 
@@ -35596,7 +36223,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(eh_pc_depth);
                                 exception_handlers.pop();
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -35615,7 +36242,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception".to_string(),
@@ -35629,7 +36256,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     // isset() on an accessible property with a get hook calls the
@@ -35647,14 +36274,14 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 Err(e) => {
                                     if self.current_exception.is_some() {
                                         if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
                                             pending_calls_catch_depth = Some(pc);
                                             ip = if c > 0 { c } else { f } as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                     }
                                     return Err(e);
@@ -35775,9 +36402,14 @@ impl Vm {
                         self.magic_prop_guards.remove(&(rid, pname, 1u8));
                     }
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::UnsetCv => {
+                OpCode::UnsetCv => match outlined(|| -> Result<Flow, VmError> {
                     let old_watch = match op.op1 {
                         OperandType::Cv(i) => cvs.get(i as usize).and_then(crate::gc::dtor_watch),
                         _ => None,
@@ -35822,10 +36454,10 @@ impl Vm {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         if catch_target > 0 {
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else if finally_target > 0 {
                                             ip = finally_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                     }
                                     let exc_msg =
@@ -35906,7 +36538,7 @@ impl Vm {
                             } else if finally > 0 {
                                 ip = finally as usize;
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception from destructor".into(),
@@ -35914,9 +36546,14 @@ impl Vm {
                         });
                     }
                     self.gc_maybe_auto();
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ArrayUnset => {
+                OpCode::ArrayUnset => match outlined(|| -> Result<Flow, VmError> {
                     // Remove element from array: op1 = array CV, op2 = key
                     let key_val = self.read_operand_warn(
                         &op.op2,
@@ -35992,7 +36629,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
@@ -36024,7 +36661,7 @@ impl Vm {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
                         }
@@ -36044,7 +36681,7 @@ impl Vm {
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
@@ -36055,10 +36692,15 @@ impl Vm {
                         }
                     }
                     // The removed element is released now.
-                    release_point!('exec);
-                }
+                    release_point!(outlined);
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::PropertyUnset => {
+                OpCode::PropertyUnset => match outlined(|| -> Result<Flow, VmError> {
                     // Remove property from object: op1 = object, op2 = property name
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
@@ -36079,7 +36721,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -36097,7 +36739,7 @@ impl Vm {
                                     ip,
                                     op.line
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 1) {
@@ -36106,7 +36748,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = match &self.current_exception {
                                 Some(Value::Object(o)) => o
@@ -36252,14 +36894,14 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception".to_string(),
                                     line: op.line,
                                 });
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     // PHP refuses property names starting with NUL. When __unset exists, dispatch
@@ -36288,7 +36930,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -36371,7 +37013,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -36400,7 +37042,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -36420,7 +37062,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -36468,7 +37110,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -36537,7 +37179,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -36577,7 +37219,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -36637,7 +37279,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         let exc_msg = if let Some(Value::Object(obj)) =
                                             &self.current_exception
@@ -36669,7 +37311,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: msg,
@@ -36681,10 +37323,15 @@ impl Vm {
                     if let Some((rid, pname)) = propagate_unset_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 3u8));
                     }
-                    release_point!('exec);
-                }
+                    release_point!(outlined);
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::VarVarGet => {
+                OpCode::VarVarGet => match outlined(|| -> Result<Flow, VmError> {
                     // FETCH_R / FETCH_IS (op2 = Const) of `$$name`.
                     let name_val = self.read_operand_warn(
                         &op.op1,
@@ -36702,7 +37349,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     let quiet = matches!(op.op2, OperandType::Const(_));
                     let found = match fsym.as_ref() {
@@ -36742,9 +37389,14 @@ impl Vm {
                         ip,
                         op.line
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::VarVarSet => {
+                OpCode::VarVarSet => match outlined(|| -> Result<Flow, VmError> {
                     // `$$name = value` (FETCH_W + ASSIGN).
                     let name_val = self.read_operand_warn(
                         &op.op1,
@@ -36763,7 +37415,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     if name == b"this" {
                         self.throw_error_at(b"Error", "Cannot re-assign $this", op.line);
@@ -36793,10 +37445,15 @@ impl Vm {
                             op.line
                         );
                     }
-                    release_point!('exec);
-                }
+                    release_point!(outlined);
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::VarVarFetch => {
+                OpCode::VarVarFetch => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -36813,7 +37470,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     let mode = match op.op2 {
                         OperandType::Const(i) => op_array
@@ -36873,9 +37530,15 @@ impl Vm {
                         ip,
                         op.line
                     );
-                }
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::VarVarUnset => {
+                OpCode::VarVarUnset => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -36892,7 +37555,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     let defined = match fsym.as_ref() {
                         Some(fs) => fs
@@ -36909,11 +37572,17 @@ impl Vm {
                         track = true;
                         fs.tab.unset(&name);
                         self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
-                        release_point!('exec);
+                        release_point!(outlined);
                     }
-                }
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::VarVarAssignRef => {
+                OpCode::VarVarAssignRef => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -36930,7 +37599,7 @@ impl Vm {
                             ip,
                             op.line
                         );
-                        continue;
+                        return Ok(Flow::Continue);
                     };
                     if name == b"this" {
                         self.throw_error_at(b"Error", "Cannot re-assign $this", op.line);
@@ -36990,15 +37659,21 @@ impl Vm {
                             *slot = result;
                         }
                     }
-                    release_point!('exec);
-                }
+                    release_point!(outlined);
+                    #[allow(unreachable_code)]
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::GetDefinedVars => {
                     let vars = self.defined_vars(fsym.as_ref(), &cvs, op_array);
                     self.write_operand(&op.result, vars, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
-                OpCode::SaveReturn => {
+                OpCode::SaveReturn => match outlined(|| -> Result<Flow, VmError> {
                     // Save return value for deferred return (finally blocks)
                     // Use raw read for CVs to preserve Reference wrapper (for by-ref returns)
                     let val = if matches!(&op.op1, OperandType::Cv(_)) {
@@ -37063,7 +37738,12 @@ impl Vm {
                     while fin.last().is_some_and(|f| f.0 > exception_handlers.len()) {
                         fin.pop();
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::SaveJump => {
                     // Save jump target for deferred break/continue (finally blocks)
@@ -37087,7 +37767,7 @@ impl Vm {
                     self.current_exception = None;
                 }
 
-                OpCode::ReturnDeferred => {
+                OpCode::ReturnDeferred => match outlined(|| -> Result<Flow, VmError> {
                     // op1 encodes the finally_start (the start offset of the finally block we just executed)
                     let this_finally_start = if let OperandType::JmpTarget(fs) = op.op1 {
                         fs
@@ -37159,10 +37839,10 @@ impl Vm {
                             // There's an outer finally - chain to it with the pending return
                             self.pending_return = Some(val);
                             ip = finally_ip as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         // No outer finally - return the value now
-                        return Ok(val);
+                        return Ok(Flow::Return(val));
                     }
                     // If there's a pending jump (deferred break/continue), execute it now
                     if let Some(target) = self.pending_finally_jump.take() {
@@ -37196,11 +37876,11 @@ impl Vm {
                                 self.pending_finally_jump = Some(target);
                                 self.pending_finally_levels = levels - 1;
                                 ip = finally_ip as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         ip = target as usize;
-                        continue;
+                        return Ok(Flow::Continue);
                     }
                     // If there's a pending exception, re-throw it through outer handlers
                     if self.current_exception.is_some() {
@@ -37216,10 +37896,10 @@ impl Vm {
                             self.pending_calls.truncate(saved_pending_calls);
                             if catch_target > 0 {
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else if finally_target > 0 {
                                 ip = finally_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         // No outer handler - uncaught exception
@@ -37244,9 +37924,14 @@ impl Vm {
                         });
                     }
                     // Otherwise continue (no pending return or exception)
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ArrayAppendRef => {
+                OpCode::ArrayAppendRef => match outlined(|| -> Result<Flow, VmError> {
                     // Append to array keeping Reference wrapper (for closure by-ref capture)
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // `$a[] = &$b[k]`: the reference comes in a temporary
@@ -37263,7 +37948,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: "Uncaught Error: Cannot assign by reference to an array dimension of an object".into(),
@@ -37285,9 +37970,14 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ArraySetRef => {
+                OpCode::ArraySetRef => match outlined(|| -> Result<Flow, VmError> {
                     // $arr[key] = &$var — set array element as reference
                     // op1 = array CV, op2 = value CV (to be made ref), result = key
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
@@ -37326,7 +38016,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: "Uncaught Error: Cannot assign by reference to an array dimension of an object".into(),
@@ -37351,7 +38041,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception from destructor".into(),
@@ -37385,7 +38075,12 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::ThrowErrorMsg => {
                     let msg = self
@@ -37419,7 +38114,7 @@ impl Vm {
                     }
                 }
 
-                OpCode::ArrayGetRef => {
+                OpCode::ArrayGetRef => match outlined(|| -> Result<Flow, VmError> {
                     // Get or create a reference to an array element: $arr[key]
                     // op1 = array CV, op2 = key, result = tmp to store Reference
                     let key_val = self.read_operand_warn(
@@ -37458,7 +38153,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: "Uncaught exception".into(),
@@ -37545,7 +38240,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message:
@@ -37582,7 +38277,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", msg),
@@ -37636,12 +38331,17 @@ impl Vm {
                             &static_cv_keys,
                         );
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::ArrayGetW
                 | OpCode::ArrayGetWRW
                 | OpCode::ArrayGetWUnset
-                | OpCode::ArrayGetWObj => {
+                | OpCode::ArrayGetWObj => match outlined(|| -> Result<Flow, VmError> {
                     let mode = match op.opcode {
                         OpCode::ArrayGetW => crate::fetch_w::DimFetch::W,
                         OpCode::ArrayGetWRW => crate::fetch_w::DimFetch::Rw,
@@ -37676,7 +38376,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                     }
@@ -37765,7 +38465,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let msg = match &self.current_exception {
                                     Some(Value::Object(o)) => {
@@ -37787,9 +38487,14 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::JmpIfArgByRef => {
+                OpCode::JmpIfArgByRef => match outlined(|| -> Result<Flow, VmError> {
                     let by_ref = self
                         .pending_calls
                         .last()
@@ -37817,9 +38522,14 @@ impl Vm {
                             ip = t as usize;
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::PropertyGetRef => {
+                OpCode::PropertyGetRef => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -37839,7 +38549,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -38043,7 +38753,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -38056,7 +38766,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught TypeError: {}", msg),
@@ -38064,9 +38774,14 @@ impl Vm {
                         });
                     }
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::PropertySetRef => {
+                OpCode::PropertySetRef => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let name_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
                     let prop_name = match name_val.deref() {
@@ -38089,7 +38804,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -38156,7 +38871,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -38200,7 +38915,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: "Uncaught Error: Cannot assign by reference to overloaded object".into(),
@@ -38224,7 +38939,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught TypeError: {}", msg),
@@ -38270,14 +38985,19 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::InitCvNull => {
                     if let OperandType::Cv(idx) = &op.op1 {
@@ -38327,7 +39047,7 @@ impl Vm {
                     }
                 }
 
-                OpCode::IssetCheck => {
+                OpCode::IssetCheck => match outlined(|| -> Result<Flow, VmError> {
                     // isset() check: True if value is not Null and not Undef
                     let mut val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // Superglobal lazy-load: isset($_SERVER) should be true
@@ -38359,9 +39079,14 @@ impl Vm {
                         _ => Value::True,
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::ArrayIsset => {
+                OpCode::ArrayIsset => match outlined(|| -> Result<Flow, VmError> {
                     // isset($arr[$key]) - for arrays, check if key exists and value is not null
                     // For objects implementing ArrayAccess, call offsetExists()
                     // Only the dimension fetch is quiet: the key is read normally.
@@ -38410,7 +39135,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                     }
@@ -38431,7 +39156,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                     }
@@ -38478,7 +39203,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: "Uncaught exception".to_string(),
@@ -38516,7 +39241,7 @@ impl Vm {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught TypeError: {}", msg),
@@ -38608,7 +39333,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 let msg = match &self.current_exception {
                                     Some(Value::Object(o)) => {
@@ -38642,7 +39367,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -38693,7 +39418,12 @@ impl Vm {
                         Value::False
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::ErrorSuppress => {
                     self.error_reporting_stack.push(self.error_reporting);
@@ -38710,7 +39440,7 @@ impl Vm {
                     }
                 }
 
-                OpCode::ArraySpread => {
+                OpCode::ArraySpread => match outlined(|| -> Result<Flow, VmError> {
                     // Spread source array/traversable/generator elements into target array.
                     // Returns Err(msg) for invalid types or bad keys; sets current_exception
                     // if a Traversable method threw.
@@ -38997,7 +39727,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 let exc_msg = if let Some(Value::Object(obj)) =
                                     &self.current_exception
@@ -39033,7 +39763,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", e),
@@ -39073,7 +39803,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -39084,9 +39814,14 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::MatchError => {
+                OpCode::MatchError => match outlined(|| -> Result<Flow, VmError> {
                     // Throw UnhandledMatchError with the unmatched value
                     let subject = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let subject_repr = match &subject {
@@ -39167,7 +39902,12 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::LoadConst => {
                     // Copy op1's current value into result (QM_ASSIGN).
@@ -39205,7 +39945,7 @@ impl Vm {
                     return Ok(val);
                 }
 
-                OpCode::DeclareClass => {
+                OpCode::DeclareClass => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let class_idx_raw = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
@@ -39361,7 +40101,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let msg = self
                                         .current_exception
@@ -39402,7 +40142,7 @@ impl Vm {
                                 // PHP raises a fatal "Class \"X\" not found".
                                 if is_early_attempt && variance::is_deferred(&parent_lower) {
                                     variance::defer(&class.name);
-                                    continue 'exec;
+                                    return Ok(Flow::Continue);
                                 }
                                 let parent_display = crate::value::display_class_name(parent_name);
                                 let msg = format!("Class \"{}\" not found", parent_display);
@@ -39414,7 +40154,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -39770,7 +40510,7 @@ impl Vm {
                                             {
                                                 if unresolved && is_early_attempt {
                                                     variance::defer(&class.name);
-                                                    continue 'exec;
+                                                    return Ok(Flow::Continue);
                                                 }
                                                 let l = if child_method.op_array.decl_line > 0 {
                                                     child_method.op_array.decl_line
@@ -40120,7 +40860,7 @@ impl Vm {
                                             && is_early_attempt
                                         {
                                             variance::defer(&class.name);
-                                            continue 'exec;
+                                            return Ok(Flow::Continue);
                                         }
                                         if parent_read_only {
                                             // Otherwise emit a hook-style declaration mismatch error.
@@ -40501,7 +41241,7 @@ impl Vm {
                                                     {
                                                         if unresolved && is_early_attempt {
                                                             variance::defer(&class.name);
-                                                            continue 'exec;
+                                                            return Ok(Flow::Continue);
                                                         }
                                                         return Err(VmError {
                                                             message: msg,
@@ -40536,7 +41276,7 @@ impl Vm {
                                 {
                                     if unresolved && is_early_attempt {
                                         variance::defer(&class.name);
-                                        continue 'exec;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError { message: msg, line });
                                 }
@@ -40711,7 +41451,7 @@ impl Vm {
                                                 {
                                                     if unresolved && is_early_attempt {
                                                         variance::defer(&class.name);
-                                                        continue 'exec;
+                                                        return Ok(Flow::Continue);
                                                     }
                                                     return Err(VmError {
                                                         message: msg,
@@ -40833,7 +41573,7 @@ impl Vm {
                                 if !known_builtin_interfaces.contains(&iface_lower.as_slice()) {
                                     if is_early_attempt && variance::is_deferred(&iface_lower) {
                                         variance::defer(&class.name);
-                                        continue 'exec;
+                                        return Ok(Flow::Continue);
                                     }
                                     let iface_display =
                                         crate::value::display_class_name(iface_name);
@@ -40866,7 +41606,7 @@ impl Vm {
                                         {
                                             if unresolved && is_early_attempt {
                                                 variance::defer(&class.name);
-                                                continue 'exec;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError { message: msg, line });
                                         }
@@ -42198,7 +42938,7 @@ impl Vm {
                             ) {
                                 if unresolved && is_early_attempt {
                                     variance::defer(&class.name);
-                                    continue 'exec;
+                                    return Ok(Flow::Continue);
                                 }
                                 let l = if existing.op_array.decl_line > 0 {
                                     existing.op_array.decl_line
@@ -42286,7 +43026,7 @@ impl Vm {
                                         {
                                             if unresolved && is_early_attempt {
                                                 variance::defer(&class.name);
-                                                continue 'exec;
+                                                return Ok(Flow::Continue);
                                             }
                                             let l = if class_method.op_array.decl_line > 0 {
                                                 class_method.op_array.decl_line
@@ -42735,7 +43475,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", err_msg),
@@ -43757,9 +44497,14 @@ impl Vm {
                         }
                         self.classes.insert(name_lower, class);
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::NewObject => {
+                OpCode::NewObject => match outlined(|| -> Result<Flow, VmError> {
                     let class_name_raw = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -43824,7 +44569,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", err_msg),
@@ -43866,7 +44611,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", err_msg),
@@ -43919,7 +44664,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         } else {
                             return Err(VmError {
                                 message: err_msg,
@@ -44074,7 +44819,7 @@ impl Vm {
                         {
                             pending_calls_catch_depth = Some(*eh_pc_depth);
                             ip = *catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: "Uncaught exception".into(),
@@ -44354,7 +45099,12 @@ impl Vm {
                     }
 
                     self.write_operand(&op.result, obj_value, &mut cvs, &mut tmps, &static_cv_keys);
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::PropertyGet
                 | OpCode::PropertyGetRW
@@ -44364,7 +45114,7 @@ impl Vm {
                 | OpCode::PropertyGetWUnset
                 | OpCode::PropertyGetWObj
                 | OpCode::PropertyGetWObjRW
-                | OpCode::PropertyGetIs => {
+                | OpCode::PropertyGetIs => match outlined(|| -> Result<Flow, VmError> {
                     // FETCH_OBJ_IS (empty(), isset() containers): __isset() is
                     // consulted before __get().
                     let is_fetch_is = matches!(op.opcode, OpCode::PropertyGetIs);
@@ -44414,7 +45164,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -44455,7 +45205,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught exception in __get".into(),
@@ -44500,7 +45250,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     // Extension property read handlers (e.g. DateInterval's fields).
@@ -44531,7 +45281,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
@@ -44549,7 +45299,7 @@ impl Vm {
                                 }
                             };
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                     }
                     // PropertyGetRW is the read side of $obj->prop op= $val.
@@ -44580,7 +45330,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -44613,7 +45363,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -44737,7 +45487,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     let msg = match &self.current_exception {
                                         Some(Value::Object(o)) => {
@@ -44861,7 +45611,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".to_string(),
@@ -44883,7 +45633,7 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
-                            continue;
+                            return Ok(Flow::Continue);
                         }
 
                         // Check for property get hook (PHP 8.4)
@@ -44952,7 +45702,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(eh_pc_depth);
                                     exception_handlers.pop();
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -44992,7 +45742,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             self.property_hook_stack.push(hook_key);
                             self.class_scope_stack.push(hook_declaring);
@@ -45016,7 +45766,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: "Uncaught Error: Indirect modification".into(),
@@ -45030,7 +45780,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 Err(e) => {
                                     if self.current_exception.is_some() {
@@ -45040,7 +45790,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                     }
                                     return Err(e);
@@ -45122,7 +45872,7 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 self.magic_depth += 1;
                                 let magic_method_def = self
@@ -45184,7 +45934,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         let exc_msg = if let Some(Value::Object(obj)) =
                                             &self.current_exception
@@ -45221,7 +45971,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -45457,7 +46207,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught TypeError: {}", msg),
@@ -45472,7 +46222,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", msg),
@@ -45526,7 +46276,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     let ct = *catch_target;
                                     ip = ct as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -45568,7 +46318,7 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     self.magic_depth += 1;
                                     let magic_method_def = self
@@ -45627,7 +46377,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         } else {
                                             let exc_msg = if let Some(Value::Object(obj)) =
                                                 &self.current_exception
@@ -45671,7 +46421,7 @@ impl Vm {
                                             {
                                                 pending_calls_catch_depth = Some(saved_pc);
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!("Uncaught TypeError: {}", msg),
@@ -45728,7 +46478,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", msg),
@@ -45770,7 +46520,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -45839,9 +46589,14 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::PropertySet => {
+                OpCode::PropertySet => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let mut value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     value = self.dup_stored_array(&op.op2, value);
@@ -45863,7 +46618,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -45922,7 +46677,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -45944,7 +46699,7 @@ impl Vm {
                                     ip,
                                     op.line
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
                         if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 0) {
@@ -45953,7 +46708,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             let msg = match &self.current_exception {
                                 Some(Value::Object(o)) => o
@@ -46039,7 +46794,7 @@ impl Vm {
                                     if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
                                         pending_calls_catch_depth = Some(pc);
                                         ip = if c > 0 { c } else { f } as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
@@ -46169,7 +46924,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: "Uncaught exception".to_string(),
@@ -46183,7 +46938,7 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                         }
 
@@ -46253,7 +47008,7 @@ impl Vm {
                                     pending_calls_catch_depth = Some(eh_pc_depth);
                                     exception_handlers.pop();
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", msg),
@@ -46335,7 +47090,7 @@ impl Vm {
                                                 pending_calls_catch_depth = Some(eh_pc_depth);
                                                 exception_handlers.pop();
                                                 ip = catch_target as usize;
-                                                continue;
+                                                return Ok(Flow::Continue);
                                             }
                                             return Err(VmError {
                                                 message: format!("Uncaught Error: {}", msg),
@@ -46379,7 +47134,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                     }
                                     return Err(e);
@@ -46397,7 +47152,7 @@ impl Vm {
                                     }
                                 }
                             }
-                            continue;
+                            return Ok(Flow::Continue);
                         }
 
                         // Closures/WeakReference/WeakMap cannot have dynamic properties
@@ -46420,7 +47175,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -46455,7 +47210,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: msg,
@@ -46486,7 +47241,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", msg),
@@ -46784,7 +47539,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught TypeError: {}", err_msg),
@@ -46800,7 +47555,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(saved_pc);
                                 ip = catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             } else {
                                 return Err(VmError {
                                     message: format!("Uncaught Error: {}", err_msg),
@@ -46882,7 +47637,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         let exc_msg = if let Some(Value::Object(obj)) =
                                             &self.current_exception
@@ -46914,7 +47669,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(saved_pc);
                                     ip = catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -46982,7 +47737,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         let exc_msg = if let Some(Value::Object(obj)) =
                                             &self.current_exception
@@ -47108,7 +47863,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(saved_pc);
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught TypeError: {}", msg),
@@ -47146,7 +47901,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -47161,7 +47916,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -47193,7 +47948,7 @@ impl Vm {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
@@ -47206,11 +47961,16 @@ impl Vm {
                     }
                     // The overwritten property value is released now.
                     if may_release {
-                        release_point!('exec);
+                        release_point!(outlined);
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
-                OpCode::InitMethodCall => {
+                OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
                     let method_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
@@ -47238,14 +47998,14 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
                                 line: op.line,
                             });
                         }
-                        continue;
+                        return Ok(Flow::Continue);
                     }
 
                     if let Value::Object(obj) = &obj_val {
@@ -47297,7 +48057,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -47323,7 +48083,7 @@ impl Vm {
                             {
                                 pending_calls_catch_depth = Some(*eh_pc_depth);
                                 ip = *catch_target as usize;
-                                continue;
+                                return Ok(Flow::Continue);
                             }
                             return Err(VmError {
                                 message: format!("Uncaught Error: {}", msg),
@@ -47350,7 +48110,7 @@ impl Vm {
                                         }],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"isrunning" => {
                                     let state =
@@ -47368,7 +48128,7 @@ impl Vm {
                                         }],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"issuspended" => {
                                     let state =
@@ -47386,7 +48146,7 @@ impl Vm {
                                         }],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"isterminated" => {
                                     let state =
@@ -47404,7 +48164,7 @@ impl Vm {
                                         }],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"getreturn" => {
                                     let state =
@@ -47432,7 +48192,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught FiberError: {}", msg),
@@ -47459,7 +48219,7 @@ impl Vm {
                                         {
                                             pending_calls_catch_depth = Some(*eh_pc_depth);
                                             ip = *catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught FiberError: {}", msg),
@@ -47477,7 +48237,7 @@ impl Vm {
                                         args: vec![ret_val],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"start" | b"resume" | b"throw" => {
                                     let mut fiber_name = b"__fiber::".to_vec();
@@ -47487,7 +48247,7 @@ impl Vm {
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 _ => {}
                             }
@@ -47504,7 +48264,7 @@ impl Vm {
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"getvalue" => {
                                     let v = obj.borrow().get_property(b"__sensitive_value");
@@ -47517,7 +48277,7 @@ impl Vm {
                                         args: vec![v],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 _ => {}
                             }
@@ -47548,7 +48308,7 @@ impl Vm {
                                         args: vec![result],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 b"__construct" => {
                                     let msg = "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead";
@@ -47559,7 +48319,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(*eh_pc_depth);
                                         ip = *catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", msg),
@@ -47582,7 +48342,7 @@ impl Vm {
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
                                     });
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 _ => {}
                             }
@@ -47600,7 +48360,7 @@ impl Vm {
                                 args: vec![obj_val.clone()],
                                 named_args: Vec::new(),
                             });
-                            continue;
+                            return Ok(Flow::Continue);
                         }
                         let builtin_result = if is_throwable && !has_user_method {
                             let obj_borrow = obj.borrow();
@@ -48048,7 +48808,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     } else {
                                         return Err(VmError {
                                             message: format!("Uncaught Error: {}", err_msg),
@@ -48344,7 +49104,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         resume_result?;
                                         return Err(VmError {
@@ -48366,7 +49126,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Exception: {}", msg),
@@ -48404,7 +49164,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Exception: {}", msg),
@@ -48427,7 +49187,7 @@ impl Vm {
                                             pending_calls_catch_depth = Some(eh_pc_depth);
                                             exception_handlers.pop();
                                             ip = catch_target as usize;
-                                            continue;
+                                            return Ok(Flow::Continue);
                                         }
                                         return Err(VmError {
                                             message: format!("Uncaught Exception: {}", msg),
@@ -48445,7 +49205,7 @@ impl Vm {
                                         pending_calls_catch_depth = Some(eh_pc_depth);
                                         exception_handlers.pop();
                                         ip = catch_target as usize;
-                                        continue;
+                                        return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
                                         message: format!("Uncaught Exception: {}", msg),
@@ -48583,7 +49343,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 } else {
                                     return Err(VmError {
                                         message: format!("Uncaught Error: {}", err_msg),
@@ -48593,7 +49353,12 @@ impl Vm {
                             }
                         }
                     }
-                }
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
             }
 
             if let Some((r, old)) = typed_ref_watch {
@@ -49452,22 +50217,20 @@ impl Vm {
     // ---- Generator support methods ----
     // These methods are called by the generator executor to interact with the VM
 
-    /// Increment call depth and check for overflow (used by generator resume to prevent stack overflow)
-    pub fn enter_generator_resume(&mut self, line: u32) -> Result<(), VmError> {
-        self.call_depth += 1;
-        if self.call_depth > 100 {
-            self.call_depth -= 1;
-            return Err(VmError {
-                message: "Maximum call depth exceeded (possible infinite recursion)".into(),
-                line,
-            });
+    /// Resuming a generator re-enters the executor (zend_generator_resume()
+    /// -> zend_execute_ex()): charged against the emulated C stack.
+    pub fn enter_generator_resume(&mut self, _line: u32) -> Result<(), VmError> {
+        if let Err(size) = crate::stack::enter_reentry() {
+            return Err(self.stack_size_error(size));
         }
+        self.call_depth += 1;
         Ok(())
     }
 
-    /// Decrement call depth after generator resume completes
+    /// Undo enter_generator_resume()
     pub fn leave_generator_resume(&mut self) {
         self.call_depth -= 1;
+        crate::stack::leave_reentry();
     }
 
     /// Calls being assembled above `depth` (a generator suspending inside
@@ -50396,10 +51159,14 @@ impl Vm {
 
         // zend_fiber_stack_allocate(): fiber.stack_size must allow at least
         // one usable page plus the guard page.
+        let mut fiber_stack_size = crate::fiber::DEFAULT_FIBER_STACK_SIZE;
         if let Some(sz) = self.constants.get(b"fiber.stack_size".as_slice()) {
             if !matches!(sz, Value::Null | Value::Undef) {
                 let bytes = sz.to_php_string();
                 let (v, _) = crate::ini_quantity::parse_quantity(bytes.as_bytes(), true);
+                if (v as i64) > 0 {
+                    fiber_stack_size = v as usize;
+                }
                 const MIN_FIBER_STACK: i64 = 4096 * 2;
                 if (v as i64) < MIN_FIBER_STACK {
                     let msg = format!(
@@ -50458,7 +51225,8 @@ impl Vm {
             }
         };
 
-        let mut fiber = crate::fiber::PhpFiber::new(display_name_for_stack.clone(), body);
+        let mut fiber =
+            crate::fiber::PhpFiber::new(display_name_for_stack.clone(), fiber_stack_size, body);
         fiber.start_args = args.to_vec();
 
         // Track the fiber object for getCurrent() and for proper nesting.

@@ -584,7 +584,10 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
-        let result = self.resume_inner(vm);
+        let result = match crate::stack::with_room(|| self.resume_inner(vm)) {
+            Ok(r) => r,
+            Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
+        };
         vm.leave_op_array_file(saved_file);
         if cv_frame {
             vm.cv_frames.pop();
@@ -3119,7 +3122,10 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
-        let result = self.resume_inner(vm);
+        let result = match crate::stack::with_room(|| self.resume_inner(vm)) {
+            Ok(r) => r,
+            Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
+        };
         vm.leave_op_array_file(saved_file);
         if cv_frame {
             vm.cv_frames.pop();

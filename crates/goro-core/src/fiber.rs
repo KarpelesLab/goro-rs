@@ -12,6 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use corosensei::stack::DefaultStack;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::value::Value;
@@ -63,6 +64,22 @@ pub enum FiberOutcome {
     /// `trigger_error(E_USER_ERROR)`). The string is the error message
     /// and the u32 is the line number.
     Failed(String, u32),
+}
+
+/// fiber.stack_size when unset (ZEND_FIBER_DEFAULT_C_STACK_SIZE).
+pub const DEFAULT_FIBER_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Native stack a fiber starts with (calls that need more continue on
+/// extra segments, see stack.rs).
+const FIBER_NATIVE_STACK: usize = 2 * 1024 * 1024;
+
+/// Switches back to the stack context saved when the guard was made.
+struct RestoreStack(crate::stack::StackCtx);
+
+impl Drop for RestoreStack {
+    fn drop(&mut self) {
+        crate::stack::restore(self.0);
+    }
 }
 
 /// Concrete corosensei yielder type used for fibers.
@@ -121,34 +138,41 @@ thread_local! {
 
 impl PhpFiber {
     /// Create a new, unstarted fiber from a closure that executes the
-    /// user's PHP callable. `display_name` is shown in backtraces.
-    pub fn new<F>(display_name: String, body: F) -> Self
+    /// user's PHP callable. `display_name` is shown in backtraces;
+    /// `stack_size` is fiber.stack_size.
+    pub fn new<F>(display_name: String, stack_size: usize, body: F) -> Self
     where
         F: FnOnce(FiberResume) -> FiberOutcome + 'static,
     {
         let yielder_ptr: Rc<Cell<*const FiberYielder>> = Rc::new(Cell::new(std::ptr::null()));
         let yielder_ptr_for_body = yielder_ptr.clone();
-        let coroutine = Coroutine::new(move |yielder: &FiberYielder, input: FiberResume| {
-            // Stash the yielder pointer so the parent can re-install it on
-            // every resume (the body wrapper code only runs on the very
-            // first invocation; subsequent resumes continue from inside
-            // yielder.suspend()).
-            yielder_ptr_for_body.set(yielder as *const FiberYielder);
-            // On the very first entry, the parent already arranged for
-            // CURRENT_YIELDER to point at this yielder (we'll do the same
-            // before every later resume), but make sure it's set in case
-            // a fiber's body runs without the parent setting it (paranoia).
-            let prev = CURRENT_YIELDER.with(|cell| {
-                let prev = *cell.borrow();
-                *cell.borrow_mut() = yielder as *const FiberYielder;
-                prev
+        let stack = DefaultStack::new(FIBER_NATIVE_STACK.max(stack_size.min(64 << 20)))
+            .expect("failed to allocate fiber stack");
+        let ctx = crate::stack::fiber_ctx(&stack, stack_size);
+        let coroutine =
+            Coroutine::with_stack(stack, move |yielder: &FiberYielder, input: FiberResume| {
+                // The fiber runs on its own stack.
+                crate::stack::restore(ctx);
+                // Stash the yielder pointer so the parent can re-install it on
+                // every resume (the body wrapper code only runs on the very
+                // first invocation; subsequent resumes continue from inside
+                // yielder.suspend()).
+                yielder_ptr_for_body.set(yielder as *const FiberYielder);
+                // On the very first entry, the parent already arranged for
+                // CURRENT_YIELDER to point at this yielder (we'll do the same
+                // before every later resume), but make sure it's set in case
+                // a fiber's body runs without the parent setting it (paranoia).
+                let prev = CURRENT_YIELDER.with(|cell| {
+                    let prev = *cell.borrow();
+                    *cell.borrow_mut() = yielder as *const FiberYielder;
+                    prev
+                });
+                let outcome = body(input);
+                // Restore on body return so the outer code sees the correct
+                // yielder for any outer fiber it might still be inside.
+                CURRENT_YIELDER.with(|cell| *cell.borrow_mut() = prev);
+                outcome
             });
-            let outcome = body(input);
-            // Restore on body return so the outer code sees the correct
-            // yielder for any outer fiber it might still be inside.
-            CURRENT_YIELDER.with(|cell| *cell.borrow_mut() = prev);
-            outcome
-        });
         Self {
             coroutine: Some(coroutine),
             yielder_ptr,
@@ -194,6 +218,7 @@ impl PhpFiber {
             .coroutine
             .as_mut()
             .expect("fiber coroutine already consumed");
+        let _back = RestoreStack(crate::stack::save());
         match co.resume(input) {
             CoroutineResult::Yield(y) => Ok(y),
             CoroutineResult::Return(r) => Err(r),
@@ -206,6 +231,7 @@ impl PhpFiber {
     pub fn force_unwind(&mut self) {
         if let Some(mut co) = self.coroutine.take() {
             if co.started() && !co.done() {
+                let _back = RestoreStack(crate::stack::save());
                 co.force_unwind();
             }
         }
@@ -229,6 +255,8 @@ pub fn suspend_current(value: Value) -> Option<FiberResume> {
     // SAFETY: the yielder pointer is valid as long as the coroutine is
     // alive and we only call this from inside one on the same thread.
     let yielder: &FiberYielder = unsafe { &*raw };
+    // Resumed on this fiber's stack, whatever ran meanwhile.
+    let _back = RestoreStack(crate::stack::save());
     let r = yielder.suspend(FiberYield::Suspend(value));
     Some(r)
 }
