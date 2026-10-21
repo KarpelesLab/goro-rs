@@ -12233,6 +12233,34 @@ impl Compiler {
                     });
                     for uv in &use_vars {
                         let cv = self.op_array.get_or_create_cv(uv);
+                        if uv.as_slice() == b"this" {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: OperandType::Cv(cv),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            continue;
+                        }
+                        // Implicit binds of undefined variables are skipped
+                        // silently (the slot stays undefined in the arrow fn).
+                        let undef_idx = self.op_array.add_literal(Value::Undef);
+                        let chk = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Identical,
+                            op1: OperandType::Cv(cv),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Tmp(chk),
+                            line: expr.span.line,
+                        });
+                        let jmp_undef = self.op_array.emit(Op {
+                            opcode: OpCode::JmpNz,
+                            op1: OperandType::Tmp(chk),
+                            op2: OperandType::JmpTarget(0),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
                         self.op_array.emit(Op {
                             opcode: OpCode::ArrayAppend,
                             op1: OperandType::Tmp(arr_tmp),
@@ -12240,6 +12268,24 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: expr.span.line,
                         });
+                        let jmp_end = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let l_undef = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_undef, l_undef);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: OperandType::Tmp(arr_tmp),
+                            op2: OperandType::Const(undef_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let l_end = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_end, l_end);
                     }
                     Ok(self.wrap_closure_operand(OperandType::Tmp(arr_tmp)))
                 } else {

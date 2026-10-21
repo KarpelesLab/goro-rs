@@ -1460,6 +1460,8 @@ impl PhpGenerator {
 
                 OpCode::MakeClosure => {
                     let inner = self.read_operand(&op.op1, &op_array.literals);
+                    let inner = vm.closure_scope_at_creation(inner, op_array.scope_class.as_ref());
+                    let inner = vm.closure_with_own_statics(inner, None);
                     let obj = vm.make_closure_object(inner);
                     self.write_operand(&op.result, obj);
                 }
@@ -1511,12 +1513,26 @@ impl PhpGenerator {
                 OpCode::StaticVarInit => {
                     let key_val = self.read_operand(&op.result, &op_array.literals);
                     let key = key_val.to_php_string().as_bytes().to_vec();
-                    if let Some(existing) = vm.get_static_var(&key) {
-                        self.write_operand(&op.op1, existing);
-                    } else {
-                        let default = self.read_operand(&op.op2, &op_array.literals);
-                        self.write_operand(&op.op1, default.clone());
-                        vm.set_static_var(key.clone(), default);
+                    // Bind the CV to a reference shared with the static
+                    // storage, so updates made by the generator persist.
+                    let shared = match vm.get_static_var(&key) {
+                        Some(Value::Reference(r)) => r,
+                        Some(existing) => {
+                            let r = Rc::new(RefCell::new(existing));
+                            vm.set_static_var(key.clone(), Value::Reference(r.clone()));
+                            r
+                        }
+                        None => {
+                            let default = self.read_operand(&op.op2, &op_array.literals);
+                            let r = Rc::new(RefCell::new(default));
+                            vm.set_static_var(key.clone(), Value::Reference(r.clone()));
+                            r
+                        }
+                    };
+                    if let OperandType::Cv(cv_idx) = op.op1 {
+                        if let Some(slot) = self.cvs.get_mut(cv_idx as usize) {
+                            *slot = Value::Reference(shared);
+                        }
                     }
                     if let OperandType::Cv(cv_idx) = op.op1 {
                         self.static_cv_keys.insert(cv_idx, key);

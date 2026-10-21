@@ -2268,6 +2268,11 @@ impl Vm {
             let args = vec![errno_val, errstr_val, file_val, line_val];
             // Closures: dispatch on the underlying function; captured values
             // bind to the first CVs.
+            let closure_display = if handler.is_closure_obj() {
+                Some(String::from_utf8_lossy(&self.closure_function_name(&handler)).to_string())
+            } else {
+                None
+            };
             let mut handler = handler.closure_callable();
             let mut captured: Vec<Value> = Vec::new();
             if let Value::Array(arr) = &handler {
@@ -2298,7 +2303,9 @@ impl Vm {
                         // Push a [internal function] frame so backtraces captured by
                         // an exception thrown inside the error handler include the
                         // error handler call frame (and its args).
-                        let handler_display = s.to_string_lossy();
+                        let handler_display = closure_display
+                            .clone()
+                            .unwrap_or_else(|| s.to_string_lossy());
                         self.call_stack.push((
                             handler_display,
                             String::new(),
@@ -6116,6 +6123,11 @@ impl Vm {
             return r;
         }
         let r = self.bind_closure_raw(&inner, new_this, scope, scope_provided);
+        let r = if matches!(r, Value::Null) {
+            r
+        } else {
+            self.closure_with_own_statics(r, Some(b""))
+        };
         self.make_closure_object(r)
     }
 
@@ -28986,6 +28998,9 @@ impl Vm {
 
                 OpCode::MakeClosure => {
                     let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let inner =
+                        self.closure_scope_at_creation(inner, op_array.scope_class.as_ref());
+                    let inner = self.closure_with_own_statics(inner, None);
                     let obj = self.make_closure_object(inner);
                     self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
                 }

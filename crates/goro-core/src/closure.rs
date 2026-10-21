@@ -97,6 +97,7 @@ impl Vm {
             }
             other => other,
         };
+        let inner = self.closure_with_own_statics(inner, Some(b""));
         self.make_closure_object(inner)
     }
 
@@ -262,7 +263,7 @@ impl Vm {
                     }
                     continue;
                 }
-                if n.is_empty() {
+                if n.is_empty() || matches!(v, Value::Undef) {
                     continue;
                 }
                 let v = match v {
@@ -451,7 +452,7 @@ impl Vm {
         if let Some(op) = self.user_functions.get(&lower) {
             for (i, v) in caps.iter().enumerate() {
                 match op.closure_capture_names.get(i) {
-                    Some(n) if n.as_slice() != b"this" => {
+                    Some(n) if n.as_slice() != b"this" && !matches!(v, Value::Undef) => {
                         out.set(ArrayKey::String(PhpString::from_vec(n.clone())), v.deref());
                     }
                     _ => {}
@@ -1361,5 +1362,158 @@ impl Vm {
             },
             None => self.make_closure_object(str_val(&name)),
         }
+    }
+}
+
+impl Vm {
+    /// A closure takes the scope of the function creating it (the op_array
+    /// scope of a rebound closure or of an imported trait method may differ
+    /// from the one it was compiled with).
+    pub fn closure_scope_at_creation(
+        &mut self,
+        inner: Value,
+        frame_scope: Option<&Vec<u8>>,
+    ) -> Value {
+        let (name, caps) = closure_parts(&inner);
+        if !is_closure_fn_name(&name) {
+            return inner;
+        }
+        let l = lower(&name);
+        let op = match self.user_functions.get(&l) {
+            Some(op) => op,
+            None => return inner,
+        };
+        if op.scope_class.as_ref() == frame_scope {
+            return inner;
+        }
+        let mut new_name = name.clone();
+        new_name.extend_from_slice(b"@");
+        new_name.extend_from_slice(frame_scope.map(|s| s.as_slice()).unwrap_or(b""));
+        let nl = lower(&new_name);
+        if !self.user_functions.contains_key(&nl) {
+            let mut nop = op.clone();
+            nop.name = new_name.clone();
+            nop.scope_class = frame_scope.cloned();
+            self.user_functions.insert(nl, nop);
+        }
+        if caps.is_empty() {
+            return str_val(&new_name);
+        }
+        let mut arr = PhpArray::new();
+        arr.push(str_val(&new_name));
+        for c in caps {
+            arr.push(c);
+        }
+        Value::Array(Rc::new(RefCell::new(arr)))
+    }
+}
+
+static CLOSURE_STATICS_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a function declares `static` variables.
+pub fn op_has_statics(op: &OpArray) -> bool {
+    op.ops
+        .iter()
+        .any(|o| matches!(o.opcode, OpCode::StaticVarInit))
+}
+
+/// Rewrite the static-variable keys of `op` ("<old>::var") for a renamed copy.
+fn retarget_static_keys(op: &mut OpArray, old_name: &[u8], new_name: &[u8]) {
+    let mut old_prefix = old_name.to_vec();
+    old_prefix.extend_from_slice(b"::");
+    let mut new_prefix = new_name.to_vec();
+    new_prefix.extend_from_slice(b"::");
+    let idxs: Vec<u32> = op
+        .ops
+        .iter()
+        .filter(|o| matches!(o.opcode, OpCode::StaticVarInit))
+        .filter_map(|o| match o.result {
+            OperandType::Const(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    for i in idxs {
+        if let Some(Value::String(s)) = op.literals.get(i as usize) {
+            if let Some(rest) = s.as_bytes().strip_prefix(old_prefix.as_slice()) {
+                let mut k = new_prefix.clone();
+                k.extend_from_slice(rest);
+                op.literals[i as usize] = Value::String(PhpString::from_vec(k));
+            }
+        }
+    }
+}
+
+impl Vm {
+    /// Closures with `static` variables get their own copy of the function
+    /// per closure object (PHP keeps static variables per closure).
+    /// `copy_from`: the closure whose current static values are duplicated
+    /// (bind/clone), None for a fresh closure.
+    pub fn closure_with_own_statics(&mut self, inner: Value, copy_from: Option<&[u8]>) -> Value {
+        let (name, caps) = closure_parts(&inner);
+        if !is_closure_fn_name(&name) {
+            return inner;
+        }
+        let l = lower(&name);
+        let op = match self.user_functions.get(&l) {
+            Some(op) if op_has_statics(op) => op.clone(),
+            _ => return inner,
+        };
+        let id = CLOSURE_STATICS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base: Vec<u8> = match name.iter().position(|&b| b == b'#') {
+            Some(p) => name[..p].to_vec(),
+            None => name.clone(),
+        };
+        let new_name = format!("{}#{}", String::from_utf8_lossy(&base), id).into_bytes();
+        // Keys are compiled from the original function name.
+        let key_name = op
+            .ops
+            .iter()
+            .find_map(|o| match (o.opcode, &o.result) {
+                (OpCode::StaticVarInit, OperandType::Const(i)) => {
+                    match op.literals.get(*i as usize) {
+                        Some(Value::String(s)) => s
+                            .as_bytes()
+                            .windows(2)
+                            .rposition(|w| w == b"::")
+                            .map(|p| s.as_bytes()[..p].to_vec()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| op.name.clone());
+        let mut nop = op;
+        retarget_static_keys(&mut nop, &key_name, &new_name);
+        nop.name = new_name.clone();
+        if copy_from.is_some() {
+            let mut old_prefix = key_name.clone();
+            old_prefix.extend_from_slice(b"::");
+            let entries: Vec<(Vec<u8>, Value)> = self
+                .static_vars()
+                .iter()
+                .filter(|(k, _)| k.starts_with(&old_prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (k, v) in entries {
+                let mut nk = new_name.clone();
+                nk.extend_from_slice(b"::");
+                nk.extend_from_slice(&k[old_prefix.len()..]);
+                let v = match v.deref() {
+                    Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                    other => other,
+                };
+                self.set_static_var(nk, v);
+            }
+        }
+        self.user_functions.insert(lower(&new_name), nop);
+        if caps.is_empty() {
+            return str_val(&new_name);
+        }
+        let mut arr = PhpArray::new();
+        arr.push(str_val(&new_name));
+        for c in caps {
+            arr.push(c);
+        }
+        Value::Array(Rc::new(RefCell::new(arr)))
     }
 }
