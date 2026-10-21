@@ -31883,23 +31883,19 @@ impl Vm {
                                             // Execute included file's op_array, sharing caller's scope
                                             let mut inc_cvs =
                                                 vec![Value::Undef; inc_op_array.cv_names.len()];
+                                            let mut inc_shared: Vec<usize> = Vec::new();
 
                                             if self.is_global_scope {
                                                 // The included file's CVs are bound to the symbol table.
                                                 self.bind_next_frame = true;
                                             } else {
-                                                // Copy caller's variables into included file's scope by name
-                                                for (inc_idx, inc_name) in
-                                                    inc_op_array.cv_names.iter().enumerate()
-                                                {
-                                                    if let Some(caller_idx) = op_array
-                                                        .cv_names
-                                                        .iter()
-                                                        .position(|n| n == inc_name)
-                                                    {
-                                                        inc_cvs[inc_idx] = cvs[caller_idx].clone();
-                                                    }
-                                                }
+                                                // The included file runs in the caller's scope.
+                                                inc_shared = Self::share_scope_cvs(
+                                                    &mut cvs,
+                                                    &op_array.cv_names,
+                                                    &mut inc_cvs,
+                                                    &inc_op_array.cv_names,
+                                                );
                                             }
 
                                             let result = match self
@@ -31932,6 +31928,7 @@ impl Vm {
 
                                             // Restore outer pending_classes
                                             self.pending_classes = saved_pending;
+                                            Self::unshare_scope_cvs(&mut cvs, &inc_shared);
 
                                             result
                                         }
@@ -32079,23 +32076,19 @@ impl Vm {
                                         // Eval shares the calling scope's variables
                                         let mut eval_cvs =
                                             vec![Value::Undef; eval_op_array.cv_names.len()];
+                                        let mut eval_shared: Vec<usize> = Vec::new();
 
                                         if self.is_global_scope {
                                             // eval'd code at global scope uses the symbol table.
                                             self.bind_next_frame = true;
                                         } else {
-                                            // Copy caller's variables into eval's scope by name
-                                            for (eval_idx, eval_name) in
-                                                eval_op_array.cv_names.iter().enumerate()
-                                            {
-                                                if let Some(caller_idx) = op_array
-                                                    .cv_names
-                                                    .iter()
-                                                    .position(|n| n == eval_name)
-                                                {
-                                                    eval_cvs[eval_idx] = cvs[caller_idx].clone();
-                                                }
-                                            }
+                                            // eval'd code runs in the caller's scope.
+                                            eval_shared = Self::share_scope_cvs(
+                                                &mut cvs,
+                                                &op_array.cv_names,
+                                                &mut eval_cvs,
+                                                &eval_op_array.cv_names,
+                                            );
                                         }
 
                                         // Set current file to eval's filename for correct error messages
@@ -32132,6 +32125,7 @@ impl Vm {
 
                                         // Restore outer pending_classes
                                         self.pending_classes = eval_saved_pending;
+                                        Self::unshare_scope_cvs(&mut cvs, &eval_shared);
 
                                         eval_result
                                     }
@@ -45509,6 +45503,50 @@ impl Vm {
     }
 
     /// Read a CV value without dereferencing (keeps Reference wrapper)
+    /// include / eval inside a function: the code shares the caller's
+    /// variables. Every variable named in both is bound through one reference
+    /// cell; returns the caller slots that were wrapped for it.
+    fn share_scope_cvs(
+        caller: &mut [Value],
+        caller_names: &[Vec<u8>],
+        callee: &mut [Value],
+        callee_names: &[Vec<u8>],
+    ) -> Vec<usize> {
+        let mut shared = Vec::new();
+        for (ci, name) in callee_names.iter().enumerate() {
+            let Some(pi) = caller_names.iter().position(|n| n == name) else {
+                continue;
+            };
+            if name == b"this" || name == b"GLOBALS" {
+                callee[ci] = caller[pi].clone();
+                continue;
+            }
+            let cell = match &caller[pi] {
+                Value::Reference(r) => r.clone(),
+                other => {
+                    let r = Rc::new(RefCell::new(other.clone()));
+                    caller[pi] = Value::Reference(r.clone());
+                    shared.push(pi);
+                    r
+                }
+            };
+            callee[ci] = Value::Reference(cell);
+        }
+        shared
+    }
+
+    /// Undo share_scope_cvs for cells nothing else kept.
+    fn unshare_scope_cvs(caller: &mut [Value], shared: &[usize]) {
+        for &pi in shared {
+            if let Some(Value::Reference(r)) = caller.get(pi) {
+                if Rc::strong_count(r) == 1 {
+                    let v = r.borrow().clone();
+                    caller[pi] = v;
+                }
+            }
+        }
+    }
+
     /// Opcodes that may store into CV slots other than their operands.
     fn op_writes_many_cvs(opcode: OpCode) -> bool {
         matches!(opcode, OpCode::Extract | OpCode::VarVarSet)
