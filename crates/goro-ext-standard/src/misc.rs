@@ -3943,7 +3943,10 @@ fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let value = args.get(1).cloned().unwrap_or(Value::Null);
+    let value = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+    if matches!(value, Value::Array(_) | Value::Object(_) | Value::Resource(_)) {
+        return Err(throw_type_error_msg(vm, "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null".to_string()));
+    }
     let key = name.as_bytes().to_vec();
     let old = vm.constants.get(&key).cloned();
     // Extension-registered INI validators (e.g. date.timezone)
@@ -8355,31 +8358,53 @@ fn tempnam_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     tempnam_fn3(vm, args)
 }
 fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_str: &str = &name.to_string_lossy();
-    match std::env::var(name_str) {
-        Ok(val) => Ok(Value::String(PhpString::from_string(val))),
-        Err(_) => Ok(Value::False),
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    match args.first().map(|v| v.deref()) {
+        None | Some(Value::Null) => {
+            // All environment variables.
+            let mut arr = PhpArray::new();
+            for (k, v) in std::env::vars_os() {
+                arr.set(
+                    Vm::value_to_array_key(Value::String(PhpString::from_vec(k.into_vec()))),
+                    Value::String(PhpString::from_vec(v.into_vec())),
+                );
+            }
+            Ok(Value::Array(Rc::new(RefCell::new(arr))))
+        }
+        Some(name) => {
+            let name = name.to_php_string();
+            let key = std::ffi::OsStr::from_bytes(name.as_bytes());
+            if name.as_bytes().is_empty() || name.as_bytes().contains(&b'=') || name.as_bytes().contains(&0) {
+                return Ok(Value::False);
+            }
+            match std::env::var_os(key) {
+                Some(val) => Ok(Value::String(PhpString::from_vec(val.into_vec()))),
+                None => Ok(Value::False),
+            }
+        }
     }
 }
-fn putenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn putenv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use std::os::unix::ffi::OsStrExt;
     let setting = args.first().unwrap_or(&Value::Null).to_php_string();
-    let s = setting.to_string_lossy();
-    if let Some(eq_pos) = s.find('=') {
-        let key = &s[..eq_pos];
-        let value = &s[eq_pos + 1..];
-        if key.is_empty() {
-            return Ok(Value::False);
-        }
-        unsafe { std::env::set_var(key, value); }
-        Ok(Value::True)
-    } else {
-        if s.is_empty() {
-            return Ok(Value::False);
-        }
-        unsafe { std::env::remove_var(&*s); }
-        Ok(Value::True)
+    let b = setting.as_bytes();
+    if b.is_empty() || b[0] == b'=' {
+        return Err(throw_value_error_in(vm, "putenv", args, "putenv(): Argument #1 ($assignment) must have a valid syntax"));
     }
+    if b.contains(&0) {
+        return Err(throw_value_error_in(vm, "putenv", args, "putenv(): Argument #1 ($assignment) must not contain any null bytes"));
+    }
+    match b.iter().position(|&c| c == b'=') {
+        Some(eq) => {
+            let key = std::ffi::OsStr::from_bytes(&b[..eq]);
+            let value = std::ffi::OsStr::from_bytes(&b[eq + 1..]);
+            unsafe { std::env::set_var(key, value); }
+        }
+        None => {
+            unsafe { std::env::remove_var(std::ffi::OsStr::from_bytes(b)); }
+        }
+    }
+    Ok(Value::True)
 }
 // spl_autoload_register, spl_autoload_functions, spl_autoload_unregister moved to goro-ext-spl
 
@@ -14222,13 +14247,47 @@ fn phpcredits_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
+thread_local! {
+    /// Startup configuration directives (php.ini / -d / phpt --INI--).
+    static CFG_VARS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Record a startup configuration directive for get_cfg_var().
+pub fn register_cfg_var(key: &str, value: &str) {
+    CFG_VARS.with(|c| c.borrow_mut().push((key.to_string(), value.to_string())));
+}
+
 fn get_cfg_var_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    // Return false for most config vars (not configured)
-    match name.as_str() {
-        "cfg_file_path" => Ok(Value::String(PhpString::from_bytes(b""))),
-        _ => Ok(Value::False),
+    if name == "cfg_file_path" {
+        return Ok(Value::String(PhpString::from_bytes(b"")));
     }
+    CFG_VARS.with(|c| {
+        let vars = c.borrow();
+        let mut found: Option<Value> = None;
+        let mut arr: Option<PhpArray> = None;
+        for (k, v) in vars.iter() {
+            if *k == name {
+                found = Some(Value::String(PhpString::from_string(v.clone())));
+            } else if let Some(rest) = k.strip_prefix(name.as_str()) {
+                // name[offset] = value entries form an array
+                if let Some(off) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                    let a = arr.get_or_insert_with(PhpArray::new);
+                    let val = Value::String(PhpString::from_string(v.clone()));
+                    if off.is_empty() {
+                        a.push(val);
+                    } else {
+                        a.set(Vm::value_to_array_key(Value::String(PhpString::from_string(off.trim().to_string()))), val);
+                    }
+                }
+            }
+        }
+        Ok(match (arr, found) {
+            (Some(a), _) => Value::Array(Rc::new(RefCell::new(a))),
+            (None, Some(v)) => v,
+            (None, None) => Value::False,
+        })
+    })
 }
 
 fn php_ini_loaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

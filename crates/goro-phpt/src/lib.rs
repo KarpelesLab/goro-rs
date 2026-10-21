@@ -1325,6 +1325,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // Apply all INI settings to the VM constants
     let mut startup_messages: Vec<u8> = Vec::new();
     for (key, value) in ini_settings {
+        goro_ext_standard::misc::register_cfg_var(key, value);
         // Handle disable_functions: remove those functions from the VM
         if key == "disable_functions" {
             for func_name in value.split(',') {
