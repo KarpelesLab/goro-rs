@@ -646,7 +646,7 @@ final class StreamBucket {
         .insert(b"PSFS_FLAG_FLUSH_CLOSE".to_vec(), Value::Long(2));
     vm.register_function(b"stream_context_create", stream_context_create_fn);
     vm.register_function(b"stream_context_set_option", stream_context_set_option_fn);
-    vm.register_function(b"stream_context_set_options", stream_context_set_option_fn);
+    vm.register_function(b"stream_context_set_options", stream_context_set_options_fn);
     vm.register_function(b"stream_context_get_options", stream_context_get_options_fn);
     vm.register_function(b"stream_context_set_params", stream_context_set_params_fn);
     vm.register_function(b"stream_context_get_params", stream_context_get_params_fn);
@@ -18772,11 +18772,14 @@ fn apply_context_params(
         if let ArrayKey::String(s) = k {
             match s.as_bytes() {
                 b"notification" => {
-                    let is_valid =
-                        matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_));
-                    if !is_valid {
-                        let msg = "Invalid notification callback".to_string();
-                        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                    // zend_is_callable_ex()
+                    ctx.notification = None;
+                    if let Some(err) = callable_error(vm, v) {
+                        let msg = format!(
+                            "stream_context_set_params(): Argument #1 ($context) must be an array with valid callbacks as values, {}",
+                            err
+                        );
+                        let exc = vm.throw_type_error(msg.clone());
                         vm.current_exception = Some(exc);
                         return Err(VmError {
                             message: msg,
@@ -18870,7 +18873,61 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     Ok(Value::Resource(fid))
 }
 
+/// PHP_FUNCTION(stream_context_set_options)
+fn stream_context_set_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ctx_val = args.first().unwrap_or(&Value::Null);
+    let fid = match resolve_context_id(ctx_val) {
+        Some(n) => n,
+        None => {
+            let msg = "stream_context_set_options(): Argument #1 ($context) must be a valid stream/context".to_string();
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    };
+    let opts_v = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+    if !matches!(opts_v, Value::Array(_)) {
+        let msg = format!(
+            "stream_context_set_options(): Argument #2 ($options) must be of type array, {} given",
+            Vm::value_type_name(&opts_v)
+        );
+        let exc = vm.throw_type_error(msg.clone());
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
+    let opts = validate_context_options(vm, &opts_v)?;
+    STREAM_CONTEXTS.with(|c| {
+        let mut cb = c.borrow_mut();
+        if let Some(ctx) = cb.get_mut(&fid) {
+            for (wrapper, opt_map) in opts {
+                let entry = ctx.options.entry(wrapper).or_default();
+                for (k, v) in opt_map {
+                    entry.insert(k, v);
+                }
+            }
+        }
+    });
+    Ok(Value::True)
+}
+
 fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() == 2 {
+        vm.emit_deprecated(
+            "Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead",
+        );
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            });
+        }
+    }
     let ctx_val = args.first().unwrap_or(&Value::Null);
     let fid = match resolve_context_id(ctx_val) {
         Some(n) => n,
@@ -18929,7 +18986,6 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     if matches!(arg2, Value::String(_)) {
         // 2-arg form: emit deprecation, then error on missing $option_name
         if arg3.is_none() && arg4.is_none() {
-            vm.emit_deprecated("Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead");
             let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
