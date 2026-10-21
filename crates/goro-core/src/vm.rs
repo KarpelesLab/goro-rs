@@ -570,6 +570,12 @@ pub struct Vm {
     pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
     /// Generators executing now (address, function name for var_dump()).
     pub(crate) running_generators: Vec<(usize, String)>,
+    /// Closure objects being called: (pending_calls index of the call, the
+    /// Closure) until the call's frame is pushed.
+    pub(crate) closure_call_objs: Vec<(usize, std::rc::Weak<RefCell<PhpObject>>)>,
+    /// Frames of closure calls: (call_stack depth, frame name, the Closure)
+    /// for Closure::getCurrent(). (Weak: they do not keep it alive.)
+    pub(crate) closure_frames: Vec<(usize, String, std::rc::Weak<RefCell<PhpObject>>)>,
     /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
     /// destructors run at shutdown, so new objects get fresh handles.
     object_store_no_reuse: bool,
@@ -934,6 +940,8 @@ impl Vm {
             destructible_objects: Vec::new(),
             finally_generators: Vec::new(),
             running_generators: Vec::new(),
+            closure_call_objs: Vec::new(),
+            closure_frames: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
@@ -2429,7 +2437,9 @@ impl Vm {
         Option<crate::opcode::ParamType>,
         Option<Visibility>,
     )> {
-        self.find_property_def_for_scope(class_name_lower, prop_name, None)
+        // Resolved from the calling scope: its own private shadows others.
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        self.find_property_def_for_scope(class_name_lower, prop_name, scope.as_deref())
     }
 
     /// Find a property definition, optionally considering the caller scope for private property resolution.
@@ -2495,9 +2505,18 @@ impl Vm {
                         ));
                     }
                 }
-                // Pass 3: record most-derived private (for error reporting)
-                for prop in &class.properties {
-                    if prop.name == prop_name && prop.visibility == Visibility::Private {
+                // Pass 3: record most-derived private (for error reporting):
+                // the one this class declares, else the inherited one.
+                let own = class.properties.iter().find(|p| {
+                    p.name == prop_name
+                        && p.visibility == Visibility::Private
+                        && p.declaring_class.eq_ignore_ascii_case(&current)
+                });
+                for prop in own.into_iter().chain(class.properties.iter()) {
+                    if last_private.is_none()
+                        && prop.name == prop_name
+                        && prop.visibility == Visibility::Private
+                    {
                         last_private = Some((
                             prop.visibility,
                             prop.declaring_class.clone(),
@@ -2610,6 +2629,17 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
+                // (a private static is not an instance slot)
+                let instance_slot = self.classes.get(class_name_lower).is_some_and(|c| {
+                    c.properties.iter().any(|p| {
+                        p.name == prop_name
+                            && !p.is_static
+                            && p.declaring_class.eq_ignore_ascii_case(&decl_lower)
+                    })
+                });
+                if !instance_slot {
+                    return prop_name.to_vec();
+                }
                 // Mangle only when there is also a same-named NON-STATIC property declared
                 // by a DIFFERENT class in this hierarchy (i.e. a redeclaration conflict for
                 // instance storage). Static properties live in a separate table, so they
@@ -2676,6 +2706,33 @@ impl Vm {
             ))
         } else {
             None
+        }
+    }
+
+    /// A call's frame is about to be pushed at the next call_stack depth:
+    /// remember the Closure object it was called through (InitFCall).
+    fn note_closure_frame(&mut self, call_name: &PhpString, frame_name: &str) {
+        let depth = self.call_stack.len() + 1;
+        while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
+            self.closure_frames.pop();
+        }
+        let at = self.pending_calls.len();
+        while self.closure_call_objs.last().is_some_and(|(i, _)| *i > at) {
+            self.closure_call_objs.pop();
+        }
+        if self.closure_call_objs.last().is_some_and(|(i, _)| *i == at) {
+            let (_, weak) = self.closure_call_objs.pop().unwrap();
+            let Some(obj) = weak.upgrade() else {
+                return;
+            };
+            let name = crate::closure::closure_parts(&Value::Object(obj).unwrap_closure()).0;
+            let c = weak;
+            // (fake closures of functions and methods are not closures)
+            if crate::closure::is_closure_fn_name(&name)
+                && name.eq_ignore_ascii_case(call_name.as_bytes())
+            {
+                self.closure_frames.push((depth, frame_name.to_string(), c));
+            }
         }
     }
 
@@ -19723,6 +19780,11 @@ impl Vm {
                         }
                     }
                     let from_closure = name_val.is_closure_obj();
+                    if let (true, Value::Object(o)) = (from_closure, &name_val) {
+                        let at = self.pending_calls.len();
+                        self.closure_call_objs.retain(|(i, _)| *i < at);
+                        self.closure_call_objs.push((at, Rc::downgrade(o)));
+                    }
                     let name_val = name_val.unwrap_closure();
                     // `$callable()` where $callable is an [obj|class, method] array
                     // (closures are also arrays here: [closure_name, captures...]).
@@ -21952,6 +22014,42 @@ impl Vm {
                                 );
                             }
                             _ => {}
+                        }
+                    } else if func_name_lower == b"closure::getcurrent" {
+                        // Closure::getCurrent(): the Closure of the calling frame.
+                        let depth = self.call_stack.len();
+                        while self.closure_frames.last().is_some_and(|f| f.0 > depth) {
+                            self.closure_frames.pop();
+                        }
+                        let cur = self.closure_frames.last().and_then(|(d, name, c)| {
+                            (*d == depth && self.call_stack.last().is_some_and(|f| f.0 == *name))
+                                .then(|| c.upgrade().map(Value::Object))
+                                .flatten()
+                        });
+                        match cur {
+                            Some(c) => self.write_operand(
+                                &op.result,
+                                c,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            ),
+                            None => {
+                                let msg = "Current function is not a closure";
+                                let exc = self.create_exception(b"Error", msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                         }
                     } else if func_name_lower == b"closure::fromcallable" {
                         // Closure::fromCallable($callable) - convert callable to a Closure
@@ -24420,13 +24518,13 @@ impl Vm {
                                     && name.starts_with("{closure")
                             }) {
                                 Some(scope) => {
+                                    // (an object bound without a scope has the
+                                    // dummy scope Closure)
                                     let class_display = self
                                         .classes
                                         .get(scope)
                                         .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                        .unwrap_or_else(|| {
-                                            String::from_utf8_lossy(scope).to_string()
-                                        });
+                                        .unwrap_or_else(|| self.builtin_canonical_name(scope));
                                     format!("{}::{}", class_display, name)
                                 }
                                 None => name,
@@ -24474,6 +24572,7 @@ impl Vm {
                             call.args.iter().skip(skip).cloned().collect::<Vec<_>>()
                         };
                         let call_frame_depth = self.call_stack.len();
+                        self.note_closure_frame(&call.name, &early_call_display);
                         self.call_stack.push((
                             early_call_display,
                             self.current_file.clone(),
@@ -48457,8 +48556,16 @@ impl Vm {
                                         }
                                     }
                                 }
-                                obj.borrow_mut()
-                                    .set_property(prop_name.as_bytes().to_vec(), value);
+                                // A private redeclared by a subclass has a slot
+                                // per declaring class (mangled key).
+                                let scope_lower =
+                                    self.current_class_scope().map(|s| s.to_ascii_lowercase());
+                                let storage_key = self.property_storage_key(
+                                    &class_lower,
+                                    prop_name.as_bytes(),
+                                    scope_lower.as_deref(),
+                                );
+                                obj.borrow_mut().set_property(storage_key, value);
                                 if was_new && !self.native_class_handlers.is_empty() {
                                     if let Some((_, h)) =
                                         self.find_native_class_handler(&class_lower)

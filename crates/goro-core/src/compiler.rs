@@ -4386,6 +4386,9 @@ impl Compiler {
                         }
                         _ => None,
                     };
+                    if let Some(v) = default.as_ref().and_then(Self::eval_const_expr) {
+                        self.op_array.static_defaults.push((key_idx, v));
+                    }
                     let default_val = if let Some(expr) = default {
                         self.compile_expr(expr)?
                     } else {

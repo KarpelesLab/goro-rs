@@ -536,6 +536,9 @@ pub struct OpArray {
     /// Reflection rendering of each parameter's default value (by CV index),
     /// as PHP prints it (evaluated literal or constant-expression AST dump).
     pub param_default_repr: Vec<Option<String>>,
+    /// Constant initial values of `static` variables (by the literal index
+    /// of their key), shown before the declaration first runs.
+    pub static_defaults: Vec<(u32, Value)>,
     /// For closures: CV names bound to the captured values of the closure's
     /// capture array, in order (`this` first when captured, then `use` vars).
     pub closure_capture_names: Vec<Vec<u8>>,
@@ -583,6 +586,7 @@ impl OpArray {
             local_classes: Vec::new(),
             internal_sig: None,
             param_default_repr: Vec::new(),
+            static_defaults: Vec::new(),
             closure_capture_names: Vec::new(),
             closure_params: Vec::new(),
             fcc_desc: None,

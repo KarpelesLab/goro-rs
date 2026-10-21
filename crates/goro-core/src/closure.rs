@@ -228,7 +228,17 @@ impl Vm {
                         .get(idx as usize)
                         .cloned()
                         .unwrap_or(Value::Null),
-                    _ => Value::Null,
+                    _ => {
+                        let key_idx = match o.result {
+                            OperandType::Const(i) => i,
+                            _ => u32::MAX,
+                        };
+                        op.static_defaults
+                            .iter()
+                            .find(|(k, _)| *k == key_idx)
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or(Value::Null)
+                    }
                 }
             };
             out.push((var, val));
