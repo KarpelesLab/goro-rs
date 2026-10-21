@@ -433,6 +433,9 @@ pub struct OpArray {
     /// For first-class callables in constant expressions: the target
     /// descriptor resolved when the constant is evaluated (see Vm::make_fcc).
     pub fcc_desc: Option<Vec<u8>>,
+    /// For closures without a bound $this: the called class (static::)
+    /// captured when the closure was created.
+    pub closure_called_class: Option<Vec<u8>>,
 }
 
 impl OpArray {
@@ -472,6 +475,7 @@ impl OpArray {
             closure_capture_names: Vec::new(),
             closure_params: Vec::new(),
             fcc_desc: None,
+            closure_called_class: None,
         }
     }
 

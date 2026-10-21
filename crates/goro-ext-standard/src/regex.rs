@@ -3669,6 +3669,9 @@ pub fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Call a PHP callback with the given arguments.
 /// Handles string function names, array callbacks [obj, method], and closure objects.
 fn call_callback(vm: &mut Vm, callback: &Value, call_args: &[Value]) -> Result<Value, VmError> {
+    if callback.is_closure_obj() {
+        return vm.call_callback(callback, call_args);
+    }
     let callback = &callback.closure_callable();
     let (func_name, captured) = match callback {
         Value::String(s) => (s.as_bytes().to_vec(), vec![]),

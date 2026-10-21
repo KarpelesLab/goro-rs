@@ -617,6 +617,9 @@ fn parse_xml(
 
 /// Call a PHP callback (function name string, array callback, or callable Value).
 fn call_callback(vm: &mut Vm, callback: &Value, args: Vec<Value>) -> Result<Value, VmError> {
+    if callback.is_closure_obj() {
+        return vm.call_callback(callback, &args);
+    }
     let callback = &callback.closure_callable();
     match callback {
         Value::String(s) => {

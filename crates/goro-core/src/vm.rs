@@ -2526,6 +2526,11 @@ impl Vm {
                                     }
                                     return Ok(r);
                                 }
+                            } else if let Some(r) =
+                                self.call_object_method(&vals[0], &method_lower, args)
+                            {
+                                // Builtin class method
+                                return Ok(r);
                             }
                         }
                         Value::String(class_name) => {
@@ -2534,8 +2539,12 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            if class_lower.starts_with(b"__closure_")
-                                || class_lower.starts_with(b"__arrow_")
+                            if crate::closure::is_closure_fn_name(&class_lower)
+                                || class_lower.starts_with(b"__closure_fcc_")
+                                || (class_lower.windows(2).any(|w| w == b"::")
+                                    && matches!(vals.get(1), Some(Value::Object(_)))
+                                    && vals.len() == 2
+                                    && self.user_functions.contains_key(&class_lower))
                             {
                                 if let Some(user_fn) =
                                     self.user_functions.get(&class_lower).cloned()
@@ -4808,7 +4817,9 @@ impl Vm {
         // them across re-entrant calls.
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
+        let pushed = self.closure_frame_enter(op_array, &cvs);
         let result = self.execute_op_array(op_array, cvs);
+        self.closure_frame_leave(pushed);
         self.is_global_scope = was_global;
         result
     }
@@ -4907,6 +4918,39 @@ impl Vm {
                     line,
                 );
             }
+        }
+    }
+
+    /// Scope for a closure invoked imperatively (callbacks): its scope class
+    /// and called class (the bound $this's class, else the scope).
+    pub(crate) fn closure_frame_enter(&mut self, op_array: &OpArray, cvs: &[Value]) -> bool {
+        if !crate::closure::is_closure_fn_name(&op_array.name)
+            && !op_array.name.starts_with(b"__closure_fcc_")
+        {
+            return false;
+        }
+        let scope = match &op_array.scope_class {
+            Some(s) => s.clone(),
+            None => return false,
+        };
+        let called = match (op_array.cv_names.first().map(|n| n.as_slice()), cvs.first()) {
+            (Some(b"this"), Some(Value::Object(o))) => o.borrow().class_name.clone(),
+            _ => op_array.closure_called_class.clone().unwrap_or_else(|| {
+                self.classes
+                    .get(&scope)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| scope.clone())
+            }),
+        };
+        self.class_scope_stack.push(scope);
+        self.called_class_stack.push(called);
+        true
+    }
+
+    pub(crate) fn closure_frame_leave(&mut self, pushed: bool) {
+        if pushed {
+            self.class_scope_stack.pop();
+            self.called_class_stack.pop();
         }
     }
 
@@ -5294,7 +5338,9 @@ impl Vm {
         // (see execute_fn for why this matters with includes in callbacks).
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
+        let pushed = self.closure_frame_enter(op_array, &func_cvs);
         let result = self.execute_op_array(op_array, func_cvs);
+        self.closure_frame_leave(pushed);
         self.is_global_scope = was_global;
         if pushed {
             self.call_stack.pop();
@@ -20184,8 +20230,31 @@ impl Vm {
                         } else {
                             Value::Null
                         };
-                        let bound =
-                            self.bind_closure_raw(&closure.unwrap_closure(), new_this, scope, true);
+                        let bound = self
+                            .bind_closure(&closure, new_this, scope, true)
+                            .unwrap_closure();
+
+                        // Builtin-class method closures: [$obj, 'method']
+                        if matches!(&bound, Value::Array(a) if matches!(a.borrow().get_int(0), Some(Value::Object(_))))
+                        {
+                            let r = self.call_callback(&bound, &extra_args);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(r.err().unwrap_or(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: op.line,
+                                }));
+                            }
+                            let r = r.unwrap_or(Value::Null);
+                            self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue;
+                        }
 
                         // Now call the bound closure
                         if let Value::Array(arr) = &bound {
@@ -21607,7 +21676,16 @@ impl Vm {
                             user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
                         // Capture args for stack trace (skip $this for methods)
                         let trace_args = {
-                            let skip = if is_instance { 1 } else { 0 };
+                            // Closures: captured values are not arguments.
+                            let skip = if crate::closure::is_closure_fn_name(&user_fn.name)
+                                && !user_fn.closure_capture_names.is_empty()
+                            {
+                                user_fn.closure_capture_names.len().min(call.args.len())
+                            } else if is_instance {
+                                1
+                            } else {
+                                0
+                            };
                             call.args.iter().skip(skip).cloned().collect::<Vec<_>>()
                         };
                         self.call_stack.push((
@@ -22078,18 +22156,32 @@ impl Vm {
                         };
 
                         // For closures with $this, push the called_class for static:: resolution
+                        // (scoped closures without $this use their scope class).
+                        let fn_has_this_cv =
+                            user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
                         let pushed_called_for_closure = if !pushed_called_class
-                            && user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                            && (fn_has_this_cv
+                                || (pushed_scope_from_fn
+                                    && crate::closure::is_closure_fn_name(&user_fn.name)))
                         {
                             // Get the $this object's class name from the first arg
-                            if let Some(Value::Object(obj)) = call.args.first() {
+                            if let (true, Some(Value::Object(obj))) =
+                                (fn_has_this_cv, call.args.first())
+                            {
                                 let class_name = obj.borrow().class_name.clone();
                                 self.called_class_stack.push(class_name);
                                 true
                             } else if pushed_scope_from_fn {
-                                // Use scope_class as fallback for called_class
+                                // Use the creation-time called class, else the scope class
                                 if let Some(ref scope) = user_fn.scope_class {
-                                    self.called_class_stack.push(scope.clone());
+                                    let canon =
+                                        user_fn.closure_called_class.clone().unwrap_or_else(|| {
+                                            self.classes
+                                                .get(scope)
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or_else(|| scope.clone())
+                                        });
+                                    self.called_class_stack.push(canon);
                                     true
                                 } else {
                                     false
@@ -44766,7 +44858,10 @@ impl Vm {
             } else {
                 Value::Null
             };
-            let bound = self.bind_closure_raw(&closure.unwrap_closure(), new_this, scope, true);
+            let bound = self.bind_closure(&closure, new_this, scope, true);
+            if matches!(bound, Value::Null) {
+                return Ok(Value::Null);
+            }
             return self.call_callback(&bound, &extra);
         }
 
@@ -44955,7 +45050,17 @@ impl Vm {
                 } else {
                     raw_name
                 };
-                let trace_args = call.args.clone();
+                let trace_args = if crate::closure::is_closure_fn_name(&user_fn.name)
+                    && !user_fn.closure_capture_names.is_empty()
+                {
+                    call.args
+                        .iter()
+                        .skip(user_fn.closure_capture_names.len())
+                        .cloned()
+                        .collect()
+                } else {
+                    call.args.clone()
+                };
                 self.call_stack.push((
                     display,
                     self.current_file.clone(),

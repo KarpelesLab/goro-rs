@@ -11685,10 +11685,48 @@ impl Compiler {
                     params.iter().map(|p| (p.name.clone(), p.by_ref)).collect();
 
                 // Set up use vars as the first CVs (before params)
-                for use_var in use_vars {
+                for (ui, use_var) in use_vars.iter().enumerate() {
                     if use_var.variable == b"this" {
                         return Err(CompileError {
                             message: "Cannot use $this as lexical variable".into(),
+                            line: expr.span.line,
+                        });
+                    }
+                    if matches!(
+                        use_var.variable.as_slice(),
+                        b"GLOBALS"
+                            | b"_SERVER"
+                            | b"_GET"
+                            | b"_POST"
+                            | b"_COOKIE"
+                            | b"_FILES"
+                            | b"_ENV"
+                            | b"_REQUEST"
+                            | b"_SESSION"
+                    ) {
+                        return Err(CompileError {
+                            message: "Cannot use auto-global as lexical variable".into(),
+                            line: expr.span.line,
+                        });
+                    }
+                    if params.iter().any(|p| p.name == use_var.variable) {
+                        return Err(CompileError {
+                            message: format!(
+                                "Cannot use lexical variable ${} as a parameter name",
+                                String::from_utf8_lossy(&use_var.variable)
+                            ),
+                            line: expr.span.line,
+                        });
+                    }
+                    if use_vars[..ui]
+                        .iter()
+                        .any(|u| u.variable == use_var.variable)
+                    {
+                        return Err(CompileError {
+                            message: format!(
+                                "Cannot use variable ${} twice",
+                                String::from_utf8_lossy(&use_var.variable)
+                            ),
                             line: expr.span.line,
                         });
                     }

@@ -6245,7 +6245,7 @@ pub fn reflection_function_method(
         b"innamespace" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
-            Some(if name.contains('\\') {
+            Some(if name.contains('\\') && !name.starts_with("{closure") {
                 Value::True
             } else {
                 Value::False
@@ -6254,6 +6254,9 @@ pub fn reflection_function_method(
         b"getnamespacename" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            if name.starts_with("{closure") {
+                return Some(Value::String(PhpString::from_bytes(b"")));
+            }
             if let Some(pos) = name.rfind('\\') {
                 Some(Value::String(PhpString::from_string(
                     name[..pos].to_string(),
@@ -6265,6 +6268,9 @@ pub fn reflection_function_method(
         b"getshortname" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            if name.starts_with("{closure") {
+                return Some(Value::String(PhpString::from_string(name)));
+            }
             if let Some(pos) = name.rfind('\\') {
                 Some(Value::String(PhpString::from_string(
                     name[pos + 1..].to_string(),

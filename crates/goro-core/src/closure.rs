@@ -31,6 +31,17 @@ pub fn closure_parts(inner: &Value) -> (Vec<u8>, Vec<Value>) {
     match inner {
         Value::Array(arr) => {
             let a = arr.borrow();
+            // `[$obj, 'method']` (methods of builtin classes)
+            if a.len() == 2 {
+                if let (Some(Value::Object(o)), Some(Value::String(m))) =
+                    (a.get_int(0), a.get_int(1))
+                {
+                    let mut name = o.borrow().class_name.clone();
+                    name.extend_from_slice(b"::");
+                    name.extend_from_slice(m.as_bytes());
+                    return (name, vec![Value::Object(o.clone())]);
+                }
+            }
             let mut it = a.values();
             let name = it
                 .next()
@@ -433,7 +444,7 @@ impl Vm {
             self.classes
                 .get(&scope_lower)
                 .map(|c| c.name.clone())
-                .unwrap_or(scope_lower),
+                .unwrap_or_else(|| self.builtin_canonical_name(&scope_lower).into_bytes()),
         )
     }
 
@@ -1214,10 +1225,24 @@ impl Vm {
         scope_provided: bool,
     ) -> Option<Value> {
         let (name, caps) = closure_parts(inner);
-        if is_closure_fn_name(&name) || name.starts_with(b"__closure_fcc_") {
+        let is_tramp = name.starts_with(b"__closure_fcc_tramp_");
+        if is_closure_fn_name(&name) || (name.starts_with(b"__closure_fcc_") && !is_tramp) {
             return None;
         }
-        let lname = lower(&name);
+        // __call/__callStatic trampolines: the target is "Class::method".
+        let target: Vec<u8> = if is_tramp {
+            match self
+                .user_functions
+                .get(&lower(&name))
+                .and_then(|o| o.fcc_target_name.clone())
+            {
+                Some(t) => t,
+                None => return None,
+            }
+        } else {
+            name.clone()
+        };
+        let lname = lower(&target);
         // Function scope / static-ness of the target.
         let (func_scope, is_static, mname): (Option<Vec<u8>>, bool, Vec<u8>) =
             match lname.windows(2).position(|w| w == b"::") {
@@ -1233,7 +1258,7 @@ impl Vm {
                             md.is_static,
                             md.name.clone(),
                         ),
-                        None => (Some(cl), caps.is_empty(), name[p + 2..].to_vec()),
+                        None => (Some(cl), caps.is_empty(), target[p + 2..].to_vec()),
                     }
                 }
                 None => (None, false, name.clone()),
@@ -1327,7 +1352,19 @@ impl Vm {
             }
             return Some(Value::Null);
         }
+        let user_class = is_tramp
+            || func_scope
+                .as_ref()
+                .map(|s| self.classes.contains_key(s))
+                .unwrap_or(false);
         let new_inner = match new_this {
+            Value::Object(_) if func_scope.is_some() && !user_class => {
+                // Builtin class method: keep the [$obj, 'method'] form.
+                let mut arr = PhpArray::new();
+                arr.push(new_this.clone());
+                arr.push(str_val(&mname));
+                Value::Array(Rc::new(RefCell::new(arr)))
+            }
             Value::Object(_) if func_scope.is_some() => {
                 let mut arr = PhpArray::new();
                 arr.push(str_val(&name));
@@ -1383,17 +1420,47 @@ impl Vm {
             Some(op) => op,
             None => return inner,
         };
-        if op.scope_class.as_ref() == frame_scope {
+        // Called class (static::) for closures without a bound $this.
+        let has_this = op
+            .closure_capture_names
+            .first()
+            .map(|n| n.as_slice() == b"this")
+            .unwrap_or(false)
+            && matches!(caps.first().map(|v| v.deref()), Some(Value::Object(_)));
+        let called: Option<Vec<u8>> = if has_this || frame_scope.is_none() {
+            None
+        } else {
+            self.called_class_stack
+                .last()
+                .cloned()
+                .filter(|c| Some(&lower(c)) != frame_scope)
+        };
+        if op.scope_class.as_ref() == frame_scope
+            && called.is_none()
+            && op.closure_called_class.is_none()
+        {
             return inner;
         }
-        let mut new_name = name.clone();
+        let base: Vec<u8> = match name.iter().position(|&b| b == b'@') {
+            Some(p) => name[..p].to_vec(),
+            None => name.clone(),
+        };
+        let mut new_name = base;
         new_name.extend_from_slice(b"@");
         new_name.extend_from_slice(frame_scope.map(|s| s.as_slice()).unwrap_or(b""));
+        if let Some(c) = &called {
+            new_name.extend_from_slice(b"@");
+            new_name.extend_from_slice(&lower(c));
+        }
+        if new_name == name {
+            return inner;
+        }
         let nl = lower(&new_name);
         if !self.user_functions.contains_key(&nl) {
             let mut nop = op.clone();
             nop.name = new_name.clone();
             nop.scope_class = frame_scope.cloned();
+            nop.closure_called_class = called;
             self.user_functions.insert(nl, nop);
         }
         if caps.is_empty() {
