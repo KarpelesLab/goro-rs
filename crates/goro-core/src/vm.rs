@@ -16063,7 +16063,15 @@ impl Vm {
                                 if matches!(val, Value::Undef | Value::Null) {
                                     self.globals.remove(name);
                                 } else {
-                                    self.globals.insert(name.clone(), val);
+                                    // Mirror the value actually stored in the CV (arrays are
+                                    // copied on assignment) so the original temporary is
+                                    // released instead of being kept alive here.
+                                    let stored = match cvs.get(idx as usize) {
+                                        Some(Value::Reference(r)) => r.borrow().clone(),
+                                        Some(v) => v.clone(),
+                                        None => val,
+                                    };
+                                    self.globals.insert(name.clone(), stored);
                                 }
                             }
                         }

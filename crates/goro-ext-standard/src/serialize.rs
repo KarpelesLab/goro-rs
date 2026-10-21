@@ -1363,6 +1363,10 @@ impl<'a> Parser<'a> {
             vm.classes.get(&lc).map(|c| !c.name.windows(10).any(|w| w == b"@anonymous")).unwrap_or(false)
                 || (vm.is_known_builtin_class(&lc) && !vm.classes.contains_key(&lc))
                 || not_serializable_builtin(&lc)
+                || (!vm.classes.contains_key(&lc)
+                    && (lc == b"exception" || lc == b"error"
+                        || goro_core::vm::is_builtin_subclass(&lc, b"exception")
+                        || goro_core::vm::is_builtin_subclass(&lc, b"error")))
         };
         if exists(vm) {
             return Ok((lc.clone(), canonical_class_name(vm, &lc, name), false));
@@ -1713,7 +1717,7 @@ impl<'a> Parser<'a> {
     /// Map a serialized (mangled) property name to the object's storage key.
     /// Returns Err(()) on failure (warning already emitted).
     fn resolve_prop(&mut self, vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, class_lower: &[u8], key: &[u8])
-        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, bool), ()>
+        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()>
     {
         // Declared properties, keyed by their PHP mangled name.
         let decl: Vec<(Vec<u8>, Vec<u8>, Option<goro_core::opcode::ParamType>, bool, Vec<u8>, Visibility, Vec<u8>)> = {
@@ -1755,7 +1759,15 @@ impl<'a> Parser<'a> {
                         Some(c) => lower(c) == lower(base) || lower(c) == class_lower,
                     };
                     if matches {
-                        return Ok((name.to_vec(), None, false));
+                        use goro_core::opcode::ParamType;
+                        let ty = match name {
+                            b"string" | b"file" => Some(ParamType::Simple(b"string".to_vec())),
+                            b"line" => Some(ParamType::Simple(b"int".to_vec())),
+                            b"trace" => Some(ParamType::Simple(b"array".to_vec())),
+                            b"previous" => Some(ParamType::Nullable(Box::new(ParamType::Simple(b"Throwable".to_vec())))),
+                            _ => None,
+                        };
+                        return Ok((name.to_vec(), ty, base.to_vec()));
                     }
                 }
             }
@@ -1764,7 +1776,7 @@ impl<'a> Parser<'a> {
             if d.3 {
                 return self.virtual_prop(vm, class_lower, &d.4);
             }
-            return Ok((d.1.clone(), d.2.clone(), true));
+            return Ok((d.1.clone(), d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
         }
         // Existing dynamic property with this exact key?
         if obj.borrow().has_property(key) && !decl.iter().any(|d| d.1 == key) {
@@ -1789,13 +1801,13 @@ impl<'a> Parser<'a> {
                     if d.3 {
                         return self.virtual_prop(vm, class_lower, &d.4);
                     }
-                    return Ok((d.1.clone(), d.2.clone(), true));
+                    return Ok((d.1.clone(), d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
                 }
             }
         }
         // Dynamic property
         if obj.borrow().has_property(key) {
-            return Ok((key.to_vec(), None, false));
+            return Ok((key.to_vec(), None, Vec::new()));
         }
         let (readonly, allow_dynamic, is_enum, display) = {
             let chain = class_chain(vm, class_lower);
@@ -1817,11 +1829,11 @@ impl<'a> Parser<'a> {
                 return Err(());
             }
         }
-        Ok((key.to_vec(), None, false))
+        Ok((key.to_vec(), None, Vec::new()))
     }
 
     fn virtual_prop(&self, vm: &mut Vm, class_lower: &[u8], name: &[u8])
-        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, bool), ()>
+        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()>
     {
         let display = goro_core::value::display_class_name(&canonical_class_name(vm, class_lower, class_lower));
         self.warn(vm, &format!("Cannot unserialize value for virtual property {}::${}", display, String::from_utf8_lossy(name)));
@@ -1847,7 +1859,7 @@ impl<'a> Parser<'a> {
                 Value::Long(n) => n.to_string().into_bytes(),
                 _ => break false,
             };
-            let (storage, ptype, _declared) = match self.resolve_prop(vm, obj, class_lower, &key) {
+            let (storage, ptype, decl_name) = match self.resolve_prop(vm, obj, class_lower, &key) {
                 Ok(x) => x,
                 Err(()) => break false,
             };
@@ -1860,7 +1872,7 @@ impl<'a> Parser<'a> {
                 let v = obj.borrow().get_property(&storage);
                 let inner = v.deref();
                 if !vm.value_matches_type_strict_pub(&inner, &pt) {
-                    let display = goro_core::value::display_class_name(&obj.borrow().class_name);
+                    let display = if decl_name.is_empty() { goro_core::value::display_class_name(&obj.borrow().class_name) } else { goro_core::value::display_class_name(&decl_name) };
                     let prop_name = unmangle(&storage).map(|(_, n)| n.to_vec()).unwrap_or(storage.clone());
                     let msg = format!("Cannot assign {} to property {}::${} of type {}",
                         Vm::value_type_name(&inner), display, String::from_utf8_lossy(&prop_name), vm.param_type_name(&pt));
