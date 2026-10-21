@@ -4906,7 +4906,14 @@ pub fn reflection_method_method(
             let prefix_opt = rcls(vm, &class_lower)
                 .and_then(|ce| ce.methods.get(method_lower.as_bytes()))
                 .map(|m| {
-                    let mut k = m.op_array.name.clone();
+                    let mut k = Vec::new();
+                    if let Some(sc) = &m.op_array.scope_class {
+                        if !m.op_array.name.starts_with(b"{closure") {
+                            k.extend_from_slice(sc);
+                            k.extend_from_slice(b"::");
+                        }
+                    }
+                    k.extend_from_slice(&m.op_array.name);
                     k.extend_from_slice(b"::");
                     k
                 });

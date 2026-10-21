@@ -3431,7 +3431,16 @@ impl Compiler {
                         OperandType::Const(idx)
                     };
                     // Create a key for the static variable: "funcname::varname"
-                    let mut key = self.op_array.name.clone();
+                    // ("class::method::varname" for methods: each declaring
+                    // class has its own statics).
+                    let mut key = Vec::new();
+                    if let Some(sc) = &self.op_array.scope_class {
+                        if !self.op_array.name.starts_with(b"{closure") {
+                            key.extend_from_slice(sc);
+                            key.extend_from_slice(b"::");
+                        }
+                    }
+                    key.extend_from_slice(&self.op_array.name);
                     key.extend_from_slice(b"::");
                     key.extend_from_slice(name);
                     let key_idx = self
