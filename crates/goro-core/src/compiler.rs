@@ -306,6 +306,8 @@ impl Compiler {
                     // exec($command, &$output, &$result_code)
                     (b"exec", 1) => true,
                     (b"exec", 2) => true,
+                    (b"system", 1) => true,
+                    (b"passthru", 1) => true,
                     // fscanf($stream, $format, &$vars...)
                     (b"fscanf", p) if p >= 2 => true,
                     // fsockopen($hostname, $port, &$errno, &$errstr, $timeout)
@@ -367,6 +369,8 @@ impl Compiler {
                     (b"socket_recv", 1) => true,
                     (b"socket_recvmsg", 1) => true,
                     (b"socket_select", 0..=2) => true,
+                    (b"curl_multi_exec", 1) => true,
+                    (b"curl_multi_info_read", 1) => true,
                     // mysqli_poll(&$read, &$error, &$reject, $sec, $usec)
                     (b"mysqli_poll", 0..=2) => true,
                     // mysqli_stmt_bind_param($stmt, $types, &$var1, &$var2, ...)

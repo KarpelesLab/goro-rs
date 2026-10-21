@@ -698,6 +698,9 @@ final class StreamBucket {
     vm.register_function(b"stream_isatty", stream_isatty_fn);
     vm.register_function(b"is_uploaded_file", is_uploaded_file_fn);
     vm.register_function(b"move_uploaded_file", move_uploaded_file_fn);
+    vm.register_function(b"get_headers", |vm, args| {
+        Ok(http_wrapper::get_headers(vm, args))
+    });
     vm.register_function(b"cli_set_process_title", cli_set_process_title_fn);
     vm.register_function(b"cli_get_process_title", cli_get_process_title_fn);
     vm.register_function(b"ini_parse_quantity", ini_parse_quantity_fn);
@@ -8171,67 +8174,26 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let body = get_request_body();
         return Ok(Value::String(PhpString::from_vec(body)));
     }
-    // http:// and https:// via the built-in minimal HTTP client.
-    if path_str.starts_with("http://") || path_str.starts_with("https://") {
-        let mut method = "GET".to_string();
-        let mut req_headers: Vec<(String, String)> = Vec::new();
-        let mut req_body: Vec<u8> = Vec::new();
-        let ssl_opts = match context {
-            Some(Value::Array(ctx)) => match ctx
-                .borrow()
-                .get(&ArrayKey::String(PhpString::from_bytes(b"ssl")))
-            {
-                Some(Value::Array(a)) => Some(a.borrow().clone()),
-                _ => None,
-            },
-            Some(v @ Value::Resource(_)) => resolve_context_id(v).and_then(xp_socket::ssl_options),
-            _ => None,
-        };
-        HTTP_SSL_OPTS.with(|o| *o.borrow_mut() = ssl_opts);
-        if let Some(Value::Array(ctx)) = context {
-            if let Some(Value::Array(http)) = ctx
-                .borrow()
-                .get(&ArrayKey::String(PhpString::from_bytes(b"http")))
-                .cloned()
-            {
-                let http = http.borrow();
-                if let Some(m) = http.get(&ArrayKey::String(PhpString::from_bytes(b"method"))) {
-                    method = m.to_php_string().to_string_lossy();
-                }
-                if let Some(h) = http.get(&ArrayKey::String(PhpString::from_bytes(b"header"))) {
-                    match h {
-                        Value::Array(harr) => {
-                            for (_, v) in harr.borrow().iter() {
-                                let s = v.to_php_string().to_string_lossy();
-                                if let Some(colon) = s.find(':') {
-                                    req_headers.push((
-                                        s[..colon].trim().to_string(),
-                                        s[colon + 1..].trim().to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {
-                            let s = h.to_php_string().to_string_lossy();
-                            for line in s.replace("\r\n", "\n").split('\n') {
-                                if let Some(colon) = line.find(':') {
-                                    req_headers.push((
-                                        line[..colon].trim().to_string(),
-                                        line[colon + 1..].trim().to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(c) = http.get(&ArrayKey::String(PhpString::from_bytes(b"content"))) {
-                    req_body = c.to_php_string().as_bytes().to_vec();
-                }
+    // http:// and https:// (http_fopen_wrapper.c)
+    let lower_scheme = path_str.get(..8).unwrap_or("").to_ascii_lowercase();
+    if lower_scheme.starts_with("http://") || lower_scheme.starts_with("https://") {
+        let body = http_wrapper::http_open(vm, "file_get_contents", &path_str, context);
+        return Ok(match body {
+            Some(b) => {
+                let start = if offset >= 0 {
+                    (offset as usize).min(b.len())
+                } else {
+                    b.len().saturating_sub((-offset) as usize)
+                };
+                let s = &b[start..];
+                let s = match length {
+                    Some(l) => &s[..s.len().min(l as usize)],
+                    None => s,
+                };
+                Value::String(PhpString::from_vec(s.to_vec()))
             }
-        }
-        let r = http_fetch_ctx(&path_str, vm, &method, &req_headers, &req_body);
-        HTTP_SSL_OPTS.with(|o| *o.borrow_mut() = None);
-        return Ok(r);
+            None => Value::False,
+        });
     }
     if !path_str.starts_with("php://")
         && !path_str.starts_with("data://")
@@ -8282,283 +8244,6 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     }
-}
-
-fn http_fetch_ctx(
-    url: &str,
-    vm: &mut Vm,
-    method: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Value {
-    // Follow up to 20 redirects (PHP default is 20).
-    let mut cur_url = url.to_string();
-    let mut cur_method = method.to_string();
-    let mut cur_headers: Vec<(String, String)> = headers.to_vec();
-    let mut cur_body: Vec<u8> = body.to_vec();
-    for _ in 0..20 {
-        let (status, location, response_body) =
-            http_fetch_once(&cur_url, vm, &cur_method, &cur_headers, &cur_body);
-        if response_body.is_none() {
-            return Value::False;
-        }
-        let response_body = response_body.unwrap();
-        // Follow 3xx Location redirects.
-        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)
-            && let Some(loc) = location
-        {
-            let next_url = if loc.starts_with("http://") || loc.starts_with("https://") {
-                loc
-            } else if let Some(slash) = cur_url
-                .find("://")
-                .and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p))
-            {
-                let base = &cur_url[..slash];
-                if loc.starts_with('/') {
-                    format!("{}{}", base, loc)
-                } else {
-                    format!("{}/{}", base, loc)
-                }
-            } else {
-                format!(
-                    "{}{}",
-                    cur_url.trim_end_matches('/'),
-                    if loc.starts_with('/') {
-                        loc.clone()
-                    } else {
-                        format!("/{}", loc)
-                    }
-                )
-            };
-            // For 301/302/303 -> downgrade to GET (PHP behaviour with default
-            // follow_location); for 307/308 keep method+body.
-            if status == 301 || status == 302 || status == 303 {
-                cur_method = "GET".to_string();
-                cur_body.clear();
-                // Strip Content-Length / Content-Type since body is gone
-                cur_headers.retain(|(k, _)| {
-                    !k.eq_ignore_ascii_case("content-length")
-                        && !k.eq_ignore_ascii_case("content-type")
-                });
-            }
-            cur_url = next_url;
-            continue;
-        }
-        return Value::String(PhpString::from_vec(response_body));
-    }
-    Value::False
-}
-
-thread_local! {
-    /// The "ssl" context options of the https:// request in progress.
-    static HTTP_SSL_OPTS: RefCell<Option<PhpArray>> = const { RefCell::new(None) };
-}
-
-/// Performs a single HTTP/1.0 request. Returns (status, Location, body).
-fn http_fetch_once(
-    url: &str,
-    vm: &mut Vm,
-    method: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> (u16, Option<String>, Option<Vec<u8>>) {
-    use std::io::{Read as IoRead, Write as IoWrite};
-    use std::net::{TcpStream, ToSocketAddrs};
-
-    // Parse the URL: scheme://host[:port]/path?query
-    let mut https = false;
-    let after_scheme = if let Some(rest) = url.strip_prefix("http://") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        https = true;
-        rest
-    } else {
-        return (0, None, None);
-    };
-    let (host_port, path) = match after_scheme.find('/') {
-        Some(i) => (&after_scheme[..i], &after_scheme[i..]),
-        None => (after_scheme, "/"),
-    };
-    let default_port = if https { 443u16 } else { 80u16 };
-    let (host, port) = match host_port.rfind(':') {
-        Some(i) => {
-            let p: u16 = host_port[i + 1..].parse().unwrap_or(default_port);
-            (&host_port[..i], p)
-        }
-        None => (host_port, default_port),
-    };
-    if https {
-        let req = http_build_request(method, path, host_port, headers, body);
-        let opts = HTTP_SSL_OPTS.with(|o| o.borrow().clone());
-        let addr = format!("{}:{}", host, port);
-        let Some(buf) =
-            xp_socket::tls_roundtrip(vm, "file_get_contents", addr.as_bytes(), opts, &req)
-        else {
-            vm.emit_warning(&format!(
-                "file_get_contents({}): Failed to open stream: operation failed",
-                url
-            ));
-            return (0, None, None);
-        };
-        return http_parse_response(vm, url, buf);
-    }
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = match addr.to_socket_addrs() {
-        Ok(mut it) => match it.next() {
-            Some(a) => a,
-            None => {
-                vm.emit_warning(&format!(
-                    "file_get_contents({}): Failed to open stream: HTTP request failed!",
-                    url
-                ));
-                return (0, None, None);
-            }
-        },
-        Err(_) => {
-            vm.emit_warning(&format!(
-                "file_get_contents({}): Failed to open stream: HTTP request failed!",
-                url
-            ));
-            return (0, None, None);
-        }
-    };
-    let mut stream =
-        match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10)) {
-            Ok(s) => s,
-            Err(_) => {
-                vm.emit_warning(&format!(
-                    "file_get_contents({}): Failed to open stream: HTTP request failed!",
-                    url
-                ));
-                return (0, None, None);
-            }
-        };
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
-    let req_bytes = http_build_request(method, path, host_port, headers, body);
-    if stream.write_all(&req_bytes).is_err() {
-        vm.emit_warning(&format!(
-            "file_get_contents({}): Failed to open stream: HTTP request failed!",
-            url
-        ));
-        return (0, None, None);
-    }
-    let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() {
-        vm.emit_warning(&format!(
-            "file_get_contents({}): Failed to open stream: HTTP request failed!",
-            url
-        ));
-        return (0, None, None);
-    }
-    http_parse_response(vm, url, buf)
-}
-
-/// The HTTP/1.0 request http_fetch_once() sends.
-fn http_build_request(
-    method: &str,
-    path: &str,
-    host_port: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Vec<u8> {
-    // Build the request
-    let mut req = String::new();
-    req.push_str(&format!("{} {} HTTP/1.0\r\n", method, path));
-    let mut has_host = false;
-    let mut has_ua = false;
-    let mut has_cl = false;
-    let mut has_ct = false;
-    for (k, v) in headers {
-        if k.eq_ignore_ascii_case("host") {
-            has_host = true;
-        }
-        if k.eq_ignore_ascii_case("user-agent") {
-            has_ua = true;
-        }
-        if k.eq_ignore_ascii_case("content-length") {
-            has_cl = true;
-        }
-        if k.eq_ignore_ascii_case("content-type") {
-            has_ct = true;
-        }
-        req.push_str(&format!("{}: {}\r\n", k, v));
-    }
-    if !has_host {
-        req.push_str(&format!("Host: {}\r\n", host_port));
-    }
-    if !has_ua {
-        req.push_str("User-Agent: goro/0.1\r\n");
-    }
-    req.push_str("Connection: close\r\n");
-    if !body.is_empty() {
-        if !has_cl {
-            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        }
-        if !has_ct {
-            req.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
-        }
-    }
-    req.push_str("\r\n");
-    let mut req_bytes = req.into_bytes();
-    req_bytes.extend_from_slice(body);
-    req_bytes
-}
-
-/// Split a raw HTTP response: (status, Location, body).
-fn http_parse_response(
-    vm: &mut Vm,
-    url: &str,
-    buf: Vec<u8>,
-) -> (u16, Option<String>, Option<Vec<u8>>) {
-    // Split headers from body
-    let sep = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        Some(s) => s,
-        None => {
-            // No headers terminator -> error
-            vm.emit_warning(&format!(
-                "file_get_contents({}): Failed to open stream: HTTP request failed!",
-                url
-            ));
-            return (0, None, None);
-        }
-    };
-    let headers_part = &buf[..sep];
-    let body = buf[sep + 4..].to_vec();
-
-    // Parse status code and Location header
-    let mut status: u16 = 200;
-    let mut location: Option<String> = None;
-    let mut http_headers = PhpArray::new();
-    if let Ok(hs) = std::str::from_utf8(headers_part) {
-        for (i, line) in hs.split("\r\n").enumerate() {
-            http_headers.set(
-                ArrayKey::Int(i as i64),
-                Value::String(PhpString::from_string(line.to_string())),
-            );
-            if i == 0 {
-                // "HTTP/1.x NNN ..." - extract status
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                if parts.len() >= 2 {
-                    if let Ok(s) = parts[1].parse::<u16>() {
-                        status = s;
-                    }
-                }
-            } else if let Some(colon) = line.find(':') {
-                let name = line[..colon].trim();
-                if name.eq_ignore_ascii_case("Location") {
-                    location = Some(line[colon + 1..].trim().to_string());
-                }
-            }
-        }
-    }
-    vm.set_global(
-        b"http_response_header".to_vec(),
-        Value::Array(Rc::new(RefCell::new(http_headers))),
-    );
-
-    (status, location, Some(body))
 }
 
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10479,6 +10164,10 @@ pub(crate) mod userstream;
 #[path = "sockets.rs"]
 pub(crate) mod xp_socket;
 
+/// The http:// and https:// wrapper.
+#[path = "http_wrapper.rs"]
+mod http_wrapper;
+
 /// proc_open() family.
 #[path = "proc_open.rs"]
 pub(crate) mod proc_open;
@@ -11228,10 +10917,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // the body upfront and back the resulting handle with a temp file so
     // subsequent fread/feof/fgets calls work as normal file ops.
     if filename.starts_with("http://") || filename.starts_with("https://") {
-        let val = http_fetch_ctx(&filename, vm, "GET", &[], &[]);
-        let body = match val {
-            Value::String(s) => s.as_bytes().to_vec(),
-            _ => return Ok(Value::False),
+        let caller = fopen_caller.clone();
+        let body = match http_wrapper::http_open(vm, &caller, &filename, args.get(3)) {
+            Some(b) => b,
+            None => return Ok(Value::False),
         };
         // Write to a temp file
         let tmp_path = std::env::temp_dir().join(format!(
@@ -12190,6 +11879,11 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Whether `fid` names an open stream handle.
 pub(crate) fn has_file_handle(fid: i64) -> bool {
     FILE_HANDLES.with(|h| h.borrow().contains_key(&fid))
+}
+
+/// php_stream->mode of an open stream.
+pub(crate) fn stream_raw_mode(fid: i64) -> Option<String> {
+    FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()))
 }
 
 fn stream_mode_clean(fid: i64) -> Option<String> {
@@ -20474,12 +20168,63 @@ fn move_uploaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
     Ok(Value::False)
 }
 
-fn cli_set_process_title_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
+thread_local! {
+    /// ps_title: the title set by cli_set_process_title()
+    static PROCESS_TITLE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// set_ps_title(): overwrite the argv area (what ps shows) with `title`.
+fn set_ps_title(title: &[u8]) -> bool {
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+        return false;
+    };
+    // fields after the ")" of the comm field; arg_start/arg_end are fields 48/49
+    let Some(rest) = stat.rfind(')').map(|p| &stat[p + 2..]) else {
+        return false;
+    };
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let (Some(start), Some(end)) = (
+        f.get(45).and_then(|s| s.parse::<u64>().ok()),
+        f.get(46).and_then(|s| s.parse::<u64>().ok()),
+    ) else {
+        return false;
+    };
+    if end <= start {
+        return false;
+    }
+    let len = (end - start) as usize;
+    let mut buf = vec![0u8; len];
+    let n = title.len().min(len.saturating_sub(1));
+    buf[..n].copy_from_slice(&title[..n]);
+    use std::io::{Seek, SeekFrom, Write};
+    let Ok(mut mem) = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/proc/self/mem")
+    else {
+        return false;
+    };
+    mem.seek(SeekFrom::Start(start)).is_ok() && mem.write_all(&buf).is_ok()
+}
+
+fn cli_set_process_title_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let title = args
+        .first()
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    if set_ps_title(&title) {
+        PROCESS_TITLE.with(|t| *t.borrow_mut() = Some(title));
+        Ok(Value::True)
+    } else {
+        vm.emit_warning("cli_set_process_title(): cli_set_process_title had an error: Not initialized correctly");
+        Ok(Value::False)
+    }
 }
 
 fn cli_get_process_title_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"")))
+    let t = PROCESS_TITLE
+        .with(|t| t.borrow().clone())
+        .unwrap_or_default();
+    Ok(Value::String(PhpString::from_vec(t)))
 }
 
 fn ini_parse_quantity_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
