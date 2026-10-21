@@ -3319,16 +3319,9 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // values are coerced via to-string semantics (with the usual
             // warnings).
             let k = match &val {
-                Value::Long(n) => {
-                    // Resource IDs (registered) become "Resource id #N" strings.
-                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
-                        ArrayKey::String(PhpString::from_vec(
-                            format!("Resource id #{}", n).into_bytes()
-                        ))
-                    } else {
-                        ArrayKey::Int(*n)
-                    }
-                }
+                Value::Long(n) => ArrayKey::Int(*n),
+                // Resources become "Resource id #N" strings.
+                Value::Resource(n) => ArrayKey::String(PhpString::from_vec(format!("Resource id #{}", n).into_bytes())),
                 Value::Double(_) => ArrayKey::String(val.to_php_string()),
                 Value::String(s) => {
                     // Try to parse as integer (PHP normalizes numeric string keys)
@@ -4694,14 +4687,7 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut result = PhpArray::new();
         for (_, val) in arr.iter() {
             let key = match val {
-                Value::Long(n) => {
-                    // Resource ids (registered Longs > 3) should be treated as resources and skipped
-                    if *n > 3 && goro_core::value::is_registered_resource(*n) {
-                        vm.emit_warning("array_count_values(): Can only count string and integer values, entry skipped");
-                        continue;
-                    }
-                    ArrayKey::Int(*n)
-                }
+                Value::Long(n) => ArrayKey::Int(*n),
                 Value::String(s) => ArrayKey::String(s.clone()),
                 _ => {
                     // PHP warns and skips non-int/non-string values
