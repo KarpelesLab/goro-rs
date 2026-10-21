@@ -1744,6 +1744,11 @@ impl CryptoStream for SslStream {
             return Err(std::io::ErrorKind::NotConnected.into());
         };
         if let Err(e) = conn.send(&data[..n]) {
+            if conn.received_close_notify() {
+                // OpenSSL still writes after the peer's close_notify; the
+                // engine cannot, and the peer reads no more anyway.
+                return Ok(n);
+            }
             self.warnings
                 .push(ssl_failed_warning(&[error_line(&e, self.is_client)]));
             return Err(std::io::ErrorKind::Other.into());
