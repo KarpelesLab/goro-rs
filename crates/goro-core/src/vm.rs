@@ -9062,7 +9062,9 @@ impl Vm {
                 // RecursiveDirectoryIterator
                 if method == b"haschildren" {
                     let full_path = self.spl_directory_iterator_get_current_path(obj);
-                    Some(if std::path::Path::new(&full_path).is_dir() { Value::True } else { Value::False })
+                    // "." and ".." never have children.
+                    let is_dot = full_path.ends_with("/.") || full_path.ends_with("/..");
+                    Some(if !is_dot && std::path::Path::new(&full_path).is_dir() { Value::True } else { Value::False })
                 } else {
                     // getChildren - return a new RecursiveDirectoryIterator for the subdirectory
                     let full_path = self.spl_directory_iterator_get_current_path(obj);
@@ -22379,6 +22381,31 @@ impl Vm {
                                 }
                             }
 
+                            // SPL outer iterators forward unknown methods to
+                            // their inner iterator.
+                            if !handled {
+                                let fwd_name = call.name.as_bytes().to_vec();
+                                if let Some(v) = self.spl_forward_unknown_method(&fwd_name, &call.args) {
+                                    if self.current_exception.is_some() {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        let msg = match &self.current_exception {
+                                            Some(Value::Object(o)) => {
+                                                let ob = o.borrow();
+                                                format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name),
+                                                    ob.get_property(b"message").to_php_string().to_string_lossy())
+                                            }
+                                            _ => "Uncaught exception".to_string(),
+                                        };
+                                        return Err(VmError { message: msg, line: op.line });
+                                    }
+                                    self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                                    handled = true;
+                                }
+                            }
                             if !handled {
                                 let func_display = call.name.to_string_lossy();
                                 let err_msg = if let Some(pos) = func_display.find("::") {

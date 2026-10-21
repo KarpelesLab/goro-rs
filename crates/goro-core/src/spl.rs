@@ -267,6 +267,52 @@ impl Vm {
         None
     }
 
+    /// Unknown method on an IteratorIterator-family / RecursiveIteratorIterator
+    /// object: php-src forwards the call to the inner iterator (or, for
+    /// RecursiveIteratorIterator, the current sub-iterator). `name` is
+    /// "Class::method" and `args[0]` is $this. Returns None when not
+    /// applicable.
+    pub(crate) fn spl_forward_unknown_method(&mut self, name: &[u8], args: &[Value]) -> Option<Value> {
+        let sep = name.windows(2).position(|w| w == b"::")?;
+        let class_lower: Vec<u8> = name[..sep].iter().map(|b| b.to_ascii_lowercase()).collect();
+        let method = &name[sep + 2..];
+        let obj = match args.first() {
+            Some(Value::Object(o)) => o.clone(),
+            _ => return None,
+        };
+        if obj_class_lower(&obj) != class_lower {
+            return None;
+        }
+        let base = self.spl_find_base(&class_lower, &[b"recursiveiteratoriterator", b"iteratoriterator"])?;
+        let target = if base == b"recursiveiteratoriterator" {
+            let stack = obj.borrow().get_property(b"__spl_iter_stack");
+            let top = match &stack {
+                Value::Array(s) => s.borrow().values().last().cloned(),
+                _ => None,
+            };
+            top.unwrap_or_else(|| obj.borrow().get_property(b"__spl_inner"))
+        } else {
+            obj.borrow().get_property(b"__spl_inner")
+        };
+        let tobj = match &target {
+            Value::Object(t) => t.clone(),
+            _ => return None,
+        };
+        // Only forward when the target actually has the method.
+        let tcl = obj_class_lower(&tobj);
+        let mlower: Vec<u8> = method.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let user_has = self.classes.get(&tcl).map(|c| c.get_method(&mlower).is_some()).unwrap_or(false);
+        let builtin_has = self
+            .spl_builtin_base(&tcl)
+            .map(|b| self.spl_stub_lookup(b, &mlower).is_some())
+            .unwrap_or(false);
+        if !user_has && !builtin_has {
+            return None;
+        }
+        let r = self.call_object_method(&target, method, &args[1..]);
+        Some(r.unwrap_or(Value::Null))
+    }
+
     /// Place named arguments of an SPL method call at their positions
     /// (`args[0]` is $this). Skipped optional parameters become Undef.
     /// Returns false with an Error set on unknown/duplicate names.
