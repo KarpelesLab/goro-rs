@@ -4297,7 +4297,7 @@ impl Compiler {
                                 set_visibility: obj_set_vis,
                                 declaring_class: declaring_class_lower.clone(),
                                 is_readonly: prop_is_readonly,
-                                property_type: prop_type,
+                                property_type: prop_type.clone(),
                                 has_get_hook: get_hook.is_some(),
                                 has_set_hook: set_hook.is_some(),
                                 is_virtual: prop_is_virtual,
@@ -4321,6 +4321,8 @@ impl Compiler {
                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
                                 hook_compiler.op_array.decl_line = stmt.span.line;
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
+                                // The get hook's return type is the property type.
+                                hook_compiler.op_array.return_type = prop_type.clone();
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
@@ -4838,7 +4840,7 @@ impl Compiler {
                                                 set_visibility: obj_set_vis_cpp,
                                                 declaring_class: declaring_class_lower.clone(),
                                                 is_readonly: param.readonly || modifiers.is_readonly,
-                                                property_type: promoted_prop_type,
+                                                property_type: promoted_prop_type.clone(),
                                                 has_get_hook: prom_has_get_hook,
                                                 has_set_hook: prom_has_set_hook,
                                                 is_virtual: prom_is_virtual,
@@ -4860,6 +4862,7 @@ impl Compiler {
                                                 hook_compiler.op_array.name = hook_display_name.into_bytes();
                                                 hook_compiler.op_array.decl_line = *method_line;
                                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
+                                                hook_compiler.op_array.return_type = promoted_prop_type.clone();
                                                 hook_compiler.source_file = self.source_file.clone();
                                                 hook_compiler.current_class = Some(qualified_name.clone());
                                                 hook_compiler.current_parent_class = class.parent.clone();
