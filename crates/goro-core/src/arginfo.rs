@@ -363,7 +363,7 @@ fn numeric(s: &PhpString) -> Option<Value> {
 
 impl Vm {
     /// "Uncaught Class: message" for the pending exception (VmError text).
-    pub(crate) fn uncaught_exception_message(&self) -> String {
+    pub fn uncaught_exception_message(&self) -> String {
         match &self.current_exception {
             Some(Value::Object(o)) => {
                 let ob = o.borrow();

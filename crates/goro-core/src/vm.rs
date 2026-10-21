@@ -29741,8 +29741,9 @@ impl Vm {
                         }
                     }
                     // `$a[] = $r` with $r a reference to $a itself keeps the
-                    // (recursive) array rather than a copy.
+                    // (recursive) array rather than a copy; `$a[] = $a` copies.
                     let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
+                        && op.op1 != op.op2
                         && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
                     let val = if self_ref {
                         val
@@ -29926,8 +29927,9 @@ impl Vm {
                             }
                         }
                         // `$a[] = $r` with $r a reference to $a itself keeps the
-                        // (recursive) array rather than a copy.
+                        // (recursive) array rather than a copy; `$a[] = $a` copies.
                         let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
+                            && op.op1 != op.op2
                             && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
                         let val = if self_ref {
                             val

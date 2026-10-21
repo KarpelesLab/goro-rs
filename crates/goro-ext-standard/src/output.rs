@@ -33,11 +33,18 @@ pub(crate) fn is_internal_property(name: &[u8]) -> bool {
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mut seen = HashSet::new();
+    // Objects an outer var_dump() is dumping while it runs __debugInfo()
+    // stay protected (ZEND_GUARD_PROTECT_RECURSION(guard, DEBUG)).
+    let mut seen = DUMPING.with(|d| d.borrow().clone());
     for arg in args {
         var_dump_value(vm, arg, 0, &mut seen);
     }
     Ok(Value::Null)
+}
+
+thread_local! {
+    /// The objects var_dump() is dumping while it calls back into PHP code.
+    static DUMPING: std::cell::RefCell<HashSet<u64>> = std::cell::RefCell::new(HashSet::new());
 }
 
 thread_local! {
@@ -64,6 +71,22 @@ pub(crate) fn debug_zval_dump(vm: &mut Vm, args: &[Value]) {
         var_dump_value(vm, arg, 0, &mut seen);
     }
     ZVAL_DUMP.with(|z| z.set(prev));
+}
+
+/// Run `__debugInfo()` for var_dump() with the object protected from
+/// recursion, also for var_dump() calls it makes.
+fn debug_info_protected(
+    vm: &mut Vm,
+    val: &Value,
+    oid: u64,
+    seen: &mut HashSet<u64>,
+) -> Option<Value> {
+    seen.insert(oid);
+    let outer = DUMPING.with(|d| d.replace(seen.clone()));
+    let r = vm.call_object_method(val, b"__debugInfo", &[]);
+    DUMPING.with(|d| *d.borrow_mut() = outer);
+    seen.remove(&oid);
+    r
 }
 
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
@@ -659,7 +682,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 // Release our borrow: __debugInfo() may modify the object
                 // (e.g. initialize a lazy object).
                 drop(obj_borrow);
-                let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                let debug_result = debug_info_protected(vm, val, oid, seen);
                 obj_borrow = obj.borrow();
                 // Lazy prefix reflects the state after __debugInfo() ran.
                 let udbg_lazy_prefix = match obj_borrow.get_property(b"__lazy_state") {
@@ -1041,7 +1064,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 // Release our borrow: __debugInfo() may modify the object
                 // (e.g. initialize a lazy object).
                 drop(obj_borrow);
-                let debug_result = vm.call_object_method(val, b"__debugInfo", &[]);
+                let debug_result = debug_info_protected(vm, val, oid, seen);
                 obj_borrow = obj.borrow();
                 // Lazy prefix reflects the state after __debugInfo() ran.
                 let dbg_lazy_prefix = match obj_borrow.get_property(b"__lazy_state") {
