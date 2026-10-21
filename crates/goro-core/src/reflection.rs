@@ -4103,6 +4103,33 @@ pub fn reflection_method_docall(
                     if m.op_array.internal_sig.is_some() {
                         return Some(invoke_internal_method(vm, &m, &class_lower, target_obj, &invoke_args));
                     }
+                    {
+                        // Internal callers report "N passed and exactly M expected".
+                        let req = m.op_array.required_param_count as usize;
+                        if invoke_args.len() < req {
+                            let canonical = rcls(vm, &m.declaring_class.to_ascii_lowercase()).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&class_lower).to_string());
+                            let skip = if !m.is_static { 1usize } else { 0usize };
+                            let total = (m.op_array.param_count as usize).saturating_sub(skip);
+                            let descriptor = if total == req && m.op_array.variadic_param.is_none() { "exactly" } else { "at least" };
+                            let msg = format!(
+                                "Too few arguments to function {}::{}(), {} passed and {} {} expected",
+                                canonical, String::from_utf8_lossy(&m.name), invoke_args.len(), descriptor, req
+                            );
+                            // Raised inside the callee, called from internal code.
+                            vm.call_stack.push((format!("{}->{}", canonical, String::from_utf8_lossy(&m.name)), "[internal function]".to_string(), 0, invoke_args.clone(), !m.is_static));
+                            let exc = vm.create_exception(b"ArgumentCountError", &msg, m.op_array.decl_line);
+                            vm.call_stack.pop();
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                        let mut arr = PhpArray::new();
+                        for a in &invoke_args {
+                            arr.push(a.clone());
+                        }
+                        if let Some(r) = invoke_user_method(vm, &m, &class_lower, &target_obj, Value::Array(Rc::new(RefCell::new(arr)))) {
+                            return Some(r);
+                        }
+                    }
                     let mut func_key = class_lower.clone();
                     func_key.extend_from_slice(b"::");
                     func_key.extend_from_slice(method_lower_bytes.as_bytes());
@@ -4217,9 +4244,14 @@ pub fn reflection_method_docall(
                         );
                         let _ = plural;
                         let line = m.op_array.decl_line;
+                        vm.call_stack.push((format!("{}->{}", canonical, method_disp), "[internal function]".to_string(), 0, invoke_args.clone(), !m.is_static));
                         let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+                        vm.call_stack.pop();
                         vm.current_exception = Some(exc);
                         return Some(Value::Null);
+                    }
+                    if let Some(r) = invoke_user_method(vm, &m, &class_lower, &target_obj, args_arr_val.clone()) {
+                        return Some(r);
                     }
                     let mut cvs = vec![Value::Undef; m.op_array.cv_names.len()];
                     if !m.is_static {
@@ -4300,6 +4332,53 @@ pub fn reflection_method_docall(
     }
 }
 
+
+
+/// Invoke a user method the way ReflectionMethod::invoke() does: a normal
+/// call (argument checks, coercion, frames) made from the declaring class's
+/// scope, with the reflected class as the called scope of static calls.
+/// None when the class can't be named in source (anonymous classes).
+fn invoke_user_method(
+    vm: &mut Vm,
+    m: &crate::object::MethodDef,
+    class_lower: &[u8],
+    target_obj: &Value,
+    args: Value,
+) -> Option<Value> {
+    let cname = rcls(vm, class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string())?;
+    let simple = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\\' || (c as u32) >= 0x80);
+    if !simple(&cname) {
+        return None;
+    }
+    let decl = m.declaring_class.to_ascii_lowercase();
+    // invoke() calls this exact implementation; a virtual call would pick an
+    // override in the object's class.
+    if let Value::Object(o) = target_obj {
+        if !m.is_static {
+            let ocl = o.borrow().class_name.to_ascii_lowercase();
+            match rmethod(vm, &ocl, &m.name) {
+                Some(om) if om.declaring_class.eq_ignore_ascii_case(&decl) => {}
+                _ => return None,
+            }
+        }
+    }
+    let src = if m.is_static || !matches!(target_obj, Value::Object(_)) {
+        format!("return \\{}::$__m(...$__a);", cname.trim_start_matches('\\'))
+    } else {
+        "return $__o->$__m(...$__a);".to_string()
+    };
+    let r = run_snippet_in_scope(
+        vm,
+        &src,
+        &[
+            ("__o", target_obj.clone()),
+            ("__m", Value::String(PhpString::from_vec(m.name.clone()))),
+            ("__a", args),
+        ],
+        &decl,
+    );
+    Some(r.unwrap_or(Value::Null))
+}
 
 /// Invoke an internal (natively implemented) method through the VM's
 /// regular callable dispatch.
