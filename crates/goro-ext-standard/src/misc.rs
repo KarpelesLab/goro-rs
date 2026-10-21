@@ -9084,13 +9084,17 @@ fn alloc_file_handle_special_uri(file: std::fs::File, mode: &str, special: Speci
             fh.uri = uri.to_string();
             // For php:// streams, set wrapper_type and stream_type appropriately.
             match special {
+                // Memory/temp streams are always read-write ("w+b"),
+                // whatever mode they were opened with.
                 SpecialStream::Memory => {
                     fh.wrapper_type = "PHP".to_string();
                     fh.stream_type = "MEMORY".to_string();
+                    fh.mode = "w+b".to_string();
                 }
                 SpecialStream::Temp => {
                     fh.wrapper_type = "PHP".to_string();
                     fh.stream_type = "TEMP".to_string();
+                    fh.mode = "w+b".to_string();
                 }
                 SpecialStream::Stdin | SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output => {
                     fh.wrapper_type = "PHP".to_string();
@@ -9926,6 +9930,15 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                     Err(_) => break,
+                }
+            }
+            // php://temp reads greedily from its inner memory stream, so the
+            // eof flag is raised as soon as all data has been consumed.
+            if !fh.eof && matches!(fh.special, SpecialStream::Temp) {
+                if let (Ok(pos), Ok(meta)) = (fh.file.stream_position(), fh.file.metadata()) {
+                    if pos >= meta.len() {
+                        fh.eof = true;
+                    }
                 }
             }
             if buf.is_empty() && fh.eof {
@@ -14078,12 +14091,17 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    let mut line = String::new();
+    // User-provided end-of-line sequence (PHP 8.1+), default "\n".
+    let eol: Vec<u8> = match args.get(5) {
+        Some(v) if !matches!(v, Value::Null | Value::Undef) => v.to_php_string().as_bytes().to_vec(),
+        _ => b"\n".to_vec(),
+    };
+    let mut line: Vec<u8> = Vec::new();
     let arr = fields.borrow();
     let mut first = true;
     for (_, val) in arr.iter() {
         if !first {
-            line.push(separator as char);
+            line.push(separator);
         }
         first = false;
         // PHP emits "Array to string conversion" warning when fputcsv encounters
@@ -14092,7 +14110,7 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let cur_line = vm.current_line;
             vm.emit_warning_at("Array to string conversion", cur_line);
         }
-        let s = val.to_php_string().to_string_lossy();
+        let s = val.to_php_string();
         // Check if we need to enclose (delimiter, enclosure, escape, \n, \r,
         // \t, or space anywhere in the field — matches PHP behavior).
         let s_bytes = s.as_bytes();
@@ -14106,35 +14124,30 @@ fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 || b == b' '
         });
         if needs_enclosure {
-            line.push(enclosure as char);
-            let bytes: Vec<u8> = s_bytes.to_vec();
-            let mut i = 0;
+            line.push(enclosure);
             let mut escaped = false;
-            while i < bytes.len() {
-                let c = bytes[i];
+            for &c in s_bytes {
                 if let Some(e) = escape {
                     if c == e && !escaped {
                         escaped = true;
-                        line.push(c as char);
-                        i += 1;
+                        line.push(c);
                         continue;
                     }
                 }
                 if c == enclosure && !escaped {
-                    line.push(enclosure as char);
+                    line.push(enclosure);
                 }
                 escaped = false;
-                line.push(c as char);
-                i += 1;
+                line.push(c);
             }
-            line.push(enclosure as char);
+            line.push(enclosure);
         } else {
-            line.push_str(&s);
+            line.extend_from_slice(s_bytes);
         }
     }
-    line.push('\n');
+    line.extend_from_slice(&eol);
 
-    let bytes = line.as_bytes();
+    let bytes = line.as_slice();
     let len = bytes.len();
 
     FILE_HANDLES.with(|handles| {

@@ -84,15 +84,101 @@ impl Vm {
         self.object_props_mangled(obj).borrow().clone()
     }
 
+    /// Stub signature of an SPL method, looked up on `class_lower` and its
+    /// built-in parents.
+    pub(crate) fn spl_stub_lookup(&self, class_lower: &[u8], method_lower: &[u8]) -> Option<&'static crate::spl_stubs::StubMethod> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..16 {
+            if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
+                return Some(m);
+            }
+            match crate::vm::get_builtin_parent(&cur) {
+                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// Place named arguments of an SPL method call at their positions
+    /// (`args[0]` is $this). Skipped optional parameters become Undef.
+    /// Returns false with an Error set on unknown/duplicate names.
+    pub(crate) fn spl_map_named_args(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &mut Vec<Value>,
+        named: &[(Vec<u8>, Value)],
+    ) -> bool {
+        let stub = match self.spl_stub_lookup(class_lower, method_lower) {
+            Some(s) => s,
+            None => {
+                // Unknown signature: append in order.
+                for (_, v) in named {
+                    args.push(v.clone());
+                }
+                return true;
+            }
+        };
+        let positional = args.len().saturating_sub(1);
+        for (name, v) in named {
+            let idx = stub.params.iter().position(|p| p.as_bytes() == name.as_slice());
+            match idx {
+                None => {
+                    let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(name));
+                    self.spl_throw(b"Error", &msg);
+                    return false;
+                }
+                Some(i) if i < positional => {
+                    let msg = format!("Named parameter ${} overwrites previous argument", String::from_utf8_lossy(name));
+                    self.spl_throw(b"Error", &msg);
+                    return false;
+                }
+                Some(i) => {
+                    while args.len() < i + 2 {
+                        args.push(Value::Undef);
+                    }
+                    args[i + 1] = v.clone();
+                }
+            }
+        }
+        true
+    }
+
+    /// Allocate a new object of `class` (user or built-in) with property
+    /// defaults applied; the constructor is not called.
+    pub(crate) fn spl_instantiate(&mut self, class: &[u8]) -> Rc<RefCell<PhpObject>> {
+        let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let canonical = self
+            .classes
+            .get(&cl)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| self.builtin_canonical_name(&cl).into_bytes());
+        let id = self.alloc_object_id();
+        let mut o = PhpObject::new(canonical, id);
+        self.apply_class_property_defaults(&mut o, &cl);
+        Rc::new(RefCell::new(o))
+    }
+
+    /// Whether `class_lower` declares a userland constructor.
+    pub(crate) fn spl_has_user_ctor(&self, class_lower: &[u8]) -> bool {
+        self.classes.get(class_lower).map(|c| c.get_method(b"__construct").is_some()).unwrap_or(false)
+    }
+
     /// Native get_debug_info for SPL classes: the property table (mangled
     /// keys) var_dump/print_r should show, or None for non-SPL objects.
     pub fn spl_debug_info(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Option<PhpArray> {
         let cl = obj_class_lower(obj);
         let base = self.spl_find_base(
             &cl,
-            &[b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap"],
+            &[
+                b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap",
+                b"directoryiterator", b"splfileobject", b"splfileinfo",
+            ],
         )?;
         match base {
+            b"splfileobject" => Some(self.sfi_debug_info(obj, true)),
+            b"splfileinfo" => Some(self.sfi_debug_info(obj, false)),
             b"splpriorityqueue" => Some(self.heap_debug_info(obj, true)),
             b"splminheap" | b"splmaxheap" | b"splheap" => Some(self.heap_debug_info(obj, false)),
             _ => None,

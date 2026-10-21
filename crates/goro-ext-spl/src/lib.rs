@@ -31,6 +31,20 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"class_parents", class_parents_fn);
     vm.register_function(b"class_uses", class_uses_fn);
 
+    // Native constructors
+    vm.object_construct_handlers.insert(
+        b"splfileobject".to_vec(),
+        goro_core::spl_file::spl_file_object_construct_native,
+    );
+    vm.object_construct_handlers.insert(
+        b"spltempfileobject".to_vec(),
+        goro_core::spl_file::spl_file_object_construct_native,
+    );
+    vm.object_construct_handlers.insert(
+        b"splfileinfo".to_vec(),
+        goro_core::spl_file::spl_file_info_construct_native,
+    );
+
     // Register parameter names for named argument support
     register_param_names(vm);
 }

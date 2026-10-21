@@ -493,6 +493,9 @@ pub struct Vm {
     /// INI on-update validators keyed by directive name: (vm, new value, at_startup) -> accept.
     /// A rejecting validator is responsible for emitting PHP's warning.
     pub ini_validators: std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[u8], bool) -> bool>,
+    /// When Some, E_WARNINGs are collected here instead of being reported
+    /// (emulates php-src's EH_THROW error handling for SPL constructors).
+    pub warning_capture: Option<Vec<String>>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -1410,6 +1413,7 @@ impl Vm {
             object_construct_handlers: std::collections::HashMap::new(),
             native_class_handlers: std::collections::HashMap::new(),
             ini_validators: std::collections::HashMap::new(),
+            warning_capture: None,
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available
@@ -2257,6 +2261,10 @@ impl Vm {
     }
 
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
+        if let Some(cap) = self.warning_capture.as_mut() {
+            cap.push(msg.to_string());
+            return;
+        }
         if self.error_reporting & 2 == 0 {
             self.record_last_error(2, msg, line);
         }
@@ -6616,6 +6624,9 @@ impl Vm {
                 crate::reflection::reflection_fiber_method(self, method_lower, obj)
             }
             b"splfileinfo" => {
+                if let Some(r) = self.spl_file_info_call(method_lower, obj, None) {
+                    return Some(r);
+                }
                 self.spl_file_info_method(method_lower, obj)
             }
             b"directoryiterator" | b"filesystemiterator"
@@ -6623,7 +6634,7 @@ impl Vm {
                 self.spl_directory_iterator_method(class_lower, method_lower, obj)
             }
             b"splfileobject" | b"spltempfileobject" => {
-                self.spl_file_object_method(method_lower, obj)
+                self.spl_file_object_call(method_lower, obj, None)
             }
             b"recursivetreeiterator" => {
                 self.spl_outer_iterator_method(method_lower, obj)
@@ -8859,47 +8870,6 @@ impl Vm {
                 }
                 Some(Value::Object(Rc::new(RefCell::new(fi_obj))))
             }
-            b"openfile" => {
-                // Opens a file object (default SplFileObject, or the class set via setFileClass)
-                let obj_id = self.next_object_id;
-                self.next_object_id += 1;
-                let file_class = {
-                    let ob = obj.borrow();
-                    ob.get_property(b"__spl_file_class")
-                };
-                let class_name: Vec<u8> = match file_class {
-                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
-                    _ => b"SplFileObject".to_vec(),
-                };
-                let mut fo_obj = PhpObject::new(class_name, obj_id);
-                fo_obj.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_string(path_str.clone())));
-                // Read all lines
-                if let Ok(content) = std::fs::read_to_string(&path_str) {
-                    let mut lines_arr = PhpArray::new();
-                    for line in content.split('\n') {
-                        lines_arr.push(Value::String(PhpString::from_string(format!("{}\n", line))));
-                    }
-                    // Fix last line: remove trailing \n if original didn't end with \n
-                    if !content.ends_with('\n') {
-                        let len = lines_arr.len();
-                        if len > 0 {
-                            if let Some(last) = lines_arr.get(&ArrayKey::Int((len - 1) as i64)) {
-                                let s = last.to_php_string().to_string_lossy();
-                                if s.ends_with('\n') {
-                                    let trimmed = &s[..s.len()-1];
-                                    lines_arr.set(ArrayKey::Int((len - 1) as i64), Value::String(PhpString::from_string(trimmed.to_string())));
-                                }
-                            }
-                        }
-                    }
-                    fo_obj.set_property(b"__spl_file_lines".to_vec(), Value::Array(Rc::new(RefCell::new(lines_arr))));
-                } else {
-                    fo_obj.set_property(b"__spl_file_lines".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                }
-                fo_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                fo_obj.set_property(b"__spl_flags".to_vec(), Value::Long(0));
-                Some(Value::Object(Rc::new(RefCell::new(fo_obj))))
-            }
             _ => None,
         }
     }
@@ -9118,314 +9088,6 @@ impl Vm {
         }
     }
 
-    fn spl_file_object_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        // Don't handle constructors
-        if method == b"__construct" {
-            return None;
-        }
-        match method {
-            // Iterator methods
-            b"rewind" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                Some(Value::Null)
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                if let Value::Array(a) = lines {
-                    let len = a.borrow().len() as i64;
-                    Some(if pos < len { Value::True } else { Value::False })
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"current" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let flags = if let Value::Long(f) = ob.get_property(b"__spl_flags") { f } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                if let Value::Array(a) = lines {
-                    let a = a.borrow();
-                    if let Some(line) = a.get(&ArrayKey::Int(pos)) {
-                        let line_str = line.to_php_string().to_string_lossy();
-                        // READ_CSV flag = 8: return parsed CSV array
-                        if flags & 8 != 0 {
-                            let trimmed = line_str.trim_end_matches('\n').trim_end_matches('\r');
-                            let delim = ob.get_property(b"__spl_csv_delimiter");
-                            let enclosure = ob.get_property(b"__spl_csv_enclosure");
-                            let d = if let Value::String(s) = delim { s.to_string_lossy() } else { ",".to_string() };
-                            let e = if let Value::String(s) = enclosure { s.to_string_lossy() } else { "\"".to_string() };
-                            let delim_char = d.chars().next().unwrap_or(',');
-                            let encl_char = e.chars().next().unwrap_or('"');
-                            let fields = Self::parse_csv_line(trimmed, delim_char, encl_char);
-                            let mut arr = PhpArray::new();
-                            for f in fields {
-                                arr.push(Value::String(PhpString::from_string(f)));
-                            }
-                            return Some(Value::Array(Rc::new(RefCell::new(arr))));
-                        }
-                        // DROP_NEW_LINE flag = 1
-                        if flags & 1 != 0 {
-                            let trimmed = line_str.trim_end_matches('\n').trim_end_matches('\r');
-                            Some(Value::String(PhpString::from_string(trimmed.to_string())))
-                        } else {
-                            Some(line.clone())
-                        }
-                    } else {
-                        Some(Value::False)
-                    }
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                Some(Value::Long(pos))
-            }
-            b"next" => {
-                let mut ob = obj.borrow_mut();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                // Don't advance past EOF (line count is the "past end" position)
-                let lines = ob.get_property(b"__spl_file_lines");
-                let new_pos = if let Value::Array(a) = &lines {
-                    let len = a.borrow().len() as i64;
-                    if pos + 1 > len { len } else { pos + 1 }
-                } else {
-                    pos + 1
-                };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(new_pos));
-                Some(Value::Null)
-            }
-            b"eof" => {
-                let ob = obj.borrow();
-                // If the file is being written to (we maintain a byte counter
-                // via fputcsv/fwrite), the stream is positioned just past the
-                // last byte written, which by PHP semantics is *not* eof.
-                if matches!(ob.get_property(b"__spl_byte_pos"), Value::Long(_)) {
-                    return Some(Value::False);
-                }
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                if let Value::Array(a) = lines {
-                    let len = a.borrow().len() as i64;
-                    Some(if pos >= len { Value::True } else { Value::False })
-                } else {
-                    Some(Value::True)
-                }
-            }
-            b"seek" => None, // handled in handle_spl_docall
-            b"fgets" | b"getcurrentline" => {
-                let mut ob = obj.borrow_mut();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                if let Value::Array(a) = lines {
-                    let a_borrow = a.borrow();
-                    if let Some(line) = a_borrow.get(&ArrayKey::Int(pos)) {
-                        let result = line.clone();
-                        drop(a_borrow);
-                        ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
-                        Some(result)
-                    } else {
-                        Some(Value::False)
-                    }
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"fgetc" => {
-                // Read a single character
-                let mut ob = obj.borrow_mut();
-                let char_pos = if let Value::Long(p) = ob.get_property(b"__spl_char_pos") { p } else { 0 };
-                let path_val = ob.get_property(b"__spl_file_path");
-                let path_str = path_val.to_php_string().to_string_lossy();
-                drop(ob);
-                if let Ok(content) = std::fs::read(&path_str) {
-                    if (char_pos as usize) < content.len() {
-                        let ch = content[char_pos as usize];
-                        let mut ob = obj.borrow_mut();
-                        ob.set_property(b"__spl_char_pos".to_vec(), Value::Long(char_pos + 1));
-                        Some(Value::String(PhpString::from_vec(vec![ch])))
-                    } else {
-                        Some(Value::False)
-                    }
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"fgetcsv" => None, // handled in handle_spl_docall
-            b"fputcsv" => None, // handled in handle_spl_docall
-            b"fwrite" => None, // handled in handle_spl_docall
-            b"fflush" => Some(Value::True),
-            b"ftell" => {
-                // Return byte position. Prefer an explicit byte counter
-                // maintained by fputcsv/fwrite/etc; fall back to summing line
-                // lengths up to current position.
-                let ob = obj.borrow();
-                if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") {
-                    return Some(Value::Long(b));
-                }
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                if let Value::Array(a) = lines {
-                    let a = a.borrow();
-                    let mut byte_pos: i64 = 0;
-                    for i in 0..pos {
-                        if let Some(line) = a.get(&ArrayKey::Int(i)) {
-                            byte_pos += line.to_php_string().len() as i64;
-                        }
-                    }
-                    Some(Value::Long(byte_pos))
-                } else {
-                    Some(Value::Long(0))
-                }
-            }
-            b"flock" => None, // handled in handle_spl_docall
-            b"ftruncate" => None, // handled in handle_spl_docall
-            b"fpassthru" => {
-                // Output remaining data from current position
-                let ob = obj.borrow();
-                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                let lines = ob.get_property(b"__spl_file_lines");
-                let mut byte_count = 0i64;
-                if let Value::Array(a) = lines {
-                    let a = a.borrow();
-                    let len = a.len() as i64;
-                    let lines_to_output: Vec<Value> = (pos..len)
-                        .filter_map(|i| a.get(&ArrayKey::Int(i)).cloned())
-                        .collect();
-                    drop(a);
-                    drop(ob);
-                    for line in &lines_to_output {
-                        let s = line.to_php_string();
-                        byte_count += s.len() as i64;
-                        self.write_output(s.as_bytes());
-                    }
-                } else {
-                    drop(ob);
-                }
-                Some(Value::Long(byte_count))
-            }
-            b"fstat" => {
-                // Returns stat info on the file
-                use std::os::unix::fs::MetadataExt;
-                let ob = obj.borrow();
-                let path_val = ob.get_property(b"__spl_file_path");
-                let path_str = path_val.to_php_string().to_string_lossy();
-                drop(ob);
-                match std::fs::metadata(&path_str) {
-                    Ok(m) => {
-                        let mut arr = PhpArray::new();
-                        // PHP fstat returns a 26-key array with numeric and string keys
-                        let entries: [(i64, &[u8], i64); 13] = [
-                            (0, b"dev", m.dev() as i64),
-                            (1, b"ino", m.ino() as i64),
-                            (2, b"mode", m.mode() as i64),
-                            (3, b"nlink", m.nlink() as i64),
-                            (4, b"uid", m.uid() as i64),
-                            (5, b"gid", m.gid() as i64),
-                            (6, b"rdev", m.rdev() as i64),
-                            (7, b"size", m.size() as i64),
-                            (8, b"atime", m.atime()),
-                            (9, b"mtime", m.mtime()),
-                            (10, b"ctime", m.ctime()),
-                            (11, b"blksize", m.blksize() as i64),
-                            (12, b"blocks", m.blocks() as i64),
-                        ];
-                        for (i, name, val) in entries.iter() {
-                            arr.set(ArrayKey::Int(*i), Value::Long(*val));
-                            arr.set(ArrayKey::String(PhpString::from_bytes(*name)), Value::Long(*val));
-                        }
-                        Some(Value::Array(Rc::new(RefCell::new(arr))))
-                    }
-                    Err(_) => Some(Value::False),
-                }
-            }
-            b"setflags" => None, // handled in handle_spl_docall
-            b"getflags" => {
-                let ob = obj.borrow();
-                let flags = ob.get_property(b"__spl_flags");
-                if matches!(flags, Value::Null) {
-                    Some(Value::Long(0))
-                } else {
-                    Some(flags)
-                }
-            }
-            b"setcsvcontrol" => None, // handled in handle_spl_docall
-            b"getcsvcontrol" => {
-                let ob = obj.borrow();
-                let delim = ob.get_property(b"__spl_csv_delimiter");
-                let enclosure = ob.get_property(b"__spl_csv_enclosure");
-                let escape = ob.get_property(b"__spl_csv_escape");
-                let d = if let Value::String(s) = delim { s.to_string_lossy() } else { ",".to_string() };
-                let e = if let Value::String(s) = enclosure { s.to_string_lossy() } else { "\"".to_string() };
-                let esc = if let Value::String(s) = escape { s.to_string_lossy() } else { "\\".to_string() };
-                let mut arr = PhpArray::new();
-                arr.set(ArrayKey::Int(0), Value::String(PhpString::from_string(d)));
-                arr.set(ArrayKey::Int(1), Value::String(PhpString::from_string(e)));
-                arr.set(ArrayKey::Int(2), Value::String(PhpString::from_string(esc)));
-                Some(Value::Array(Rc::new(RefCell::new(arr))))
-            }
-            b"setmaxlinelen" => None, // handled in handle_spl_docall
-            b"getmaxlinelen" => {
-                let ob = obj.borrow();
-                let maxlen = ob.get_property(b"__spl_max_line_len");
-                if matches!(maxlen, Value::Null) {
-                    Some(Value::Long(0))
-                } else {
-                    Some(maxlen)
-                }
-            }
-            b"getchildren" => Some(Value::Null), // SplFileObject doesn't have children
-            b"haschildren" => Some(Value::False),
-            // SplFileInfo methods (SplFileObject extends SplFileInfo)
-            b"getfilename" | b"getextension" | b"getpath" | b"getpathname"
-            | b"getrealpath" | b"getsize" | b"gettype" | b"isdir" | b"isfile"
-            | b"islink" | b"isreadable" | b"iswritable" | b"iswriteable"
-            | b"isexecutable" | b"getperms" | b"getinode" | b"getowner"
-            | b"getgroup" | b"getatime" | b"getmtime" | b"getctime"
-            | b"getfileinfo" | b"getpathinfo" | b"openfile" => {
-                self.spl_file_info_method(method, obj)
-            }
-            b"__tostring" | b"tostring" => {
-                let ob = obj.borrow();
-                let path_val = ob.get_property(b"__spl_file_path");
-                if let Value::String(s) = path_val {
-                    Some(Value::String(s))
-                } else {
-                    Some(Value::String(PhpString::from_bytes(b"")))
-                }
-            }
-            b"__debuginfo" => {
-                let ob = obj.borrow();
-                let path_val = ob.get_property(b"__spl_file_path");
-                let path_str = path_val.to_php_string().to_string_lossy();
-                drop(ob);
-                let mut arr = PhpArray::new();
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00pathName")),
-                    Value::String(PhpString::from_string(path_str.clone())),
-                );
-                let filename = std::path::Path::new(&path_str)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                arr.set(
-                    ArrayKey::String(PhpString::from_bytes(b"\x00SplFileInfo\x00fileName")),
-                    Value::String(PhpString::from_string(filename)),
-                );
-                Some(Value::Array(Rc::new(RefCell::new(arr))))
-            }
-            _ => None,
-        }
-    }
-
     /// Check if this is an SPL method that needs call arguments
     fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
         if let Some(h) = self.native_class_handlers.get(class) {
@@ -9473,11 +9135,11 @@ impl Vm {
                 method,
                 b"seek" | b"setflags" | b"setcsvcontrol" | b"setmaxlinelen"
                     | b"fgetcsv" | b"fputcsv" | b"fwrite" | b"flock" | b"ftruncate"
-                    | b"getbasename" | b"fread" | b"fscanf"
+                    | b"fread" | b"fscanf" | b"fseek"
             ),
             b"splfileinfo" => matches!(
                 method,
-                b"getbasename" | b"setfileclass" | b"setinfoclass"
+                b"getbasename" | b"setfileclass" | b"setinfoclass" | b"openfile"
             ),
             b"directoryiterator" | b"filesystemiterator"
             | b"recursivedirectoryiterator" | b"globiterator" => matches!(
@@ -12097,434 +11759,12 @@ impl Vm {
                     crate::reflection::reflection_attribute_docall(self, method, args)
                 }
                 b"splfileobject" | b"spltempfileobject" => {
-                    match method {
-                        b"seek" => {
-                            let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            let mut ob = obj.borrow_mut();
-                            // PHP clamps seek to last line index when past EOF.
-                            // After seek past EOF, key() returns line_count.
-                            let lines = ob.get_property(b"__spl_file_lines");
-                            let clamped_pos = if let Value::Array(a) = &lines {
-                                let len = a.borrow().len() as i64;
-                                if pos < 0 { 0 } else if pos >= len { len } else { pos }
-                            } else {
-                                if pos < 0 { 0 } else { pos }
-                            };
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(clamped_pos));
-                            Some(Value::Null)
-                        }
-                        b"setflags" => {
-                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0));
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_flags".to_vec(), flags);
-                            Some(Value::Null)
-                        }
-                        b"setcsvcontrol" => {
-                            let delim = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b",")));
-                            let enclosure = args.get(2).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"\"")));
-                            let escape = args.get(3).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"\\")));
-                            // Validate single-character constraints
-                            let delim_len = delim.to_php_string().as_bytes().len();
-                            let enclosure_len = enclosure.to_php_string().as_bytes().len();
-                            let escape_len = escape.to_php_string().as_bytes().len();
-                            if delim_len != 1 {
-                                let msg = "SplFileObject::setCsvControl(): Argument #1 ($separator) must be a single character";
-                                let exc = self.create_exception(b"ValueError", msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            if enclosure_len != 1 {
-                                let msg = "SplFileObject::setCsvControl(): Argument #2 ($enclosure) must be a single character";
-                                let exc = self.create_exception(b"ValueError", msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            if escape_len > 1 {
-                                let msg = "SplFileObject::setCsvControl(): Argument #3 ($escape) must be empty or a single character";
-                                let exc = self.create_exception(b"ValueError", msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_csv_delimiter".to_vec(), delim);
-                            ob.set_property(b"__spl_csv_enclosure".to_vec(), enclosure);
-                            ob.set_property(b"__spl_csv_escape".to_vec(), escape);
-                            Some(Value::Null)
-                        }
-                        b"setmaxlinelen" => {
-                            let maxlen = args.get(1).cloned().unwrap_or(Value::Long(0));
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_max_line_len".to_vec(), maxlen);
-                            Some(Value::Null)
-                        }
-                        b"fgetcsv" => {
-                            // Validate single-character args if explicitly provided
-                            if let Some(d_arg) = args.get(1) {
-                                let d_bytes = d_arg.to_php_string();
-                                if d_bytes.as_bytes().len() != 1 {
-                                    let msg = "SplFileObject::fgetcsv(): Argument #1 ($separator) must be a single character";
-                                    let exc = self.create_exception(b"ValueError", msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            if let Some(e_arg) = args.get(2) {
-                                let e_bytes = e_arg.to_php_string();
-                                if e_bytes.as_bytes().len() != 1 {
-                                    let msg = "SplFileObject::fgetcsv(): Argument #2 ($enclosure) must be a single character";
-                                    let exc = self.create_exception(b"ValueError", msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            if let Some(esc_arg) = args.get(3) {
-                                let esc_bytes = esc_arg.to_php_string();
-                                if esc_bytes.as_bytes().len() > 1 {
-                                    let msg = "SplFileObject::fgetcsv(): Argument #3 ($escape) must be empty or a single character";
-                                    let exc = self.create_exception(b"ValueError", msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            let delim = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| {
-                                let ob = obj.borrow();
-                                let d = ob.get_property(b"__spl_csv_delimiter");
-                                if let Value::String(s) = d { s.to_string_lossy() } else { ",".to_string() }
-                            });
-                            let enclosure = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| {
-                                let ob = obj.borrow();
-                                let e = ob.get_property(b"__spl_csv_enclosure");
-                                if let Value::String(s) = e { s.to_string_lossy() } else { "\"".to_string() }
-                            });
-                            // Read the current line
-                            let mut ob = obj.borrow_mut();
-                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                            let lines = ob.get_property(b"__spl_file_lines");
-                            if let Value::Array(a) = lines {
-                                let a_borrow = a.borrow();
-                                if let Some(line_val) = a_borrow.get(&ArrayKey::Int(pos)) {
-                                    let line = line_val.to_php_string().to_string_lossy();
-                                    let line = line.trim_end_matches('\n').trim_end_matches('\r');
-                                    drop(a_borrow);
-                                    ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
-                                    drop(ob);
-                                    // Parse CSV
-                                    let delim_char = delim.chars().next().unwrap_or(',');
-                                    let encl_char = enclosure.chars().next().unwrap_or('"');
-                                    let fields = Self::parse_csv_line(line, delim_char, encl_char);
-                                    let mut arr = PhpArray::new();
-                                    for f in fields {
-                                        arr.push(Value::String(PhpString::from_string(f)));
-                                    }
-                                    Some(Value::Array(Rc::new(RefCell::new(arr))))
-                                } else {
-                                    drop(a_borrow);
-                                    Some(Value::False)
-                                }
-                            } else {
-                                Some(Value::False)
-                            }
-                        }
-                        b"fputcsv" => {
-                            // SplFileObject::fputcsv(array $fields, string $separator = ",", string $enclosure = "\"", string $escape = "\\", string $eol = "\n")
-                            let fields = args.get(1).cloned().unwrap_or(Value::Null);
-                            let separator = args.get(2).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| ",".to_string());
-                            let enclosure = args.get(3).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\"".to_string());
-                            let escape = args.get(4).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\\".to_string());
-                            let eol = args.get(5).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "\n".to_string());
-                            let sep_char = separator.chars().next().unwrap_or(',');
-                            let encl_char = enclosure.chars().next().unwrap_or('"');
-                            let esc_char: Option<char> = escape.chars().next();
-
-                            // Build CSV line
-                            let mut csv_line = String::new();
-                            if let Value::Array(arr) = &fields {
-                                let arr_borrow = arr.borrow();
-                                let mut first = true;
-                                for (_, val) in arr_borrow.iter() {
-                                    if !first { csv_line.push(sep_char); }
-                                    first = false;
-                                    let s = val.to_php_string().to_string_lossy();
-                                    // Check if quoting is needed
-                                    let needs_quote = s.contains(sep_char) || s.contains(encl_char) || s.contains('\n') || s.contains('\r') || s.contains(' ');
-                                    if needs_quote {
-                                        csv_line.push(encl_char);
-                                        let chars: Vec<char> = s.chars().collect();
-                                        let mut i = 0;
-                                        while i < chars.len() {
-                                            let c = chars[i];
-                                            // PHP: if escape char precedes the
-                                            // enclosure, do not double the
-                                            // enclosure (the escape char takes
-                                            // care of it).
-                                            if c == encl_char {
-                                                let prev_is_escape = esc_char.is_some()
-                                                    && i > 0
-                                                    && chars[i - 1] == esc_char.unwrap();
-                                                if !prev_is_escape {
-                                                    csv_line.push(encl_char);
-                                                }
-                                            }
-                                            csv_line.push(c);
-                                            i += 1;
-                                        }
-                                        csv_line.push(encl_char);
-                                    } else {
-                                        csv_line.push_str(&s);
-                                    }
-                                }
-                            }
-                            csv_line.push_str(&eol);
-                            let csv_bytes = csv_line.as_bytes();
-                            let bytes_written = csv_bytes.len() as i64;
-
-                            // Write to file
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let is_temp = path_str.starts_with("php://temp") || path_str.starts_with("php://memory");
-                            drop(ob);
-                            if is_temp {
-                                let ob = obj.borrow();
-                                let lines = ob.get_property(b"__spl_file_lines");
-                                if let Value::Array(a) = lines {
-                                    a.borrow_mut().push(Value::String(PhpString::from_string(csv_line)));
-                                }
-                            } else {
-                                use std::io::Write;
-                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path_str) {
-                                    let _ = f.write_all(csv_bytes);
-                                }
-                            }
-                            // Maintain an explicit byte counter so ftell()
-                            // returns the post-write file position.
-                            let mut ob = obj.borrow_mut();
-                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
-                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + bytes_written));
-                            Some(Value::Long(bytes_written))
-                        }
-                        b"fwrite" => {
-                            let data_full = args.get(1).unwrap_or(&Value::Null).to_php_string();
-                            // Optional length: truncate data to length bytes
-                            let data = if let Some(len_val) = args.get(2) {
-                                let len = len_val.to_long().max(0) as usize;
-                                let bytes = data_full.as_bytes();
-                                let take = len.min(bytes.len());
-                                PhpString::from_vec(bytes[..take].to_vec())
-                            } else {
-                                data_full
-                            };
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let is_temp = path_str.starts_with("php://temp") || path_str.starts_with("php://memory");
-                            drop(ob);
-                            let bytes_written = data.len() as i64;
-                            if is_temp {
-                                // Write to in-memory lines array
-                                let ob = obj.borrow();
-                                let lines = ob.get_property(b"__spl_file_lines");
-                                if let Value::Array(a) = lines {
-                                    // Split data into proper lines (each ending in \n except possibly last)
-                                    let content = data.to_string_lossy();
-                                    let mut a_mut = a.borrow_mut();
-                                    let mut pieces: Vec<String> = Vec::new();
-                                    let mut current = String::new();
-                                    for ch in content.chars() {
-                                        current.push(ch);
-                                        if ch == '\n' {
-                                            pieces.push(std::mem::take(&mut current));
-                                        }
-                                    }
-                                    if !current.is_empty() {
-                                        pieces.push(current);
-                                    }
-                                    // If the storage already has a partial last line (no trailing \n),
-                                    // merge with the first new piece.
-                                    let len = a_mut.len() as i64;
-                                    if len > 0 {
-                                        if let Some(last) = a_mut.get(&ArrayKey::Int(len - 1)) {
-                                            let last_str = last.to_php_string().to_string_lossy();
-                                            if !last_str.ends_with('\n') && !pieces.is_empty() {
-                                                let merged = format!("{}{}", last_str, pieces.remove(0));
-                                                a_mut.set(ArrayKey::Int(len - 1), Value::String(PhpString::from_string(merged)));
-                                            }
-                                        }
-                                    }
-                                    for p in pieces {
-                                        a_mut.push(Value::String(PhpString::from_string(p)));
-                                    }
-                                } else {
-                                    drop(ob);
-                                    let mut lines_arr = PhpArray::new();
-                                    lines_arr.push(Value::String(PhpString::from_vec(data.as_bytes().to_vec())));
-                                    obj.borrow_mut().set_property(b"__spl_file_lines".to_vec(), Value::Array(Rc::new(RefCell::new(lines_arr))));
-                                }
-                                Some(Value::Long(bytes_written))
-                            } else {
-                                // Write to file on disk
-                                use std::io::Write;
-                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path_str) {
-                                    match f.write(data.as_bytes()) {
-                                        Ok(n) => {
-                                            let mut ob = obj.borrow_mut();
-                                            let prev = if let Value::Long(b) = ob.get_property(b"__spl_byte_pos") { b } else { 0 };
-                                            ob.set_property(b"__spl_byte_pos".to_vec(), Value::Long(prev + n as i64));
-                                            Some(Value::Long(n as i64))
-                                        }
-                                        Err(_) => Some(Value::False),
-                                    }
-                                } else {
-                                    Some(Value::False)
-                                }
-                            }
-                        }
-                        b"getbasename" => {
-                            let suffix = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let name = std::path::Path::new(&path_str)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            // PHP basename() does not strip the suffix if it
-                            // equals the entire basename (avoid empty result).
-                            let result = if !suffix.is_empty() && name.ends_with(&suffix) && name.len() > suffix.len() {
-                                name[..name.len() - suffix.len()].to_string()
-                            } else {
-                                name
-                            };
-                            Some(Value::String(PhpString::from_string(result)))
-                        }
-                        b"ftruncate" => {
-                            // Truncate file or in-memory storage. Returns bool.
-                            let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let is_temp = path_str.starts_with("php://temp") || path_str.starts_with("php://memory");
-                            drop(ob);
-                            if is_temp {
-                                // Truncate the in-memory line buffer at byte offset `size`.
-                                let ob = obj.borrow();
-                                let lines = ob.get_property(b"__spl_file_lines");
-                                if let Value::Array(a) = lines {
-                                    let mut a_mut = a.borrow_mut();
-                                    let mut remaining = size as usize;
-                                    let mut new_lines = PhpArray::new();
-                                    let snapshot: Vec<Value> = a_mut.iter().map(|(_, v)| v.clone()).collect();
-                                    for v in snapshot {
-                                        let s = v.to_php_string();
-                                        let len = s.as_bytes().len();
-                                        if remaining >= len {
-                                            new_lines.push(v);
-                                            remaining -= len;
-                                        } else if remaining > 0 {
-                                            let truncated: Vec<u8> = s.as_bytes()[..remaining].to_vec();
-                                            new_lines.push(Value::String(PhpString::from_vec(truncated)));
-                                            remaining = 0;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    *a_mut = new_lines;
-                                }
-                                Some(Value::True)
-                            } else {
-                                use std::fs::OpenOptions;
-                                match OpenOptions::new().write(true).open(&*path_str) {
-                                    Ok(f) => match f.set_len(size as u64) {
-                                        Ok(()) => Some(Value::True),
-                                        Err(_) => Some(Value::False),
-                                    },
-                                    Err(_) => Some(Value::False),
-                                }
-                            }
-                        }
-                        b"flock" => {
-                            // Stub: pretend the lock was acquired.
-                            Some(Value::True)
-                        }
-                        b"fread" => {
-                            // SplFileObject::fread(int $length): string|false
-                            let length = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            if length <= 0 {
-                                let msg = "SplFileObject::fread(): Argument #1 ($length) must be greater than 0";
-                                let line = self.current_line;
-                                let exc = self.create_exception(b"ValueError", msg, line);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let ob = obj.borrow();
-                            let path_val = ob.get_property(b"__spl_file_path");
-                            let path_str = path_val.to_php_string().to_string_lossy();
-                            let char_pos = if let Value::Long(p) = ob.get_property(b"__spl_char_pos") { p } else {
-                                // Initialize from line position
-                                let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                                let lines = ob.get_property(b"__spl_file_lines");
-                                if let Value::Array(a) = lines {
-                                    let a = a.borrow();
-                                    let mut total = 0i64;
-                                    for i in 0..pos {
-                                        if let Some(line) = a.get(&ArrayKey::Int(i)) {
-                                            total += line.to_php_string().as_bytes().len() as i64;
-                                        }
-                                    }
-                                    total
-                                } else { 0 }
-                            };
-                            drop(ob);
-                            // Read from file at char_pos
-                            if let Ok(content) = std::fs::read(&*path_str) {
-                                if (char_pos as usize) < content.len() {
-                                    let end = std::cmp::min(content.len(), (char_pos + length) as usize);
-                                    let data: Vec<u8> = content[char_pos as usize..end].to_vec();
-                                    let mut ob = obj.borrow_mut();
-                                    ob.set_property(b"__spl_char_pos".to_vec(), Value::Long(end as i64));
-                                    Some(Value::String(PhpString::from_vec(data)))
-                                } else {
-                                    // EOF returns empty string in PHP fread (and false for very-low-level)
-                                    Some(Value::String(PhpString::from_bytes(b"")))
-                                }
-                            } else {
-                                Some(Value::False)
-                            }
-                        }
-                        b"fscanf" => {
-                            // SplFileObject::fscanf(string $format, mixed &...$vars)
-                            // Read a line, then sscanf it.
-                            let format_arg = args.get(1).cloned().unwrap_or(Value::Null);
-                            // Get current line
-                            let mut ob = obj.borrow_mut();
-                            let pos = if let Value::Long(p) = ob.get_property(b"__spl_pos") { p } else { 0 };
-                            let lines = ob.get_property(b"__spl_file_lines");
-                            let line_value = if let Value::Array(a) = lines {
-                                let a_b = a.borrow();
-                                a_b.get(&ArrayKey::Int(pos)).cloned()
-                            } else { None };
-                            if line_value.is_none() {
-                                return Some(Value::Long(-1));
-                            }
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
-                            drop(ob);
-                            let line = line_value.unwrap();
-                            // Call sscanf with the line
-                            let sscanf_fn = self.functions.get(b"sscanf".as_slice()).copied();
-                            if let Some(sscanf) = sscanf_fn {
-                                let mut sscanf_args = vec![line, format_arg];
-                                for a in args.iter().skip(2) {
-                                    sscanf_args.push(a.clone());
-                                }
-                                sscanf(self, &sscanf_args).ok()
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        _ => None,
-                    }
+                    self.spl_file_object_call(method, obj, Some(&args[1..]))
                 }
                 b"splfileinfo" => {
+                    if method == b"getbasename" || method == b"openfile" {
+                        return self.spl_file_info_call(method, obj, Some(&args[1..]));
+                    }
                     match method {
                         b"getbasename" => {
                             let suffix = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
@@ -19281,15 +18521,22 @@ impl Vm {
                                 ));
                                 let mut spl_args = call.args.clone();
                                 let mut named_err = None;
-                                if !call.named_args.is_empty() && self.native_class_handlers.contains_key(spl_class) {
-                                    if let Err(n) = self.merge_native_named_args(spl_class, spl_method, &mut spl_args, 1, &call.named_args) {
-                                        named_err = Some(n);
+                                let mut named_ok = true;
+                                if !call.named_args.is_empty() {
+                                    if self.native_class_handlers.contains_key(spl_class) {
+                                        if let Err(n) = self.merge_native_named_args(spl_class, spl_method, &mut spl_args, 1, &call.named_args) {
+                                            named_err = Some(n);
+                                        }
+                                    } else {
+                                        named_ok = self.spl_map_named_args(spl_class, spl_method, &mut spl_args, &call.named_args);
                                     }
                                 }
                                 let result = if let Some(n) = named_err {
                                     let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
                                     let exc = self.create_exception(b"Error", &msg, op.line);
                                     self.current_exception = Some(exc);
+                                    Value::Null
+                                } else if !named_ok {
                                     Value::Null
                                 } else {
                                     self
