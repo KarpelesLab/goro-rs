@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::array::{ArrayKey, PhpArray};
+use crate::fastpath::canonical_int_key;
 use crate::fiber::{FIBER_SUSPEND_SENTINEL, FiberState};
 use crate::object::{ClassEntry, PhpObject, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
@@ -15547,16 +15548,33 @@ impl Vm {
             // exception (left by a builtin that called back into user code)
             // is dispatched by the general handlers, so it disables this.
             if typed_ref_watch.is_none() && self.current_exception.is_none() {
-                let refs_ok = !typed_ref::any();
-                let no_release = !self.has_release_work();
-                match crate::fastpath::fast_op(
-                    op,
-                    cvs.as_mut_slice(),
-                    tmps.as_mut_slice(),
-                    &op_array.literals,
-                    refs_ok,
-                    no_release,
-                ) {
+                let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet) {
+                    self.fast_prop_op(
+                        op,
+                        cvs.as_mut_slice(),
+                        tmps.as_mut_slice(),
+                        &op_array.literals,
+                    )
+                } else if matches!(op.opcode, OpCode::ArrayGet | OpCode::ArraySet) {
+                    self.fast_dim_op(
+                        op,
+                        cvs.as_mut_slice(),
+                        tmps.as_mut_slice(),
+                        &op_array.literals,
+                    )
+                } else {
+                    let refs_ok = !typed_ref::any();
+                    let no_release = !self.has_release_work();
+                    crate::fastpath::fast_op(
+                        op,
+                        cvs.as_mut_slice(),
+                        tmps.as_mut_slice(),
+                        &op_array.literals,
+                        refs_ok,
+                        no_release,
+                    )
+                };
+                match fast {
                     crate::fastpath::Fast::No => {}
                     crate::fastpath::Fast::Done => continue 'exec,
                     crate::fastpath::Fast::Jump(t) => {
@@ -48319,16 +48337,10 @@ impl Vm {
                 // PHP converts numeric strings to integer keys
                 // In PHP 8, only strings that are exactly integer representations
                 // (no leading/trailing whitespace) are converted to integer keys
-                let s_str = s.to_string_lossy();
-                if !s_str.is_empty()
-                    && let Ok(n) = s_str.parse::<i64>()
-                {
-                    // Only convert if the string is exactly the integer representation
-                    if n.to_string() == s_str.as_ref() {
-                        return ArrayKey::Int(n);
-                    }
+                match canonical_int_key(s.as_bytes()) {
+                    Some(n) => ArrayKey::Int(n),
+                    None => ArrayKey::String(s),
                 }
-                ArrayKey::String(s)
             }
             Value::Double(f) => ArrayKey::Int(f as i64),
             Value::True => ArrayKey::Int(1),

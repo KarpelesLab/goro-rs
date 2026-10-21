@@ -11,6 +11,8 @@
 //! before; the results are identical by construction (they use the same
 //! `Value` arithmetic / comparison routines as the general handlers).
 
+use std::rc::Rc;
+
 use crate::opcode::{Op, OpCode, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -245,6 +247,24 @@ fn bool_val(b: bool) -> Value {
     if b { Value::True } else { Value::False }
 }
 
+/// The integer an array key string stands for, if it is the canonical
+/// decimal form of an int ("0", "-5", "42"; not "+5", "05", "-0", " 5" or
+/// out of range), like PHP's ZEND_HANDLE_NUMERIC_STR.  Allocation-free
+/// equivalent of `s.parse::<i64>()` + `n.to_string() == s`.
+#[inline]
+pub fn canonical_int_key(b: &[u8]) -> Option<i64> {
+    let digits = b.strip_prefix(b"-").unwrap_or(b);
+    if digits.is_empty() || digits.len() > 19 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if digits[0] == b'0' && (digits.len() > 1 || digits.len() != b.len()) {
+        return None;
+    }
+    // ASCII digits (and '-') only, so this is valid UTF-8; parse() rejects
+    // values out of i64 range.
+    std::str::from_utf8(b).ok()?.parse::<i64>().ok()
+}
+
 /// Outcome of fast_op().
 pub(crate) enum Fast {
     /// Not handled: run the general handler.
@@ -464,9 +484,352 @@ pub(crate) fn fast_op(
     }
 }
 
+/// Lowercase `s` into `buf` (None when it does not fit: the caller then
+/// takes the general path).
+#[inline]
+fn lower_into<'b>(s: &[u8], buf: &'b mut [u8]) -> Option<&'b [u8]> {
+    let out = buf.get_mut(..s.len())?;
+    for (o, c) in out.iter_mut().zip(s) {
+        *o = c.to_ascii_lowercase();
+    }
+    Some(out)
+}
+
+/// An int or string array key operand (through a CV's reference).  Other
+/// key types (null, float, bool, ...) may warn and take the general path.
+#[inline]
+fn dim_key(
+    operand: &OperandType,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> Option<crate::array::ArrayKey> {
+    let of = |v: &Value| match v {
+        Value::Long(n) => Some(crate::array::ArrayKey::Int(*n)),
+        Value::String(s) => Some(crate::vm::Vm::value_to_array_key(Value::String(s.clone()))),
+        _ => None,
+    };
+    match operand {
+        OperandType::Cv(i) => match cvs.get(*i as usize)? {
+            Value::Reference(r) => of(&*r.try_borrow().ok()?),
+            v => of(v),
+        },
+        OperandType::Tmp(i) => of(tmps.get(*i as usize)?),
+        OperandType::Const(i) => of(literals.get(*i as usize)?),
+        _ => None,
+    }
+}
+
+impl crate::vm::Vm {
+    /// `$a[k]` read and `$cv[k] = <scalar>` write on a real array with an
+    /// int / string key, where the element (for a read) exists or (for a
+    /// write) is absent or a plain scalar that is not a reference.  The
+    /// general handlers do exactly this in that case, after checks for
+    /// objects, strings, undefined variables, illegal offsets and the
+    /// release of an overwritten object / array.
+    pub(crate) fn fast_dim_op(
+        &self,
+        op: &Op,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+    ) -> Fast {
+        let write = op.opcode == OpCode::ArraySet;
+        let arr_of = |v: &Value| match v {
+            Value::Array(a) => Some(a.clone()),
+            Value::Reference(r) => match &*r.try_borrow().ok()? {
+                Value::Array(a) => Some(a.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let arr = match op.op1 {
+            OperandType::Cv(i) => cvs.get(i as usize).and_then(arr_of),
+            OperandType::Tmp(i) if !write => match tmps.get(i as usize) {
+                Some(Value::Array(a)) => Some(a.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(arr) = arr else {
+            return Fast::No;
+        };
+        // $GLOBALS (the symbol table) has its own bookkeeping.
+        if Rc::ptr_eq(&arr, &self.globals) {
+            return Fast::No;
+        }
+        let key_op = if write { &op.result } else { &op.op2 };
+        let Some(key) = dim_key(key_op, cvs, tmps, literals) else {
+            return Fast::No;
+        };
+        if write {
+            let val = match op.op2 {
+                OperandType::Tmp(i) => tmps.get(i as usize),
+                OperandType::Cv(i) => cvs.get(i as usize),
+                OperandType::Const(i) => literals.get(i as usize),
+                _ => None,
+            };
+            let val = match val {
+                Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => v.clone(),
+                _ => return Fast::No,
+            };
+            let Ok(mut a) = arr.try_borrow_mut() else {
+                return Fast::No;
+            };
+            if !a.get(&key).is_none_or(is_plain_scalar) {
+                return Fast::No;
+            }
+            a.set(key, val);
+            return Fast::Done;
+        }
+        if !tmp_writable(&op.result, tmps) {
+            return Fast::No;
+        }
+        let v = {
+            let Ok(a) = arr.try_borrow() else {
+                return Fast::No;
+            };
+            match a.get(&key) {
+                Some(v) => v.deref(),
+                None => return Fast::No,
+            }
+        };
+        match &v {
+            Value::Object(o) => crate::gc::track_object(o),
+            Value::Generator(g) => crate::gc::track_generator(g),
+            _ => {}
+        }
+        if store_tmp(&op.result, v, tmps) {
+            Fast::Done
+        } else {
+            Fast::No
+        }
+    }
+
+    /// Whether `$obj->prop` on an instance of `class_name` is a plain slot
+    /// access: the class and all its ancestors are user classes without
+    /// extension handlers, `prop` is declared exactly once in the hierarchy
+    /// as a public, non-static instance property without hooks (for a
+    /// write: also untyped, not readonly, no asymmetric set visibility, in
+    /// a class that is not readonly).  Magic methods do not matter: they are
+    /// only consulted for inaccessible or missing properties, and the
+    /// caller checks the object holds an initialized slot for `prop`.
+    fn plain_public_prop(&self, class_name: &[u8], prop: &[u8], write: bool) -> bool {
+        let mut buf = [0u8; 128];
+        let Some(lower) = lower_into(class_name, &mut buf) else {
+            return false;
+        };
+        let Some(ce) = self.classes.get(lower) else {
+            return false;
+        };
+        if ce.is_enum || ce.filename.is_none() || (write && ce.is_readonly) {
+            return false;
+        }
+        let mut decl = None;
+        for p in &ce.properties {
+            if p.name == prop {
+                if decl.is_some() {
+                    return false;
+                }
+                decl = Some(p);
+            }
+        }
+        let Some(p) = decl else {
+            return false;
+        };
+        if p.is_static
+            || p.visibility != crate::object::Visibility::Public
+            || p.has_get_hook
+            || p.has_set_hook
+            || p.is_virtual
+            || (write && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
+        {
+            return false;
+        }
+        // Hooks are compiled to `__property_get_<name>` / `__property_set_<name>`.
+        let mut hbuf = [0u8; 160];
+        let prefix: &[u8] = if write {
+            b"__property_set_"
+        } else {
+            b"__property_get_"
+        };
+        let Some(h) = hbuf.get_mut(..prefix.len() + prop.len()) else {
+            return false;
+        };
+        h[..prefix.len()].copy_from_slice(prefix);
+        for (o, c) in h[prefix.len()..].iter_mut().zip(prop) {
+            *o = c.to_ascii_lowercase();
+        }
+        if ce.methods.contains_key(&*h) {
+            return false;
+        }
+        if self.native_class_handlers.contains_key(lower) {
+            return false;
+        }
+        let mut parent = ce.parent.as_deref();
+        for _ in 0..64 {
+            let Some(pn) = parent else {
+                return true;
+            };
+            let mut pbuf = [0u8; 128];
+            let Some(pl) = lower_into(pn, &mut pbuf) else {
+                return false;
+            };
+            if self.native_class_handlers.contains_key(pl) {
+                return false;
+            }
+            let Some(pce) = self.classes.get(pl) else {
+                return false;
+            };
+            if pce.filename.is_none() {
+                return false;
+            }
+            parent = pce.parent.as_deref();
+        }
+        false
+    }
+
+    /// `$cv->name` read / `$cv->name = <scalar>` write of a plain declared
+    /// public property (see plain_public_prop) on a user object that has
+    /// no internal state markers (lazy, cloning, enum case, destructed... are
+    /// all stored as `__`-prefixed slots).  Everything else takes the
+    /// general PropertyGet / PropertySet handlers.
+    pub(crate) fn fast_prop_op(
+        &self,
+        op: &Op,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+    ) -> Fast {
+        if !self.property_hook_stack.is_empty() {
+            return Fast::No;
+        }
+        let OperandType::Cv(ci) = op.op1 else {
+            return Fast::No;
+        };
+        let Some(Value::Object(obj)) = cvs.get(ci as usize) else {
+            return Fast::No;
+        };
+        let write = op.opcode == OpCode::PropertySet;
+        let name_op = if write { &op.result } else { &op.op2 };
+        let name = match name_op {
+            OperandType::Const(i) => match literals.get(*i as usize) {
+                Some(Value::String(s)) => s.as_bytes(),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
+        if name.is_empty() || name[0] == 0 || name.starts_with(b"__") {
+            return Fast::No;
+        }
+        // The value to store: a plain scalar.
+        let new_val = if write {
+            let src = match op.op2 {
+                OperandType::Tmp(i) => tmps.get(i as usize),
+                OperandType::Cv(i) => cvs.get(i as usize),
+                OperandType::Const(i) => literals.get(i as usize),
+                _ => None,
+            };
+            match src {
+                Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
+                _ => return Fast::No,
+            }
+        } else {
+            if !tmp_writable(&op.result, tmps) {
+                return Fast::No;
+            }
+            None
+        };
+        let obj = obj.clone();
+        let Ok(ob) = obj.try_borrow() else {
+            return Fast::No;
+        };
+        if ob.native.is_some() || ob.closure.is_some() {
+            return Fast::No;
+        }
+        let mut slot = None;
+        for (i, (k, v)) in ob.properties.iter().enumerate() {
+            if k.starts_with(b"__") {
+                return Fast::No;
+            }
+            if k.as_slice() == name {
+                slot = Some((i, v));
+            }
+        }
+        let Some((idx, cur)) = slot else {
+            return Fast::No;
+        };
+        // An uninitialized slot, or (for a write) one that is a reference
+        // or holds something releasing / tracking could care about.
+        let ok = if write {
+            is_plain_scalar(cur) && !matches!(cur, Value::Undef)
+        } else {
+            match cur {
+                Value::Undef => false,
+                Value::Reference(r) => r.try_borrow().is_ok_and(|b| !matches!(*b, Value::Undef)),
+                _ => true,
+            }
+        };
+        if !ok || !self.plain_public_prop(&ob.class_name, name, write) {
+            return Fast::No;
+        }
+        if let Some(v) = new_val {
+            drop(ob);
+            let Ok(mut obm) = obj.try_borrow_mut() else {
+                return Fast::No;
+            };
+            obm.properties[idx].1 = v;
+            return Fast::Done;
+        }
+        let v = cur.deref();
+        drop(ob);
+        // As write_operand(): objects / generators stored in a temporary
+        // are registered with the cycle collector.
+        match &v {
+            Value::Object(o) => crate::gc::track_object(o),
+            Value::Generator(g) => crate::gc::track_generator(g),
+            _ => {}
+        }
+        if store_tmp(&op.result, v, tmps) {
+            Fast::Done
+        } else {
+            Fast::No
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn int_keys() {
+        for s in [
+            "0",
+            "1",
+            "-1",
+            "42",
+            "-0",
+            "01",
+            "+1",
+            " 1",
+            "1 ",
+            "",
+            "-",
+            "1.0",
+            "1e3",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "00",
+            "abc",
+            "12345678901234567890",
+        ] {
+            let old = s.parse::<i64>().ok().filter(|n| n.to_string() == s);
+            assert_eq!(canonical_int_key(s.as_bytes()), old, "{s:?}");
+        }
+    }
 
     #[test]
     fn long_formatting() {
