@@ -2653,6 +2653,7 @@ impl Compiler {
                     func_compiler.op_array.param_types[cv as usize] = type_info;
 
                     if let Some(default_expr) = &param.default {
+                        func_compiler.op_array.set_param_default_repr(cv, self.default_value_repr(default_expr));
                         // Emit: if param is Undef, set to default
                         let default_val = func_compiler.compile_expr(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
@@ -5213,6 +5214,8 @@ impl Compiler {
                                     method_compiler.op_array.param_types[cv as usize] = type_info;
 
                                     if let Some(default_expr) = &param.default {
+                                        let default_repr = self.default_value_repr_scoped(default_expr, if modifiers.is_trait { None } else { Some(&qualified_name) });
+                                        method_compiler.op_array.set_param_default_repr(cv, default_repr);
                                         let default_val =
                                             method_compiler.compile_expr(default_expr)?;
                                         if !matches!(default_expr.kind, ExprKind::Null) {
@@ -9786,6 +9789,7 @@ impl Compiler {
 
                     // Compile default value
                     if let Some(default_expr) = &param.default {
+                        closure_compiler.op_array.set_param_default_repr(cv, self.default_value_repr(default_expr));
                         let default_val = closure_compiler.compile_expr(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
@@ -13532,5 +13536,289 @@ fn is_illegal_class_literal(e: &Expr) -> bool {
             matches!(operand.kind, ExprKind::Int(_) | ExprKind::Float(_))
         }
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default-value rendering for Reflection (`zend_ast_export` / evaluated
+// literals), computed at compile time while namespace/use info is known.
+// ---------------------------------------------------------------------------
+impl Compiler {
+    /// Resolve a class name in a constant expression the way Zend does for
+    /// its AST dump: `\Fully\Qualified`, except self/parent/static.
+    fn export_class_name(&self, name: &[u8]) -> String {
+        let lower = name.to_ascii_lowercase();
+        if matches!(lower.as_slice(), b"self" | b"parent" | b"static") {
+            return String::from_utf8_lossy(name).to_string();
+        }
+        let resolved = if lower.starts_with(b"namespace\\") {
+            self.prefix_with_namespace(&name[b"namespace\\".len()..])
+        } else {
+            self.resolve_class_name(name)
+        };
+        format!("\\{}", String::from_utf8_lossy(&resolved))
+    }
+
+    /// Fold a literal-only constant expression into a value (what PHP
+    /// evaluates at compile time). None if it needs runtime evaluation.
+    fn fold_literal_default(&self, expr: &Expr) -> Option<Value> {
+        match &expr.kind {
+            ExprKind::Int(n) => Some(Value::Long(*n)),
+            ExprKind::Float(f) => Some(Value::Double(*f)),
+            ExprKind::String(s) => Some(Value::String(PhpString::from_vec(s.clone()))),
+            ExprKind::True => Some(Value::True),
+            ExprKind::False => Some(Value::False),
+            ExprKind::Null => Some(Value::Null),
+            ExprKind::Identifier(n) => match n.to_ascii_lowercase().as_slice() {
+                b"true" | b"\\true" => Some(Value::True),
+                b"false" | b"\\false" => Some(Value::False),
+                b"null" | b"\\null" => Some(Value::Null),
+                _ => None,
+            },
+            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => match self.fold_literal_default(operand)? {
+                Value::Long(n) => Some(Value::Long(n.wrapping_neg())),
+                Value::Double(f) => Some(Value::Double(-f)),
+                _ => None,
+            },
+            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => match self.fold_literal_default(operand)? {
+                v @ (Value::Long(_) | Value::Double(_)) => Some(v),
+                _ => None,
+            },
+            ExprKind::Array(elems) => {
+                let mut arr = crate::array::PhpArray::new();
+                for el in elems {
+                    if el.unpack || el.by_ref {
+                        return None;
+                    }
+                    let v = self.fold_literal_default(&el.value)?;
+                    match &el.key {
+                        None => arr.push(v),
+                        Some(k) => match self.fold_literal_default(k)? {
+                            Value::Long(n) => arr.set(crate::array::ArrayKey::Int(n), v),
+                            Value::String(s) => {
+                                let key = match std::str::from_utf8(s.as_bytes()).ok().and_then(|t| t.parse::<i64>().ok()) {
+                                    Some(n) if n.to_string().as_bytes() == s.as_bytes() => crate::array::ArrayKey::Int(n),
+                                    _ => crate::array::ArrayKey::String(s),
+                                };
+                                arr.set(key, v)
+                            }
+                            Value::True => arr.set(crate::array::ArrayKey::Int(1), v),
+                            Value::False | Value::Null => arr.set(crate::array::ArrayKey::Int(0), v),
+                            _ => return None,
+                        },
+                    }
+                }
+                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+            }
+            ExprKind::BinaryOp { op, left, right } => {
+                let l = self.fold_literal_default(left)?;
+                let r = self.fold_literal_default(right)?;
+                match (op, &l, &r) {
+                    (BinaryOp::Add, Value::Long(a), Value::Long(b)) => a.checked_add(*b).map(Value::Long),
+                    (BinaryOp::Sub, Value::Long(a), Value::Long(b)) => a.checked_sub(*b).map(Value::Long),
+                    (BinaryOp::Mul, Value::Long(a), Value::Long(b)) => a.checked_mul(*b).map(Value::Long),
+                    (BinaryOp::BitwiseOr, Value::Long(a), Value::Long(b)) => Some(Value::Long(a | b)),
+                    (BinaryOp::BitwiseAnd, Value::Long(a), Value::Long(b)) => Some(Value::Long(a & b)),
+                    (BinaryOp::ShiftLeft, Value::Long(a), Value::Long(b)) if (0..64).contains(b) => Some(Value::Long(a << b)),
+                    (BinaryOp::Concat, Value::String(a), Value::String(b)) => {
+                        let mut v = a.as_bytes().to_vec();
+                        v.extend_from_slice(b.as_bytes());
+                        Some(Value::String(PhpString::from_vec(v)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Port of `zend_ast_export_ex` for constant expressions.
+    fn export_const_expr(&self, expr: &Expr, priority: i32) -> Option<String> {
+        fn qstr(s: &[u8]) -> String {
+            let mut out = String::from("'");
+            for &c in s {
+                if c == b'\'' || c == b'\\' {
+                    out.push('\\');
+                }
+                out.push(c as char);
+            }
+            out.push('\'');
+            out
+        }
+        let bin = |sym: &str, p: i32, pl: i32, pr: i32, l: &Expr, r: &Expr| -> Option<String> {
+            let ls = self.export_const_expr(l, pl)?;
+            let rs = self.export_const_expr(r, pr)?;
+            let s = format!("{}{}{}", ls, sym, rs);
+            Some(if priority > p { format!("({})", s) } else { s })
+        };
+        Some(match &expr.kind {
+            ExprKind::Int(n) => n.to_string(),
+            ExprKind::Float(f) => {
+                let s = crate::value::format_php_float(*f);
+                if f.is_finite() && !s.contains('.') { format!("{}.0", s) } else { s }
+            }
+            ExprKind::String(s) => qstr(s),
+            ExprKind::True => "true".to_string(),
+            ExprKind::False => "false".to_string(),
+            ExprKind::Null => "null".to_string(),
+            ExprKind::Identifier(n) => {
+                let lower = n.to_ascii_lowercase();
+                match lower.as_slice() {
+                    b"true" | b"false" | b"null" => String::from_utf8_lossy(&lower).to_string(),
+                    _ => {
+                        if let Some(rest) = n.strip_prefix(b"\\") {
+                            String::from_utf8_lossy(rest).to_string()
+                        } else if lower.starts_with(b"namespace\\") {
+                            String::from_utf8_lossy(&self.prefix_with_namespace(&n[b"namespace\\".len()..])).to_string()
+                        } else if n.contains(&b'\\') {
+                            String::from_utf8_lossy(&self.resolve_class_name(n)).to_string()
+                        } else {
+                            String::from_utf8_lossy(&self.prefix_with_namespace(n)).to_string()
+                        }
+                    }
+                }
+            }
+            ExprKind::ClassConstAccess { class, constant } => {
+                let cls = match &class.kind {
+                    ExprKind::Identifier(n) => {
+                        // Zend marks the name fully qualified only if resolution
+                        // changed it (or it was written that way).
+                        let full = self.export_class_name(n);
+                        if !n.starts_with(b"\\") && full.as_bytes().get(1..) == Some(&n[..]) { String::from_utf8_lossy(n).to_string() } else { full }
+                    }
+                    _ => return None,
+                };
+                format!("{}::{}", cls, String::from_utf8_lossy(constant))
+            }
+            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
+                let s = format!("-{}", self.export_const_expr(operand, 241)?);
+                if priority > 240 { format!("({})", s) } else { s }
+            }
+            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => {
+                let s = format!("+{}", self.export_const_expr(operand, 241)?);
+                if priority > 240 { format!("({})", s) } else { s }
+            }
+            ExprKind::UnaryOp { op: UnaryOp::BooleanNot, operand, .. } => {
+                let s = format!("!{}", self.export_const_expr(operand, 241)?);
+                if priority > 240 { format!("({})", s) } else { s }
+            }
+            ExprKind::UnaryOp { op: UnaryOp::BitwiseNot, operand, .. } => {
+                let s = format!("~{}", self.export_const_expr(operand, 241)?);
+                if priority > 240 { format!("({})", s) } else { s }
+            }
+            ExprKind::BinaryOp { op, left, right } => {
+                let (sym, p, pl, pr) = match op {
+                    BinaryOp::Add => (" + ", 200, 200, 201),
+                    BinaryOp::Sub => (" - ", 200, 200, 201),
+                    BinaryOp::Mul => (" * ", 210, 210, 211),
+                    BinaryOp::Div => (" / ", 210, 210, 211),
+                    BinaryOp::Mod => (" % ", 210, 210, 211),
+                    BinaryOp::ShiftLeft => (" << ", 190, 190, 191),
+                    BinaryOp::ShiftRight => (" >> ", 190, 190, 191),
+                    BinaryOp::Concat => (" . ", 185, 185, 186),
+                    BinaryOp::BitwiseOr => (" | ", 140, 140, 141),
+                    BinaryOp::BitwiseAnd => (" & ", 160, 160, 161),
+                    BinaryOp::BitwiseXor => (" ^ ", 150, 150, 151),
+                    BinaryOp::Identical => (" === ", 170, 171, 171),
+                    BinaryOp::NotIdentical => (" !== ", 170, 171, 171),
+                    BinaryOp::Equal => (" == ", 170, 171, 171),
+                    BinaryOp::NotEqual => (" != ", 170, 171, 171),
+                    BinaryOp::Less => (" < ", 180, 181, 181),
+                    BinaryOp::LessEqual => (" <= ", 180, 181, 181),
+                    BinaryOp::Greater => (" > ", 180, 181, 181),
+                    BinaryOp::GreaterEqual => (" >= ", 180, 181, 181),
+                    BinaryOp::Pow => (" ** ", 250, 251, 250),
+                    BinaryOp::LogicalXor => (" xor ", 40, 40, 41),
+                    BinaryOp::Spaceship => (" <=> ", 180, 181, 181),
+                    BinaryOp::BooleanAnd => (" && ", 130, 130, 131),
+                    BinaryOp::BooleanOr => (" || ", 120, 120, 121),
+                    _ => return None,
+                };
+                return bin(sym, p, pl, pr, left, right);
+            }
+            ExprKind::NullCoalesce { left, right } => return bin(" ?? ", 110, 111, 110, left, right),
+            ExprKind::Ternary { condition, if_true, if_false } => {
+                let c = self.export_const_expr(condition, 100)?;
+                let f = self.export_const_expr(if_false, 101)?;
+                let s = match if_true {
+                    Some(t) => format!("{} ? {} : {}", c, self.export_const_expr(t, 101)?, f),
+                    None => format!("{} ?: {}", c, f),
+                };
+                if priority > 100 { format!("({})", s) } else { s }
+            }
+            ExprKind::Array(elems) => {
+                let mut parts = Vec::new();
+                for el in elems {
+                    let mut p = String::new();
+                    if el.unpack {
+                        p.push_str("...");
+                    }
+                    if let Some(k) = &el.key {
+                        p.push_str(&self.export_const_expr(k, 80)?);
+                        p.push_str(" => ");
+                    }
+                    if el.by_ref {
+                        p.push('&');
+                    }
+                    p.push_str(&self.export_const_expr(&el.value, 80)?);
+                    parts.push(p);
+                }
+                format!("[{}]", parts.join(", "))
+            }
+            ExprKind::New { class, args } => {
+                let cls = match &class.kind {
+                    ExprKind::Identifier(n) => self.export_class_name(n),
+                    _ => return None,
+                };
+                let mut parts = Vec::new();
+                for a in args {
+                    let v = self.export_const_expr(&a.value, 0)?;
+                    parts.push(match &a.name {
+                        Some(n) => format!("{}: {}", String::from_utf8_lossy(n), v),
+                        None if a.unpack => format!("...{}", v),
+                        None => v,
+                    });
+                }
+                format!("new {}({})", cls, parts.join(", "))
+            }
+            _ => return None,
+        })
+    }
+
+    /// The reflection rendering of a parameter/property default value:
+    /// literal values are formatted as PHP prints evaluated defaults, other
+    /// constant expressions as their AST dump.
+    pub(crate) fn default_value_repr(&self, expr: &Expr) -> Option<String> {
+        self.default_value_repr_scoped(expr, None)
+    }
+
+    /// Like `default_value_repr`; `self::class` folds to the name of
+    /// `class_scope` (a non-trait class) as PHP does at compile time.
+    pub(crate) fn default_value_repr_scoped(&self, expr: &Expr, class_scope: Option<&[u8]>) -> Option<String> {
+        if let (Some(cls), ExprKind::ClassConstAccess { class, constant }) = (class_scope, &expr.kind) {
+            if constant.eq_ignore_ascii_case(b"class") && !cls.starts_with(b"__anonymous") && !cls.contains(&0u8) {
+                if let ExprKind::Identifier(n) = &class.kind {
+                    if n.eq_ignore_ascii_case(b"self") {
+                        return Some(crate::reflection::format_default_value(&Value::String(PhpString::from_vec(cls.to_vec()))));
+                    }
+                }
+            }
+        }
+        if let Some(v) = self.fold_literal_default(expr) {
+            return Some(crate::reflection::format_default_value(&v));
+        }
+        // `X::class` on a known (non-relative) class folds to a string.
+        if let ExprKind::ClassConstAccess { class, constant } = &expr.kind {
+            if constant.eq_ignore_ascii_case(b"class") {
+                if let ExprKind::Identifier(n) = &class.kind {
+                    let lower = n.to_ascii_lowercase();
+                    if !matches!(lower.as_slice(), b"self" | b"parent" | b"static") {
+                        let resolved = self.resolve_class_name(n);
+                        return Some(crate::reflection::format_default_value(&Value::String(PhpString::from_vec(resolved))));
+                    }
+                }
+            }
+        }
+        self.export_const_expr(expr, 0)
     }
 }

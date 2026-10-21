@@ -417,6 +417,9 @@ pub struct OpArray {
     /// Set on signature-only OpArrays synthesized for internal functions and
     /// methods from php-src stubs (see `crate::stubs`).
     pub internal_sig: Option<&'static crate::stubs::StubFunc>,
+    /// Reflection rendering of each parameter's default value (by CV index),
+    /// as PHP prints it (evaluated literal or constant-expression AST dump).
+    pub param_default_repr: Vec<Option<String>>,
 }
 
 impl OpArray {
@@ -452,6 +455,7 @@ impl OpArray {
             const_attribute_table: Vec::new(),
             local_classes: Vec::new(),
             internal_sig: None,
+            param_default_repr: Vec::new(),
         }
     }
 
@@ -463,6 +467,15 @@ impl OpArray {
         } else {
             &self.name
         }
+    }
+
+    /// Record the reflection rendering of a parameter's default value.
+    pub fn set_param_default_repr(&mut self, cv: u32, repr: Option<String>) {
+        let i = cv as usize;
+        if self.param_default_repr.len() <= i {
+            self.param_default_repr.resize(i + 1, None);
+        }
+        self.param_default_repr[i] = repr;
     }
 
     /// Add a literal value to the constant pool, returning its index

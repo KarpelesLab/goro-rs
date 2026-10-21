@@ -4622,6 +4622,59 @@ pub fn reflection_function_method(
             };
             Some(Value::String(PhpString::from_string(function_string(vm, &ctx, ""))))
         }
+        b"__tostring" if vm.user_functions.contains_key(func_lower.as_slice()) => {
+            let ob = obj.borrow();
+            let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            let is_closure = ob.has_property(b"__reflection_is_closure");
+            let captured: Vec<Value> = match ob.get_property(b"__reflection_closure_captured") {
+                Value::Array(a) => a.borrow().values().cloned().collect(),
+                _ => Vec::new(),
+            };
+            drop(ob);
+            let op = vm.user_functions.get(func_lower.as_slice()).unwrap();
+            let display = if !op.display_name.is_empty() {
+                String::from_utf8_lossy(&op.display_name).to_string()
+            } else if is_closure {
+                name.clone()
+            } else {
+                String::from_utf8_lossy(&op.name).to_string()
+            };
+            let display = if display.is_empty() { name.clone() } else { display };
+            let filename = if op.filename.is_empty() {
+                vm.current_file.clone()
+            } else {
+                String::from_utf8_lossy(&op.filename).into_owned()
+            };
+            let ctx = FnStrCtx {
+                op,
+                method: None,
+                scope: None,
+                is_closure,
+                internal_fn_ext: None,
+                display_name: &display,
+                filename: &filename,
+            };
+            let mut out = function_string(vm, &ctx, "");
+            // Bound variables (closure `use` vars) go right after the @@ line.
+            if is_closure && !captured.is_empty() {
+                let skip = if op.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) { 1 } else { 0 };
+                let mut bv = format!("\n  - Bound Variables [{}] {{\n", captured.len());
+                for i in 0..captured.len() {
+                    let n = op.cv_names.get(skip + op.param_count as usize + i)
+                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .unwrap_or_default();
+                    bv.push_str(&format!("      Variable #{} [ ${} ]\n", i, n));
+                }
+                bv.push_str("  }\n");
+                if let Some(pos) = out.find('\n') {
+                    if let Some(pos2) = out[pos + 1..].find('\n') {
+                        let at = pos + 1 + pos2 + 1;
+                        out.insert_str(at, &bv);
+                    }
+                }
+            }
+            Some(Value::String(PhpString::from_string(out)))
+        }
         b"__tostring" => {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
@@ -8695,6 +8748,9 @@ fn method_prototype(vm: &Vm, m: &crate::object::MethodDef) -> Option<String> {
 
 /// Default-value suffix for a parameter of a user function (` = ...`).
 fn user_param_default_suffix(op: &OpArray, cv_idx: usize) -> String {
+    if let Some(Some(r)) = op.param_default_repr.get(cv_idx) {
+        return format!(" = {}", r);
+    }
     if let Some(const_ref) = extract_param_default_constant(op, cv_idx as u32) {
         let display = if let Some(rest) = const_ref.strip_prefix("global:") {
             rest.trim_start_matches('\\').to_string()
