@@ -420,7 +420,7 @@ impl Serializer {
             return;
         }
         if self.depth > 3000 {
-            throw(vm, b"Error", "Maximum call stack size reached. Infinite recursion?");
+            throw(vm, b"Error", "Maximum call stack size of 8339456 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?");
             return;
         }
         let already = self.add_var_hash(val);
