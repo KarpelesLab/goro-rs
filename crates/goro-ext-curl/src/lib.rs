@@ -1,3 +1,4 @@
+pub mod engine;
 mod handle;
 
 use std::cell::RefCell;
