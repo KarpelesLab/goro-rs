@@ -96,6 +96,8 @@ pub struct PhpFiber {
     pub saved_class_scope_stack: Vec<Vec<u8>>,
     pub saved_called_class_stack: Vec<Vec<u8>>,
     pub saved_property_hook_stack: Vec<Vec<u8>>,
+    /// File and line of the `Fiber::suspend()` call it is suspended at.
+    pub suspended_at: Option<(String, u32)>,
 }
 
 thread_local! {
@@ -148,6 +150,7 @@ impl PhpFiber {
             saved_class_scope_stack: Vec::new(),
             saved_called_class_stack: Vec::new(),
             saved_property_hook_stack: Vec::new(),
+            suspended_at: None,
         }
     }
 

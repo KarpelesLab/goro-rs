@@ -3282,7 +3282,12 @@ impl Vm {
                 );
             }
             // Parse class::method from func_name
+            // Zend's frame key order: file, line, function, class, type, args.
             if let Some(sep) = func_name.find("::") {
+                frame.set(
+                    ArrayKey::String(PhpString::from_bytes(b"function")),
+                    Value::String(PhpString::from_string(func_name[sep+2..].to_string())),
+                );
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"class")),
                     Value::String(PhpString::from_string(func_name[..sep].to_string())),
@@ -3293,11 +3298,11 @@ impl Vm {
                     ArrayKey::String(PhpString::from_bytes(b"type")),
                     Value::String(PhpString::from_bytes(type_str)),
                 );
+            } else if let Some(sep) = func_name.find("->") {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"function")),
                     Value::String(PhpString::from_string(func_name[sep+2..].to_string())),
                 );
-            } else if let Some(sep) = func_name.find("->") {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"class")),
                     Value::String(PhpString::from_string(func_name[..sep].to_string())),
@@ -3305,10 +3310,6 @@ impl Vm {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"type")),
                     Value::String(PhpString::from_bytes(b"->")),
-                );
-                frame.set(
-                    ArrayKey::String(PhpString::from_bytes(b"function")),
-                    Value::String(PhpString::from_string(func_name[sep+2..].to_string())),
                 );
             } else {
                 frame.set(
@@ -34169,6 +34170,7 @@ impl Vm {
         // backtraces captured INSIDE the fiber. We pop it when control
         // returns out (suspend or terminate) so the outer code sees a
         // clean stack.
+        let fiber_stack_base = self.call_stack.len();
         self.call_stack.push((
             display_name_for_stack.clone(),
             "[internal function]".to_string(),
@@ -34181,7 +34183,8 @@ impl Vm {
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
         self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
 
-        self.call_stack.pop();
+        let fiber_susp_pos = (self.current_file.clone(), self.current_line);
+        self.call_stack.truncate(fiber_stack_base);
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);
 
@@ -34201,6 +34204,7 @@ impl Vm {
         match result {
             Ok(crate::fiber::FiberYield::Suspend(v)) => {
                 obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                fiber.suspended_at = Some(fiber_susp_pos);
                 let fiber_id = obj_rc.borrow().object_id;
                 // Stash the fiber's error_reporting state for the next resume.
                 fiber.saved_error_reporting = fiber_err_reporting;
@@ -34690,6 +34694,7 @@ impl Vm {
         self.fiber_enter_stacks(&mut fiber);
         let result = fiber.resume(input);
         self.fiber_leave_stacks(&mut fiber, bases, matches!(result, Ok(_)));
+        let fiber_susp_pos = (self.current_file.clone(), self.current_line);
         self.call_stack.pop();
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);
@@ -34704,6 +34709,7 @@ impl Vm {
         match result {
             Ok(crate::fiber::FiberYield::Suspend(v)) => {
                 obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                fiber.suspended_at = Some(fiber_susp_pos);
                 fiber.saved_error_reporting = fiber_err_reporting;
                 fiber.saved_error_reporting_stack = fiber_err_stack;
                 self.fiber_coroutines.insert(fiber_id, fiber);

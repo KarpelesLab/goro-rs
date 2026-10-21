@@ -6491,30 +6491,61 @@ pub fn reflection_fiber_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
+    use crate::fiber::FiberState;
+    let fib = obj.borrow().get_property(b"__reflection_target");
+    let fib_obj = match &fib {
+        Value::Object(f) => Some(f.clone()),
+        _ => None,
+    };
+    let state = fib_obj.as_ref().map(|f| f.borrow().get_property(b"__fiber_state").to_long()).unwrap_or(-1);
+    let fiber_id = fib_obj.as_ref().map(|f| f.borrow().object_id).unwrap_or(0);
+    let is_running = state == FiberState::Running as i64;
+    let invalid = state != FiberState::Running as i64 && state != FiberState::Suspended as i64;
+    let invalid_error = |vm: &mut Vm| {
+        let exc = vm.create_exception(b"Error", "Cannot fetch information from a fiber that has not been started or is terminated", vm.current_line);
+        vm.current_exception = Some(exc);
+        Some(Value::Null)
+    };
     match method {
-        b"getfiber" => {
-            let ob = obj.borrow();
-            Some(ob.get_property(b"__reflection_target"))
-        }
+        b"getfiber" => Some(fib),
         b"getcallable" => {
-            let ob = obj.borrow();
-            let fib = ob.get_property(b"__reflection_target");
-            drop(ob);
-            if let Value::Object(f) = &fib {
-                let fb = f.borrow();
-                Some(fb.get_property(b"__fiber_callable"))
-            } else {
-                Some(Value::Null)
+            if state == FiberState::Terminated as i64 {
+                let exc = vm.create_exception(b"Error", "Cannot fetch the callable from a fiber that has terminated", vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
             }
+            Some(fib_obj.map(|f| f.borrow().get_property(b"__fiber_callable")).unwrap_or(Value::Null))
         }
-        b"getexecutingfile" => {
-            Some(Value::String(PhpString::from_string(vm.current_file.clone())))
-        }
-        b"getexecutingline" => {
-            Some(Value::Long(vm.current_line as i64))
+        b"getexecutingfile" | b"getexecutingline" => {
+            if invalid {
+                return invalid_error(vm);
+            }
+            let pos = if is_running {
+                Some((vm.current_file.clone(), vm.current_line))
+            } else {
+                vm.fiber_coroutines.get(&fiber_id).and_then(|f| f.suspended_at.clone())
+            };
+            Some(match (method, pos) {
+                (b"getexecutingfile", Some((f, _))) => Value::String(PhpString::from_string(f)),
+                (_, Some((_, l))) => Value::Long(l as i64),
+                _ => Value::Null,
+            })
         }
         b"gettrace" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+            if invalid {
+                return invalid_error(vm);
+            }
+            if is_running {
+                return Some(vm.build_exception_trace());
+            }
+            let mut frames = vm.fiber_coroutines.get(&fiber_id).map(|f| f.saved_call_stack.clone()).unwrap_or_default();
+            if let Some((file, line)) = vm.fiber_coroutines.get(&fiber_id).and_then(|f| f.suspended_at.clone()) {
+                frames.push(("Fiber::suspend".to_string(), file, line, Vec::new(), false));
+            }
+            let saved = std::mem::replace(&mut vm.call_stack, frames);
+            let trace = vm.build_exception_trace();
+            vm.call_stack = saved;
+            Some(trace)
         }
         _ => None,
     }
