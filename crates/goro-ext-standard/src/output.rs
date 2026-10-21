@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::collections::HashSet;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
@@ -40,7 +41,7 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
-    if indent > 40 {
+    if indent > 8000 {
         return;
     }
     let prefix = " ".repeat(indent);
@@ -247,6 +248,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let case_name = obj_borrow.get_property(b"name");
                 let case_name_str = case_name.to_php_string().to_string_lossy();
                 vm.write_output(format!("{}enum({}::{})\n", prefix, class_name, case_name_str).as_bytes());
+                return;
+            }
+            // An object already being dumped prints just *RECURSION*.
+            if seen.contains(&obj_borrow.object_id) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
                 return;
             }
             let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
@@ -965,7 +971,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // so a single holder (the array element) shouldn't show &.
             let inner = r.borrow().clone();
             if std::rc::Rc::strong_count(r) >= 2 {
-                var_dump_value_ref(vm, &inner, indent, &prefix, seen);
+                // PHP prefixes the header line with '&' (COMMON); a
+                // *RECURSION* marker carries no '&'.
+                let pos = vm.active_output_buffer().len() + indent;
+                var_dump_value(vm, &inner, indent, seen);
+                let buf = vm.active_output_buffer();
+                if pos <= buf.len() && !buf[pos..].starts_with(b"*RECURSION*") {
+                    buf.insert(pos, b'&');
+                }
             } else {
                 var_dump_value(vm, &inner, indent, seen);
             }
@@ -1303,9 +1316,15 @@ fn print_r_value_inner(
                     }
                 }
             }
+            let arr_ptr = Rc::as_ptr(arr) as *const u8 as usize;
+            buf.extend_from_slice(b"Array\n");
+            if PRINT_R_STACK.with(|st| st.borrow().contains(&arr_ptr)) {
+                buf.extend_from_slice(b" *RECURSION*");
+                return;
+            }
+            PRINT_R_STACK.with(|st| st.borrow_mut().push(arr_ptr));
             let arr = arr.borrow();
             let prefix = " ".repeat(indent);
-            buf.extend_from_slice(b"Array\n");
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (key, value) in arr.iter() {
                 match key {
@@ -1322,6 +1341,7 @@ fn print_r_value_inner(
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+            PRINT_R_STACK.with(|st| { st.borrow_mut().pop(); });
         }
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
@@ -1443,6 +1463,12 @@ fn print_r_value_inner(
             let class_info = classes.get(&class_lower);
 
             buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+            let obj_ptr = Rc::as_ptr(obj) as *const u8 as usize;
+            if PRINT_R_STACK.with(|st| st.borrow().contains(&obj_ptr)) {
+                buf.extend_from_slice(b" *RECURSION*");
+                return;
+            }
+            PRINT_R_STACK.with(|st| st.borrow_mut().push(obj_ptr));
             buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
             for (name, value) in &obj_borrow.properties {
                 // Skip internal SPL/Reflection properties and uninitialized properties
@@ -1506,6 +1532,7 @@ fn print_r_value_inner(
                 buf.push(b'\n');
             }
             buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+            PRINT_R_STACK.with(|st| { st.borrow_mut().pop(); });
         }
         Value::Generator(_) => {
             buf.extend_from_slice(b"Generator Object\n(\n)\n");
