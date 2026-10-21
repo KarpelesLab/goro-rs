@@ -2721,6 +2721,44 @@ impl Vm {
         None
     }
 
+    /// Prototype of a class's constructor: an interface constructor declared by
+    /// any interface the class implements (directly or through ancestors), or
+    /// an abstract constructor of an ancestor class.
+    fn find_ctor_prototype(&self, class_name: &[u8]) -> Option<(Vec<u8>, crate::object::MethodDef)> {
+        let mut cur = Some(class_name.to_ascii_lowercase());
+        let mut abstract_proto: Option<(Vec<u8>, crate::object::MethodDef)> = None;
+        let mut guard = 0;
+        while let Some(c) = cur {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            let ce = self.classes.get(&c)?;
+            let mut stack: Vec<Vec<u8>> = ce.interfaces.iter().map(|i| i.to_ascii_lowercase()).collect();
+            let mut seen = 0;
+            while let Some(i) = stack.pop() {
+                seen += 1;
+                if seen > 256 {
+                    break;
+                }
+                if let Some(ie) = self.classes.get(&i) {
+                    if let Some(m) = ie.methods.get(b"__construct".as_slice()) {
+                        let decl = self.classes.get(&m.declaring_class.to_ascii_lowercase()).map(|d| d.name.clone()).unwrap_or_else(|| ie.name.clone());
+                        return Some((decl, m.clone()));
+                    }
+                    stack.extend(ie.interfaces.iter().map(|x| x.to_ascii_lowercase()));
+                }
+            }
+            if let Some(m) = ce.methods.get(b"__construct".as_slice()) {
+                if m.is_abstract && abstract_proto.is_none() {
+                    abstract_proto = Some((ce.name.clone(), m.clone()));
+                }
+            }
+            cur = ce.parent.as_ref().map(|p| p.to_ascii_lowercase());
+        }
+        abstract_proto
+    }
+
     /// zend_objects_destroy_object visibility check for a runtime destructor
     /// call; returns the Error message when the current scope may not call it.
     fn destructor_visibility_error(&self, class_lower: &[u8], vis: crate::object::Visibility, decl: &[u8]) -> Option<String> {
@@ -28975,11 +29013,37 @@ impl Vm {
                                         // - private parent methods (not inherited for override checking)
                                         let should_check = (mn_lower != b"__construct" || method.is_abstract)
                                             && method.visibility != Visibility::Private;
+                                        // A concrete constructor still has a prototype when it
+                                        // implements an interface (or abstract) constructor;
+                                        // overriding constructors are checked against it.
+                                        let ctor_proto = if mn_lower == b"__construct" && !method.is_abstract
+                                            && method.visibility != Visibility::Private
+                                        {
+                                            self.find_ctor_prototype(&parent.name)
+                                        } else {
+                                            None
+                                        };
+                                        if let Some((proto_class, proto_method)) = &ctor_proto {
+                                            if let Some(err_msg) = Self::check_method_compatibility(
+                                                &class.name, child_method,
+                                                proto_class, proto_method,
+                                            ) {
+                                                return Err(VmError {
+                                                    message: err_msg,
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                        let parent_decl_name = self
+                                            .classes
+                                            .get(&method.declaring_class.to_ascii_lowercase())
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_else(|| parent.name.clone());
                                         if should_check {
                                             // Check method signature compatibility
                                             if let Some(err_msg) = Self::check_method_compatibility(
                                                 &class.name, child_method,
-                                                &parent.name, method,
+                                                &parent_decl_name, method,
                                             ) {
                                                 return Err(VmError {
                                                     message: err_msg,
@@ -29485,11 +29549,17 @@ impl Vm {
                                     if let Some(existing_method) = class.methods.get(method_name) {
                                         // Check method signature compatibility when a class/interface
                                         // redeclares a method that an interface defines
-                                        let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if mn_lower != b"__construct" {
+                                        let _mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        // Interface methods (constructors included) are prototypes.
+                                        {
+                                            let iface_decl_name = self
+                                                .classes
+                                                .get(&method.declaring_class.to_ascii_lowercase())
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or_else(|| iface.name.clone());
                                             if let Some(err_msg) = Self::check_method_compatibility(
                                                 &class.name, existing_method,
-                                                &iface.name, method,
+                                                &iface_decl_name, method,
                                             ) {
                                                 return Err(VmError {
                                                     message: err_msg,
