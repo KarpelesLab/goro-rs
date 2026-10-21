@@ -3,6 +3,7 @@ pub mod basedir_guard;
 pub mod crypt;
 mod crypt_blowfish_tables;
 pub mod csv;
+pub mod curl_streams;
 pub mod filters;
 pub mod filters_conv;
 pub mod highlight;

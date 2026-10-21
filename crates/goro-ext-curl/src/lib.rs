@@ -1,2048 +1,2197 @@
+//! ext/curl: a port of php-src's ext/curl (interface.c, multi.c, share.c,
+//! curl_file.c) on top of `engine`, a pure-Rust emulation of libcurl.
+
 pub mod engine;
-mod handle;
+
+mod consts;
+mod curl_file;
+mod multi;
+mod share;
+mod zpp;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::object::{ClassEntry, PhpObject};
+use goro_core::object::{ClassEntry, NativeData, PhpObject};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::vm::{NativeClassHandler, NativeObjectHandlers, Vm, VmError};
+use goro_ext_standard::curl_streams as streams;
 
-use handle::{CURL_HANDLES as CURL_HANDLES_STORE, CurlHandle};
+use consts::c::*;
+use engine::{Easy, InfoVal, Mime, MimeData, MimePart, OptVal, ReadResult};
+use zpp::{Arg, Obj};
 
-/// Helper: access the curl handles RefCell<HashMap>.
-/// Wraps the thread_local HandleStore so we can clear `private` on Drop.
-fn with_curl_handles<R>(
-    f: impl FnOnce(&std::cell::RefCell<std::collections::HashMap<i64, CurlHandle>>) -> R,
-) -> R {
-    CURL_HANDLES_STORE.with(|store| f(&store.handles))
+// php_curl handler methods (curl_private.h)
+pub(crate) const PHP_CURL_STDOUT: i32 = 0;
+pub(crate) const PHP_CURL_FILE: i32 = 1;
+pub(crate) const PHP_CURL_USER: i32 = 2;
+pub(crate) const PHP_CURL_DIRECT: i32 = 3;
+pub(crate) const PHP_CURL_RETURN: i32 = 4;
+pub(crate) const PHP_CURL_IGNORE: i32 = 7;
+
+// libcurl options and values PHP uses but does not expose
+const CURLOPT_ERRORBUFFER: i64 = 10010;
+const CURLOPT_POSTFIELDSIZE: i64 = 60;
+const CURLOPT_COPYPOSTFIELDS: i64 = 10165;
+const CURLOPT_MIMEPOST: i64 = 10269;
+const CURLOPT_PROGRESSFUNCTION_C: i64 = 20056;
+const CURLOPT_XFERINFOFUNCTION_C: i64 = 20219;
+const CURLOPT_SEEKFUNCTION: i64 = 20167;
+const CURLPROTO_ALL: i64 = !0;
+const CURL_REDIR_POST_ALL: i64 = 7;
+const CURLE_RECURSIVE_API_CALL: i64 = 93;
+const CURLE_UNKNOWN_OPTION: i64 = 48;
+const CURL_READFUNC_ABORT_V: i64 = 0x10000000;
+const CURL_READFUNC_PAUSE_V: i64 = 0x10000001;
+
+const CURLINFO_STRING: i64 = 0x100000;
+const CURLINFO_LONG: i64 = 0x200000;
+const CURLINFO_DOUBLE: i64 = 0x300000;
+const CURLINFO_SLIST: i64 = 0x400000;
+const CURLINFO_OFF_T: i64 = 0x600000;
+const CURLINFO_TYPEMASK: i64 = 0xf00000;
+
+#[derive(Clone, Default)]
+pub(crate) struct WriteH {
+    pub method: i32,
+    pub fcc: Option<Value>,
+    pub stream: Option<Value>,
+    pub buf: Vec<u8>,
+    /// smart_str buf.s allocated (something was written)
+    pub buf_set: bool,
 }
 
-// CURLOPT constants
-const CURLOPT_URL: i64 = 10002;
-const CURLOPT_RETURNTRANSFER: i64 = 19913;
-const CURLOPT_POST: i64 = 47;
-const CURLOPT_POSTFIELDS: i64 = 10015;
-const CURLOPT_HTTPHEADER: i64 = 10023;
-const CURLOPT_FOLLOWLOCATION: i64 = 52;
-const CURLOPT_MAXREDIRS: i64 = 68;
-const CURLOPT_TIMEOUT: i64 = 13;
-const CURLOPT_CONNECTTIMEOUT: i64 = 78;
-const CURLOPT_USERAGENT: i64 = 10018;
-const CURLOPT_HEADER: i64 = 42;
-const CURLOPT_NOBODY: i64 = 44;
-const CURLOPT_SSL_VERIFYPEER: i64 = 64;
-const CURLOPT_SSL_VERIFYHOST: i64 = 81;
-const CURLOPT_CUSTOMREQUEST: i64 = 10036;
-const CURLOPT_ENCODING: i64 = 10102;
-const CURLOPT_HTTPGET: i64 = 80;
-const CURLOPT_COOKIE: i64 = 10022;
-const CURLOPT_USERPWD: i64 = 10005;
-const CURLOPT_HTTPAUTH: i64 = 107;
-const CURLOPT_FAILONERROR: i64 = 45;
-const CURLOPT_PUT: i64 = 54;
-const CURLOPT_PRIVATE: i64 = 10103;
-
-// CURLINFO constants
-const CURLINFO_HTTP_CODE: i64 = 2097154;
-const CURLINFO_EFFECTIVE_URL: i64 = 1048577;
-const CURLINFO_CONTENT_TYPE: i64 = 1048594;
-const CURLINFO_TOTAL_TIME: i64 = 3145731;
-const CURLINFO_REDIRECT_COUNT: i64 = 2097172;
-const CURLINFO_HEADER_SIZE: i64 = 2097163;
-const CURLINFO_PRIVATE: i64 = 1048597;
-
-// Multi handle registry
-thread_local! {
-    static MULTI_HANDLES: RefCell<HashMap<i64, Vec<i64>>> = RefCell::new(HashMap::new());
-    static SHARE_HANDLES: RefCell<HashMap<i64, ()>> = RefCell::new(HashMap::new());
-    /// Per-share errno tracking (keyed by share id)
-    static SHARE_ERRNOS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
-    /// Per-multi errno tracking
-    static MULTI_ERRNOS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
+#[derive(Clone, Default)]
+pub(crate) struct ReadH {
+    pub method: i32,
+    pub fcc: Option<Value>,
+    pub stream: Option<Value>,
 }
 
-/// Helper: create a CurlHandle object, registering the handle in CURL_HANDLES.
-fn make_curl_handle_obj(vm: &mut Vm, handle: CurlHandle) -> Value {
-    let id = vm.next_object_id() as i64;
-    with_curl_handles(|h| {
-        h.borrow_mut().insert(id, handle);
-    });
-    let obj = PhpObject::new(b"CurlHandle".to_vec(), id as u64);
-    Value::Object(Rc::new(RefCell::new(obj)))
+#[derive(Clone, Default)]
+pub(crate) struct Handlers {
+    pub write: WriteH,
+    pub write_header: WriteH,
+    pub read: ReadH,
+    pub std_err: Option<Value>,
+    pub progress: Option<Value>,
+    pub xferinfo: Option<Value>,
+    pub fnmatch: Option<Value>,
+    pub debug: Option<Value>,
+    pub prereq: Option<Value>,
+    pub sshhostkey: Option<Value>,
 }
 
-/// Helper: create a CurlMultiHandle object
-fn make_multi_handle_obj(vm: &mut Vm) -> Value {
-    let id = vm.next_object_id() as i64;
-    MULTI_HANDLES.with(|h| {
-        h.borrow_mut().insert(id, Vec::new());
-    });
-    let obj = PhpObject::new(b"CurlMultiHandle".to_vec(), id as u64);
-    Value::Object(Rc::new(RefCell::new(obj)))
+#[derive(Default)]
+pub(crate) struct CurlState {
+    pub handlers: Handlers,
+    /// ch->header.str (CURLINFO_HEADER_OUT)
+    pub header_out: Option<Vec<u8>>,
+    pub err_no: i64,
+    pub err_str: Vec<u8>,
+    pub in_callback: bool,
+    pub postfields: Option<Value>,
+    pub private_data: Option<Value>,
+    pub share: Option<Value>,
+    /// The multi handle (object id) this handle was added to.
+    pub multi: Option<u64>,
 }
 
-/// Helper: create a CurlShareHandle object
-fn make_share_handle_obj(vm: &mut Vm) -> Value {
-    let id = vm.next_object_id() as i64;
-    SHARE_HANDLES.with(|h| {
-        h.borrow_mut().insert(id, ());
-    });
-    let obj = PhpObject::new(b"CurlShareHandle".to_vec(), id as u64);
-    Value::Object(Rc::new(RefCell::new(obj)))
+/// php_curl
+pub(crate) struct CurlObj {
+    /// None while a transfer is running (curl_easy_perform has the handle).
+    pub easy: RefCell<Option<Easy>>,
+    pub st: RefCell<CurlState>,
 }
 
-/// Extract curl id from a Value (Object or Long fallback)
-fn arg_curl_id(arg: Option<&Value>) -> Option<i64> {
-    match arg {
-        Some(Value::Object(obj)) => {
-            let b = obj.borrow();
-            if b.class_name == b"CurlHandle" {
-                Some(b.object_id as i64)
-            } else {
-                None
-            }
+impl Drop for CurlObj {
+    fn drop(&mut self) {
+        // curl_easy_cleanup(): the cookie jar is written out.
+        if let Some(e) = self.easy.get_mut().as_mut() {
+            e.flush_cookies();
         }
-        Some(Value::Long(n)) => Some(*n),
-        Some(Value::Reference(r)) => arg_curl_id(Some(&r.borrow().clone())),
-        _ => None,
+    }
+}
+
+/// zend_objects_not_comparable
+fn not_comparable(a: &Value, b: &Value) -> Option<i64> {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y) => Some(0),
+        _ => Some(1),
     }
 }
 
-fn arg_multi_id(arg: Option<&Value>) -> Option<i64> {
-    match arg {
-        Some(Value::Object(obj)) => {
-            let b = obj.borrow();
-            if b.class_name == b"CurlMultiHandle" {
-                Some(b.object_id as i64)
-            } else {
-                None
-            }
-        }
-        Some(Value::Long(n)) => Some(*n),
-        Some(Value::Reference(r)) => arg_multi_id(Some(&r.borrow().clone())),
-        _ => None,
-    }
-}
-
-fn arg_share_id(arg: Option<&Value>) -> Option<i64> {
-    match arg {
-        Some(Value::Object(obj)) => {
-            let b = obj.borrow();
-            if b.class_name == b"CurlShareHandle" {
-                Some(b.object_id as i64)
-            } else {
-                None
-            }
-        }
-        Some(Value::Long(n)) => Some(*n),
-        Some(Value::Reference(r)) => arg_share_id(Some(&r.borrow().clone())),
-        _ => None,
-    }
-}
-
-/// Throw a ValueError
-fn throw_value_error(vm: &mut Vm, msg: &str) -> VmError {
-    let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
-    vm.current_exception = Some(exc);
-    VmError {
-        message: msg.to_string(),
-        line: vm.current_line,
-    }
-}
-
-/// Throw a TypeError
-fn throw_type_error(vm: &mut Vm, msg: &str) -> VmError {
-    let exc = vm.create_exception(b"TypeError", msg, vm.current_line);
-    vm.current_exception = Some(exc);
-    VmError {
-        message: msg.to_string(),
-        line: vm.current_line,
-    }
-}
-
-/// Register all curl extension functions and constants
-pub fn register(vm: &mut Vm) {
-    vm.register_extension(b"curl");
-
-    // Register classes
-    vm.classes.insert(
-        b"curlhandle".to_vec(),
-        ClassEntry::new(b"CurlHandle".to_vec()),
-    );
-    vm.classes.insert(
-        b"curlmultihandle".to_vec(),
-        ClassEntry::new(b"CurlMultiHandle".to_vec()),
-    );
-    vm.classes.insert(
-        b"curlsharehandle".to_vec(),
-        ClassEntry::new(b"CurlShareHandle".to_vec()),
-    );
-    let mut curlfile = ClassEntry::new(b"CURLFile".to_vec());
-    curlfile.allow_dynamic_properties = true;
-    vm.classes.insert(b"curlfile".to_vec(), curlfile);
-
-    // Register functions
-    vm.register_function(b"curl_init", curl_init);
-    vm.register_function(b"curl_setopt", curl_setopt);
-    vm.register_function(b"curl_setopt_array", curl_setopt_array);
-    vm.register_function(b"curl_exec", curl_exec);
-    vm.register_function(b"curl_close", curl_close);
-    vm.register_function(b"curl_error", curl_error);
-    vm.register_function(b"curl_errno", curl_errno);
-    vm.register_function(b"curl_getinfo", curl_getinfo);
-    vm.register_function(b"curl_reset", curl_reset);
-    vm.register_function(b"curl_version", curl_version);
-    vm.register_function(b"curl_multi_init", curl_multi_init);
-    vm.register_function(b"curl_multi_add_handle", curl_multi_add_handle);
-    vm.register_function(b"curl_multi_remove_handle", curl_multi_remove_handle);
-    vm.register_function(b"curl_multi_exec", curl_multi_exec);
-    vm.register_function(b"curl_multi_getcontent", curl_multi_getcontent);
-    vm.register_function(b"curl_multi_close", curl_multi_close);
-    vm.register_function(b"curl_multi_errno", curl_multi_errno);
-    vm.register_function(b"curl_multi_strerror", curl_multi_strerror);
-    vm.register_function(b"curl_multi_setopt", curl_multi_setopt);
-    vm.register_function(b"curl_multi_info_read", curl_multi_info_read);
-    vm.register_function(b"curl_multi_select", curl_multi_select);
-    vm.register_function(b"curl_multi_get_handles", curl_multi_get_handles);
-    vm.register_function(b"curl_copy_handle", curl_copy_handle);
-    vm.register_function(b"curl_file_create", curl_file_create);
-    vm.register_function(b"curl_share_init", curl_share_init);
-    vm.register_function(b"curl_share_init_persistent", curl_share_init_persistent);
-    vm.register_function(b"curl_share_setopt", curl_share_setopt);
-    vm.register_function(b"curl_share_close", curl_share_close);
-    vm.register_function(b"curl_share_strerror", curl_share_strerror);
-    vm.register_function(b"curl_share_errno", curl_share_errno);
-    vm.register_function(b"curl_strerror", curl_strerror);
-    vm.register_function(b"curl_pause", curl_pause);
-    vm.register_function(b"curl_upkeep", curl_upkeep);
-    vm.register_function(b"curl_escape", curl_escape);
-    vm.register_function(b"curl_unescape", curl_unescape);
-
-    // CURLOPT constants
-    vm.constants
-        .insert(b"CURLOPT_URL".to_vec(), Value::Long(10002));
-    vm.constants
-        .insert(b"CURLOPT_RETURNTRANSFER".to_vec(), Value::Long(19913));
-    vm.constants
-        .insert(b"CURLOPT_POST".to_vec(), Value::Long(47));
-    vm.constants
-        .insert(b"CURLOPT_POSTFIELDS".to_vec(), Value::Long(10015));
-    vm.constants
-        .insert(b"CURLOPT_HTTPHEADER".to_vec(), Value::Long(10023));
-    vm.constants
-        .insert(b"CURLOPT_FOLLOWLOCATION".to_vec(), Value::Long(52));
-    vm.constants
-        .insert(b"CURLOPT_MAXREDIRS".to_vec(), Value::Long(68));
-    vm.constants
-        .insert(b"CURLOPT_TIMEOUT".to_vec(), Value::Long(13));
-    vm.constants
-        .insert(b"CURLOPT_CONNECTTIMEOUT".to_vec(), Value::Long(78));
-    vm.constants
-        .insert(b"CURLOPT_USERAGENT".to_vec(), Value::Long(10018));
-    vm.constants
-        .insert(b"CURLOPT_HEADER".to_vec(), Value::Long(42));
-    vm.constants
-        .insert(b"CURLOPT_NOBODY".to_vec(), Value::Long(44));
-    vm.constants
-        .insert(b"CURLOPT_SSL_VERIFYPEER".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"CURLOPT_SSL_VERIFYHOST".to_vec(), Value::Long(81));
-    vm.constants
-        .insert(b"CURLOPT_CUSTOMREQUEST".to_vec(), Value::Long(10036));
-    vm.constants
-        .insert(b"CURLOPT_ENCODING".to_vec(), Value::Long(10102));
-    vm.constants
-        .insert(b"CURLOPT_HTTPGET".to_vec(), Value::Long(80));
-    vm.constants
-        .insert(b"CURLOPT_COOKIE".to_vec(), Value::Long(10022));
-    vm.constants
-        .insert(b"CURLOPT_COOKIEFILE".to_vec(), Value::Long(10031));
-    vm.constants
-        .insert(b"CURLOPT_USERPWD".to_vec(), Value::Long(10005));
-    vm.constants
-        .insert(b"CURLOPT_HTTPAUTH".to_vec(), Value::Long(107));
-    vm.constants
-        .insert(b"CURLOPT_HTTP_VERSION".to_vec(), Value::Long(84));
-    vm.constants
-        .insert(b"CURLOPT_VERBOSE".to_vec(), Value::Long(41));
-    vm.constants
-        .insert(b"CURLOPT_HEADERFUNCTION".to_vec(), Value::Long(20079));
-    vm.constants
-        .insert(b"CURLOPT_WRITEFUNCTION".to_vec(), Value::Long(20011));
-    vm.constants
-        .insert(b"CURLOPT_READFUNCTION".to_vec(), Value::Long(20012));
-    vm.constants
-        .insert(b"CURLOPT_INFILESIZE".to_vec(), Value::Long(14));
-    vm.constants
-        .insert(b"CURLOPT_PUT".to_vec(), Value::Long(54));
-    vm.constants
-        .insert(b"CURLOPT_FAILONERROR".to_vec(), Value::Long(45));
-    vm.constants
-        .insert(b"CURLOPT_SHARE".to_vec(), Value::Long(10100));
-    vm.constants
-        .insert(b"CURLOPT_PRIVATE".to_vec(), Value::Long(10103));
-
-    // CURLINFO constants
-    vm.constants
-        .insert(b"CURLINFO_HTTP_CODE".to_vec(), Value::Long(2097154));
-    vm.constants
-        .insert(b"CURLINFO_EFFECTIVE_URL".to_vec(), Value::Long(1048577));
-    vm.constants
-        .insert(b"CURLINFO_CONTENT_TYPE".to_vec(), Value::Long(1048594));
-    vm.constants
-        .insert(b"CURLINFO_TOTAL_TIME".to_vec(), Value::Long(3145731));
-    vm.constants
-        .insert(b"CURLINFO_REDIRECT_COUNT".to_vec(), Value::Long(2097172));
-    vm.constants
-        .insert(b"CURLINFO_HEADER_SIZE".to_vec(), Value::Long(2097163));
-    vm.constants
-        .insert(b"CURLINFO_RESPONSE_CODE".to_vec(), Value::Long(2097154));
-    vm.constants
-        .insert(b"CURLINFO_PRIVATE".to_vec(), Value::Long(1048597));
-
-    // CURLE error constants
-    vm.constants.insert(b"CURLE_OK".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLE_UNSUPPORTED_PROTOCOL".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLE_URL_MALFORMAT".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURLE_COULDNT_RESOLVE_HOST".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"CURLE_COULDNT_CONNECT".to_vec(), Value::Long(7));
-    vm.constants
-        .insert(b"CURLE_OPERATION_TIMEDOUT".to_vec(), Value::Long(28));
-    vm.constants
-        .insert(b"CURLE_SSL_CONNECT_ERROR".to_vec(), Value::Long(35));
-
-    // HTTP version constants
-    vm.constants
-        .insert(b"CURL_HTTP_VERSION_NONE".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURL_HTTP_VERSION_1_0".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURL_HTTP_VERSION_1_1".to_vec(), Value::Long(2));
-
-    // Auth constants
-    vm.constants
-        .insert(b"CURLAUTH_BASIC".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLAUTH_DIGEST".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURLAUTH_ANY".to_vec(), Value::Long(-17));
-
-    // CurlMulti constants
-    vm.constants.insert(b"CURLM_OK".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLM_CALL_MULTI_PERFORM".to_vec(), Value::Long(-1));
-    vm.constants
-        .insert(b"CURLM_INTERNAL_ERROR".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURLM_BAD_HANDLE".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLM_BAD_EASY_HANDLE".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURLM_OUT_OF_MEMORY".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURLM_UNKNOWN_OPTION".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"CURLMSG_DONE".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLMOPT_MAXCONNECTS".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"CURLMOPT_PIPELINING".to_vec(), Value::Long(3));
-
-    // Additional CURLOPT constants
-    vm.constants
-        .insert(b"CURLOPT_FILE".to_vec(), Value::Long(10001));
-    vm.constants
-        .insert(b"CURLOPT_STDERR".to_vec(), Value::Long(10037));
-    vm.constants
-        .insert(b"CURLOPT_SAFE_UPLOAD".to_vec(), Value::Long(148));
-    vm.constants
-        .insert(b"CURLOPT_NOPROGRESS".to_vec(), Value::Long(43));
-    vm.constants
-        .insert(b"CURLOPT_UPLOAD".to_vec(), Value::Long(46));
-    vm.constants
-        .insert(b"CURLOPT_PROGRESSFUNCTION".to_vec(), Value::Long(20056));
-    vm.constants
-        .insert(b"CURLOPT_PROTOCOLS_STR".to_vec(), Value::Long(10318));
-    vm.constants
-        .insert(b"CURLOPT_SSH_HOSTKEYFUNCTION".to_vec(), Value::Long(20316));
-    vm.constants
-        .insert(b"CURLINFO_HEADER_OUT".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURL_LOCK_DATA_DNS".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURLOPT_INFILE".to_vec(), Value::Long(10009));
-    vm.constants
-        .insert(b"CURLOPT_REFERER".to_vec(), Value::Long(10016));
-    vm.constants
-        .insert(b"CURLOPT_PROXY".to_vec(), Value::Long(10004));
-    vm.constants
-        .insert(b"CURLOPT_PROXYTYPE".to_vec(), Value::Long(101));
-    vm.constants
-        .insert(b"CURLOPT_SSLCERT".to_vec(), Value::Long(10025));
-    vm.constants
-        .insert(b"CURLOPT_SSLKEY".to_vec(), Value::Long(10087));
-    vm.constants
-        .insert(b"CURLOPT_CAINFO".to_vec(), Value::Long(10065));
-    vm.constants
-        .insert(b"CURLOPT_CAPATH".to_vec(), Value::Long(10097));
-    vm.constants
-        .insert(b"CURLOPT_RANGE".to_vec(), Value::Long(10007));
-    vm.constants
-        .insert(b"CURLOPT_RESUME_FROM".to_vec(), Value::Long(21));
-    vm.constants
-        .insert(b"CURLOPT_BUFFERSIZE".to_vec(), Value::Long(98));
-    vm.constants
-        .insert(b"CURLOPT_LOW_SPEED_LIMIT".to_vec(), Value::Long(19));
-    vm.constants
-        .insert(b"CURLOPT_LOW_SPEED_TIME".to_vec(), Value::Long(20));
-    vm.constants
-        .insert(b"CURLOPT_TIMEOUT_MS".to_vec(), Value::Long(155));
-    vm.constants
-        .insert(b"CURLOPT_CONNECTTIMEOUT_MS".to_vec(), Value::Long(156));
-    vm.constants
-        .insert(b"CURLOPT_PORT".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURLOPT_COOKIEJAR".to_vec(), Value::Long(10082));
-    vm.constants
-        .insert(b"CURLOPT_COOKIESESSION".to_vec(), Value::Long(96));
-    vm.constants
-        .insert(b"CURLOPT_SSLVERSION".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"CURLOPT_INTERFACE".to_vec(), Value::Long(10062));
-    vm.constants
-        .insert(b"CURLOPT_XOAUTH2_BEARER".to_vec(), Value::Long(10220));
-    vm.constants
-        .insert(b"CURLOPT_ACCEPT_ENCODING".to_vec(), Value::Long(10102));
-    vm.constants
-        .insert(b"CURLOPT_TRANSFER_ENCODING".to_vec(), Value::Long(207));
-    vm.constants
-        .insert(b"CURLOPT_MAXFILESIZE".to_vec(), Value::Long(114));
-    vm.constants
-        .insert(b"CURLOPT_RESOLVE".to_vec(), Value::Long(10203));
-    vm.constants
-        .insert(b"CURLOPT_DNS_SERVERS".to_vec(), Value::Long(10211));
-    vm.constants
-        .insert(b"CURLOPT_XFERINFOFUNCTION".to_vec(), Value::Long(20219));
-    vm.constants
-        .insert(b"CURLOPT_WRITEHEADER".to_vec(), Value::Long(10029));
-    vm.constants
-        .insert(b"CURLOPT_DEBUGFUNCTION".to_vec(), Value::Long(20094));
-    vm.constants
-        .insert(b"CURLOPT_READDATA".to_vec(), Value::Long(10009));
-    vm.constants
-        .insert(b"CURLOPT_COOKIELIST".to_vec(), Value::Long(10135));
-    vm.constants
-        .insert(b"CURLINFO_COOKIELIST".to_vec(), Value::Long(4194332));
-    vm.constants
-        .insert(b"CURLOPT_FRESH_CONNECT".to_vec(), Value::Long(74));
-    vm.constants
-        .insert(b"CURLOPT_FORBID_REUSE".to_vec(), Value::Long(75));
-    vm.constants
-        .insert(b"CURLOPT_UPKEEP_INTERVAL_MS".to_vec(), Value::Long(281));
-    vm.constants
-        .insert(b"CURLMOPT_PUSHFUNCTION".to_vec(), Value::Long(20014));
-
-    // CURLPAUSE constants
-    vm.constants
-        .insert(b"CURLPAUSE_ALL".to_vec(), Value::Long(5));
-    vm.constants
-        .insert(b"CURLPAUSE_CONT".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLPAUSE_RECV".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLPAUSE_RECV_CONT".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLPAUSE_SEND".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURLPAUSE_SEND_CONT".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURL_READFUNC_PAUSE".to_vec(), Value::Long(0x10000001));
-
-    // Additional CURLINFO constants
-    vm.constants
-        .insert(b"CURLINFO_SIZE_DOWNLOAD".to_vec(), Value::Long(3145736));
-    vm.constants
-        .insert(b"CURLINFO_SIZE_UPLOAD".to_vec(), Value::Long(3145735));
-    vm.constants
-        .insert(b"CURLINFO_SPEED_DOWNLOAD".to_vec(), Value::Long(3145737));
-    vm.constants
-        .insert(b"CURLINFO_SPEED_UPLOAD".to_vec(), Value::Long(3145738));
-    vm.constants
-        .insert(b"CURLINFO_FILETIME".to_vec(), Value::Long(2097166));
-    vm.constants.insert(
-        b"CURLINFO_CONTENT_LENGTH_DOWNLOAD".to_vec(),
-        Value::Long(3145743),
-    );
-    vm.constants.insert(
-        b"CURLINFO_CONTENT_LENGTH_UPLOAD".to_vec(),
-        Value::Long(3145744),
-    );
-    vm.constants
-        .insert(b"CURLINFO_REDIRECT_URL".to_vec(), Value::Long(1048607));
-    vm.constants
-        .insert(b"CURLINFO_PRIMARY_IP".to_vec(), Value::Long(1048608));
-    vm.constants
-        .insert(b"CURLINFO_LOCAL_IP".to_vec(), Value::Long(1048617));
-    vm.constants
-        .insert(b"CURLINFO_LOCAL_PORT".to_vec(), Value::Long(2097194));
-    vm.constants
-        .insert(b"CURLINFO_PRIMARY_PORT".to_vec(), Value::Long(2097192));
-
-    // CURL share constants
-    vm.constants
-        .insert(b"CURL_LOCK_DATA_COOKIE".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURL_LOCK_DATA_SSL_SESSION".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURL_LOCK_DATA_CONNECT".to_vec(), Value::Long(5));
-    vm.constants
-        .insert(b"CURL_LOCK_DATA_PSL".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"CURLSHOPT_NONE".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLSHOPT_SHARE".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLSHOPT_UNSHARE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURLSHE_OK".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLSHE_BAD_OPTION".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLSHE_IN_USE".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURLSHE_INVALID".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURLSHE_NOMEM".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURLSHE_NOT_BUILT_IN".to_vec(), Value::Long(5));
-
-    // CURLcode constants
-    vm.constants
-        .insert(b"CURLE_ABORTED_BY_CALLBACK".to_vec(), Value::Long(42));
-    vm.constants
-        .insert(b"CURLE_GOT_NOTHING".to_vec(), Value::Long(52));
-    vm.constants
-        .insert(b"CURLE_RECV_ERROR".to_vec(), Value::Long(56));
-    vm.constants
-        .insert(b"CURLE_SEND_ERROR".to_vec(), Value::Long(55));
-
-    // CURLPROXY constants
-    vm.constants
-        .insert(b"CURLPROXY_HTTP".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"CURLPROXY_SOCKS4".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURLPROXY_SOCKS5".to_vec(), Value::Long(5));
-
-    // CURL version constants
-    vm.constants
-        .insert(b"CURL_VERSION_IPV6".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURL_VERSION_KERBEROS4".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURL_VERSION_SSL".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURL_VERSION_LIBZ".to_vec(), Value::Long(8));
-    vm.constants
-        .insert(b"CURL_VERSION_NTLM".to_vec(), Value::Long(16));
-    vm.constants
-        .insert(b"CURL_VERSION_GSSNEGOTIATE".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"CURL_VERSION_DEBUG".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"CURL_VERSION_ASYNCHDNS".to_vec(), Value::Long(128));
-    vm.constants
-        .insert(b"CURL_VERSION_SPNEGO".to_vec(), Value::Long(256));
-    vm.constants
-        .insert(b"CURL_VERSION_LARGEFILE".to_vec(), Value::Long(512));
-    vm.constants
-        .insert(b"CURL_VERSION_IDN".to_vec(), Value::Long(1024));
-    vm.constants
-        .insert(b"CURL_VERSION_SSPI".to_vec(), Value::Long(2048));
-    vm.constants
-        .insert(b"CURL_VERSION_CONV".to_vec(), Value::Long(4096));
-    vm.constants
-        .insert(b"CURL_VERSION_CURLDEBUG".to_vec(), Value::Long(8192));
-    vm.constants
-        .insert(b"CURL_VERSION_TLSAUTH_SRP".to_vec(), Value::Long(16384));
-    vm.constants
-        .insert(b"CURL_VERSION_NTLM_WB".to_vec(), Value::Long(32768));
-    vm.constants
-        .insert(b"CURL_VERSION_HTTP2".to_vec(), Value::Long(65536));
-    vm.constants
-        .insert(b"CURL_VERSION_GSSAPI".to_vec(), Value::Long(131072));
-    vm.constants
-        .insert(b"CURL_VERSION_KERBEROS5".to_vec(), Value::Long(262144));
-    vm.constants
-        .insert(b"CURL_VERSION_UNIX_SOCKETS".to_vec(), Value::Long(524288));
-    vm.constants
-        .insert(b"CURL_VERSION_PSL".to_vec(), Value::Long(1048576));
-    vm.constants
-        .insert(b"CURL_VERSION_HTTPS_PROXY".to_vec(), Value::Long(2097152));
-    vm.constants
-        .insert(b"CURL_VERSION_MULTI_SSL".to_vec(), Value::Long(4194304));
-    vm.constants
-        .insert(b"CURL_VERSION_BROTLI".to_vec(), Value::Long(8388608));
-    vm.constants
-        .insert(b"CURL_VERSION_ALTSVC".to_vec(), Value::Long(16777216));
-    vm.constants
-        .insert(b"CURL_VERSION_HTTP3".to_vec(), Value::Long(33554432));
-    vm.constants
-        .insert(b"CURL_VERSION_ZSTD".to_vec(), Value::Long(67108864));
-    vm.constants
-        .insert(b"CURL_VERSION_UNICODE".to_vec(), Value::Long(134217728));
-    vm.constants
-        .insert(b"CURL_VERSION_HSTS".to_vec(), Value::Long(268435456));
-    vm.constants
-        .insert(b"CURL_VERSION_GSASL".to_vec(), Value::Long(536870912));
-
-    // CURL sslversion constants
-    vm.constants
-        .insert(b"CURL_SSLVERSION_TLSv1".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURL_SSLVERSION_TLSv1_0".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURL_SSLVERSION_TLSv1_1".to_vec(), Value::Long(5));
-    vm.constants
-        .insert(b"CURL_SSLVERSION_TLSv1_2".to_vec(), Value::Long(6));
-    vm.constants
-        .insert(b"CURL_SSLVERSION_TLSv1_3".to_vec(), Value::Long(7));
-
-    // HTTP version constants
-    vm.constants
-        .insert(b"CURL_HTTP_VERSION_2_0".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"CURL_HTTP_VERSION_2TLS".to_vec(), Value::Long(4));
-    vm.constants.insert(
-        b"CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE".to_vec(),
-        Value::Long(5),
-    );
-
-    // CURLPROTO_* constants
-    vm.constants
-        .insert(b"CURLPROTO_HTTP".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"CURLPROTO_HTTPS".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"CURLPROTO_FTP".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"CURLPROTO_FTPS".to_vec(), Value::Long(8));
-    vm.constants
-        .insert(b"CURLPROTO_SCP".to_vec(), Value::Long(16));
-    vm.constants
-        .insert(b"CURLPROTO_SFTP".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"CURLPROTO_TELNET".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"CURLPROTO_LDAP".to_vec(), Value::Long(128));
-    vm.constants
-        .insert(b"CURLPROTO_LDAPS".to_vec(), Value::Long(256));
-    vm.constants
-        .insert(b"CURLPROTO_DICT".to_vec(), Value::Long(512));
-    vm.constants
-        .insert(b"CURLPROTO_FILE".to_vec(), Value::Long(1024));
-    vm.constants
-        .insert(b"CURLPROTO_TFTP".to_vec(), Value::Long(2048));
-    vm.constants
-        .insert(b"CURLPROTO_IMAP".to_vec(), Value::Long(4096));
-    vm.constants
-        .insert(b"CURLPROTO_IMAPS".to_vec(), Value::Long(8192));
-    vm.constants
-        .insert(b"CURLPROTO_POP3".to_vec(), Value::Long(16384));
-    vm.constants
-        .insert(b"CURLPROTO_POP3S".to_vec(), Value::Long(32768));
-    vm.constants
-        .insert(b"CURLPROTO_SMTP".to_vec(), Value::Long(65536));
-    vm.constants
-        .insert(b"CURLPROTO_SMTPS".to_vec(), Value::Long(131072));
-    vm.constants
-        .insert(b"CURLPROTO_RTSP".to_vec(), Value::Long(262144));
-    vm.constants
-        .insert(b"CURLPROTO_RTMP".to_vec(), Value::Long(524288));
-    vm.constants
-        .insert(b"CURLPROTO_RTMPT".to_vec(), Value::Long(1048576));
-    vm.constants
-        .insert(b"CURLPROTO_RTMPE".to_vec(), Value::Long(2097152));
-    vm.constants
-        .insert(b"CURLPROTO_RTMPTE".to_vec(), Value::Long(4194304));
-    vm.constants
-        .insert(b"CURLPROTO_RTMPS".to_vec(), Value::Long(8388608));
-    vm.constants
-        .insert(b"CURLPROTO_RTMPTS".to_vec(), Value::Long(16777216));
-    vm.constants
-        .insert(b"CURLPROTO_GOPHER".to_vec(), Value::Long(33554432));
-    vm.constants
-        .insert(b"CURLPROTO_SMB".to_vec(), Value::Long(67108864));
-    vm.constants
-        .insert(b"CURLPROTO_SMBS".to_vec(), Value::Long(134217728));
-    vm.constants
-        .insert(b"CURLPROTO_MQTT".to_vec(), Value::Long(268435456));
-    vm.constants
-        .insert(b"CURLPROTO_ALL".to_vec(), Value::Long(-1));
-}
-
-/// curl_init(?string $url = null): CurlHandle|false
-fn curl_init(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mut handle = CurlHandle::new();
-
-    if let Some(url_val) = args.first() {
-        let url_val = url_val.deref();
-        if !matches!(url_val, Value::Null | Value::Undef) {
-            let url_str = url_val.to_php_string().to_string_lossy();
-            handle.url = url_str.clone();
-            handle.effective_url = url_str;
-        }
-    }
-
-    Ok(make_curl_handle_obj(vm, handle))
-}
-
-/// Determine if option is a known CURLOPT for validation purposes
-fn is_known_curlopt(option: i64) -> bool {
-    // Accept anything we recognize from the constant registrations.
-    // For now accept any value in 1..200 OR 10000..11000 OR 19000..20100 OR 20000..21000 etc.
-    // PHP: just check it's a valid known CURLOPT_*
-    matches!(option,
-        // Integer options 1..300
-        1..=300
-        // String options 10000+
-        | 10000..=10999
-        // Boolean options 0..3 ? - covered by 1..300
-        // Function options 20000+
-        | 20000..=20999
-        // Off_t options 30000+
-        | 30000..=31000
-        // RETURNTRANSFER
-        | 19913
-        // BLOB options
-        | 40000..=41000
-    )
-}
-
-/// Apply a single curl option to a handle.
-/// Returns (success, exception_msg) where exception_msg signals a ValueError.
-fn apply_setopt(
-    vm: &mut Vm,
-    handle: &mut CurlHandle,
-    option: i64,
-    value: &Value,
-) -> Result<bool, VmError> {
-    // Special validation per option
-    if option == CURLOPT_URL {
-        let url_str = value.to_php_string();
-        // Check for null bytes
-        if url_str.as_bytes().contains(&0) {
-            return Err(throw_value_error(
-                vm,
-                "curl_setopt(): cURL option must not contain any null bytes",
-            ));
-        }
-        let s = url_str.to_string_lossy();
-        handle.url = s.clone();
-        handle.effective_url = s;
-        return Ok(true);
-    }
-
-    if option == CURLOPT_SSL_VERIFYHOST {
-        let n = value.to_long();
-        if n == 1 {
-            vm.emit_notice_at(
-                "curl_setopt(): CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead",
-                vm.current_line,
-            );
-            handle.ssl_verify_host = 2;
-        } else {
-            handle.ssl_verify_host = n;
-        }
-        return Ok(true);
-    }
-
-    if option == CURLOPT_PRIVATE {
-        handle.private = value.clone();
-        return Ok(true);
-    }
-
-    match option {
-        CURLOPT_RETURNTRANSFER => handle.return_transfer = value.to_long() != 0,
-        CURLOPT_POST => {
-            if value.to_long() != 0 {
-                handle.method = "POST".to_string();
-            }
-        }
-        CURLOPT_POSTFIELDS => match value {
-            Value::String(s) => {
-                handle.post_fields = Some(s.as_bytes().to_vec());
-                handle.method = "POST".to_string();
-            }
-            Value::Array(arr) => {
-                let arr = arr.borrow();
-                let mut parts = Vec::new();
-                for (key, val) in arr.iter() {
-                    let k = match key {
-                        ArrayKey::Int(n) => n.to_string(),
-                        ArrayKey::String(s) => s.to_string_lossy(),
-                    };
-                    let v = val.to_php_string().to_string_lossy();
-                    parts.push(format!("{}={}", url_encode(&k), url_encode(&v)));
-                }
-                handle.post_fields = Some(parts.join("&").into_bytes());
-                handle.method = "POST".to_string();
-            }
-            _ => {
-                let s = value.to_php_string();
-                handle.post_fields = Some(s.as_bytes().to_vec());
-                handle.method = "POST".to_string();
-            }
-        },
-        CURLOPT_HTTPHEADER => {
-            if let Value::Array(arr) = value {
-                handle.headers.clear();
-                let arr = arr.borrow();
-                for (_key, val) in arr.iter() {
-                    let header_str = val.to_php_string().to_string_lossy();
-                    if let Some(pos) = header_str.find(':') {
-                        let name = header_str[..pos].trim().to_string();
-                        let hval = header_str[pos + 1..].trim().to_string();
-                        handle.headers.push((name, hval));
-                    }
-                }
-            } else {
-                return Err(throw_type_error(
-                    vm,
-                    "curl_setopt(): The CURLOPT_HTTPHEADER option must have an array value",
-                ));
-            }
-        }
-        CURLOPT_FOLLOWLOCATION => handle.follow_location = value.to_long() != 0,
-        CURLOPT_MAXREDIRS => handle.max_redirects = value.to_long(),
-        CURLOPT_TIMEOUT => handle.timeout = value.to_long() as u64,
-        CURLOPT_CONNECTTIMEOUT => handle.connect_timeout = value.to_long() as u64,
-        CURLOPT_USERAGENT => handle.user_agent = value.to_php_string().to_string_lossy(),
-        CURLOPT_HEADER => handle.include_header = value.to_long() != 0,
-        CURLOPT_NOBODY => {
-            handle.nobody = value.to_long() != 0;
-            if handle.nobody {
-                handle.method = "HEAD".to_string();
-            }
-        }
-        CURLOPT_SSL_VERIFYPEER => handle.ssl_verify_peer = value.to_long() != 0,
-        CURLOPT_CUSTOMREQUEST => {
-            let method = value.to_php_string().to_string_lossy();
-            handle.custom_request = Some(method);
-        }
-        CURLOPT_ENCODING => {
-            let enc = value.to_php_string().to_string_lossy();
-            handle.encoding = Some(enc);
-        }
-        CURLOPT_HTTPGET => {
-            if value.to_long() != 0 {
-                handle.method = "GET".to_string();
-                handle.post_fields = None;
-            }
-        }
-        CURLOPT_COOKIE => handle.cookie = Some(value.to_php_string().to_string_lossy()),
-        CURLOPT_USERPWD => handle.userpwd = Some(value.to_php_string().to_string_lossy()),
-        CURLOPT_HTTPAUTH => handle.http_auth = value.to_long(),
-        CURLOPT_FAILONERROR => handle.fail_on_error = value.to_long() != 0,
-        CURLOPT_PUT => {
-            if value.to_long() != 0 {
-                handle.method = "PUT".to_string();
-            }
-        }
-        _ => {
-            // For unknown options check validity
-            if !is_known_curlopt(option) {
-                return Err(throw_value_error(
-                    vm,
-                    "curl_setopt(): Argument #2 ($option) is not a valid cURL option",
-                ));
-            }
-            // Known but not specifically handled - silently accept
-        }
-    }
-    Ok(true)
-}
-
-/// curl_setopt(CurlHandle $handle, int $option, mixed $value): bool
-fn curl_setopt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-
-    // Check option is an int
-    let opt_arg = args.get(1).unwrap_or(&Value::Null);
-    let opt_arg_deref = opt_arg.deref();
-    if let Value::String(_) = opt_arg_deref {
-        return Err(throw_type_error(
-            vm,
-            "curl_setopt(): Argument #2 ($option) must be of type int, string given",
-        ));
-    }
-    let option = opt_arg_deref.to_long();
-    let value = args.get(2).cloned().unwrap_or(Value::Null);
-
-    // First validate option is known
-    if !is_known_curlopt(option) {
-        return Err(throw_value_error(
-            vm,
-            "curl_setopt(): Argument #2 ($option) is not a valid cURL option",
-        ));
-    }
-
-    // Take handle out, apply, put back
-    let mut handle = with_curl_handles(|h| {
-        let mut hs = h.borrow_mut();
-        hs.remove(&handle_id)
-    });
-
-    let result = if let Some(ref mut h) = handle {
-        apply_setopt(vm, h, option, &value)?
+/// curl_cast_object(): (int) gives the object handle.
+fn curl_cast(o: &Rc<RefCell<PhpObject>>, ty: u8) -> Option<Value> {
+    if ty == 1 {
+        Some(Value::Long(o.borrow().object_id as i64))
     } else {
-        false
-    };
-
-    if let Some(h) = handle {
-        with_curl_handles(|hs| {
-            hs.borrow_mut().insert(handle_id, h);
-        });
+        None
     }
-
-    Ok(if result { Value::True } else { Value::False })
 }
 
-/// curl_setopt_array(CurlHandle $handle, array $options): bool
-fn curl_setopt_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
+static CURL_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    compare: Some(not_comparable),
+    cast: Some(curl_cast),
+    clone_obj: Some(curl_clone_obj),
+    ..NativeObjectHandlers::EMPTY
+};
+
+pub(crate) static MULTI_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    compare: Some(not_comparable),
+    cast: Some(curl_cast),
+    ..NativeObjectHandlers::EMPTY
+};
+
+pub(crate) static SHARE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    compare: Some(not_comparable),
+    ..NativeObjectHandlers::EMPTY
+};
+
+pub(crate) fn curl_of(o: &Obj) -> Option<Rc<CurlObj>> {
+    let d = o.borrow().native.as_ref().map(|n| n.data.clone())?;
+    d.downcast::<CurlObj>().ok()
+}
+
+fn new_curl_object(vm: &mut Vm, easy: Easy, st: CurlState) -> (Value, Rc<CurlObj>) {
+    let id = vm.next_object_id();
+    let mut obj = PhpObject::new(b"CurlHandle".to_vec(), id);
+    let c = Rc::new(CurlObj {
+        easy: RefCell::new(Some(easy)),
+        st: RefCell::new(st),
+    });
+    obj.native = Some(NativeData {
+        data: c.clone() as Rc<dyn std::any::Any>,
+        handlers: &CURL_HANDLERS,
+    });
+    (Value::Object(Rc::new(RefCell::new(obj))), c)
+}
+
+/// Run `f` on the easy handle (no-op when a transfer holds it).
+pub(crate) fn with_easy<R>(c: &CurlObj, f: impl FnOnce(&mut Easy) -> R) -> Option<R> {
+    c.easy.borrow_mut().as_mut().map(f)
+}
+
+fn setopt_raw(c: &CurlObj, option: i64, v: OptVal) -> u32 {
+    with_easy(c, |e| e.setopt(option as u32, v)).unwrap_or(0)
+}
+
+/// _php_curl_set_default_options()
+fn set_default_options(vm: &Vm, c: &CurlObj) {
+    setopt_raw(c, CURLOPT_NOPROGRESS, OptVal::Long(1));
+    setopt_raw(c, CURLOPT_VERBOSE, OptVal::Long(0));
+    setopt_raw(c, CURLOPT_WRITEFUNCTION, OptVal::Callback(true));
+    setopt_raw(c, CURLOPT_READFUNCTION, OptVal::Callback(true));
+    setopt_raw(c, CURLOPT_HEADERFUNCTION, OptVal::Callback(true));
+    setopt_raw(c, CURLOPT_DNS_CACHE_TIMEOUT, OptVal::Long(120));
+    setopt_raw(c, CURLOPT_MAXREDIRS, OptVal::Long(20));
+    let ini = |k: &[u8]| {
+        vm.constants
+            .get(k)
+            .map(|v| v.to_php_string().as_bytes().to_vec())
+            .unwrap_or_default()
     };
-    let options = args.get(1).cloned().unwrap_or(Value::Null);
+    let mut cainfo = ini(b"openssl.cafile");
+    if cainfo.is_empty() {
+        cainfo = ini(b"curl.cainfo");
+    }
+    if !cainfo.is_empty() {
+        setopt_raw(c, CURLOPT_CAINFO, OptVal::Str(Some(&cainfo)));
+    }
+    let _ = CURLOPT_ERRORBUFFER;
+}
 
-    if let Value::Array(arr) = options {
-        let opts: Vec<(i64, Value)> = arr
-            .borrow()
-            .iter()
-            .map(|(key, val)| {
-                let opt = match key {
-                    ArrayKey::Int(n) => *n,
-                    ArrayKey::String(s) => s.to_string_lossy().parse::<i64>().unwrap_or(0),
-                };
-                (opt, val.clone())
-            })
-            .collect();
+fn new_state() -> CurlState {
+    let mut st = CurlState::default();
+    st.handlers.write.method = PHP_CURL_STDOUT;
+    st.handlers.read.method = PHP_CURL_DIRECT;
+    st.handlers.write_header.method = PHP_CURL_IGNORE;
+    st
+}
 
-        let mut handle = with_curl_handles(|h| h.borrow_mut().remove(&handle_id));
-        let mut all_ok = true;
-        if let Some(ref mut h) = handle {
-            for (option, value) in &opts {
-                match apply_setopt(vm, h, *option, value) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        all_ok = false;
-                        break;
-                    }
-                    Err(e) => {
-                        // Put handle back before propagating
-                        if let Some(h) = handle.take() {
-                            with_curl_handles(|hs| {
-                                hs.borrow_mut().insert(handle_id, h);
-                            });
-                        }
-                        return Err(e);
+pub(crate) fn stream_id(v: &Option<Value>) -> Option<i64> {
+    match v {
+        Some(Value::Resource(id)) => Some(*id),
+        _ => None,
+    }
+}
+
+/// _php_curl_verify_handlers()
+pub(crate) fn verify_handlers(vm: &mut Vm, c: &CurlObj, reporterror: bool) {
+    let mut warn: Vec<&'static str> = Vec::new();
+    {
+        let mut st = c.st.borrow_mut();
+        let h = &mut st.handlers;
+        if let Some(id) = stream_id(&h.std_err) {
+            if !streams::is_stream(id) {
+                warn.push("CURLOPT_STDERR resource has gone away, resetting to stderr");
+                h.std_err = None;
+            }
+        }
+        if let Some(id) = stream_id(&h.read.stream) {
+            if !streams::is_stream(id) {
+                warn.push("CURLOPT_INFILE resource has gone away, resetting to default");
+                h.read.stream = None;
+            }
+        }
+        if let Some(id) = stream_id(&h.write_header.stream) {
+            if !streams::is_stream(id) {
+                warn.push("CURLOPT_WRITEHEADER resource has gone away, resetting to default");
+                h.write_header.stream = None;
+                h.write_header.method = PHP_CURL_IGNORE;
+            }
+        }
+        if let Some(id) = stream_id(&h.write.stream) {
+            if !streams::is_stream(id) {
+                warn.push("CURLOPT_FILE resource has gone away, resetting to default");
+                h.write.stream = None;
+                h.write.method = PHP_CURL_STDOUT;
+            }
+        }
+    }
+    if reporterror {
+        for w in warn {
+            let f = vm.current_builtin_name().unwrap_or_default();
+            vm.emit_warning(&format!("{}(): {}", f, w));
+        }
+    }
+}
+
+/// _php_curl_cleanup_handle()
+pub(crate) fn cleanup_handle(c: &CurlObj) {
+    let mut st = c.st.borrow_mut();
+    st.handlers.write.buf.clear();
+    st.handlers.write.buf_set = false;
+    st.header_out = None;
+    st.err_str.clear();
+    st.err_no = 0;
+}
+
+/// The callbacks of a transfer (curl_write, curl_read, curl_write_header,
+/// curl_progress / curl_xferinfo, curl_debug, ...).
+pub(crate) struct Transfer<'a> {
+    pub vm: &'a mut Vm,
+    pub c: Rc<CurlObj>,
+    pub this: Value,
+}
+
+/// zend_call_known_fcc(): through call_user_func(), which also handles
+/// __call() trampolines and invokable objects.
+pub(crate) fn call_php(vm: &mut Vm, cb: &Value, args: &[Value]) -> Result<Value, VmError> {
+    match vm.functions.get(b"call_user_func".as_slice()).copied() {
+        Some(f) => {
+            let mut a = Vec::with_capacity(args.len() + 1);
+            a.push(cb.clone());
+            a.extend_from_slice(args);
+            f(vm, &a)
+        }
+        None => vm.call_callback(cb, args),
+    }
+}
+
+/// php_curl_get_long()
+fn get_long(vm: &mut Vm, v: &Value) -> i64 {
+    match v {
+        Value::Long(n) => *n,
+        other => zpp::zval_get_long(vm, other),
+    }
+}
+
+impl Transfer<'_> {
+    /// zend_call_known_fcc() with ch->in_callback set; None when the call
+    /// did not complete (exception).
+    fn call(&mut self, cb: &Value, args: &[Value]) -> Option<Value> {
+        self.c.st.borrow_mut().in_callback = true;
+        let r = call_php(self.vm, cb, args);
+        self.c.st.borrow_mut().in_callback = false;
+        match r {
+            Ok(v) if self.vm.current_exception.is_none() => Some(v),
+            _ => None,
+        }
+    }
+
+    fn write_to_stream(&mut self, s: &Option<Value>, data: &[u8]) -> usize {
+        match stream_id(s) {
+            Some(id) => streams::write(self.vm, id, data),
+            None => 0,
+        }
+    }
+}
+
+impl engine::Callbacks for Transfer<'_> {
+    fn write(&mut self, data: &[u8]) -> usize {
+        let (method, fcc, stream) = {
+            let st = self.c.st.borrow();
+            let w = &st.handlers.write;
+            (w.method, w.fcc.clone(), w.stream.clone())
+        };
+        let mut length = data.len();
+        match method {
+            PHP_CURL_STDOUT => self.vm.write_output(data),
+            PHP_CURL_FILE => return self.write_to_stream(&stream, data),
+            PHP_CURL_RETURN => {
+                if !data.is_empty() {
+                    let mut st = self.c.st.borrow_mut();
+                    st.handlers.write.buf.extend_from_slice(data);
+                    st.handlers.write.buf_set = true;
+                }
+            }
+            PHP_CURL_USER => {
+                if let Some(cb) = fcc {
+                    let args = [
+                        self.this.clone(),
+                        Value::String(PhpString::from_bytes(data)),
+                    ];
+                    if let Some(rv) = self.call(&cb, &args) {
+                        verify_handlers(self.vm, &self.c, true);
+                        length = get_long(self.vm, &rv) as usize;
                     }
                 }
             }
-        } else {
-            all_ok = false;
+            _ => {}
         }
-
-        if let Some(h) = handle {
-            with_curl_handles(|hs| {
-                hs.borrow_mut().insert(handle_id, h);
-            });
-        }
-
-        Ok(if all_ok { Value::True } else { Value::False })
-    } else {
-        Ok(Value::False)
+        length
     }
-}
 
-/// curl_exec(CurlHandle $handle): string|bool
-fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-
-    let request_data = with_curl_handles(|handles| {
-        let handles = handles.borrow();
-        handles.get(&handle_id).map(|handle| {
+    fn header(&mut self, data: &[u8]) -> usize {
+        let (method, fcc, stream, wmethod) = {
+            let st = self.c.st.borrow();
+            let w = &st.handlers.write_header;
             (
-                handle.url.clone(),
-                handle
-                    .custom_request
-                    .clone()
-                    .unwrap_or_else(|| handle.method.clone()),
-                handle.headers.clone(),
-                handle.post_fields.clone(),
-                handle.timeout,
-                handle.connect_timeout,
-                handle.user_agent.clone(),
-                handle.follow_location,
-                handle.max_redirects,
-                handle.encoding.clone(),
-                handle.cookie.clone(),
-                handle.userpwd.clone(),
-                handle.return_transfer,
-                handle.include_header,
-                handle.nobody,
-                handle.fail_on_error,
+                w.method,
+                w.fcc.clone(),
+                w.stream.clone(),
+                st.handlers.write.method,
             )
+        };
+        let mut length = data.len();
+        match method {
+            PHP_CURL_STDOUT => {
+                if wmethod == PHP_CURL_RETURN && !data.is_empty() {
+                    let mut st = self.c.st.borrow_mut();
+                    st.handlers.write.buf.extend_from_slice(data);
+                    st.handlers.write.buf_set = true;
+                } else {
+                    self.vm.write_output(data);
+                }
+            }
+            PHP_CURL_FILE => return self.write_to_stream(&stream, data),
+            PHP_CURL_USER => {
+                if let Some(cb) = fcc {
+                    let args = [
+                        self.this.clone(),
+                        Value::String(PhpString::from_bytes(data)),
+                    ];
+                    if let Some(rv) = self.call(&cb, &args) {
+                        verify_handlers(self.vm, &self.c, true);
+                        length = get_long(self.vm, &rv) as usize;
+                    }
+                }
+            }
+            PHP_CURL_IGNORE => return length,
+            _ => return usize::MAX,
+        }
+        length
+    }
+
+    fn read(&mut self, max: usize) -> ReadResult {
+        let (method, fcc, stream) = {
+            let st = self.c.st.borrow();
+            let r = &st.handlers.read;
+            (r.method, r.fcc.clone(), r.stream.clone())
+        };
+        match method {
+            PHP_CURL_DIRECT => match stream_id(&stream) {
+                Some(id) => ReadResult::Data(streams::read(self.vm, id, max).unwrap_or_default()),
+                None => ReadResult::Data(Vec::new()),
+            },
+            PHP_CURL_USER => {
+                let Some(cb) = fcc else {
+                    return ReadResult::Data(Vec::new());
+                };
+                let args = [
+                    self.this.clone(),
+                    stream.clone().unwrap_or(Value::Null),
+                    Value::Long(max as i64),
+                ];
+                match self.call(&cb, &args) {
+                    Some(rv) => {
+                        verify_handlers(self.vm, &self.c, true);
+                        match rv {
+                            Value::String(s) => {
+                                let b = s.as_bytes();
+                                ReadResult::Data(b[..b.len().min(max)].to_vec())
+                            }
+                            Value::Long(CURL_READFUNC_PAUSE_V) => ReadResult::Pause,
+                            Value::Long(CURL_READFUNC_ABORT_V) => ReadResult::Abort,
+                            Value::Long(n) if n > 0 => {
+                                ReadResult::Data(vec![0u8; (n as usize).min(max)])
+                            }
+                            _ => ReadResult::Data(Vec::new()),
+                        }
+                    }
+                    None => ReadResult::Data(Vec::new()),
+                }
+            }
+            _ => ReadResult::Data(Vec::new()),
+        }
+    }
+
+    fn progress(&mut self, dltotal: i64, dlnow: i64, ultotal: i64, ulnow: i64) -> i64 {
+        let (x, p) = {
+            let st = self.c.st.borrow();
+            (st.handlers.xferinfo.clone(), st.handlers.progress.clone())
+        };
+        let Some(cb) = x.or(p) else {
+            return 0;
+        };
+        let args = [
+            self.this.clone(),
+            Value::Long(dltotal),
+            Value::Long(dlnow),
+            Value::Long(ultotal),
+            Value::Long(ulnow),
+        ];
+        match self.call(&cb, &args) {
+            Some(rv) => {
+                verify_handlers(self.vm, &self.c, true);
+                if get_long(self.vm, &rv) != 0 { 1 } else { 0 }
+            }
+            None => 0,
+        }
+    }
+
+    fn debug(&mut self, kind: u32, data: &[u8]) {
+        if kind as i64 == CURLINFO_HEADER_OUT {
+            self.c.st.borrow_mut().header_out = Some(data.to_vec());
+        }
+        let cb = self.c.st.borrow().handlers.debug.clone();
+        if let Some(cb) = cb {
+            let args = [
+                self.this.clone(),
+                Value::Long(kind as i64),
+                Value::String(PhpString::from_bytes(data)),
+            ];
+            let _ = self.call(&cb, &args);
+        }
+    }
+
+    fn stderr(&mut self, data: &[u8]) {
+        let s = self.c.st.borrow().handlers.std_err.clone();
+        match stream_id(&s) {
+            Some(id) => {
+                streams::write(self.vm, id, data);
+            }
+            None => {
+                use std::io::Write;
+                self.vm.flush_cli_output();
+                let _ = std::io::stderr().write_all(data);
+            }
+        }
+    }
+
+    fn prereq(&mut self, primary_ip: &str, local_ip: &str, pport: i32, lport: i32) -> i32 {
+        let cb = self.c.st.borrow().handlers.prereq.clone();
+        let Some(cb) = cb else {
+            return 0;
+        };
+        let args = [
+            self.this.clone(),
+            Value::String(PhpString::from_string(primary_ip.to_string())),
+            Value::String(PhpString::from_string(local_ip.to_string())),
+            Value::Long(pport as i64),
+            Value::Long(lport as i64),
+        ];
+        let mut rval = 0;
+        if let Some(rv) = self.call(&cb, &args) {
+            verify_handlers(self.vm, &self.c, true);
+            match rv {
+                Value::Long(n) if n == CURL_PREREQFUNC_OK || n == CURL_PREREQFUNC_ABORT => {
+                    rval = n as i32
+                }
+                Value::Long(_) => zpp::plain_value_error(
+                    self.vm,
+                    "The CURLOPT_PREREQFUNCTION callback must return either CURL_PREREQFUNC_OK or CURL_PREREQFUNC_ABORT",
+                ),
+                _ => zpp::throw(
+                    self.vm,
+                    b"TypeError",
+                    "The CURLOPT_PREREQFUNCTION callback must return either CURL_PREREQFUNC_OK or CURL_PREREQFUNC_ABORT",
+                ),
+            }
+        }
+        rval
+    }
+
+    fn fnmatch(&mut self, pattern: &[u8], string: &[u8]) -> i32 {
+        let cb = self.c.st.borrow().handlers.fnmatch.clone();
+        let Some(cb) = cb else {
+            return CURL_FNMATCHFUNC_FAIL as i32;
+        };
+        let args = [
+            self.this.clone(),
+            Value::String(PhpString::from_bytes(pattern)),
+            Value::String(PhpString::from_bytes(string)),
+        ];
+        match self.call(&cb, &args) {
+            Some(rv) => {
+                verify_handlers(self.vm, &self.c, true);
+                get_long(self.vm, &rv) as i32
+            }
+            None => CURL_FNMATCHFUNC_FAIL as i32,
+        }
+    }
+
+    fn ssh_hostkey(&mut self, keytype: i32, key: &[u8]) -> i32 {
+        let cb = self.c.st.borrow().handlers.sshhostkey.clone();
+        let mut rval = CURLKHMATCH_MISMATCH as i32;
+        let Some(cb) = cb else {
+            return rval;
+        };
+        let args = [
+            self.this.clone(),
+            Value::Long(keytype as i64),
+            Value::String(PhpString::from_bytes(key)),
+            Value::Long(key.len() as i64),
+        ];
+        if let Some(rv) = self.call(&cb, &args) {
+            verify_handlers(self.vm, &self.c, true);
+            match rv {
+                Value::Long(n) if n == CURLKHMATCH_OK || n == CURLKHMATCH_MISMATCH => {
+                    rval = n as i32
+                }
+                _ => zpp::throw(
+                    self.vm,
+                    b"Error",
+                    "The CURLOPT_SSH_HOSTKEYFUNCTION callback must return either CURLKHMATCH_OK or CURLKHMATCH_MISMATCH",
+                ),
+            }
+        }
+        rval
+    }
+}
+
+/// curl_easy_perform() of a handle with the PHP callbacks; records the
+/// error (SAVE_CURL_ERROR and the error buffer).
+pub(crate) fn perform(vm: &mut Vm, this: &Value, c: &Rc<CurlObj>) -> u32 {
+    let Some(mut easy) = c.easy.borrow_mut().take() else {
+        // curl_easy_perform() from one of its own callbacks
+        return CURLE_RECURSIVE_API_CALL as u32;
+    };
+    let code = {
+        let mut t = Transfer {
+            vm,
+            c: c.clone(),
+            this: this.clone(),
+        };
+        easy.perform(&mut t)
+    };
+    let err = easy.error_buffer().to_vec();
+    *c.easy.borrow_mut() = Some(easy);
+    let mut st = c.st.borrow_mut();
+    st.err_no = code as i64;
+    st.err_str = err;
+    code
+}
+
+fn arg_curl(a: &Arg) -> (Value, Rc<CurlObj>) {
+    let o = a.obj();
+    let c = curl_of(&o).unwrap_or_else(|| {
+        Rc::new(CurlObj {
+            easy: RefCell::new(Some(Easy::new())),
+            st: RefCell::new(new_state()),
         })
     });
+    (Value::Object(o), c)
+}
 
-    let (
-        url,
-        method,
-        headers,
-        post_fields,
-        timeout,
-        _connect_timeout,
-        user_agent,
-        follow_location,
-        max_redirects,
-        encoding,
-        cookie,
-        userpwd,
-        return_transfer,
-        include_header,
-        nobody,
-        fail_on_error,
-    ) = match request_data {
-        Some(data) => data,
-        None => return Ok(Value::False),
-    };
+fn vstr(b: &[u8]) -> Value {
+    Value::String(PhpString::from_bytes(b))
+}
 
-    if url.is_empty() {
-        with_curl_handles(|handles| {
-            let mut handles = handles.borrow_mut();
-            if let Some(handle) = handles.get_mut(&handle_id) {
-                handle.error_message = "No URL set!".to_string();
-                handle.error_number = 3;
-            }
-        });
-        return Ok(Value::False);
+fn key(s: &str) -> ArrayKey {
+    ArrayKey::String(PhpString::from_string(s.to_string()))
+}
+
+fn new_arr(a: PhpArray) -> Value {
+    Value::Array(Rc::new(RefCell::new(a)))
+}
+
+// ---------------------------------------------------------------------------
+// curl_version()
+
+const FEATURES: &[(&str, i64)] = &[
+    ("AsynchDNS", CURL_VERSION_ASYNCHDNS),
+    ("CharConv", CURL_VERSION_CONV),
+    ("Debug", CURL_VERSION_DEBUG),
+    ("GSS-Negotiate", CURL_VERSION_GSSNEGOTIATE),
+    ("IDN", CURL_VERSION_IDN),
+    ("IPv6", CURL_VERSION_IPV6),
+    ("krb4", CURL_VERSION_KERBEROS4),
+    ("Largefile", CURL_VERSION_LARGEFILE),
+    ("libz", CURL_VERSION_LIBZ),
+    ("NTLM", CURL_VERSION_NTLM),
+    ("NTLMWB", CURL_VERSION_NTLM_WB),
+    ("SPNEGO", CURL_VERSION_SPNEGO),
+    ("SSL", CURL_VERSION_SSL),
+    ("SSPI", CURL_VERSION_SSPI),
+    ("TLS-SRP", CURL_VERSION_TLSAUTH_SRP),
+    ("HTTP2", CURL_VERSION_HTTP2),
+    ("GSSAPI", CURL_VERSION_GSSAPI),
+    ("KERBEROS5", CURL_VERSION_KERBEROS5),
+    ("UNIX_SOCKETS", CURL_VERSION_UNIX_SOCKETS),
+    ("PSL", CURL_VERSION_PSL),
+    ("HTTPS_PROXY", CURL_VERSION_HTTPS_PROXY),
+    ("MULTI_SSL", CURL_VERSION_MULTI_SSL),
+    ("BROTLI", CURL_VERSION_BROTLI),
+    ("ALTSVC", CURL_VERSION_ALTSVC),
+    ("HTTP3", CURL_VERSION_HTTP3),
+    ("UNICODE", CURL_VERSION_UNICODE),
+    ("ZSTD", CURL_VERSION_ZSTD),
+    ("HSTS", CURL_VERSION_HSTS),
+    ("GSASL", CURL_VERSION_GSASL),
+];
+
+fn curl_version(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    if zpp::parse(vm, f, "", args).is_err() {
+        return Value::Null;
     }
-
-    let start_time = Instant::now();
-
-    let mut config_builder = ureq::Agent::config_builder();
-    if timeout > 0 {
-        config_builder = config_builder.timeout_global(Some(Duration::from_secs(timeout)));
-    }
-    if follow_location {
-        let max_redir = if max_redirects < 0 {
-            30
-        } else {
-            max_redirects as u32
-        };
-        config_builder = config_builder.max_redirects(max_redir);
-    } else {
-        config_builder = config_builder.max_redirects(0);
-    }
-    config_builder = config_builder.http_status_as_error(false);
-
-    let agent: ureq::Agent = config_builder.build().into();
-    let effective_method = if nobody { "HEAD" } else { &method };
-
-    let result = execute_request(
-        &agent,
-        effective_method,
-        &url,
-        &headers,
-        &post_fields,
-        &user_agent,
-        &encoding,
-        &cookie,
-        &userpwd,
-    );
-
-    let elapsed = start_time.elapsed().as_secs_f64();
-
-    match result {
-        Ok((status, resp_headers, body, content_type, effective_url)) => {
-            let mut header_text = Vec::new();
-            if include_header {
-                header_text.extend_from_slice(format!("HTTP/1.1 {} OK\r\n", status).as_bytes());
-                for (name, value) in &resp_headers {
-                    header_text.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
-                }
-                header_text.extend_from_slice(b"\r\n");
-            }
-            let header_size = header_text.len();
-
-            with_curl_handles(|handles| {
-                let mut handles = handles.borrow_mut();
-                if let Some(handle) = handles.get_mut(&handle_id) {
-                    handle.response_code = status as i64;
-                    handle.response_headers = resp_headers;
-                    handle.response_body = body.clone();
-                    handle.header_size = header_size;
-                    handle.content_type = content_type;
-                    handle.effective_url = effective_url;
-                    handle.total_time = elapsed;
-                    handle.error_message.clear();
-                    handle.error_number = 0;
-                }
-            });
-
-            if fail_on_error && status >= 400 {
-                with_curl_handles(|handles| {
-                    let mut handles = handles.borrow_mut();
-                    if let Some(handle) = handles.get_mut(&handle_id) {
-                        handle.error_message =
-                            format!("The requested URL returned error: {}", status);
-                        handle.error_number = 22;
-                    }
-                });
-                return Ok(Value::False);
-            }
-
-            if return_transfer {
-                let mut result_body = Vec::new();
-                if include_header {
-                    result_body.extend_from_slice(&header_text);
-                }
-                result_body.extend_from_slice(&body);
-                Ok(Value::String(PhpString::from_vec(result_body)))
+    let d = engine::version_info();
+    let mut a = PhpArray::new();
+    a.set(key("version_number"), Value::Long(d.version_num));
+    a.set(key("age"), Value::Long(d.age));
+    a.set(key("features"), Value::Long(d.features));
+    let mut fl = PhpArray::new();
+    for (name, bit) in FEATURES {
+        fl.set(
+            key(name),
+            if d.features & bit != 0 {
+                Value::True
             } else {
-                if include_header {
-                    vm.write_output(&header_text);
-                }
-                vm.write_output(&body);
-                Ok(Value::True)
-            }
-        }
-        Err((error_number, error_message)) => {
-            with_curl_handles(|handles| {
-                let mut handles = handles.borrow_mut();
-                if let Some(handle) = handles.get_mut(&handle_id) {
-                    handle.error_message = error_message;
-                    handle.error_number = error_number;
-                    handle.total_time = elapsed;
-                }
-            });
-            Ok(Value::False)
-        }
+                Value::False
+            },
+        );
     }
+    a.set(key("feature_list"), new_arr(fl));
+    a.set(key("ssl_version_number"), Value::Long(d.ssl_version_num));
+    a.set(key("version"), vstr(d.version.as_bytes()));
+    a.set(key("host"), vstr(d.host.as_bytes()));
+    a.set(key("ssl_version"), vstr(d.ssl_version.as_bytes()));
+    a.set(key("libz_version"), vstr(d.libz_version.as_bytes()));
+    let mut pl = PhpArray::new();
+    for p in &d.protocols {
+        pl.push(vstr(p.as_bytes()));
+    }
+    a.set(key("protocols"), new_arr(pl));
+    let os = |s: &Option<String>| vstr(s.as_deref().unwrap_or("").as_bytes());
+    if d.age >= 1 {
+        a.set(key("ares"), os(&d.ares));
+        a.set(key("ares_num"), Value::Long(d.ares_num));
+    }
+    if d.age >= 2 {
+        a.set(key("libidn"), os(&d.libidn));
+    }
+    if d.age >= 3 {
+        a.set(key("iconv_ver_num"), Value::Long(d.iconv_ver_num));
+        a.set(key("libssh_version"), os(&d.libssh_version));
+    }
+    if d.age >= 4 {
+        a.set(key("brotli_ver_num"), Value::Long(d.brotli_ver_num));
+        a.set(key("brotli_version"), os(&d.brotli_version));
+    }
+    new_arr(a)
 }
 
-fn execute_request(
-    agent: &ureq::Agent,
-    method: &str,
-    url: &str,
-    headers: &[(String, String)],
-    post_fields: &Option<Vec<u8>>,
-    user_agent: &str,
-    encoding: &Option<String>,
-    cookie: &Option<String>,
-    userpwd: &Option<String>,
-) -> Result<(u16, Vec<(String, String)>, Vec<u8>, String, String), (i64, String)> {
-    let has_body = matches!(method, "POST" | "PUT" | "PATCH") || post_fields.is_some();
+// ---------------------------------------------------------------------------
+// curl_init(), curl_copy_handle(), clone
 
-    let response = if has_body {
-        let mut request = match method {
-            "POST" => agent.post(url),
-            "PUT" => agent.put(url),
-            "PATCH" => agent.patch(url),
-            _ => agent.post(url),
-        };
-
-        for (name, value) in headers {
-            request = request.header(name.as_str(), value.as_str());
-        }
-        if !user_agent.is_empty() {
-            request = request.header("User-Agent", user_agent);
-        }
-        if let Some(enc) = encoding {
-            request = request.header("Accept-Encoding", enc.as_str());
-        }
-        if let Some(cookie_val) = cookie {
-            request = request.header("Cookie", cookie_val.as_str());
-        }
-        if let Some(userpwd_val) = userpwd {
-            if let Some(pos) = userpwd_val.find(':') {
-                let user = &userpwd_val[..pos];
-                let pass = &userpwd_val[pos + 1..];
-                let credentials = base64_encode(&format!("{}:{}", user, pass));
-                request = request.header("Authorization", &format!("Basic {}", credentials));
-            }
-        }
-
-        if let Some(body) = post_fields {
-            let has_content_type = headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
-            if !has_content_type {
-                request = request.header("Content-Type", "application/x-www-form-urlencoded");
-            }
-            request.send(body.as_slice())
-        } else {
-            request.send_empty()
-        }
-    } else {
-        let mut request = match method {
-            "GET" => agent.get(url),
-            "HEAD" => agent.head(url),
-            "DELETE" => agent.delete(url),
-            "OPTIONS" => agent.options(url),
-            _ => agent.get(url),
-        };
-
-        for (name, value) in headers {
-            request = request.header(name.as_str(), value.as_str());
-        }
-        if !user_agent.is_empty() {
-            request = request.header("User-Agent", user_agent);
-        }
-        if let Some(enc) = encoding {
-            request = request.header("Accept-Encoding", enc.as_str());
-        }
-        if let Some(cookie_val) = cookie {
-            request = request.header("Cookie", cookie_val.as_str());
-        }
-        if let Some(userpwd_val) = userpwd {
-            if let Some(pos) = userpwd_val.find(':') {
-                let user = &userpwd_val[..pos];
-                let pass = &userpwd_val[pos + 1..];
-                let credentials = base64_encode(&format!("{}:{}", user, pass));
-                request = request.header("Authorization", &format!("Basic {}", credentials));
-            }
-        }
-
-        request.call()
+fn curl_init(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "|s!", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
     };
-
-    match response {
-        Ok(mut resp) => {
-            let status = resp.status().as_u16();
-            let mut resp_headers = Vec::new();
-            for (name, value) in resp.headers().iter() {
-                if let Ok(v) = value.to_str() {
-                    resp_headers.push((name.as_str().to_string(), v.to_string()));
-                }
-            }
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            let effective_url = url.to_string();
-            let body = resp.body_mut().read_to_vec().unwrap_or_default();
-            Ok((status, resp_headers, body, content_type, effective_url))
-        }
-        Err(e) => {
-            let (error_number, error_message) = classify_ureq_error(&e);
-            Err((error_number, error_message))
+    let (ret, c) = new_curl_object(vm, Easy::new(), new_state());
+    set_default_options(vm, &c);
+    if a[0].is_given() {
+        let url = a[0].str().to_vec();
+        if option_url(vm, f, &c, &url).is_err() {
+            return Value::False;
         }
     }
+    ret
 }
 
-fn classify_ureq_error(e: &ureq::Error) -> (i64, String) {
-    let msg = e.to_string();
-    // Heuristic: classify based on error message keywords
-    let lower = msg.to_lowercase();
-    if lower.contains("name or service not known")
-        || lower.contains("nodename nor servname")
-        || lower.contains("lookup address")
-        || lower.contains("no such host")
-    {
-        return (6, format!("Could not resolve host: {}", msg));
-    }
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return (28, msg);
-    }
-    if lower.contains("connection refused") {
-        return (7, msg);
-    }
-    if lower.contains("unsupported") || lower.contains("scheme") || lower.contains("protocol") {
-        return (1, format!("Unsupported protocol: {}", msg));
-    }
-    match e {
-        ureq::Error::Timeout(_) => (28, msg),
-        ureq::Error::HostNotFound => (6, msg),
-        ureq::Error::ConnectionFailed => (7, msg),
-        ureq::Error::Tls(_) => (35, msg),
-        ureq::Error::Rustls(_) => (35, msg),
-        ureq::Error::BadUri(_) => (3, msg),
-        ureq::Error::TooManyRedirects => (47, msg),
-        _ => (7, msg),
-    }
+/// _php_setup_easy_copy_handlers() + curl_easy_duphandle()
+fn dup_curl(src: &CurlObj) -> (Easy, CurlState) {
+    let easy = src
+        .easy
+        .borrow()
+        .as_ref()
+        .map(|e| e.duphandle())
+        .unwrap_or_default();
+    let s = src.st.borrow();
+    let mut st = new_state();
+    st.handlers = s.handlers.clone();
+    st.handlers.write.buf.clear();
+    st.handlers.write.buf_set = false;
+    st.private_data = s.private_data.clone();
+    st.share = s.share.clone();
+    (easy, st)
 }
 
-/// curl_close(CurlHandle $handle): void
-/// PHP 8.5: deprecated since 8.5, no-op since 8.0
-fn curl_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
-        "Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
-    );
-    // No-op (handle stays alive); just consume the argument
-    let _ = arg_curl_id(args.first());
-    Ok(Value::Null)
-}
-
-/// curl_error(CurlHandle $handle): string
-fn curl_error(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::String(PhpString::empty())),
+fn curl_clone_obj(vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, clone: &Rc<RefCell<PhpObject>>) {
+    let Some(c) = curl_of(src) else {
+        return;
     };
-    let msg = with_curl_handles(|handles| {
-        let handles = handles.borrow();
-        handles
-            .get(&handle_id)
-            .map(|h| h.error_message.clone())
-            .unwrap_or_default()
+    let (easy, st) = dup_curl(&c);
+    let postfields = c.st.borrow().postfields.clone();
+    let nc = Rc::new(CurlObj {
+        easy: RefCell::new(Some(easy)),
+        st: RefCell::new(st),
     });
-    Ok(Value::String(PhpString::from_string(msg)))
-}
-
-/// curl_errno(CurlHandle $handle): int
-fn curl_errno(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Long(0)),
-    };
-    let errno = with_curl_handles(|handles| {
-        let handles = handles.borrow();
-        handles.get(&handle_id).map(|h| h.error_number).unwrap_or(0)
+    clone.borrow_mut().native = Some(NativeData {
+        data: nc.clone() as Rc<dyn std::any::Any>,
+        handlers: &CURL_HANDLERS,
     });
-    Ok(Value::Long(errno))
+    if let Some(Value::Array(pf)) = postfields {
+        let this = Value::Object(clone.clone());
+        if build_mime(vm, "curl_copy_handle", &nc, &this, &pf).is_err() && !vm_has_exc(vm) {
+            zpp::throw(vm, b"Exception", "Failed to clone CurlHandle");
+        }
+    }
 }
 
-/// curl_getinfo(CurlHandle $handle, ?int $option = null): mixed
-fn curl_getinfo(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-    let option = args.get(1);
+/// instanceof_function() against a (lower-case) class name
+fn is_a(vm: &Vm, o: &Obj, target: &[u8]) -> bool {
+    let cn = o.borrow().class_name.to_ascii_lowercase();
+    cn == target || vm.class_extends(&cn, target)
+}
 
-    with_curl_handles(|handles| {
-        let handles = handles.borrow();
-        if let Some(handle) = handles.get(&handle_id) {
-            if let Some(opt) = option {
-                let opt = opt.deref();
-                if matches!(opt, Value::Null | Value::Undef) {
-                    return Ok(build_info_array(handle));
-                }
-                let opt_val = opt.to_long();
-                match opt_val {
-                    CURLINFO_HTTP_CODE => Ok(Value::Long(handle.response_code)),
-                    CURLINFO_EFFECTIVE_URL => Ok(Value::String(PhpString::from_string(
-                        handle.effective_url.clone(),
-                    ))),
-                    CURLINFO_CONTENT_TYPE => {
-                        if handle.content_type.is_empty() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::String(PhpString::from_string(
-                                handle.content_type.clone(),
-                            )))
-                        }
-                    }
-                    CURLINFO_TOTAL_TIME => Ok(Value::Double(handle.total_time)),
-                    CURLINFO_REDIRECT_COUNT => Ok(Value::Long(handle.redirect_count)),
-                    CURLINFO_HEADER_SIZE => Ok(Value::Long(handle.header_size as i64)),
-                    CURLINFO_PRIVATE => Ok(handle.private.clone()),
-                    4194332 => {
-                        // CURLINFO_COOKIELIST - return empty array
-                        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-                    }
-                    _ => Ok(Value::False),
-                }
-            } else {
-                Ok(build_info_array(handle))
-            }
-        } else {
-            Ok(Value::False)
+fn vm_has_exc(vm: &Vm) -> bool {
+    vm.current_exception.is_some()
+}
+
+fn curl_copy_handle(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    let (easy, st) = dup_curl(&c);
+    let postfields = c.st.borrow().postfields.clone();
+    let (ret, nc) = new_curl_object(vm, easy, st);
+    if let Some(Value::Array(pf)) = postfields {
+        if build_mime(vm, f, &nc, &ret, &pf).is_err() {
+            vm.current_exception = None;
+            vm.emit_warning("curl_copy_handle(): Cannot duplicate cURL handle");
+            return Value::False;
         }
+    }
+    ret
+}
+
+// ---------------------------------------------------------------------------
+// curl_setopt()
+
+type SetoptResult = Result<(), ()>;
+
+fn save_error(c: &CurlObj, code: u32) {
+    c.st.borrow_mut().err_no = code as i64;
+}
+
+fn open_basedir_set(vm: &Vm) -> bool {
+    !goro_core::basedir::open_basedir_value(vm).is_empty()
+}
+
+/// php_curl_option_str()
+fn option_str(vm: &mut Vm, f: &str, c: &CurlObj, option: i64, s: &[u8]) -> SetoptResult {
+    if s.contains(&0) {
+        zpp::plain_value_error(
+            vm,
+            &format!("{}(): cURL option must not contain any null bytes", f),
+        );
+        return Err(());
+    }
+    let code = setopt_raw(c, option, OptVal::Str(Some(s)));
+    save_error(c, code);
+    if code == 0 { Ok(()) } else { Err(()) }
+}
+
+/// php_curl_option_url()
+fn option_url(vm: &mut Vm, f: &str, c: &CurlObj, url: &[u8]) -> SetoptResult {
+    if open_basedir_set(vm) {
+        setopt_raw(
+            c,
+            CURLOPT_PROTOCOLS,
+            OptVal::Long(CURLPROTO_ALL & !CURLPROTO_FILE),
+        );
+    }
+    option_str(vm, f, c, CURLOPT_URL, url)
+}
+
+const LONG_OPTIONS: &[i64] = &[
+    CURLOPT_AUTOREFERER,
+    CURLOPT_BUFFERSIZE,
+    CURLOPT_CONNECTTIMEOUT,
+    CURLOPT_COOKIESESSION,
+    CURLOPT_CRLF,
+    CURLOPT_DNS_CACHE_TIMEOUT,
+    CURLOPT_FAILONERROR,
+    CURLOPT_FILETIME,
+    CURLOPT_FORBID_REUSE,
+    CURLOPT_FRESH_CONNECT,
+    CURLOPT_FTP_USE_EPRT,
+    CURLOPT_FTP_USE_EPSV,
+    CURLOPT_HEADER,
+    CURLOPT_HTTPGET,
+    CURLOPT_HTTPPROXYTUNNEL,
+    CURLOPT_HTTP_VERSION,
+    CURLOPT_INFILESIZE,
+    CURLOPT_LOW_SPEED_LIMIT,
+    CURLOPT_LOW_SPEED_TIME,
+    CURLOPT_MAXCONNECTS,
+    CURLOPT_MAXREDIRS,
+    CURLOPT_NETRC,
+    CURLOPT_NOBODY,
+    CURLOPT_NOPROGRESS,
+    CURLOPT_NOSIGNAL,
+    CURLOPT_PORT,
+    CURLOPT_POST,
+    CURLOPT_PROXYPORT,
+    CURLOPT_PROXYTYPE,
+    CURLOPT_PUT,
+    CURLOPT_RESUME_FROM,
+    CURLOPT_SSLVERSION,
+    CURLOPT_SSL_VERIFYPEER,
+    CURLOPT_TIMECONDITION,
+    CURLOPT_TIMEOUT,
+    CURLOPT_TIMEVALUE,
+    CURLOPT_TRANSFERTEXT,
+    CURLOPT_UNRESTRICTED_AUTH,
+    CURLOPT_UPLOAD,
+    CURLOPT_VERBOSE,
+    CURLOPT_HTTPAUTH,
+    CURLOPT_FTP_CREATE_MISSING_DIRS,
+    CURLOPT_PROXYAUTH,
+    CURLOPT_SERVER_RESPONSE_TIMEOUT,
+    CURLOPT_IPRESOLVE,
+    CURLOPT_MAXFILESIZE,
+    CURLOPT_TCP_NODELAY,
+    CURLOPT_FTPSSLAUTH,
+    CURLOPT_IGNORE_CONTENT_LENGTH,
+    CURLOPT_FTP_SKIP_PASV_IP,
+    CURLOPT_FTP_FILEMETHOD,
+    CURLOPT_CONNECT_ONLY,
+    CURLOPT_LOCALPORT,
+    CURLOPT_LOCALPORTRANGE,
+    CURLOPT_SSL_SESSIONID_CACHE,
+    CURLOPT_FTP_SSL_CCC,
+    CURLOPT_SSH_AUTH_TYPES,
+    CURLOPT_CONNECTTIMEOUT_MS,
+    CURLOPT_HTTP_CONTENT_DECODING,
+    CURLOPT_HTTP_TRANSFER_DECODING,
+    CURLOPT_TIMEOUT_MS,
+    CURLOPT_NEW_DIRECTORY_PERMS,
+    CURLOPT_NEW_FILE_PERMS,
+    CURLOPT_USE_SSL,
+    CURLOPT_APPEND,
+    CURLOPT_DIRLISTONLY,
+    CURLOPT_PROXY_TRANSFER_MODE,
+    CURLOPT_ADDRESS_SCOPE,
+    CURLOPT_CERTINFO,
+    CURLOPT_PROTOCOLS,
+    CURLOPT_REDIR_PROTOCOLS,
+    CURLOPT_SOCKS5_GSSAPI_NEC,
+    CURLOPT_TFTP_BLKSIZE,
+    CURLOPT_FTP_USE_PRET,
+    CURLOPT_RTSP_CLIENT_CSEQ,
+    CURLOPT_RTSP_REQUEST,
+    CURLOPT_RTSP_SERVER_CSEQ,
+    CURLOPT_WILDCARDMATCH,
+    CURLOPT_GSSAPI_DELEGATION,
+    CURLOPT_ACCEPTTIMEOUT_MS,
+    CURLOPT_SSL_OPTIONS,
+    CURLOPT_TCP_KEEPALIVE,
+    CURLOPT_TCP_KEEPIDLE,
+    CURLOPT_TCP_KEEPINTVL,
+    CURLOPT_SASL_IR,
+    CURLOPT_EXPECT_100_TIMEOUT_MS,
+    CURLOPT_SSL_ENABLE_ALPN,
+    CURLOPT_SSL_ENABLE_NPN,
+    CURLOPT_HEADEROPT,
+    CURLOPT_SSL_VERIFYSTATUS,
+    CURLOPT_PATH_AS_IS,
+    CURLOPT_SSL_FALSESTART,
+    CURLOPT_PIPEWAIT,
+    CURLOPT_STREAM_WEIGHT,
+    CURLOPT_TFTP_NO_OPTIONS,
+    CURLOPT_TCP_FASTOPEN,
+    CURLOPT_KEEP_SENDING_ON_ERROR,
+    CURLOPT_PROXY_SSL_OPTIONS,
+    CURLOPT_PROXY_SSL_VERIFYHOST,
+    CURLOPT_PROXY_SSL_VERIFYPEER,
+    CURLOPT_PROXY_SSLVERSION,
+    CURLOPT_SUPPRESS_CONNECT_HEADERS,
+    CURLOPT_SOCKS5_AUTH,
+    CURLOPT_SSH_COMPRESSION,
+    CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS,
+    CURLOPT_DNS_SHUFFLE_ADDRESSES,
+    CURLOPT_HAPROXYPROTOCOL,
+    CURLOPT_DISALLOW_USERNAME_IN_URL,
+    CURLOPT_UPKEEP_INTERVAL_MS,
+    CURLOPT_UPLOAD_BUFFERSIZE,
+    CURLOPT_HTTP09_ALLOWED,
+    CURLOPT_ALTSVC_CTRL,
+    CURLOPT_MAXAGE_CONN,
+    CURLOPT_MAIL_RCPT_ALLLOWFAILS,
+    CURLOPT_HSTS_CTRL,
+    CURLOPT_DOH_SSL_VERIFYHOST,
+    CURLOPT_DOH_SSL_VERIFYPEER,
+    CURLOPT_DOH_SSL_VERIFYSTATUS,
+    CURLOPT_MAXLIFETIME_CONN,
+    CURLOPT_MIME_OPTIONS,
+    CURLOPT_WS_OPTIONS,
+    CURLOPT_CA_CACHE_TIMEOUT,
+    CURLOPT_QUICK_EXIT,
+    CURLOPT_TCP_KEEPCNT,
+    CURLOPT_FOLLOWLOCATION,
+];
+
+const STRING_OPTIONS: &[i64] = &[
+    CURLOPT_CAINFO,
+    CURLOPT_CAPATH,
+    CURLOPT_COOKIE,
+    CURLOPT_EGDSOCKET,
+    CURLOPT_INTERFACE,
+    CURLOPT_PROXY,
+    CURLOPT_PROXYUSERPWD,
+    CURLOPT_REFERER,
+    CURLOPT_SSLCERTTYPE,
+    CURLOPT_SSLENGINE,
+    CURLOPT_SSLENGINE_DEFAULT,
+    CURLOPT_SSLKEY,
+    CURLOPT_SSLKEYPASSWD,
+    CURLOPT_SSLKEYTYPE,
+    CURLOPT_SSL_CIPHER_LIST,
+    CURLOPT_USERAGENT,
+    CURLOPT_COOKIELIST,
+    CURLOPT_FTP_ALTERNATIVE_TO_USER,
+    CURLOPT_SSH_HOST_PUBLIC_KEY_MD5,
+    CURLOPT_PROXYPASSWORD,
+    CURLOPT_PROXYUSERNAME,
+    CURLOPT_NOPROXY,
+    CURLOPT_SOCKS5_GSSAPI_SERVICE,
+    CURLOPT_MAIL_FROM,
+    CURLOPT_RTSP_STREAM_URI,
+    CURLOPT_RTSP_TRANSPORT,
+    CURLOPT_TLSAUTH_TYPE,
+    CURLOPT_TLSAUTH_PASSWORD,
+    CURLOPT_TLSAUTH_USERNAME,
+    CURLOPT_TRANSFER_ENCODING,
+    CURLOPT_DNS_SERVERS,
+    CURLOPT_MAIL_AUTH,
+    CURLOPT_LOGIN_OPTIONS,
+    CURLOPT_PINNEDPUBLICKEY,
+    CURLOPT_PROXY_SERVICE_NAME,
+    CURLOPT_SERVICE_NAME,
+    CURLOPT_DEFAULT_PROTOCOL,
+    CURLOPT_PRE_PROXY,
+    CURLOPT_PROXY_CAINFO,
+    CURLOPT_PROXY_CAPATH,
+    CURLOPT_PROXY_CRLFILE,
+    CURLOPT_PROXY_KEYPASSWD,
+    CURLOPT_PROXY_PINNEDPUBLICKEY,
+    CURLOPT_PROXY_SSL_CIPHER_LIST,
+    CURLOPT_PROXY_SSLCERT,
+    CURLOPT_PROXY_SSLCERTTYPE,
+    CURLOPT_PROXY_SSLKEY,
+    CURLOPT_PROXY_SSLKEYTYPE,
+    CURLOPT_PROXY_TLSAUTH_PASSWORD,
+    CURLOPT_PROXY_TLSAUTH_TYPE,
+    CURLOPT_PROXY_TLSAUTH_USERNAME,
+    CURLOPT_ABSTRACT_UNIX_SOCKET,
+    CURLOPT_REQUEST_TARGET,
+    CURLOPT_PROXY_TLS13_CIPHERS,
+    CURLOPT_TLS13_CIPHERS,
+    CURLOPT_ALTSVC,
+    CURLOPT_SASL_AUTHZID,
+    CURLOPT_PROXY_ISSUERCERT,
+    CURLOPT_SSL_EC_CURVES,
+    CURLOPT_AWS_SIGV4,
+    CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+    CURLOPT_PROTOCOLS_STR,
+    CURLOPT_REDIR_PROTOCOLS_STR,
+];
+
+const NULLABLE_STRING_OPTIONS: &[i64] = &[
+    CURLOPT_CUSTOMREQUEST,
+    CURLOPT_FTPPORT,
+    CURLOPT_RANGE,
+    CURLOPT_FTP_ACCOUNT,
+    CURLOPT_RTSP_SESSION_ID,
+    CURLOPT_ACCEPT_ENCODING,
+    CURLOPT_DNS_INTERFACE,
+    CURLOPT_DNS_LOCAL_IP4,
+    CURLOPT_DNS_LOCAL_IP6,
+    CURLOPT_XOAUTH2_BEARER,
+    CURLOPT_UNIX_SOCKET_PATH,
+    CURLOPT_DOH_URL,
+    CURLOPT_HSTS,
+    CURLOPT_KRBLEVEL,
+    CURLOPT_USERPWD,
+    CURLOPT_USERNAME,
+    CURLOPT_PASSWORD,
+    CURLOPT_SSL_SIGNATURE_ALGORITHMS,
+];
+
+const SLIST_OPTIONS: &[(i64, &str)] = &[
+    (CURLOPT_HTTP200ALIASES, "CURLOPT_HTTP200ALIASES"),
+    (CURLOPT_HTTPHEADER, "CURLOPT_HTTPHEADER"),
+    (CURLOPT_POSTQUOTE, "CURLOPT_POSTQUOTE"),
+    (CURLOPT_PREQUOTE, "CURLOPT_PREQUOTE"),
+    (CURLOPT_QUOTE, "CURLOPT_QUOTE"),
+    (CURLOPT_TELNETOPTIONS, "CURLOPT_TELNETOPTIONS"),
+    (CURLOPT_MAIL_RCPT, "CURLOPT_MAIL_RCPT"),
+    (CURLOPT_RESOLVE, "CURLOPT_RESOLVE"),
+    (CURLOPT_PROXYHEADER, "CURLOPT_PROXYHEADER"),
+    (CURLOPT_CONNECT_TO, "CURLOPT_CONNECT_TO"),
+];
+
+const OFF_T_OPTIONS: &[i64] = &[
+    CURLOPT_INFILESIZE_LARGE,
+    CURLOPT_MAX_RECV_SPEED_LARGE,
+    CURLOPT_MAX_SEND_SPEED_LARGE,
+    CURLOPT_MAXFILESIZE_LARGE,
+    CURLOPT_TIMEVALUE_LARGE,
+];
+
+const FILE_PATH_OPTIONS: &[i64] = &[
+    CURLOPT_COOKIEFILE,
+    CURLOPT_COOKIEJAR,
+    CURLOPT_RANDOM_FILE,
+    CURLOPT_SSLCERT,
+    CURLOPT_NETRC_FILE,
+    CURLOPT_SSH_PRIVATE_KEYFILE,
+    CURLOPT_SSH_PUBLIC_KEYFILE,
+    CURLOPT_CRLFILE,
+    CURLOPT_ISSUERCERT,
+    CURLOPT_SSH_KNOWNHOSTS,
+];
+
+const BLOB_OPTIONS: &[i64] = &[
+    CURLOPT_ISSUERCERT_BLOB,
+    CURLOPT_PROXY_ISSUERCERT_BLOB,
+    CURLOPT_PROXY_SSLCERT_BLOB,
+    CURLOPT_PROXY_SSLKEY_BLOB,
+    CURLOPT_SSLCERT_BLOB,
+    CURLOPT_SSLKEY_BLOB,
+    CURLOPT_CAINFO_BLOB,
+    CURLOPT_PROXY_CAINFO_BLOB,
+];
+
+/// php_curl_set_callable_handler()
+fn set_callable(
+    vm: &mut Vm,
+    f: &str,
+    slot: &mut Option<Value>,
+    v: &Value,
+    is_array_config: bool,
+    option_name: &str,
+) -> bool {
+    *slot = None;
+    if matches!(v, Value::Null) {
+        return true;
+    }
+    if let Err(e) = streams::check_callable(vm, v) {
+        if !vm_has_exc(vm) {
+            zpp::arg_type_error(
+                vm,
+                f,
+                if is_array_config { 2 } else { 3 },
+                &format!("must be a valid callback for option {}, {}", option_name, e),
+            );
+        }
+        return false;
+    }
+    *slot = Some(v.clone());
+    true
+}
+
+/// Which handler slot a callable option fills.
+fn callable_slot(h: &mut Handlers, option: i64) -> Option<(&mut Option<Value>, &'static str)> {
+    Some(match option {
+        CURLOPT_PROGRESSFUNCTION => (&mut h.progress, "CURLOPT_PROGRESSFUNCTION"),
+        CURLOPT_XFERINFOFUNCTION => (&mut h.xferinfo, "CURLOPT_XFERINFOFUNCTION"),
+        CURLOPT_FNMATCH_FUNCTION => (&mut h.fnmatch, "CURLOPT_FNMATCH_FUNCTION"),
+        CURLOPT_DEBUGFUNCTION => (&mut h.debug, "CURLOPT_DEBUGFUNCTION"),
+        CURLOPT_PREREQFUNCTION => (&mut h.prereq, "CURLOPT_PREREQFUNCTION"),
+        CURLOPT_SSH_HOSTKEYFUNCTION => (&mut h.sshhostkey, "CURLOPT_SSH_HOSTKEYFUNCTION"),
+        _ => return None,
     })
 }
 
-fn build_info_array(handle: &CurlHandle) -> Value {
-    let mut arr = PhpArray::new();
-
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"url")),
-        Value::String(PhpString::from_string(handle.effective_url.clone())),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"content_type")),
-        if handle.content_type.is_empty() {
-            Value::Null
-        } else {
-            Value::String(PhpString::from_string(handle.content_type.clone()))
-        },
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"http_code")),
-        Value::Long(handle.response_code),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"header_size")),
-        Value::Long(handle.header_size as i64),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"request_size")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"filetime")),
-        Value::Long(-1),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"ssl_verify_result")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"redirect_count")),
-        Value::Long(handle.redirect_count),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"total_time")),
-        Value::Double(handle.total_time),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"namelookup_time")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"connect_time")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"pretransfer_time")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"size_upload")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"size_download")),
-        Value::Double(handle.response_body.len() as f64),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"speed_download")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"speed_upload")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"download_content_length")),
-        Value::Double(-1.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"upload_content_length")),
-        Value::Double(-1.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"starttransfer_time")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"redirect_time")),
-        Value::Double(0.0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"redirect_url")),
-        Value::String(PhpString::empty()),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"primary_ip")),
-        Value::String(PhpString::empty()),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"certinfo")),
-        Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"primary_port")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"local_ip")),
-        Value::String(PhpString::empty()),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"local_port")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"http_version")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"protocol")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"ssl_verifyresult")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"scheme")),
-        Value::String(PhpString::empty()),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"appconnect_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"connect_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"namelookup_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"pretransfer_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"redirect_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"starttransfer_time_us")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"total_time_us")),
-        Value::Long((handle.total_time * 1e6) as i64),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"effective_method")),
-        Value::String(PhpString::from_string(handle.method.clone())),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"capath")),
-        Value::String(PhpString::empty()),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"cainfo")),
-        Value::String(PhpString::empty()),
-    );
-
-    Value::Array(Rc::new(RefCell::new(arr)))
-}
-
-/// curl_reset(CurlHandle $handle): void
-fn curl_reset(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Null),
-    };
-    with_curl_handles(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(handle) = handles.get_mut(&handle_id) {
-            handle.reset();
-        }
-    });
-    Ok(Value::Null)
-}
-
-/// curl_version(int $age = 0): array|false
-fn curl_version(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"version_number")),
-        Value::Long(0x075500),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"age")),
-        Value::Long(9),
-    );
-    // Features bitmask: SSL | IPV6 | LIBZ | LARGEFILE | NTLM | HTTP2 | UNIX_SOCKETS | HTTPS_PROXY
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"features")),
-        Value::Long(4 | 1 | 8 | 512 | 16 | 65536 | 524288 | 2097152),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"ssl_version_number")),
-        Value::Long(0),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"version")),
-        Value::String(PhpString::from_bytes(b"7.85.0")),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"host")),
-        Value::String(PhpString::from_bytes(b"rust")),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"ssl_version")),
-        Value::String(PhpString::from_bytes(b"rustls/0.23")),
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"libz_version")),
-        Value::String(PhpString::from_bytes(b"1.2.13")),
-    );
-    let protos = {
-        let mut protos = PhpArray::new();
-        protos.push(Value::String(PhpString::from_bytes(b"http")));
-        protos.push(Value::String(PhpString::from_bytes(b"https")));
-        Value::Array(Rc::new(RefCell::new(protos)))
-    };
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"protocols")),
-        protos,
-    );
-
-    // Feature list - all bool false
-    let mut feature_list = PhpArray::new();
-    for &k in &[
-        "AsynchDNS",
-        "CharConv",
-        "Debug",
-        "GSS-Negotiate",
-        "IDN",
-        "IPv6",
-        "krb4",
-        "Largefile",
-        "libz",
-        "NTLM",
-        "NTLMWB",
-        "SPNEGO",
-        "SSL",
-        "SSPI",
-        "TLS-SRP",
-        "HTTP2",
-        "GSSAPI",
-        "KERBEROS5",
-        "UNIX_SOCKETS",
-        "PSL",
-        "HTTPS_PROXY",
-        "MULTI_SSL",
-        "BROTLI",
-    ] {
-        feature_list.set(
-            ArrayKey::String(PhpString::from_bytes(k.as_bytes())),
-            Value::False,
-        );
-    }
-    // Set a few to true
-    feature_list.set(ArrayKey::String(PhpString::from_bytes(b"SSL")), Value::True);
-    feature_list.set(
-        ArrayKey::String(PhpString::from_bytes(b"IPv6")),
-        Value::True,
-    );
-    feature_list.set(
-        ArrayKey::String(PhpString::from_bytes(b"libz")),
-        Value::True,
-    );
-    arr.set(
-        ArrayKey::String(PhpString::from_bytes(b"feature_list")),
-        Value::Array(Rc::new(RefCell::new(feature_list))),
-    );
-
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
-}
-
-fn url_encode(s: &str) -> String {
-    let mut result = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(byte as char);
-            }
-            b' ' => result.push('+'),
-            _ => result.push_str(&format!("%{:02X}", byte)),
-        }
-    }
-    result
-}
-
-// === curl_multi_* ===
-
-fn curl_multi_init(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(make_multi_handle_obj(vm))
-}
-
-fn curl_multi_add_handle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let multi_id = match arg_multi_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Long(1)),
-    };
-    let handle_id = match arg_curl_id(args.get(1)) {
-        Some(id) => id,
-        None => return Ok(Value::Long(2)),
-    };
-    MULTI_HANDLES.with(|handles| {
-        if let Some(list) = handles.borrow_mut().get_mut(&multi_id) {
-            list.push(handle_id);
-        }
-    });
-    Ok(Value::Long(0))
-}
-
-fn curl_multi_remove_handle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let multi_id = match arg_multi_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Long(1)),
-    };
-    let handle_id = match arg_curl_id(args.get(1)) {
-        Some(id) => id,
-        None => return Ok(Value::Long(2)),
-    };
-    MULTI_HANDLES.with(|handles| {
-        if let Some(list) = handles.borrow_mut().get_mut(&multi_id) {
-            list.retain(|&id| id != handle_id);
-        }
-    });
-    Ok(Value::Long(0))
-}
-
-fn curl_multi_exec(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Reference(r)) = args.get(1) {
-        *r.borrow_mut() = Value::Long(0);
-    }
-    Ok(Value::Long(0))
-}
-
-fn curl_multi_getcontent(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Null),
-    };
-    let result = with_curl_handles(|handles| {
-        if let Some(handle) = handles.borrow().get(&handle_id) {
-            if handle.response_body.is_empty() {
-                Value::Null
-            } else {
-                Value::String(PhpString::from_vec(handle.response_body.clone()))
-            }
-        } else {
-            Value::Null
-        }
-    });
-    Ok(result)
-}
-
-/// curl_multi_close: no-op (PHP 8.0+ doesn't actually close)
-fn curl_multi_close(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _ = arg_multi_id(args.first());
-    Ok(Value::Null)
-}
-
-fn curl_multi_errno(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let multi_id = match arg_multi_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Long(0)),
-    };
-    let e = MULTI_ERRNOS.with(|e| e.borrow().get(&multi_id).copied().unwrap_or(0));
-    Ok(Value::Long(e))
-}
-
-fn curl_multi_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let msg = match code {
-        0 => "No error",
-        1 => "Invalid multi handle",
-        2 => "Invalid easy handle",
-        3 => "Out of memory",
-        4 => "Internal error",
-        5 => "Invalid socket argument",
-        6 => "Unknown option",
-        7 => "Called multi_perform without ever having added an easy handle",
-        _ => return Ok(Value::Null),
-    };
-    Ok(Value::String(PhpString::from_string(msg.to_string())))
-}
-
-fn curl_multi_setopt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let multi_id = match arg_multi_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-    let option = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    if !(1..=30).contains(&option) && !(20000..=20030).contains(&option) {
-        MULTI_ERRNOS.with(|e| {
-            e.borrow_mut().insert(multi_id, 6); // CURLM_UNKNOWN_OPTION
-        });
-        return Err(throw_value_error(
-            vm,
-            "curl_multi_setopt(): Argument #2 ($option) is not a valid cURL multi option",
-        ));
-    }
-    Ok(Value::True)
-}
-
-fn curl_multi_info_read(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Reference(r)) = args.get(1) {
-        *r.borrow_mut() = Value::Long(0);
-    }
-    Ok(Value::False)
-}
-
-fn curl_multi_select(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
-}
-
-fn curl_multi_get_handles(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let multi_id = match arg_multi_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let ids = MULTI_HANDLES.with(|h| h.borrow().get(&multi_id).cloned().unwrap_or_default());
-    let mut arr = PhpArray::new();
-    for cid in ids {
-        // Create a CurlHandle object referring to existing handle
-        let obj = PhpObject::new(b"CurlHandle".to_vec(), cid as u64);
-        arr.push(Value::Object(Rc::new(RefCell::new(obj))));
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
-}
-
-fn base64_encode(input: &str) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
-    let mut result = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
-// === Additional functions ===
-
-fn curl_copy_handle(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let handle_id = match arg_curl_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-    let new_handle = with_curl_handles(|handles| {
-        let handles = handles.borrow();
-        handles.get(&handle_id).cloned()
-    });
-    match new_handle {
-        Some(new_h) => Ok(make_curl_handle_obj(vm, new_h)),
-        None => Ok(Value::False),
-    }
-}
-
-fn curl_share_init(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(make_share_handle_obj(vm))
-}
-
-fn curl_share_init_persistent(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let arr_ref = arr.borrow();
-        if arr_ref.is_empty() {
-            return Err(throw_value_error(
+/// The PHP stream behind a File-Handle option value.
+fn fetch_file_handle(vm: &mut Vm, v: &Value) -> Result<i64, ()> {
+    match v {
+        Value::Resource(id) if streams::is_stream(*id) => Ok(*id),
+        Value::Resource(_) => {
+            let f = vm.current_builtin_name().unwrap_or_default();
+            zpp::throw(
                 vm,
-                "curl_share_init_persistent(): Argument #1 ($share_options) must not be empty",
-            ));
+                b"TypeError",
+                &format!(
+                    "{}(): supplied resource is not a valid File-Handle resource",
+                    f
+                ),
+            );
+            Err(())
         }
-        for (_, val) in arr_ref.iter() {
-            let n = val.to_long();
-            if !matches!(n, 2..=6) {
-                return Err(throw_value_error(
-                    vm,
-                    "curl_share_init_persistent(): Argument #1 ($share_options) must contain only CURL_LOCK_DATA_* constants",
-                ));
-            }
-            if n == 2 {
-                return Err(throw_value_error(
-                    vm,
-                    "curl_share_init_persistent(): Argument #1 ($share_options) must not contain CURL_LOCK_DATA_COOKIE because sharing cookies across PHP requests is unsafe",
-                ));
-            }
-        }
-    }
-    Ok(make_share_handle_obj(vm))
-}
-
-fn curl_share_setopt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let share_id = match arg_share_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::False),
-    };
-    let option = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    if !(1..=4).contains(&option) {
-        // Mark share errno = 1 (CURLSHE_BAD_OPTION / Unknown share option)
-        SHARE_ERRNOS.with(|e| {
-            e.borrow_mut().insert(share_id, 1);
-        });
-        return Err(throw_value_error(
-            vm,
-            "curl_share_setopt(): Argument #2 ($option) is not a valid cURL share option",
-        ));
-    }
-    Ok(Value::True)
-}
-
-/// curl_share_close: deprecated since 8.5, no-op since 8.0
-fn curl_share_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated(
-        "Function curl_share_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
-    );
-    let _ = arg_share_id(args.first());
-    Ok(Value::Null)
-}
-
-fn curl_share_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let msg = match code {
-        0 => "No error",
-        1 => "Unknown share option",
-        2 => "Share currently in use",
-        3 => "Invalid share handle",
-        4 => "Out of memory",
-        5 => "Feature not available in this library",
-        _ => return Ok(Value::Null),
-    };
-    Ok(Value::String(PhpString::from_string(msg.to_string())))
-}
-
-fn curl_share_errno(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let share_id = match arg_share_id(args.first()) {
-        Some(id) => id,
-        None => return Ok(Value::Long(0)),
-    };
-    let e = SHARE_ERRNOS.with(|e| e.borrow().get(&share_id).copied().unwrap_or(0));
-    Ok(Value::Long(e))
-}
-
-fn curl_strerror(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let code = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let msg = match code {
-        0 => "No error",
-        1 => "Unsupported protocol",
-        3 => "URL using bad/illegal format or missing URL",
-        6 => "Couldn't resolve host name",
-        7 => "Couldn't connect to server",
-        28 => "Connection timed out",
-        35 => "SSL connect error",
-        42 => "Operation was aborted by an application callback",
-        47 => "Number of redirects hit maximum amount",
-        52 => "Server returned nothing (no headers, no data)",
-        55 => "Failed sending data to the peer",
-        56 => "Failure when receiving data from the peer",
-        _ => "Unknown error",
-    };
-    Ok(Value::String(PhpString::from_string(msg.to_string())))
-}
-
-fn curl_pause(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
-}
-
-fn curl_upkeep(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
-}
-
-fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args
-        .first()
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(PhpString::empty);
-    let mime_type = args
-        .get(1)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::from_bytes(b"application/octet-stream"));
-    let posted_filename = args
-        .get(2)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(PhpString::empty);
-
-    let id = vm.next_object_id();
-    let mut obj = PhpObject::new(b"CURLFile".to_vec(), id);
-    obj.set_property(b"name".to_vec(), Value::String(filename));
-    obj.set_property(b"mime".to_vec(), Value::String(mime_type));
-    obj.set_property(b"postname".to_vec(), Value::String(posted_filename));
-    Ok(Value::Object(Rc::new(RefCell::new(obj))))
-}
-
-/// curl_escape(CurlHandle $handle, string $string): string|false
-fn curl_escape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _handle_id = arg_curl_id(args.first());
-    let s = args
-        .get(1)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(PhpString::empty);
-    let mut result = String::new();
-    for byte in s.as_bytes() {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(*byte as char);
-            }
-            _ => result.push_str(&format!("%{:02X}", byte)),
+        _ => {
+            let f = vm.current_builtin_name().unwrap_or_default();
+            zpp::throw(
+                vm,
+                b"TypeError",
+                &format!(
+                    "{}(): supplied argument is not a valid File-Handle resource",
+                    f
+                ),
+            );
+            Err(())
         }
     }
-    Ok(Value::String(PhpString::from_string(result)))
 }
 
-/// curl_unescape(CurlHandle $handle, string $string): string|false
-fn curl_unescape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _handle_id = arg_curl_id(args.first());
-    let s = args
-        .get(1)
-        .map(|v| v.to_php_string())
-        .unwrap_or_else(PhpString::empty);
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            // Decode %XX
-            let hex = &bytes[i + 1..i + 3];
-            let h1 = (hex[0] as char).to_digit(16);
-            let h2 = (hex[1] as char).to_digit(16);
-            if let (Some(a), Some(b)) = (h1, h2) {
-                let byte = (a * 16 + b) as u8;
-                // libcurl skips NUL bytes
-                if byte != 0 {
-                    result.push(byte);
+fn writable_mode(fid: i64) -> bool {
+    let m = streams::mode(fid).unwrap_or_default();
+    let b = m.as_bytes();
+    b.first() != Some(&b'r') || b.get(1) == Some(&b'+')
+}
+
+/// _php_curl_setopt()
+pub(crate) fn php_curl_setopt(
+    vm: &mut Vm,
+    f: &str,
+    this: &Value,
+    c: &Rc<CurlObj>,
+    option: i64,
+    zvalue: &Value,
+    is_array_config: bool,
+) -> SetoptResult {
+    let zvalue = &zvalue.deref();
+    let mut error: u32 = 0;
+    match option {
+        // Callable options with a PHP_CURL_USER handler method
+        CURLOPT_WRITEFUNCTION | CURLOPT_HEADERFUNCTION | CURLOPT_READFUNCTION => {
+            let (name, default) = match option {
+                CURLOPT_WRITEFUNCTION => ("CURLOPT_WRITEFUNCTION", PHP_CURL_STDOUT),
+                CURLOPT_HEADERFUNCTION => ("CURLOPT_HEADERFUNCTION", PHP_CURL_IGNORE),
+                _ => ("CURLOPT_READFUNCTION", PHP_CURL_DIRECT),
+            };
+            let mut slot = None;
+            let ok = set_callable(vm, f, &mut slot, zvalue, is_array_config, name);
+            let mut st = c.st.borrow_mut();
+            let set = slot.is_some();
+            let method = match option {
+                CURLOPT_WRITEFUNCTION => {
+                    st.handlers.write.fcc = slot;
+                    &mut st.handlers.write.method
                 }
-                i += 3;
+                CURLOPT_HEADERFUNCTION => {
+                    st.handlers.write_header.fcc = slot;
+                    &mut st.handlers.write_header.method
+                }
+                _ => {
+                    st.handlers.read.fcc = slot;
+                    &mut st.handlers.read.method
+                }
+            };
+            if !ok {
+                *method = default;
+                return Err(());
+            }
+            if !set {
+                *method = default;
+                return Ok(());
+            }
+            *method = PHP_CURL_USER;
+        }
+        CURLOPT_PROGRESSFUNCTION
+        | CURLOPT_XFERINFOFUNCTION
+        | CURLOPT_FNMATCH_FUNCTION
+        | CURLOPT_DEBUGFUNCTION
+        | CURLOPT_PREREQFUNCTION
+        | CURLOPT_SSH_HOSTKEYFUNCTION => {
+            let mut slot = None;
+            let name = {
+                let mut st = c.st.borrow_mut();
+                let (s, name) = callable_slot(&mut st.handlers, option).unwrap();
+                *s = None;
+                name
+            };
+            if !set_callable(vm, f, &mut slot, zvalue, is_array_config, name) {
+                return Err(());
+            }
+            {
+                let mut st = c.st.borrow_mut();
+                let (s, _) = callable_slot(&mut st.handlers, option).unwrap();
+                *s = slot;
+            }
+            let engine_opt = match option {
+                CURLOPT_PROGRESSFUNCTION => CURLOPT_PROGRESSFUNCTION_C,
+                CURLOPT_XFERINFOFUNCTION => CURLOPT_XFERINFOFUNCTION_C,
+                o => o,
+            };
+            setopt_raw(c, engine_opt, OptVal::Callback(true));
+        }
+        CURLOPT_SSL_VERIFYHOST => {
+            let lval = zpp::zval_get_long(vm, zvalue);
+            if lval == 1 {
+                vm.emit_notice_at(
+                    &format!(
+                        "{}(): CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead",
+                        f
+                    ),
+                    vm.current_line,
+                );
+                error = setopt_raw(c, option, OptVal::Long(2));
+            } else {
+                error = setopt_raw(c, option, OptVal::Long(lval));
+            }
+        }
+        o if LONG_OPTIONS.contains(&o) => {
+            let lval = zpp::zval_get_long(vm, zvalue);
+            if (o == CURLOPT_PROTOCOLS || o == CURLOPT_REDIR_PROTOCOLS)
+                && open_basedir_set(vm)
+                && (lval & CURLPROTO_FILE) != 0
+            {
+                vm.emit_warning(&format!(
+                    "{}(): CURLPROTO_FILE cannot be activated when an open_basedir is set",
+                    f
+                ));
+                return Err(());
+            }
+            error = setopt_raw(c, o, OptVal::Long(lval));
+        }
+        CURLOPT_SAFE_UPLOAD => {
+            if !zvalue.is_truthy() {
+                zpp::plain_value_error(
+                    vm,
+                    &format!("{}(): Disabling safe uploads is no longer supported", f),
+                );
+                return Err(());
+            }
+        }
+        o if STRING_OPTIONS.contains(&o) => {
+            let s = zpp::zval_get_string(vm, zvalue);
+            if vm_has_exc(vm) {
+                return Err(());
+            }
+            if (o == CURLOPT_PROTOCOLS_STR || o == CURLOPT_REDIR_PROTOCOLS_STR)
+                && open_basedir_set(vm)
+            {
+                let l = s.to_ascii_lowercase();
+                if l.windows(4).any(|w| w == b"file") || l.windows(3).any(|w| w == b"all") {
+                    vm.emit_warning(&format!(
+                        "{}(): The FILE protocol cannot be activated when an open_basedir is set",
+                        f
+                    ));
+                    return Err(());
+                }
+            }
+            return option_str(vm, f, c, o, &s);
+        }
+        o if NULLABLE_STRING_OPTIONS.contains(&o) => {
+            if matches!(zvalue, Value::Null) {
+                error = setopt_raw(c, o, OptVal::Str(None));
+            } else {
+                let s = zpp::zval_get_string(vm, zvalue);
+                if vm_has_exc(vm) {
+                    return Err(());
+                }
+                return option_str(vm, f, c, o, &s);
+            }
+        }
+        CURLOPT_PRIVATE => {
+            c.st.borrow_mut().private_data = Some(zvalue.clone());
+            return Ok(());
+        }
+        CURLOPT_URL => {
+            let s = zpp::zval_get_string(vm, zvalue);
+            if vm_has_exc(vm) {
+                return Err(());
+            }
+            return option_url(vm, f, c, &s);
+        }
+        CURLOPT_FILE | CURLOPT_INFILE | CURLOPT_STDERR | CURLOPT_WRITEHEADER => {
+            let what = if matches!(zvalue, Value::Null) {
+                None
+            } else {
+                Some(fetch_file_handle(vm, zvalue)?)
+            };
+            let mut st = c.st.borrow_mut();
+            let h = &mut st.handlers;
+            match option {
+                CURLOPT_FILE => match what {
+                    None => {
+                        h.write.stream = None;
+                        h.write.method = PHP_CURL_STDOUT;
+                    }
+                    Some(id) if writable_mode(id) => {
+                        h.write.stream = Some(Value::Resource(id));
+                        h.write.method = PHP_CURL_FILE;
+                    }
+                    Some(_) => {
+                        drop(st);
+                        zpp::plain_value_error(
+                            vm,
+                            &format!("{}(): The provided file handle must be writable", f),
+                        );
+                        return Err(());
+                    }
+                },
+                CURLOPT_WRITEHEADER => match what {
+                    None => {
+                        h.write_header.stream = None;
+                        h.write_header.method = PHP_CURL_IGNORE;
+                    }
+                    Some(id) if writable_mode(id) => {
+                        h.write_header.stream = Some(Value::Resource(id));
+                        h.write_header.method = PHP_CURL_FILE;
+                    }
+                    Some(_) => {
+                        drop(st);
+                        zpp::plain_value_error(
+                            vm,
+                            &format!("{}(): The provided file handle must be writable", f),
+                        );
+                        return Err(());
+                    }
+                },
+                CURLOPT_INFILE => {
+                    h.read.stream = what.map(Value::Resource);
+                }
+                _ => match what {
+                    None => h.std_err = None,
+                    Some(id) if writable_mode(id) => h.std_err = Some(Value::Resource(id)),
+                    Some(_) => {
+                        drop(st);
+                        zpp::plain_value_error(
+                            vm,
+                            &format!("{}(): The provided file handle must be writable", f),
+                        );
+                        return Err(());
+                    }
+                },
+            }
+        }
+        o if SLIST_OPTIONS.iter().any(|(x, _)| *x == o) => {
+            let Value::Array(arr) = zvalue else {
+                let name = SLIST_OPTIONS.iter().find(|(x, _)| *x == o).unwrap().1;
+                zpp::throw(
+                    vm,
+                    b"TypeError",
+                    &format!("{}(): The {} option must have an array value", f, name),
+                );
+                return Err(());
+            };
+            let vals: Vec<Value> = arr.borrow().values().cloned().collect();
+            let mut list = Vec::with_capacity(vals.len());
+            for v in vals {
+                let s = zpp::zval_get_string(vm, &v.deref());
+                if vm_has_exc(vm) {
+                    return Err(());
+                }
+                list.push(s);
+            }
+            let slist = if list.is_empty() { None } else { Some(list) };
+            error = setopt_raw(c, o, OptVal::Slist(slist));
+        }
+        CURLOPT_BINARYTRANSFER | CURLOPT_DNS_USE_GLOBAL_CACHE => {}
+        CURLOPT_POSTFIELDS => {
+            if let Value::Array(arr) = zvalue {
+                if arr.borrow().is_empty() {
+                    setopt_raw(c, CURLOPT_POSTFIELDS, OptVal::Str(Some(b"")));
+                    error = setopt_raw(c, CURLOPT_POSTFIELDSIZE, OptVal::Long(0));
+                } else {
+                    return build_mime(vm, f, c, this, arr);
+                }
+            } else {
+                let s = zpp::zval_get_string(vm, zvalue);
+                if vm_has_exc(vm) {
+                    return Err(());
+                }
+                setopt_raw(c, CURLOPT_POSTFIELDSIZE, OptVal::Long(s.len() as i64));
+                error = setopt_raw(c, CURLOPT_COPYPOSTFIELDS, OptVal::Str(Some(&s)));
+            }
+        }
+        CURLOPT_RETURNTRANSFER => {
+            c.st.borrow_mut().handlers.write.method = if zvalue.is_truthy() {
+                PHP_CURL_RETURN
+            } else {
+                PHP_CURL_STDOUT
+            };
+        }
+        o if OFF_T_OPTIONS.contains(&o) => {
+            let lval = zpp::zval_get_long(vm, zvalue);
+            error = setopt_raw(c, o, OptVal::OffT(lval));
+        }
+        CURLOPT_POSTREDIR => {
+            let lval = zpp::zval_get_long(vm, zvalue);
+            error = setopt_raw(
+                c,
+                CURLOPT_POSTREDIR,
+                OptVal::Long(lval & CURL_REDIR_POST_ALL),
+            );
+        }
+        o if FILE_PATH_OPTIONS.contains(&o) => {
+            let s = zpp::zval_get_string(vm, zvalue);
+            if vm_has_exc(vm) {
+                return Err(());
+            }
+            if !s.is_empty() && !vm.check_open_basedir(f, &String::from_utf8_lossy(&s)) {
+                return Err(());
+            }
+            return option_str(vm, f, c, o, &s);
+        }
+        CURLINFO_HEADER_OUT => {
+            if c.st.borrow().handlers.debug.is_some() {
+                zpp::plain_value_error(
+                    vm,
+                    "CURLINFO_HEADER_OUT option must not be set when the CURLOPT_DEBUGFUNCTION option is set",
+                );
+                return Err(());
+            }
+            if zvalue.is_truthy() {
+                setopt_raw(c, CURLOPT_DEBUGFUNCTION, OptVal::Callback(true));
+                setopt_raw(c, CURLOPT_VERBOSE, OptVal::Long(1));
+            } else {
+                setopt_raw(c, CURLOPT_DEBUGFUNCTION, OptVal::Callback(false));
+                setopt_raw(c, CURLOPT_VERBOSE, OptVal::Long(0));
+            }
+        }
+        CURLOPT_SHARE => {
+            if let Value::Object(o) = zvalue {
+                if let Some(sh) = share::share_of(o) {
+                    setopt_raw(c, CURLOPT_SHARE, OptVal::Share(Some(sh.share.clone())));
+                    c.st.borrow_mut().share = Some(zvalue.clone());
+                }
+            }
+        }
+        o if BLOB_OPTIONS.contains(&o) => {
+            let s = zpp::zval_get_string(vm, zvalue);
+            if vm_has_exc(vm) {
+                return Err(());
+            }
+            error = setopt_raw(c, o, OptVal::Blob(&s));
+        }
+        _ => {
+            if is_array_config {
+                zpp::value_error(vm, f, 2, "must contain only valid cURL options");
+            } else {
+                zpp::value_error(vm, f, 2, "is not a valid cURL option");
+            }
+            error = CURLE_UNKNOWN_OPTION as u32;
+        }
+    }
+    save_error(c, error);
+    if error != 0 { Err(()) } else { Ok(()) }
+}
+
+/// build_mime_structure_from_hash()
+fn build_mime(
+    vm: &mut Vm,
+    _f: &str,
+    c: &Rc<CurlObj>,
+    _this: &Value,
+    postfields: &Rc<RefCell<PhpArray>>,
+) -> SetoptResult {
+    let entries: Vec<(ArrayKey, Value)> = postfields
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut parts: Vec<MimePart> = Vec::new();
+    let simple = |vm: &mut Vm, name: &[u8], v: &Value| -> Option<MimePart> {
+        let s = zpp::zval_get_string(vm, &v.deref());
+        if vm_has_exc(vm) {
+            return None;
+        }
+        Some(MimePart {
+            name: name.to_vec(),
+            data: MimeData::Bytes(s),
+            filename: None,
+            content_type: None,
+        })
+    };
+    for (k, v) in entries {
+        let name = k.to_string().into_bytes();
+        let v = v.deref();
+        if let Value::Object(o) = &v {
+            if is_a(vm, o, b"curlfile") {
+                let prop = o.borrow().get_property(b"name");
+                let Value::String(path) = prop.deref() else {
+                    vm.emit_warning(&format!(
+                        "{}(): Invalid filename for key {}",
+                        vm.current_builtin_name().unwrap_or_default(),
+                        String::from_utf8_lossy(&name)
+                    ));
+                    continue;
+                };
+                let path = path.as_bytes().to_vec();
+                let fname = vm.current_builtin_name().unwrap_or_default();
+                if !vm.check_open_basedir(&fname, &String::from_utf8_lossy(&path)) {
+                    return Err(());
+                }
+                let nonempty = |p: Value| match p {
+                    Value::String(s) if !s.as_bytes().is_empty() => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                };
+                let ty = nonempty(o.borrow().get_property(b"mime").deref());
+                let postname = nonempty(o.borrow().get_property(b"postname").deref());
+                c.st.borrow_mut().postfields = Some(Value::Array(postfields.clone()));
+                let data = if path.windows(3).any(|w| w == b"://") || path.starts_with(b"data:") {
+                    match streams::read_file(vm, &path) {
+                        Some(d) => MimeData::Bytes(d),
+                        None => MimeData::File(std::path::PathBuf::from(
+                            String::from_utf8_lossy(&path).into_owned(),
+                        )),
+                    }
+                } else {
+                    use std::os::unix::ffi::OsStrExt;
+                    MimeData::File(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path)))
+                };
+                parts.push(MimePart {
+                    name,
+                    data,
+                    filename: Some(postname.unwrap_or(path)),
+                    content_type: Some(ty.unwrap_or_else(|| b"application/octet-stream".to_vec())),
+                });
+                continue;
+            }
+            if is_a(vm, o, b"curlstringfile") {
+                let get = |n: &[u8]| o.borrow().get_property(n).deref().to_php_string();
+                let postname = get(b"postname").as_bytes().to_vec();
+                let ty = get(b"mime").as_bytes().to_vec();
+                let data = get(b"data").as_bytes().to_vec();
+                c.st.borrow_mut().postfields = Some(Value::Array(postfields.clone()));
+                parts.push(MimePart {
+                    name,
+                    data: MimeData::Bytes(data),
+                    filename: Some(postname),
+                    content_type: Some(ty),
+                });
                 continue;
             }
         }
-        result.push(bytes[i]);
-        i += 1;
+        if let Value::Array(a) = &v {
+            let vals: Vec<Value> = a.borrow().values().cloned().collect();
+            for e in vals {
+                match simple(vm, &name, &e) {
+                    Some(p) => parts.push(p),
+                    None => return Err(()),
+                }
+            }
+            continue;
+        }
+        match simple(vm, &name, &v) {
+            Some(p) => parts.push(p),
+            None => return Err(()),
+        }
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    let error = setopt_raw(c, CURLOPT_MIMEPOST, OptVal::Mime(Some(Mime { parts })));
+    save_error(c, error);
+    let _ = CURLOPT_SEEKFUNCTION;
+    if error == 0 { Ok(()) } else { Err(()) }
+}
+
+fn curl_setopt(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "Clz", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (this, c) = arg_curl(&a[0]);
+    match php_curl_setopt(vm, f, &this, &c, a[1].long(), &a[2].any(), false) {
+        Ok(()) => Value::True,
+        Err(()) => Value::False,
+    }
+}
+
+fn curl_setopt_array(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "Ca", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (this, c) = arg_curl(&a[0]);
+    let Arg::Arr(arr) = &a[1] else {
+        return Value::Null;
+    };
+    let entries: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in entries {
+        let ArrayKey::Int(option) = k else {
+            zpp::value_error(vm, f, 2, "contains an invalid cURL option");
+            return Value::Null;
+        };
+        if php_curl_setopt(vm, f, &this, &c, option, &v.deref(), true).is_err() {
+            return Value::False;
+        }
+    }
+    Value::True
+}
+
+// ---------------------------------------------------------------------------
+// curl_exec() and friends
+
+fn curl_exec(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (this, c) = arg_curl(&a[0]);
+    verify_handlers(vm, &c, true);
+    cleanup_handle(&c);
+    let error = perform(vm, &this, &c);
+    if error != 0 {
+        let mut st = c.st.borrow_mut();
+        st.handlers.write.buf.clear();
+        st.handlers.write.buf_set = false;
+        return Value::False;
+    }
+    let (std_err, wmethod, wstream, hmethod, hstream, buf) = {
+        let st = c.st.borrow();
+        let h = &st.handlers;
+        (
+            stream_id(&h.std_err),
+            h.write.method,
+            stream_id(&h.write.stream),
+            h.write_header.method,
+            stream_id(&h.write_header.stream),
+            if h.write.buf_set {
+                Some(h.write.buf.clone())
+            } else {
+                None
+            },
+        )
+    };
+    if let Some(id) = std_err {
+        if streams::is_stream(id) {
+            streams::flush(vm, id);
+        }
+    }
+    if wmethod == PHP_CURL_RETURN {
+        if let Some(b) = buf {
+            return vstr(&b);
+        }
+    }
+    if wmethod == PHP_CURL_FILE {
+        if let Some(id) = wstream {
+            streams::flush(vm, id);
+        }
+    }
+    if hmethod == PHP_CURL_FILE {
+        if let Some(id) = hstream {
+            streams::flush(vm, id);
+        }
+    }
+    if wmethod == PHP_CURL_RETURN {
+        vstr(b"")
+    } else {
+        Value::True
+    }
+}
+
+fn info_long(e: &Easy, info: i64) -> Option<i64> {
+    match e.getinfo(info as u32)? {
+        InfoVal::Long(n) | InfoVal::OffT(n) => Some(n),
+        InfoVal::Double(d) => Some(d as i64),
+        _ => None,
+    }
+}
+
+fn info_double(e: &Easy, info: i64) -> Option<f64> {
+    match e.getinfo(info as u32)? {
+        InfoVal::Double(d) => Some(d),
+        InfoVal::Long(n) | InfoVal::OffT(n) => Some(n as f64),
+        _ => None,
+    }
+}
+
+fn info_str(e: &Easy, info: i64) -> Option<Option<Vec<u8>>> {
+    match e.getinfo(info as u32)? {
+        InfoVal::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// create_certinfo()
+fn certinfo_array(vm: &mut Vm, certs: Vec<Vec<Vec<u8>>>) -> PhpArray {
+    let mut list = PhpArray::new();
+    for cert in certs {
+        let mut h = PhpArray::new();
+        for line in cert {
+            let head = &line[..line.len().min(63)];
+            match head.iter().position(|&b| b == b':') {
+                Some(p) => {
+                    h.set(
+                        ArrayKey::String(PhpString::from_bytes(&line[..p])),
+                        vstr(&line[p + 1..]),
+                    );
+                }
+                None => vm.emit_warning(&format!(
+                    "{}(): Could not extract hash key from certificate info",
+                    vm.current_builtin_name().unwrap_or_default()
+                )),
+            }
+        }
+        list.push(new_arr(h));
+    }
+    list
+}
+
+fn curl_getinfo(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C|l!", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    let easy_ref = c.easy.borrow();
+    let fallback = Easy::new();
+    let e = easy_ref.as_ref().unwrap_or(&fallback);
+    if !a[1].is_given() {
+        let mut r = PhpArray::new();
+        let s = |r: &mut PhpArray, k: &str, info: i64| {
+            if let Some(v) = info_str(e, info) {
+                r.set(key(k), vstr(&v.unwrap_or_default()));
+            }
+        };
+        let l = |r: &mut PhpArray, k: &str, info: i64| {
+            if let Some(v) = info_long(e, info) {
+                r.set(key(k), Value::Long(v));
+            }
+        };
+        let d = |r: &mut PhpArray, k: &str, info: i64| {
+            if let Some(v) = info_double(e, info) {
+                r.set(key(k), Value::Double(v));
+            }
+        };
+        s(&mut r, "url", CURLINFO_EFFECTIVE_URL);
+        if let Some(ct) = info_str(e, CURLINFO_CONTENT_TYPE) {
+            r.set(
+                key("content_type"),
+                match ct {
+                    Some(v) => vstr(&v),
+                    None => Value::Null,
+                },
+            );
+        }
+        l(&mut r, "http_code", CURLINFO_HTTP_CODE);
+        l(&mut r, "header_size", CURLINFO_HEADER_SIZE);
+        l(&mut r, "request_size", CURLINFO_REQUEST_SIZE);
+        l(&mut r, "filetime", CURLINFO_FILETIME);
+        l(&mut r, "ssl_verify_result", CURLINFO_SSL_VERIFYRESULT);
+        l(&mut r, "redirect_count", CURLINFO_REDIRECT_COUNT);
+        d(&mut r, "total_time", CURLINFO_TOTAL_TIME);
+        d(&mut r, "namelookup_time", CURLINFO_NAMELOOKUP_TIME);
+        d(&mut r, "connect_time", CURLINFO_CONNECT_TIME);
+        d(&mut r, "pretransfer_time", CURLINFO_PRETRANSFER_TIME);
+        d(&mut r, "size_upload", CURLINFO_SIZE_UPLOAD);
+        d(&mut r, "size_download", CURLINFO_SIZE_DOWNLOAD);
+        d(&mut r, "speed_download", CURLINFO_SPEED_DOWNLOAD);
+        d(&mut r, "speed_upload", CURLINFO_SPEED_UPLOAD);
+        d(
+            &mut r,
+            "download_content_length",
+            CURLINFO_CONTENT_LENGTH_DOWNLOAD,
+        );
+        d(
+            &mut r,
+            "upload_content_length",
+            CURLINFO_CONTENT_LENGTH_UPLOAD,
+        );
+        d(&mut r, "starttransfer_time", CURLINFO_STARTTRANSFER_TIME);
+        d(&mut r, "redirect_time", CURLINFO_REDIRECT_TIME);
+        s(&mut r, "redirect_url", CURLINFO_REDIRECT_URL);
+        s(&mut r, "primary_ip", CURLINFO_PRIMARY_IP);
+        if let Some(InfoVal::CertInfo(ci)) = e.getinfo(CURLINFO_CERTINFO as u32) {
+            let arr = certinfo_array(vm, ci);
+            r.set(key("certinfo"), new_arr(arr));
+        } else {
+            r.set(key("certinfo"), new_arr(PhpArray::new()));
+        }
+        l(&mut r, "primary_port", CURLINFO_PRIMARY_PORT);
+        s(&mut r, "local_ip", CURLINFO_LOCAL_IP);
+        l(&mut r, "local_port", CURLINFO_LOCAL_PORT);
+        l(&mut r, "http_version", CURLINFO_HTTP_VERSION);
+        l(&mut r, "protocol", CURLINFO_PROTOCOL);
+        l(&mut r, "ssl_verifyresult", CURLINFO_PROXY_SSL_VERIFYRESULT);
+        s(&mut r, "scheme", CURLINFO_SCHEME);
+        l(&mut r, "appconnect_time_us", CURLINFO_APPCONNECT_TIME_T);
+        l(&mut r, "queue_time_us", CURLINFO_QUEUE_TIME_T);
+        l(&mut r, "connect_time_us", CURLINFO_CONNECT_TIME_T);
+        l(&mut r, "namelookup_time_us", CURLINFO_NAMELOOKUP_TIME_T);
+        l(&mut r, "pretransfer_time_us", CURLINFO_PRETRANSFER_TIME_T);
+        l(&mut r, "redirect_time_us", CURLINFO_REDIRECT_TIME_T);
+        l(
+            &mut r,
+            "starttransfer_time_us",
+            CURLINFO_STARTTRANSFER_TIME_T,
+        );
+        l(&mut r, "posttransfer_time_us", CURLINFO_POSTTRANSFER_TIME_T);
+        l(&mut r, "total_time_us", CURLINFO_TOTAL_TIME_T);
+        if let Some(h) = &c.st.borrow().header_out {
+            r.set(key("request_header"), vstr(h));
+        }
+        s(&mut r, "effective_method", CURLINFO_EFFECTIVE_METHOD);
+        s(&mut r, "capath", CURLINFO_CAPATH);
+        s(&mut r, "cainfo", CURLINFO_CAINFO);
+        l(&mut r, "used_proxy", CURLINFO_USED_PROXY);
+        l(&mut r, "httpauth_used", CURLINFO_HTTPAUTH_USED);
+        l(&mut r, "proxyauth_used", CURLINFO_PROXYAUTH_USED);
+        l(&mut r, "conn_id", CURLINFO_CONN_ID);
+        return new_arr(r);
+    }
+    let option = a[1].long();
+    match option {
+        CURLINFO_HEADER_OUT => match &c.st.borrow().header_out {
+            Some(h) => vstr(h),
+            None => Value::False,
+        },
+        CURLINFO_CERTINFO => match e.getinfo(option as u32) {
+            Some(InfoVal::CertInfo(ci)) => new_arr(certinfo_array(vm, ci)),
+            Some(_) => new_arr(PhpArray::new()),
+            None => Value::False,
+        },
+        CURLINFO_PRIVATE => match &c.st.borrow().private_data {
+            Some(v) => v.clone(),
+            None => Value::False,
+        },
+        _ => match option & CURLINFO_TYPEMASK {
+            CURLINFO_STRING => match info_str(e, option) {
+                Some(Some(s)) => vstr(&s),
+                _ => Value::False,
+            },
+            CURLINFO_LONG | CURLINFO_OFF_T => match info_long(e, option) {
+                Some(n) => Value::Long(n),
+                None => Value::False,
+            },
+            CURLINFO_DOUBLE => match info_double(e, option) {
+                Some(d) => Value::Double(d),
+                None => Value::False,
+            },
+            CURLINFO_SLIST => match e.getinfo(option as u32) {
+                Some(InfoVal::Slist(l)) => {
+                    let mut arr = PhpArray::new();
+                    for s in l {
+                        arr.push(vstr(&s));
+                    }
+                    new_arr(arr)
+                }
+                _ => Value::False,
+            },
+            _ => Value::False,
+        },
+    }
+}
+
+fn curl_error(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    let st = c.st.borrow();
+    if st.err_no != 0 {
+        let s = &st.err_str[..st.err_str.len().min(256)];
+        let s = match s.iter().position(|&b| b == 0) {
+            Some(z) => &s[..z],
+            None => s,
+        };
+        if !s.is_empty() {
+            vstr(s)
+        } else {
+            vstr(engine::easy_strerror(st.err_no as u32).as_bytes())
+        }
+    } else {
+        vstr(b"")
+    }
+}
+
+fn curl_errno(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    Value::Long(c.st.borrow().err_no)
+}
+
+fn curl_close(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    vm.emit_deprecated(
+        "Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
+    );
+    if vm.current_exception.is_some() {
+        return Value::Null;
+    }
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    if c.st.borrow().in_callback {
+        zpp::throw(
+            vm,
+            b"Error",
+            &format!("{}(): Attempt to close cURL handle from a callback", f),
+        );
+    }
+    Value::Null
+}
+
+fn curl_strerror(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "l", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    vstr(engine::easy_strerror(a[0].long() as u32).as_bytes())
+}
+
+/// _php_curl_reset_handlers()
+fn reset_handlers(c: &CurlObj) {
+    let mut st = c.st.borrow_mut();
+    let h = &mut st.handlers;
+    let buf = std::mem::take(&mut h.write.buf);
+    let buf_set = h.write.buf_set;
+    *h = Handlers::default();
+    h.write.method = PHP_CURL_STDOUT;
+    h.write.buf = buf;
+    h.write.buf_set = buf_set;
+    h.write_header.method = PHP_CURL_IGNORE;
+    h.read.method = PHP_CURL_DIRECT;
+}
+
+fn curl_reset(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    if c.st.borrow().in_callback {
+        zpp::throw(
+            vm,
+            b"Error",
+            &format!("{}(): Attempt to reset cURL handle from a callback", f),
+        );
+        return Value::Null;
+    }
+    with_easy(&c, |e| e.reset());
+    reset_handlers(&c);
+    set_default_options(vm, &c);
+    Value::Null
+}
+
+fn curl_escape(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "Cs", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    if a[1].str().len() > i32::MAX as usize {
+        return Value::False;
+    }
+    vstr(&engine::easy_escape(a[1].str()))
+}
+
+fn curl_unescape(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "Cs", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    if a[1].str().len() > i32::MAX as usize {
+        return Value::False;
+    }
+    vstr(&engine::easy_unescape(a[1].str()))
+}
+
+fn curl_pause(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "Cl", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    let bitmask = a[1].long();
+    Value::Long(with_easy(&c, |e| e.pause(bitmask)).unwrap_or(0) as i64)
+}
+
+fn curl_upkeep(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
+    let a = match zpp::parse(vm, f, "C", args) {
+        Ok(a) => a,
+        Err(()) => return Value::Null,
+    };
+    let (_, c) = arg_curl(&a[0]);
+    let error = with_easy(&c, |e| e.upkeep()).unwrap_or(0);
+    save_error(&c, error);
+    if error == 0 {
+        Value::True
+    } else {
+        Value::False
+    }
+}
+
+// ---------------------------------------------------------------------------
+// registration
+
+/// A native class without constructor (get_constructor throws).
+pub(crate) fn register_handle_class(vm: &mut Vm, name: &[u8], ctor_msg: &'static str) {
+    let ce = match goro_core::stubs::class_entry(vm, name) {
+        Some(stub) => stub.clone(),
+        None => {
+            let mut ce = ClassEntry::new(name.to_vec());
+            ce.is_final = true;
+            ce
+        }
+    };
+    let lower = name.to_ascii_lowercase();
+    vm.classes.insert(lower.clone(), ce);
+    CTOR_MSGS.with(|m| m.borrow_mut().push((lower.clone(), ctor_msg)));
+    vm.native_class_handlers.insert(
+        lower,
+        NativeClassHandler {
+            has_method: handle_has_method,
+            call: handle_call_method,
+            prop_added: None,
+            prop_write: None,
+            compare_check: None,
+            prop_read: None,
+            param_names: None,
+        },
+    );
+}
+
+thread_local! {
+    static CTOR_MSGS: RefCell<Vec<(Vec<u8>, &'static str)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn handle_has_method(_class: &[u8], method: &[u8], _is_static: bool) -> bool {
+    method.eq_ignore_ascii_case(b"__construct")
+}
+
+fn handle_call_method(
+    vm: &mut Vm,
+    class: &[u8],
+    method: &[u8],
+    _called: &[u8],
+    _this: Option<&Value>,
+    _args: &[Value],
+) -> Value {
+    if method.eq_ignore_ascii_case(b"__construct") {
+        let lower = class.to_ascii_lowercase();
+        let msg = CTOR_MSGS.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(c, _)| *c == lower)
+                .map(|(_, s)| *s)
+        });
+        if let Some(msg) = msg {
+            zpp::throw(vm, b"Error", msg);
+        }
+    }
+    Value::Null
+}
+
+macro_rules! php_functions {
+    ($($name:literal => $imp:path),* $(,)?) => {
+        fn register_functions(vm: &mut Vm) {
+            $(
+                {
+                    fn w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+                        Ok($imp(vm, $name, args))
+                    }
+                    vm.register_function($name.as_bytes(), w);
+                }
+            )*
+        }
+    };
+}
+
+php_functions! {
+    "curl_init" => curl_init,
+    "curl_copy_handle" => curl_copy_handle,
+    "curl_setopt" => curl_setopt,
+    "curl_setopt_array" => curl_setopt_array,
+    "curl_exec" => curl_exec,
+    "curl_getinfo" => curl_getinfo,
+    "curl_error" => curl_error,
+    "curl_errno" => curl_errno,
+    "curl_close" => curl_close,
+    "curl_strerror" => curl_strerror,
+    "curl_reset" => curl_reset,
+    "curl_escape" => curl_escape,
+    "curl_unescape" => curl_unescape,
+    "curl_pause" => curl_pause,
+    "curl_upkeep" => curl_upkeep,
+    "curl_version" => curl_version,
+    "curl_multi_init" => multi::curl_multi_init,
+    "curl_multi_add_handle" => multi::curl_multi_add_handle,
+    "curl_multi_remove_handle" => multi::curl_multi_remove_handle,
+    "curl_multi_get_handles" => multi::curl_multi_get_handles,
+    "curl_multi_select" => multi::curl_multi_select,
+    "curl_multi_exec" => multi::curl_multi_exec,
+    "curl_multi_getcontent" => multi::curl_multi_getcontent,
+    "curl_multi_info_read" => multi::curl_multi_info_read,
+    "curl_multi_close" => multi::curl_multi_close,
+    "curl_multi_errno" => multi::curl_multi_errno,
+    "curl_multi_strerror" => multi::curl_multi_strerror,
+    "curl_multi_setopt" => multi::curl_multi_setopt,
+    "curl_share_init" => share::curl_share_init,
+    "curl_share_init_persistent" => share::curl_share_init_persistent,
+    "curl_share_close" => share::curl_share_close,
+    "curl_share_setopt" => share::curl_share_setopt,
+    "curl_share_errno" => share::curl_share_errno,
+    "curl_share_strerror" => share::curl_share_strerror,
+    "curl_file_create" => curl_file::curl_file_create,
+}
+
+pub fn register(vm: &mut Vm) {
+    vm.register_extension(b"curl");
+    register_handle_class(
+        vm,
+        b"CurlHandle",
+        "Cannot directly construct CurlHandle, use curl_init() instead",
+    );
+    register_handle_class(
+        vm,
+        b"CurlMultiHandle",
+        "Cannot directly construct CurlMultiHandle, use curl_multi_init() instead",
+    );
+    register_handle_class(
+        vm,
+        b"CurlShareHandle",
+        "Cannot directly construct CurlShareHandle, use curl_share_init() instead",
+    );
+    register_handle_class(
+        vm,
+        b"CurlSharePersistentHandle",
+        "Cannot directly construct CurlSharePersistentHandle, use curl_share_init_persistent() instead",
+    );
+    curl_file::register(vm);
+    register_functions(vm);
+    for (name, v, deprecated) in consts::CONSTANTS {
+        vm.constants.insert(name.to_vec(), Value::Long(*v));
+        if *deprecated {
+            vm.internal_deprecated_constants.insert(
+                name.to_vec(),
+                format!(
+                    "Constant {} is deprecated since 8.4, as it had no effect since 5.1.2",
+                    String::from_utf8_lossy(name)
+                ),
+            );
+        }
+    }
+    vm.constants
+        .entry(b"curl.cainfo".to_vec())
+        .or_insert(Value::String(PhpString::from_bytes(b"")));
 }
