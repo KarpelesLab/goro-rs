@@ -11645,6 +11645,30 @@ impl Compiler {
                         });
                     }
                 }
+                if exprs.len() > 1 {
+                    // php-src compiles isset($a, $b, ...) as
+                    // isset($a) && isset($b) && ... : short-circuiting, bool result.
+                    let mut iter = exprs.iter().rev();
+                    let last = iter.next().unwrap();
+                    let mut chain = Expr {
+                        kind: ExprKind::Isset(vec![last.clone()]),
+                        span: expr.span,
+                    };
+                    for e in iter {
+                        chain = Expr {
+                            kind: ExprKind::BinaryOp {
+                                op: BinaryOp::BooleanAnd,
+                                left: Box::new(Expr {
+                                    kind: ExprKind::Isset(vec![e.clone()]),
+                                    span: expr.span,
+                                }),
+                                right: Box::new(chain),
+                            },
+                            span: expr.span,
+                        };
+                    }
+                    return self.compile_expr(&chain);
+                }
                 // Uses IssetCheck opcode that checks for both Undef and Null
                 // Suppress warnings during isset check (e.g., Undefined array key)
                 self.op_array.emit(Op {
@@ -12056,67 +12080,7 @@ impl Compiler {
                     });
                     Ok(OperandType::Tmp(tmp))
                 } else {
-                    // Multiple args: AND all together
-                    let mut result_tmp = self.op_array.alloc_temp();
-                    for (i, e) in exprs.iter().enumerate() {
-                        // For array access expressions, use ArrayIsset to call offsetExists
-                        let check_tmp = if let ExprKind::ArrayAccess { array, index } = &e.kind {
-                            let arr = self.compile_expr(array)?;
-                            let idx = if let Some(idx_expr) = index {
-                                self.compile_expr(idx_expr)?
-                            } else {
-                                let lit_idx = self.op_array.add_literal(Value::Null);
-                                OperandType::Const(lit_idx)
-                            };
-                            let t = self.op_array.alloc_temp();
-                            self.op_array.emit(Op {
-                                opcode: OpCode::ArrayIsset,
-                                op1: arr,
-                                op2: idx,
-                                result: OperandType::Tmp(t),
-                                line: expr.span.line,
-                            });
-                            t
-                        } else {
-                            let val = self.compile_expr(e)?;
-                            let t = self.op_array.alloc_temp();
-                            self.op_array.emit(Op {
-                                opcode: OpCode::IssetCheck,
-                                op1: val,
-                                op2: OperandType::Unused,
-                                result: OperandType::Tmp(t),
-                                line: expr.span.line,
-                            });
-                            t
-                        };
-                        if i == 0 {
-                            self.op_array.emit(Op {
-                                opcode: OpCode::Assign,
-                                op1: OperandType::Tmp(result_tmp),
-                                op2: OperandType::Tmp(check_tmp),
-                                result: OperandType::Unused,
-                                line: expr.span.line,
-                            });
-                        } else {
-                            let and_tmp = self.op_array.alloc_temp();
-                            self.op_array.emit(Op {
-                                opcode: OpCode::BitwiseAnd,
-                                op1: OperandType::Tmp(result_tmp),
-                                op2: OperandType::Tmp(check_tmp),
-                                result: OperandType::Tmp(and_tmp),
-                                line: expr.span.line,
-                            });
-                            result_tmp = and_tmp;
-                        }
-                    }
-                    self.op_array.emit(Op {
-                        opcode: OpCode::ErrorRestore,
-                        op1: OperandType::Unused,
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                    Ok(OperandType::Tmp(result_tmp))
+                    unreachable!("multi-argument isset() is lowered to &&")
                 }
             }
 
