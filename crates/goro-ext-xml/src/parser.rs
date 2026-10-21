@@ -1152,6 +1152,20 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
     }
 
+    /// xmlSwitchEncodingName before parsing started: the main input (and
+    /// data pushed later) is in `enc`, whatever the document declares.
+    pub fn switch_encoding(&mut self, enc: &str) {
+        let up = enc.to_ascii_uppercase();
+        if up != "UTF-8" && up != "UTF8" {
+            let raw = self.st.inputs[0].data[self.st.inputs[0].pos..].to_vec();
+            self.st.inputs[0].data = Rc::new(Vec::new());
+            self.st.inputs[0].pos = 0;
+            self.conv_enc = Some(enc.to_string());
+            self.push_append(&raw);
+        }
+        self.st.input_encoding = Some(enc.to_string());
+    }
+
     // ------------------------------------------------------------------
     // Low-level input access
 
