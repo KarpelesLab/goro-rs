@@ -370,7 +370,6 @@ enum Loc {
     Top(usize),
     Arr(Rc<RefCell<PhpArray>>, ArrayKey),
     Prop(Rc<RefCell<PhpObject>>, Vec<u8>),
-    None,
 }
 
 pub struct UnserializeState {
@@ -391,7 +390,6 @@ impl UnserializeState {
             Loc::Top(i) => self.tops.get(*i).cloned(),
             Loc::Arr(a, k) => a.borrow().get(k).cloned(),
             Loc::Prop(o, n) => o.borrow().properties.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()),
-            Loc::None => None,
         }
     }
 
@@ -403,8 +401,14 @@ impl UnserializeState {
                 }
             }
             Loc::Arr(a, k) => a.borrow_mut().set(k.clone(), v),
-            Loc::Prop(o, n) => o.borrow_mut().set_property(n.clone(), v),
-            Loc::None => {}
+            Loc::Prop(o, n) => {
+                // Rebind the slot itself (not through an existing reference).
+                let mut ob = o.borrow_mut();
+                match ob.properties.iter_mut().find(|(k, _)| k == n) {
+                    Some((_, slot)) => *slot = v,
+                    None => ob.properties.push((n.clone(), v)),
+                }
+            }
         }
     }
 
@@ -451,14 +455,6 @@ impl<'a> P<'a> {
     fn expect(&mut self, c: u8) -> Option<()> {
         if self.peek() == Some(c) {
             self.pos += 1;
-            Some(())
-        } else {
-            None
-        }
-    }
-    fn expect_str(&mut self, s: &[u8]) -> Option<()> {
-        if self.d[self.pos..].starts_with(s) {
-            self.pos += s.len();
             Some(())
         } else {
             None

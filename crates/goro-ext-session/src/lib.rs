@@ -3022,11 +3022,7 @@ fn f_session_gc(vm: &mut Vm, args: &[Value]) -> R<Value> {
 }
 
 fn f_session_write_close(vm: &mut Vm, args: &[Value]) -> R<Value> {
-    let fname = if FN_STACK.with(|s| s.borrow().is_empty()) && PHASE.with(|p| p.get()) == Phase::RequestShutdown {
-        "session_write_close"
-    } else {
-        "session_write_close"
-    };
+    let fname = "session_write_close";
     let _g = FnGuard::new(vm, fname);
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
