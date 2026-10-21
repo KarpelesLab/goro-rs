@@ -9497,6 +9497,30 @@ impl Compiler {
 
     /// `<target> = v` / `<target> op= v` whose target keys are computed
     /// first (kept out of compile_expr to keep its stack frame small).
+    ///
+    /// Two mechanisms evaluate parts of an assignment target once, ahead of
+    /// the code that uses them:
+    ///
+    /// - this one (keys before value): the target is rewritten into an
+    ///   equivalent lvalue whose computed keys / property names / bases are
+    ///   reserved `\0memoN` variables aliased (`tmp_aliases`) to temporaries
+    ///   evaluated now, then the rewritten assignment is compiled once. A key
+    ///   that is itself a fetch (`$a[$b[0]] = v`) is evaluated by value, and
+    ///   a key yielding a variable is copied, since the value expression may
+    ///   change it before the write.
+    /// - `??=` (compile_assign_coalesce, zend_compile_memoized_expr): the
+    ///   same target subtree is compiled twice, for isset and for write,
+    ///   with operands of its sub-expressions recorded by AST node address
+    ///   in the first pass and reused in the second. The fetch path itself
+    ///   (variables, dims, properties) is compiled again in the second pass
+    ///   because its fetch mode differs.
+    ///
+    /// They are kept separate: the `??=` scheme needs the target compiled
+    /// twice from the very same nodes and deliberately does not memoize
+    /// dim/property nodes, while keys-before-value must snapshot such nodes
+    /// when they appear as keys; merging them would need a walker that tells
+    /// key positions from path positions and per-mode copy rules, for no
+    /// behavioural gain.
     #[inline(never)]
     fn compile_assign_memoized(
         &mut self,
