@@ -9,14 +9,14 @@ closures, generators, fibers, property hooks, lazy objects, typed properties and
 match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
 extensions run the official php-src test suite.
 
-**php-src 8.5.4 test suite** (full run, master `8cd5d1e6`, 2026-10-22):
+**php-src 8.5.4 test suite** (full run, master `2b4740f7`, 2026-10-22):
 
 | Metric | Count |
 |---|---|
 | Total tests | 21455 |
-| Pass | 13879 (64.7% of all, **91.1% of runnable**) |
-| Fail | 1342 |
-| Skip | 6210 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
+| Pass | 14006 (65.3% of all, **91.9% of runnable**) |
+| Fail | 1214 |
+| Skip | 6211 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
 | Error | 18 |
 | XFail / XPass | 5 / 1 |
 
@@ -27,12 +27,12 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 | Area | Pass | Run | Rate |
 |---|---|---|---|
-| Zend/tests | 4404 | 5160 | 85.3% |
-| tests/ (lang, classes, basic, …) | 772 | 826 | 93.5% |
-| ext/standard | 3099 | 3299 | 93.9% |
-| ext/spl | 718 | 775 | 92.6% |
+| Zend/tests | 4433 | 5160 | 85.9% |
+| tests/ (lang, classes, basic, …) | 776 | 826 | 93.9% |
+| ext/standard | 3105 | 3299 | 94.1% |
+| ext/spl | 744 | 775 | 96.0% |
 | ext/date | 673 | 676 | 99.6% |
-| ext/reflection | 406 | 485 | 83.7% |
+| ext/reflection | 455 | 485 | 93.8% |
 | ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 824 | 844 | 97.6% |
 | ext/simplexml / xml / xmlreader / xmlwriter | 296 | 316 | 93.7% |
 | ext/mbstring | 389 | 414 | 94.0% |
@@ -44,13 +44,13 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/json | 79 | 87 | 90.8% |
 | ext/gmp | 91 | 98 | 92.9% |
 | ext/ctype / ext/uri | 166 | 166 | 100% |
-| ext/opcache (behavioural tests) | 229 | 292 | 78.4% |
-| ext/curl (libcurl emulation) | 156 | 157 | 99.4% |
+| ext/opcache (behavioural tests) | 230 | 292 | 78.8% |
+| ext/curl (libcurl emulation) | 157 | 157 | 100% |
 | ext/sockets | 94 | 95 | 98.9% |
-| sapi/cli (incl. `php -S`) | 88 | 97 | 90.7% |
+| sapi/cli (incl. `php -S`) | 96 | 96 | 100% |
 
-Zend highlights: type_declarations 95.5%, traits 90.5%, enum 90.8%, generators 82.6%,
-closures 87.4%, lazy_objects 88.7%, property_hooks 87.5%, fibers 90.7%, gc 89.5%,
+Zend highlights: type_declarations 95.5%, traits 91.0%, enum 92.3%, generators 82.6%,
+closures 88.1%, lazy_objects 89.7%, property_hooks 87.5%, fibers 90.7%, gc 89.5%,
 attributes 91.3%.
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
