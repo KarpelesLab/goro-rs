@@ -2063,7 +2063,14 @@ impl Vm {
                             if let Some(class) = self.classes.get(&class_lower).cloned() {
                                 if let Some(method) = class.methods.get(&method_lower) {
                                     let op = method.op_array.clone();
-                                    return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], Some(Value::Object(obj.clone())));
+                                    // Run in the method's class scope (parent::, self::, private access).
+                                    let scope = if method.declaring_class.is_empty() { class_lower.clone() } else { method.declaring_class.to_ascii_lowercase() };
+                                    self.class_scope_stack.push(scope);
+                                    self.called_class_stack.push(obj.borrow().class_name.clone());
+                                    let r = self.execute_fn_with_named_args(&op, args.to_vec(), vec![], Some(Value::Object(obj.clone())));
+                                    self.called_class_stack.pop();
+                                    self.class_scope_stack.pop();
+                                    return r;
                                 }
                             }
                             // Methods of extension-provided (native) classes.
@@ -4131,6 +4138,9 @@ impl Vm {
                 b"array" => matches!(value, Value::Array(_)),
                 b"object" => matches!(value, Value::Object(_)),
                 b"null" => matches!(value, Value::Null),
+                b"false" => matches!(value, Value::False),
+                b"true" => matches!(value, Value::True),
+                b"mixed" => true,
                 _ => false,
             },
             ParamType::Nullable(inner) => {
@@ -23601,6 +23611,13 @@ impl Vm {
                                     let method_part = &name_bytes[sep_pos + 2..];
                                     let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    // A user subclass inheriting the method from an
+                                    // extension-provided class: dispatch to that class.
+                                    let class_lower = match self.find_native_class_handler(&class_lower) {
+                                        Some((native, _)) if native != class_lower
+                                            && !self.classes.get(&class_lower).map(|c| c.get_method(&method_lower).is_some()).unwrap_or(false) => native,
+                                        _ => class_lower,
+                                    };
                                     // Resolve $this. For forwarding calls (parent::, self::,
                                     // static::) the call.args list contains only the explicit
                                     // arguments, so $this lives in CV[0]. For non-forwarding
