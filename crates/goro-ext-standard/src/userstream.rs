@@ -345,6 +345,45 @@ fn invoke_method_inner(
     r
 }
 
+/// Take the unread data of a user stream's read buffer.
+pub(crate) fn take_read_buffer(us: &Us) -> Vec<u8> {
+    let mut b = us.borrow_mut();
+    let rp = b.readpos;
+    let mut v = std::mem::take(&mut b.readbuf);
+    v.drain(..rp.min(v.len()));
+    b.readpos = 0;
+    v
+}
+
+/// Replace a user stream's read buffer contents.
+pub(crate) fn put_read_buffer(us: &Us, data: Vec<u8>) {
+    let mut b = us.borrow_mut();
+    b.readbuf = data;
+    b.readpos = 0;
+}
+
+/// _php_stream_write_buffer() on a user stream (bypassing its filters).
+pub(crate) fn write_unfiltered(vm: &mut Vm, fid: i64, data: &[u8]) -> Result<i64, VmError> {
+    match get_us(fid) {
+        Some(us) => write_buffer(vm, &us, data),
+        None => Ok(-1),
+    }
+}
+
+/// call_method() for other modules: Ok(None) when the method does not
+/// exist or the call produced no value (exception thrown).
+pub(crate) fn call_method_pub(
+    vm: &mut Vm,
+    obj: &Value,
+    name: &[u8],
+    args: Vec<Value>,
+) -> Result<Option<Value>, VmError> {
+    Ok(match call_method(vm, obj, name, args)? {
+        CallRes::Val(v) => Some(v),
+        _ => None,
+    })
+}
+
 /// zend_call_method_if_exists(): returns NotImpl when the object cannot
 /// handle `name`; Err only for fatal (non-exception) errors.
 fn call_method(
@@ -1396,22 +1435,32 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
                 Some(d) => d,
             };
             let justread = data.len();
-            let mut out = if !data.is_empty() {
-                crate::stream_filters::apply_read_chain(vm, fid, &data)
+            let eof = us.borrow().eof;
+            let flags = if justread > 0 {
+                if eof {
+                    crate::stream_filters::PSFS_FLAG_FLUSH_CLOSE
+                } else {
+                    crate::stream_filters::PSFS_FLAG_NORMAL
+                }
+            } else if eof {
+                crate::stream_filters::PSFS_FLAG_FLUSH_CLOSE
             } else {
-                Vec::new()
+                crate::stream_filters::PSFS_FLAG_FLUSH_INC
             };
-            if us.borrow().eof {
-                out.extend(crate::stream_filters::flush_chain(
-                    vm,
-                    fid,
-                    crate::stream_filters::STREAM_FILTER_READ,
-                ));
-            }
-            {
-                let mut b = us.borrow_mut();
-                compact(&mut b);
-                b.readbuf.extend_from_slice(&out);
+            let r = crate::stream_filters::run_read_chain(vm, fid, Some(&data), flags);
+            match r.status {
+                crate::stream_filters::PSFS_PASS_ON => {
+                    let mut b = us.borrow_mut();
+                    compact(&mut b);
+                    b.readbuf.extend_from_slice(&r.out);
+                }
+                crate::stream_filters::PSFS_FEED_ME => {}
+                _ => {
+                    let mut b = us.borrow_mut();
+                    b.eof = true;
+                    b.fatal_error = true;
+                    return Ok(false);
+                }
             }
             if justread == 0 {
                 break;
@@ -1700,11 +1749,16 @@ fn stream_write(vm: &mut Vm, fid: i64, us: &Us, buf: &[u8]) -> Result<i64, VmErr
         return Ok(0);
     }
     let bytes = if has_write_filters(fid) {
-        let out = crate::stream_filters::apply_write_chain(vm, fid, buf);
+        let (consumed, out) = crate::stream_filters::run_write_chain(
+            vm,
+            fid,
+            Some(buf),
+            crate::stream_filters::PSFS_FLAG_NORMAL,
+        );
         if !out.is_empty() && write_buffer(vm, us, &out)? < 0 {
             -1
         } else {
-            buf.len() as i64
+            consumed as i64
         }
     } else {
         write_buffer(vm, us, buf)?
@@ -1717,9 +1771,17 @@ fn stream_write(vm: &mut Vm, fid: i64, us: &Us, buf: &[u8]) -> Result<i64, VmErr
 
 /// _php_stream_flush()
 fn stream_flush(vm: &mut Vm, fid: i64, us: &Us) -> Result<i32, VmError> {
+    stream_flush_ex(vm, fid, us, false)
+}
+
+fn stream_flush_ex(vm: &mut Vm, fid: i64, us: &Us, closing: bool) -> Result<i32, VmError> {
     if has_write_filters(fid) {
-        let out =
-            crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
+        let flags = if closing {
+            crate::stream_filters::PSFS_FLAG_FLUSH_CLOSE
+        } else {
+            crate::stream_filters::PSFS_FLAG_FLUSH_INC
+        };
+        let (_, out) = crate::stream_filters::run_write_chain(vm, fid, None, flags);
         if !out.is_empty() {
             write_buffer(vm, us, &out)?;
         }
@@ -1870,7 +1932,7 @@ fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
     let is_dir = us.borrow().flags & FLAG_IS_DIR != 0;
     let mut res = Ok(());
     if !is_dir && (us.borrow().flags & FLAG_WAS_WRITTEN != 0 || has_write_filters(fid)) {
-        res = stream_flush(vm, fid, us).map(|_| ());
+        res = stream_flush_ex(vm, fid, us, true).map(|_| ());
     }
     // zend_list_close(): the resource is gone before the close handler runs.
     USER_STREAMS.with(|m| {
@@ -1881,7 +1943,7 @@ fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
     });
     goro_core::value::close_resource(fid);
     if !is_dir {
-        crate::stream_filters::remove_stream_filters(fid);
+        crate::stream_filters::remove_stream_filters(vm, fid);
         if res.is_ok() {
             res = op_close(vm, us);
         }

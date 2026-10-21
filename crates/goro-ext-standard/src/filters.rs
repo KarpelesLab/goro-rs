@@ -1,1314 +1,2044 @@
-//! PHP stream filter infrastructure.
+//! Stream filters: main/streams/filter.c (bucket brigades, filter chains),
+//! ext/standard/user_filters.c (php_user_filter, StreamBucket,
+//! stream_bucket_*), the built-in string.* / consumed filters of
+//! ext/standard/filters.c, and the zlib.* / bzip2.* filters
+//! (ext/zlib/zlib_filter.c, ext/bz2/bz2_filter.c).
+//! convert.* and dechunk live in `filters_conv`.
 //!
-//! Implements `stream_filter_register`, `stream_filter_append`,
-//! `stream_filter_prepend`, `stream_filter_remove`, `stream_get_filters`
-//! and the built-in filters (zlib.*, bzip2.*, string.*, convert.*, dechunk,
-//! consumed).
-//!
-//! Filter state is kept in thread-local maps keyed by either:
-//!   * a stream resource id (the chain attached to that stream)
-//!   * a filter resource id (used by `stream_filter_remove`)
-//!
-//! The fread / fwrite / fgets / fclose implementations in misc.rs call the
-//! helpers exposed here (`apply_read_chain`, `apply_write_chain`,
-//! `flush_close`) to run the chain.
+//! Every stream id has a read chain and a write chain. A filter attached
+//! with STREAM_FILTER_ALL is two filter instances, one per chain (only the
+//! last one created gets a resource, as in PHP). The stream layers
+//! (misc.rs for descriptor/memory streams, userstream.rs for user-space
+//! streams) drive the chains through `run_write_chain` / `run_read_chain`.
 
 use goro_core::array::ArrayKey;
-use goro_core::object::PhpObject;
+use goro_core::object::{PhpObject, Visibility};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::Vm;
+use goro_core::vm::{Vm, VmError};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+
+use crate::filters_conv::{ConvertFilter, DechunkFilter};
 
 pub const STREAM_FILTER_READ: i64 = 1;
 pub const STREAM_FILTER_WRITE: i64 = 2;
 pub const STREAM_FILTER_ALL: i64 = STREAM_FILTER_READ | STREAM_FILTER_WRITE;
 
-pub const PSFS_PASS_ON: i64 = 2;
-pub const PSFS_FEED_ME: i64 = 1;
-pub const PSFS_ERR_FATAL: i64 = 0;
+pub const PSFS_ERR_FATAL: i32 = 0;
+pub const PSFS_FEED_ME: i32 = 1;
+pub const PSFS_PASS_ON: i32 = 2;
 
-/// Built-in filter kinds. The user filter variant carries a PhpObject
-/// instance constructed from the registered class.
-#[derive(Clone)]
-pub enum BuiltinKind {
-    /// zlib.deflate (raw deflate, no zlib header)
-    ZlibDeflate { level: u32 },
-    /// zlib.inflate (raw deflate decode)
-    ZlibInflate,
-    /// bzip2.compress
-    Bzip2Compress { level: u32 },
-    /// bzip2.decompress
-    Bzip2Decompress,
-    /// string.toupper
-    StringToUpper,
-    /// string.tolower
-    StringToLower,
-    /// string.rot13
-    StringRot13,
-    /// string.strip_tags (allowed tags)
-    StringStripTags { allowed: Vec<u8> },
-    /// convert.base64-encode
-    ConvertBase64Encode {
-        line_length: usize,
-        line_break: Vec<u8>,
-    },
-    /// convert.base64-decode
-    ConvertBase64Decode,
-    /// convert.quoted-printable-encode
-    ConvertQpEncode {
-        line_length: usize,
-        line_break: Vec<u8>,
-        binary: bool,
-    },
-    /// convert.quoted-printable-decode
-    ConvertQpDecode,
-    /// dechunk - HTTP chunked transfer decoding
-    Dechunk,
-    /// consumed - passthrough, no-op
-    Consumed,
+pub const PSFS_FLAG_NORMAL: i32 = 0;
+pub const PSFS_FLAG_FLUSH_INC: i32 = 1;
+pub const PSFS_FLAG_FLUSH_CLOSE: i32 = 2;
+
+// ---------------------------------------------------------------------------
+// Buckets and brigades
+// ---------------------------------------------------------------------------
+
+/// php_stream_bucket
+pub struct Bucket {
+    pub buf: Vec<u8>,
+    /// Id of the brigade the bucket is linked into (0 = none).
+    brigade: u64,
 }
 
-/// Live filter instance attached to a stream.
-pub struct FilterInstance {
-    /// Filter name (e.g. "zlib.deflate", "myfilter").
+pub type BucketRef = Rc<RefCell<Bucket>>;
+
+pub fn new_bucket(buf: Vec<u8>) -> BucketRef {
+    Rc::new(RefCell::new(Bucket { buf, brigade: 0 }))
+}
+
+/// php_stream_bucket_brigade
+pub struct Brigade {
+    id: u64,
+    list: VecDeque<BucketRef>,
+}
+
+pub type BrigadeRef = Rc<RefCell<Brigade>>;
+
+thread_local! {
+    static NEXT_BRIGADE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// Brigades currently exposed to user filters, by brigade id.
+    static LIVE_BRIGADES: RefCell<HashMap<u64, BrigadeRef>> = RefCell::new(HashMap::new());
+    /// "userfilter.bucket brigade" resources.
+    static BRIGADE_RES: RefCell<HashMap<i64, BrigadeRef>> = RefCell::new(HashMap::new());
+    /// "userfilter.bucket" resources.
+    static BUCKET_RES: RefCell<HashMap<i64, BucketRef>> = RefCell::new(HashMap::new());
+}
+
+impl Default for Brigade {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Brigade {
+    pub fn new() -> Self {
+        let id = NEXT_BRIGADE.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
+            v
+        });
+        Brigade {
+            id,
+            list: VecDeque::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn head(&self) -> Option<BucketRef> {
+        self.list.front().cloned()
+    }
+
+    /// php_stream_bucket_append()
+    pub fn append(&mut self, b: BucketRef) {
+        // "TODO: this was added as a bad workaround for bug #35916"
+        if let Some(t) = self.list.back() {
+            if Rc::ptr_eq(t, &b) {
+                return;
+            }
+        }
+        b.borrow_mut().brigade = self.id;
+        self.list.push_back(b);
+    }
+
+    /// php_stream_bucket_prepend()
+    pub fn prepend(&mut self, b: BucketRef) {
+        b.borrow_mut().brigade = self.id;
+        self.list.push_front(b);
+    }
+
+    /// Unlink and return the head bucket (php_stream_bucket_make_writeable()
+    /// of brigade->head).
+    pub fn pop_front(&mut self) -> Option<BucketRef> {
+        let b = self.list.pop_front()?;
+        b.borrow_mut().brigade = 0;
+        Some(b)
+    }
+
+    fn unlink(&mut self, b: &BucketRef) {
+        if let Some(pos) = self.list.iter().position(|x| Rc::ptr_eq(x, b)) {
+            self.list.remove(pos);
+        }
+        b.borrow_mut().brigade = 0;
+    }
+
+    pub fn total_len(&self) -> usize {
+        self.list.iter().map(|b| b.borrow().buf.len()).sum()
+    }
+
+    /// Concatenated contents (the buckets are dropped).
+    pub fn take_all(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(b) = self.pop_front() {
+            out.extend_from_slice(&b.borrow().buf);
+        }
+        out
+    }
+
+    pub fn clear(&mut self) {
+        while self.pop_front().is_some() {}
+    }
+
+    fn bufs(&mut self) -> Vec<Vec<u8>> {
+        let mut v = Vec::new();
+        while let Some(b) = self.pop_front() {
+            v.push(std::mem::take(&mut b.borrow_mut().buf));
+        }
+        v
+    }
+}
+
+/// php_stream_bucket_unlink(): remove a bucket from whatever brigade holds it.
+fn bucket_unlink(b: &BucketRef) {
+    let bid = b.borrow().brigade;
+    if bid == 0 {
+        return;
+    }
+    let br = LIVE_BRIGADES.with(|m| m.borrow().get(&bid).cloned());
+    match br {
+        Some(br) => br.borrow_mut().unlink(b),
+        None => b.borrow_mut().brigade = 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+/// The built-in filter implementations (php_stream_filter_ops).
+pub enum Builtin {
+    Rot13,
+    ToUpper,
+    ToLower,
+    Consumed {
+        offset: Option<i64>,
+        consumed: usize,
+    },
+    Convert(Box<ConvertFilter>),
+    Dechunk(Box<DechunkFilter>),
+    ZlibInflate(Box<ZlibInflate>),
+    ZlibDeflate(Box<ZlibDeflate>),
+    BzDecompress(Box<BzDecompress>),
+    BzCompress(Box<BzCompress>),
+}
+
+pub enum Ops {
+    Builtin(Builtin),
+    /// userfilter_ops: the filter object.
+    User(Value),
+}
+
+/// php_stream_filter
+pub struct Filter {
+    /// fops->label for built-ins, the requested name for user filters.
     pub name: Vec<u8>,
-    /// Resource id of this filter (returned to PHP from
-    /// stream_filter_append/prepend, looked up by stream_filter_remove).
-    pub fid: i64,
-    /// Stream resource id this filter is attached to.
-    pub stream_id: i64,
-    /// Direction flags: read, write, or both.
-    pub direction: i64,
-    /// Built-in implementation, if any.
-    pub builtin: Option<BuiltinKind>,
-    /// User filter implementation: object instance whose class extends
-    /// php_user_filter. None for built-in filters.
-    pub user_obj: Option<Rc<RefCell<PhpObject>>>,
-    /// Persistent state: bytes accumulated for decoders that need a
-    /// look-ahead (e.g. base64 partial blocks, qp partial =hex, dechunk
-    /// partial chunk header / chunk body).
-    pub leftover: Vec<u8>,
-    /// Compressors that maintain a streaming context (zlib / bzip2).
-    pub deflate_ctx: Option<DeflateCtx>,
-    pub inflate_ctx: Option<InflateCtx>,
-    pub bz_compress: Option<BzCompressCtx>,
-    pub bz_decompress: Option<BzDecompressCtx>,
-    /// For dechunk: state tracking the current chunk size remaining.
-    pub dechunk_state: DechunkState,
-    /// For base64 / qp encoders: current column position so line wrapping
-    /// continues correctly across fwrite calls.
-    pub col: usize,
-    /// True once the filter has been driven with `closing=true` exactly
-    /// once. Used by flush_chain to avoid re-flushing.
-    pub closed: bool,
+    pub ops: Ops,
+    /// Stream the filter is attached to (0 = detached).
+    pub stream: i64,
+    pub is_read: bool,
+    /// "stream filter" resource id (0 = none).
+    pub res: i64,
 }
 
-pub struct DeflateCtx {
-    pub enc: flate2::Compress,
-}
+pub type FilterRef = Rc<RefCell<Filter>>;
 
-pub struct InflateCtx {
-    pub dec: flate2::Decompress,
-}
-
-pub struct BzCompressCtx {
-    pub enc: bzip2::Compress,
-}
-
-pub struct BzDecompressCtx {
-    pub dec: bzip2::Decompress,
-}
-
-#[derive(Clone, Copy, Default)]
-pub enum DechunkState {
-    #[default]
-    Header,
-    Body(usize),
-    AfterChunk,
-    Done,
+#[derive(Default)]
+struct Chains {
+    read: Vec<FilterRef>,
+    write: Vec<FilterRef>,
 }
 
 thread_local! {
-    /// Map from filter resource id -> Rc<RefCell<FilterInstance>>.
-    static FILTERS: RefCell<HashMap<i64, Rc<RefCell<FilterInstance>>>> = RefCell::new(HashMap::new());
-    /// Map from stream resource id -> ordered list of attached filters.
-    static STREAM_CHAINS: RefCell<HashMap<i64, Vec<Rc<RefCell<FilterInstance>>>>> = RefCell::new(HashMap::new());
-    /// Registered user filter classes: filter name -> class name.
-    static USER_FILTER_CLASSES: RefCell<HashMap<Vec<u8>, Vec<u8>>> = RefCell::new(HashMap::new());
-    /// Counter for filter resource ids. Starts high so it doesn't clash
-    /// with file/dir/curl handles allocated elsewhere.
-    static NEXT_FILTER_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(900_000) };
+    static CHAINS: RefCell<HashMap<i64, Chains>> = RefCell::new(HashMap::new());
+    static FILTER_RES: RefCell<HashMap<i64, FilterRef>> = RefCell::new(HashMap::new());
+    /// BG(user_filter_map): filter name -> class name, in registration order.
+    static USER_FILTERS: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    /// Streams whose user filter callback is running (PHP_STREAM_FLAG_NO_FCLOSE).
+    static IN_CALLBACK: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
 }
 
-fn alloc_filter_id() -> i64 {
-    NEXT_FILTER_ID.with(|c| {
-        let n = c.get();
-        c.set(n + 1);
-        n
+pub fn in_filter_callback(stream: i64) -> bool {
+    IN_CALLBACK.with(|v| v.borrow().contains(&stream))
+}
+
+/// Ids of streams that have filters attached.
+pub fn streams_with_filters() -> Vec<i64> {
+    CHAINS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|(_, c)| !c.read.is_empty() || !c.write.is_empty())
+            .map(|(k, _)| *k)
+            .collect()
     })
 }
 
-/// Return list of all built-in + registered filter names.
+/// Built-in factories, in php-src MINIT registration order.
+const BUILTIN_FACTORIES: &[&[u8]] = &[
+    b"zlib.*",
+    b"bzip2.*",
+    b"convert.iconv.*",
+    b"string.rot13",
+    b"string.toupper",
+    b"string.tolower",
+    b"convert.*",
+    b"consumed",
+    b"dechunk",
+];
+
+/// stream_get_filters()
 pub fn list_filter_names() -> Vec<Vec<u8>> {
-    let mut names: Vec<Vec<u8>> = vec![
-        b"zlib.deflate".to_vec(),
-        b"zlib.inflate".to_vec(),
-        b"zlib.compress".to_vec(),
-        b"zlib.uncompress".to_vec(),
-        b"bzip2.compress".to_vec(),
-        b"bzip2.decompress".to_vec(),
-        b"string.toupper".to_vec(),
-        b"string.tolower".to_vec(),
-        b"string.rot13".to_vec(),
-        b"string.strip_tags".to_vec(),
-        b"convert.base64-encode".to_vec(),
-        b"convert.base64-decode".to_vec(),
-        b"convert.quoted-printable-encode".to_vec(),
-        b"convert.quoted-printable-decode".to_vec(),
-        b"convert.iconv.*".to_vec(),
-        b"dechunk".to_vec(),
-        b"consumed".to_vec(),
-    ];
-    USER_FILTER_CLASSES.with(|m| {
-        for k in m.borrow().keys() {
+    let mut names: Vec<Vec<u8>> = BUILTIN_FACTORIES.iter().map(|n| n.to_vec()).collect();
+    USER_FILTERS.with(|m| {
+        for (k, _) in m.borrow().iter() {
             names.push(k.clone());
         }
     });
     names
 }
 
-/// Implements `stream_filter_register($filter_name, $class)`. Returns true
-/// if the registration succeeded, false if the name was already taken.
+/// stream_filter_register(): false when the name is taken.
 pub fn register_user_filter(name: &[u8], class: &[u8]) -> bool {
-    USER_FILTER_CLASSES.with(|m| {
-        let mut m = m.borrow_mut();
-        if m.contains_key(name) {
-            return false;
-        }
-        m.insert(name.to_vec(), class.to_vec());
-        true
-    })
+    if USER_FILTERS.with(|m| m.borrow().iter().any(|(n, _)| n == name)) {
+        return false;
+    }
+    // php_stream_filter_register_factory_volatile() fails for names of
+    // the built-in factories.
+    if BUILTIN_FACTORIES.contains(&name) {
+        return false;
+    }
+    USER_FILTERS.with(|m| m.borrow_mut().push((name.to_vec(), class.to_vec())));
+    true
 }
 
-/// True iff the filter name matches a registered user filter class.
 pub fn is_user_filter(name: &[u8]) -> bool {
-    USER_FILTER_CLASSES.with(|m| m.borrow().contains_key(name))
+    USER_FILTERS.with(|m| m.borrow().iter().any(|(n, _)| n == name))
 }
 
-/// Return the registered user filter class name for the given filter name,
-/// if any.
-pub fn user_filter_class(name: &[u8]) -> Option<Vec<u8>> {
-    USER_FILTER_CLASSES.with(|m| m.borrow().get(name).cloned())
-}
-
-/// Parse the `params` argument of stream_filter_append/prepend for zlib's
-/// `level` option. Returns the requested level clamped to 0..=9 (-1 ==
-/// default).
-fn parse_zlib_level(params: &Value) -> u32 {
-    let level = lookup_array_int(params, b"level", -1);
-    if level == -1 {
-        return flate2::Compression::default().level();
-    }
-    level.clamp(0, 9) as u32
-}
-
-fn parse_bzip2_level(params: &Value) -> u32 {
-    let level = lookup_array_int(params, b"blocks", 4);
-    level.clamp(1, 9) as u32
-}
-
-fn lookup_array_int(v: &Value, key: &[u8], default: i64) -> i64 {
-    match v {
-        Value::Array(a) => {
-            let a = a.borrow();
-            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
-                .map(|v| v.to_long())
-                .unwrap_or(default)
+/// Which factory serves `name` (exact name, then "prefix.*" wildcards
+/// from the longest prefix down). Returns (factory key, user class).
+fn find_factory(name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let lookup = |key: &[u8]| -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        if let Some(c) = USER_FILTERS.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(n, _)| n.as_slice() == key)
+                .map(|(_, c)| c.clone())
+        }) {
+            return Some((key.to_vec(), Some(c)));
         }
-        Value::Reference(r) => lookup_array_int(&r.borrow(), key, default),
-        Value::Object(obj) => {
-            let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) {
-                default
-            } else {
-                v.to_long()
-            }
+        if BUILTIN_FACTORIES.contains(&key) {
+            return Some((key.to_vec(), None));
         }
-        _ => default,
-    }
-}
-
-fn lookup_array_str(v: &Value, key: &[u8]) -> Option<Vec<u8>> {
-    match v {
-        Value::Array(a) => {
-            let a = a.borrow();
-            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
-                .map(|v| v.to_php_string().as_bytes().to_vec())
-        }
-        Value::Reference(r) => lookup_array_str(&r.borrow(), key),
-        Value::Object(obj) => {
-            let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) {
-                None
-            } else {
-                Some(v.to_php_string().as_bytes().to_vec())
-            }
-        }
-        _ => None,
-    }
-}
-
-fn lookup_array_bool(v: &Value, key: &[u8], default: bool) -> bool {
-    match v {
-        Value::Array(a) => {
-            let a = a.borrow();
-            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
-                .map(|v| v.to_bool())
-                .unwrap_or(default)
-        }
-        Value::Reference(r) => lookup_array_bool(&r.borrow(), key, default),
-        Value::Object(obj) => {
-            let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) {
-                default
-            } else {
-                v.to_bool()
-            }
-        }
-        _ => default,
-    }
-}
-
-/// Resolve a filter name to a built-in implementation, if it matches one
-/// of the registered built-ins.
-pub fn builtin_for_name(name: &[u8], params: &Value) -> Option<BuiltinKind> {
-    let lname = name.to_ascii_lowercase();
-    let s: &[u8] = &lname;
-    match s {
-        b"zlib.deflate" | b"zlib.compress" => Some(BuiltinKind::ZlibDeflate {
-            level: parse_zlib_level(params),
-        }),
-        b"zlib.inflate" | b"zlib.uncompress" => Some(BuiltinKind::ZlibInflate),
-        b"bzip2.compress" => Some(BuiltinKind::Bzip2Compress {
-            level: parse_bzip2_level(params),
-        }),
-        b"bzip2.decompress" => Some(BuiltinKind::Bzip2Decompress),
-        b"string.toupper" => Some(BuiltinKind::StringToUpper),
-        b"string.tolower" => Some(BuiltinKind::StringToLower),
-        b"string.rot13" => Some(BuiltinKind::StringRot13),
-        b"string.strip_tags" => Some(BuiltinKind::StringStripTags {
-            allowed: lookup_array_str(params, b"allowed_tags").unwrap_or_default(),
-        }),
-        b"convert.base64-encode" => Some(BuiltinKind::ConvertBase64Encode {
-            line_length: lookup_array_int(params, b"line-length", 0).max(0) as usize,
-            line_break: lookup_array_str(params, b"line-break-chars")
-                .unwrap_or_else(|| b"\r\n".to_vec()),
-        }),
-        b"convert.base64-decode" => Some(BuiltinKind::ConvertBase64Decode),
-        b"convert.quoted-printable-encode" => Some(BuiltinKind::ConvertQpEncode {
-            line_length: lookup_array_int(params, b"line-length", 76).max(0) as usize,
-            line_break: lookup_array_str(params, b"line-break-chars")
-                .unwrap_or_else(|| b"\r\n".to_vec()),
-            binary: lookup_array_bool(params, b"binary", false),
-        }),
-        b"convert.quoted-printable-decode" => Some(BuiltinKind::ConvertQpDecode),
-        b"dechunk" => Some(BuiltinKind::Dechunk),
-        b"consumed" => Some(BuiltinKind::Consumed),
-        _ => None,
-    }
-}
-
-/// Create and attach a filter to a stream. `prepend = true` puts it at the
-/// front of the chain. Returns the filter resource id on success, or None
-/// if the filter could not be resolved.
-pub fn attach_filter(
-    stream_id: i64,
-    name: &[u8],
-    direction: i64,
-    params: &Value,
-    prepend: bool,
-    user_obj: Option<Rc<RefCell<PhpObject>>>,
-) -> Option<i64> {
-    let builtin = if user_obj.is_some() {
         None
-    } else {
-        Some(builtin_for_name(name, params)?)
     };
-    let fid = alloc_filter_id();
-    let inst = FilterInstance {
-        name: name.to_vec(),
-        fid,
-        stream_id,
-        direction,
-        builtin,
-        user_obj,
-        leftover: Vec::new(),
-        deflate_ctx: None,
-        inflate_ctx: None,
-        bz_compress: None,
-        bz_decompress: None,
-        dechunk_state: DechunkState::Header,
-        col: 0,
-        closed: false,
-    };
-    let rc = Rc::new(RefCell::new(inst));
-    FILTERS.with(|m| {
-        m.borrow_mut().insert(fid, rc.clone());
-    });
-    STREAM_CHAINS.with(|m| {
-        let mut m = m.borrow_mut();
-        let chain = m.entry(stream_id).or_default();
-        if prepend {
-            chain.insert(0, rc);
-        } else {
-            chain.push(rc);
-        }
-    });
-    goro_core::value::register_resource(fid, b"stream filter");
-    Some(fid)
-}
-
-/// Remove a filter from its stream. Returns true if the filter id was
-/// known.
-pub fn remove_filter(fid: i64) -> bool {
-    let inst = FILTERS.with(|m| m.borrow_mut().remove(&fid));
-    if let Some(inst) = inst {
-        let stream_id = inst.borrow().stream_id;
-        STREAM_CHAINS.with(|m| {
-            let mut m = m.borrow_mut();
-            if let Some(chain) = m.get_mut(&stream_id) {
-                chain.retain(|f| f.borrow().fid != fid);
-            }
-        });
-        goro_core::value::close_resource(fid);
-        true
-    } else {
-        false
+    if let Some(f) = lookup(name) {
+        return Some(f);
     }
-}
-
-/// Remove every filter attached to the given stream id. Called on fclose.
-pub fn remove_stream_filters(stream_id: i64) {
-    let chain = STREAM_CHAINS.with(|m| m.borrow_mut().remove(&stream_id));
-    if let Some(chain) = chain {
-        FILTERS.with(|m| {
-            let mut m = m.borrow_mut();
-            for f in &chain {
-                let fid = f.borrow().fid;
-                m.remove(&fid);
-                goro_core::value::close_resource(fid);
-            }
-        });
-    }
-}
-
-/// True iff the resource id is a registered stream filter (open or
-/// closed).
-pub fn is_filter_resource(fid: i64) -> bool {
-    FILTERS.with(|m| m.borrow().contains_key(&fid))
-}
-
-/// True iff at least one filter on `stream_id` matches `direction`.
-pub fn chain_has_direction(stream_id: i64, direction: i64) -> bool {
-    STREAM_CHAINS.with(|m| {
-        m.borrow()
-            .get(&stream_id)
-            .is_some_and(|chain| chain.iter().any(|f| f.borrow().direction & direction != 0))
-    })
-}
-
-/// True iff the stream has any filters attached (used by stream_get_contents
-/// to decide whether to route through the filter chain).
-pub fn chain_has_any(stream_id: i64) -> bool {
-    STREAM_CHAINS.with(|m| m.borrow().get(&stream_id).is_some_and(|c| !c.is_empty()))
-}
-
-/// Apply the write filter chain to `data` for the given stream. Returns
-/// the filtered output bytes ready to be physically written.
-pub fn apply_write_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
-    let chain = STREAM_CHAINS
-        .with(|m| m.borrow().get(&stream_id).cloned())
-        .unwrap_or_default();
-    let mut buf = data.to_vec();
-    for f in &chain {
-        let dir = f.borrow().direction;
-        if dir & STREAM_FILTER_WRITE == 0 {
-            continue;
+    let mut cut = name.len();
+    while let Some(p) = name[..cut].iter().rposition(|&c| c == b'.') {
+        let mut wild = name[..=p].to_vec();
+        wild.push(b'*');
+        if let Some(f) = lookup(&wild) {
+            return Some(f);
         }
-        buf = run_filter(vm, f, &buf, false);
-    }
-    buf
-}
-
-/// Apply the read filter chain to `data`.
-pub fn apply_read_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
-    let chain = STREAM_CHAINS
-        .with(|m| m.borrow().get(&stream_id).cloned())
-        .unwrap_or_default();
-    let mut buf = data.to_vec();
-    for f in &chain {
-        let dir = f.borrow().direction;
-        if dir & STREAM_FILTER_READ == 0 {
-            continue;
-        }
-        buf = run_filter(vm, f, &buf, false);
-    }
-    buf
-}
-
-/// Flush filters at close. Each filter is called with closing=true and any
-/// pending output is returned. Direction (READ/WRITE) selects which side
-/// of the chain to flush.
-pub fn flush_chain(vm: &mut Vm, stream_id: i64, direction: i64) -> Vec<u8> {
-    let chain = STREAM_CHAINS
-        .with(|m| m.borrow().get(&stream_id).cloned())
-        .unwrap_or_default();
-    let mut buf = Vec::new();
-    for f in &chain {
-        let dir = f.borrow().direction;
-        if dir & direction == 0 {
-            continue;
-        }
-        // Push prior output through, then emit closing exactly once per
-        // filter (subsequent calls would re-invoke user `onClose`-like
-        // logic, leading to infinite loops in read mode).
-        if !buf.is_empty() {
-            buf = run_filter(vm, f, &buf, false);
-        }
-        let already_closed = f.borrow().closed;
-        if already_closed {
-            continue;
-        }
-        let mut close_out = run_filter(vm, f, &[], true);
-        f.borrow_mut().closed = true;
-        buf.append(&mut close_out);
-    }
-    buf
-}
-
-/// Drive a single filter instance over `input`. If `closing` is true,
-/// compressors/decoders should finalize.
-fn run_filter(
-    vm: &mut Vm,
-    f: &Rc<RefCell<FilterInstance>>,
-    input: &[u8],
-    closing: bool,
-) -> Vec<u8> {
-    // Built-in: dispatch on kind.
-    let kind_opt = f.borrow().builtin.clone();
-    if let Some(kind) = kind_opt {
-        return run_builtin(f, kind, input, closing);
-    }
-    // User filter: invoke filter() method.
-    run_user_filter(vm, f, input, closing)
-}
-
-fn run_builtin(
-    f: &Rc<RefCell<FilterInstance>>,
-    kind: BuiltinKind,
-    input: &[u8],
-    closing: bool,
-) -> Vec<u8> {
-    match kind {
-        BuiltinKind::ZlibDeflate { level } => {
-            let mut fi = f.borrow_mut();
-            if fi.deflate_ctx.is_none() {
-                fi.deflate_ctx = Some(DeflateCtx {
-                    enc: flate2::Compress::new(flate2::Compression::new(level), false),
-                });
-            }
-            let ctx = fi.deflate_ctx.as_mut().unwrap();
-            let mut out = Vec::with_capacity(input.len() + 64);
-            let mut input_pos = 0usize;
-            let mut buf = [0u8; 4096];
-            // PHP uses Z_NO_FLUSH during writes (only Z_FINISH on close).
-            // This matches the byte-for-byte output of the C implementation
-            // for tests that depend on it.
-            loop {
-                let in_before = ctx.enc.total_in();
-                let out_before = ctx.enc.total_out();
-                let flush = if closing {
-                    flate2::FlushCompress::Finish
-                } else {
-                    flate2::FlushCompress::None
-                };
-                let _ = ctx.enc.compress(&input[input_pos..], &mut buf, flush);
-                let consumed_in = (ctx.enc.total_in() - in_before) as usize;
-                let produced_out = (ctx.enc.total_out() - out_before) as usize;
-                if produced_out > 0 {
-                    out.extend_from_slice(&buf[..produced_out]);
-                }
-                input_pos += consumed_in;
-                if input_pos >= input.len() && produced_out < buf.len() {
-                    break;
-                }
-                if consumed_in == 0 && produced_out == 0 {
-                    break;
-                }
-            }
-            out
-        }
-        BuiltinKind::ZlibInflate => {
-            let mut fi = f.borrow_mut();
-            if fi.inflate_ctx.is_none() {
-                fi.inflate_ctx = Some(InflateCtx {
-                    dec: flate2::Decompress::new(false),
-                });
-            }
-            let ctx = fi.inflate_ctx.as_mut().unwrap();
-            let mut out = Vec::with_capacity(input.len() * 2 + 64);
-            let mut input_pos = 0usize;
-            let mut buf = [0u8; 4096];
-            let flush = if closing {
-                flate2::FlushDecompress::Finish
-            } else {
-                flate2::FlushDecompress::Sync
-            };
-            loop {
-                let in_before = ctx.dec.total_in();
-                let out_before = ctx.dec.total_out();
-                let res = ctx.dec.decompress(&input[input_pos..], &mut buf, flush);
-                let consumed_in = (ctx.dec.total_in() - in_before) as usize;
-                let produced_out = (ctx.dec.total_out() - out_before) as usize;
-                if produced_out > 0 {
-                    out.extend_from_slice(&buf[..produced_out]);
-                }
-                input_pos += consumed_in;
-                if let Ok(flate2::Status::StreamEnd) = res {
-                    break;
-                }
-                if input_pos >= input.len() && produced_out < buf.len() {
-                    break;
-                }
-                if consumed_in == 0 && produced_out == 0 {
-                    break;
-                }
-            }
-            out
-        }
-        BuiltinKind::Bzip2Compress { level } => {
-            let mut fi = f.borrow_mut();
-            if fi.bz_compress.is_none() {
-                fi.bz_compress = Some(BzCompressCtx {
-                    enc: bzip2::Compress::new(bzip2::Compression::new(level), 0),
-                });
-            }
-            let ctx = fi.bz_compress.as_mut().unwrap();
-            let mut out = Vec::with_capacity(input.len() + 128);
-            let mut input_pos = 0usize;
-            let mut buf = [0u8; 4096];
-            let action = if closing {
-                bzip2::Action::Finish
-            } else {
-                bzip2::Action::Run
-            };
-            loop {
-                let in_before = ctx.enc.total_in();
-                let out_before = ctx.enc.total_out();
-                let res = ctx.enc.compress(&input[input_pos..], &mut buf, action);
-                let consumed_in = (ctx.enc.total_in() - in_before) as usize;
-                let produced_out = (ctx.enc.total_out() - out_before) as usize;
-                if produced_out > 0 {
-                    out.extend_from_slice(&buf[..produced_out]);
-                }
-                input_pos += consumed_in;
-                if let Ok(bzip2::Status::StreamEnd) = res {
-                    break;
-                }
-                if input_pos >= input.len() && produced_out < buf.len() {
-                    break;
-                }
-                if consumed_in == 0 && produced_out == 0 {
-                    break;
-                }
-            }
-            out
-        }
-        BuiltinKind::Bzip2Decompress => {
-            let mut fi = f.borrow_mut();
-            if fi.bz_decompress.is_none() {
-                fi.bz_decompress = Some(BzDecompressCtx {
-                    dec: bzip2::Decompress::new(false),
-                });
-            }
-            let ctx = fi.bz_decompress.as_mut().unwrap();
-            let mut out = Vec::with_capacity(input.len() * 2 + 128);
-            let mut input_pos = 0usize;
-            let mut buf = [0u8; 4096];
-            loop {
-                let in_before = ctx.dec.total_in();
-                let out_before = ctx.dec.total_out();
-                let res = ctx.dec.decompress(&input[input_pos..], &mut buf);
-                let consumed_in = (ctx.dec.total_in() - in_before) as usize;
-                let produced_out = (ctx.dec.total_out() - out_before) as usize;
-                if produced_out > 0 {
-                    out.extend_from_slice(&buf[..produced_out]);
-                }
-                input_pos += consumed_in;
-                if let Ok(bzip2::Status::StreamEnd) = res {
-                    break;
-                }
-                if input_pos >= input.len() && produced_out < buf.len() {
-                    break;
-                }
-                if consumed_in == 0 && produced_out == 0 {
-                    break;
-                }
-            }
-            out
-        }
-        BuiltinKind::StringToUpper => {
-            let mut out = Vec::with_capacity(input.len());
-            for &b in input {
-                out.push(b.to_ascii_uppercase());
-            }
-            out
-        }
-        BuiltinKind::StringToLower => {
-            let mut out = Vec::with_capacity(input.len());
-            for &b in input {
-                out.push(b.to_ascii_lowercase());
-            }
-            out
-        }
-        BuiltinKind::StringRot13 => {
-            let mut out = Vec::with_capacity(input.len());
-            for &b in input {
-                out.push(match b {
-                    b'A'..=b'M' | b'a'..=b'm' => b + 13,
-                    b'N'..=b'Z' | b'n'..=b'z' => b - 13,
-                    _ => b,
-                });
-            }
-            out
-        }
-        BuiltinKind::StringStripTags { allowed: _ } => {
-            // Simple naive HTML tag stripping. We process leftover state
-            // so partial tags across writes work.
-            let mut fi = f.borrow_mut();
-            let mut data = std::mem::take(&mut fi.leftover);
-            data.extend_from_slice(input);
-            let mut out = Vec::with_capacity(data.len());
-            let mut in_tag = false;
-            let mut i = 0;
-            while i < data.len() {
-                let b = data[i];
-                if !in_tag {
-                    if b == b'<' {
-                        in_tag = true;
-                    } else {
-                        out.push(b);
-                    }
-                } else if b == b'>' {
-                    in_tag = false;
-                }
-                i += 1;
-            }
-            if in_tag && !closing {
-                // Stash incomplete tag to consume next call.
-                fi.leftover = b"<".to_vec();
-            }
-            out
-        }
-        BuiltinKind::ConvertBase64Encode {
-            line_length,
-            line_break,
-        } => base64_encode_streaming(f, input, closing, line_length, &line_break),
-        BuiltinKind::ConvertBase64Decode => base64_decode_streaming(f, input, closing),
-        BuiltinKind::ConvertQpEncode {
-            line_length,
-            line_break,
-            binary,
-        } => qp_encode_streaming(f, input, closing, line_length, &line_break, binary),
-        BuiltinKind::ConvertQpDecode => qp_decode_streaming(f, input, closing),
-        BuiltinKind::Dechunk => dechunk_streaming(f, input, closing),
-        BuiltinKind::Consumed => input.to_vec(),
-    }
-}
-
-fn base64_encode_streaming(
-    f: &Rc<RefCell<FilterInstance>>,
-    input: &[u8],
-    closing: bool,
-    line_length: usize,
-    line_break: &[u8],
-) -> Vec<u8> {
-    let mut fi = f.borrow_mut();
-    // Accumulate full triplets; carry over any partial.
-    let mut data = std::mem::take(&mut fi.leftover);
-    data.extend_from_slice(input);
-    let mut out = Vec::with_capacity(data.len() * 4 / 3 + 16);
-    let take_len = if closing {
-        data.len()
-    } else {
-        (data.len() / 3) * 3
-    };
-    let to_encode = &data[..take_len];
-    let encoded = base64_encode_no_wrap(to_encode, closing);
-    // Apply line wrapping if requested.
-    if line_length > 0 {
-        for &b in encoded.as_bytes() {
-            if fi.col == line_length {
-                out.extend_from_slice(line_break);
-                fi.col = 0;
-            }
-            out.push(b);
-            fi.col += 1;
-        }
-    } else {
-        out.extend_from_slice(encoded.as_bytes());
-        fi.col += encoded.len();
-    }
-    fi.leftover = data[take_len..].to_vec();
-    if closing {
-        fi.leftover.clear();
-    }
-    out
-}
-
-fn base64_encode_no_wrap(input: &[u8], finish: bool) -> String {
-    // Plain base64 (no padding mid-stream; only at the very end).
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len() * 4 / 3 + 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push(TABLE[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    if finish && i < input.len() {
-        let rem = input.len() - i;
-        let n = match rem {
-            1 => (input[i] as u32) << 16,
-            2 => ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8),
-            _ => 0,
-        };
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        if rem == 2 {
-            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        out.push('=');
-    }
-    out
-}
-
-fn base64_decode_streaming(
-    f: &Rc<RefCell<FilterInstance>>,
-    input: &[u8],
-    closing: bool,
-) -> Vec<u8> {
-    let mut fi = f.borrow_mut();
-    let mut data = std::mem::take(&mut fi.leftover);
-    // Skip whitespace, accept only valid base64 characters.
-    for &b in input {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=' => data.push(b),
-            _ => {}
-        }
-    }
-    let chunks = if closing {
-        data.len().div_ceil(4)
-    } else {
-        data.len() / 4
-    };
-    let consume = chunks * 4;
-    let consume = consume.min(data.len());
-    let mut out = Vec::with_capacity(consume * 3 / 4 + 4);
-    let mut i = 0;
-    while i + 4 <= consume {
-        let q: [u8; 4] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
-        let mut n: u32 = 0;
-        let mut padcount = 0u32;
-        for &c in &q {
-            let v: u32 = match c {
-                b'A'..=b'Z' => (c - b'A') as u32,
-                b'a'..=b'z' => (c - b'a' + 26) as u32,
-                b'0'..=b'9' => (c - b'0' + 52) as u32,
-                b'+' => 62,
-                b'/' => 63,
-                b'=' => {
-                    padcount += 1;
-                    0
-                }
-                _ => 0,
-            };
-            n = (n << 6) | v;
-        }
-        out.push(((n >> 16) & 0xff) as u8);
-        if padcount < 2 {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if padcount < 1 {
-            out.push((n & 0xff) as u8);
-        }
-        i += 4;
-    }
-    if closing && i < consume {
-        // Trailing partial group (no padding): decode whatever's there.
-        let rem = &data[i..consume];
-        let mut buf = rem.to_vec();
-        while !buf.len().is_multiple_of(4) {
-            buf.push(b'=');
-        }
-        let mut n: u32 = 0;
-        let mut padcount = 0u32;
-        for &c in &buf {
-            let v: u32 = match c {
-                b'A'..=b'Z' => (c - b'A') as u32,
-                b'a'..=b'z' => (c - b'a' + 26) as u32,
-                b'0'..=b'9' => (c - b'0' + 52) as u32,
-                b'+' => 62,
-                b'/' => 63,
-                b'=' => {
-                    padcount += 1;
-                    0
-                }
-                _ => 0,
-            };
-            n = (n << 6) | v;
-        }
-        out.push(((n >> 16) & 0xff) as u8);
-        if padcount < 2 {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if padcount < 1 {
-            out.push((n & 0xff) as u8);
-        }
-    }
-    fi.leftover = if closing {
-        Vec::new()
-    } else {
-        data[consume..].to_vec()
-    };
-    out
-}
-
-fn qp_encode_streaming(
-    f: &Rc<RefCell<FilterInstance>>,
-    input: &[u8],
-    closing: bool,
-    line_length: usize,
-    line_break: &[u8],
-    _binary: bool,
-) -> Vec<u8> {
-    // PHP's quoted-printable encoder is line-aware: it preserves SP/HT
-    // bytes (encoded as themselves) inside a line, but escapes them as
-    // =20/=09 when they would otherwise appear at the end of a line
-    // (before LF or before a soft break). Newline ('\n') resets the
-    // column and is emitted verbatim. '=' is always escaped.
-    let mut fi = f.borrow_mut();
-    let mut leftover = std::mem::take(&mut fi.leftover);
-    leftover.extend_from_slice(input);
-    let data = leftover;
-    let mut out = Vec::with_capacity(data.len() * 2);
-    // PHP's line_length includes the trailing `=` soft-break marker; the
-    // effective content limit per line is line_length - 1.
-    let max_col = if line_length == 0 {
-        75
-    } else {
-        line_length.saturating_sub(1)
-    };
-    let mut col = fi.col;
-    let mut i = 0;
-    let n = data.len();
-    while i < n {
-        let b = data[i];
-        // Newline: re-encode all pending trailing whitespace before lb.
-        // If preceded by '\r' in the input (i.e. the previous byte was a
-        // CR), both bytes are kept as hex so the receiver gets `=0D=0A`.
-        let prev_was_cr = i > 0 && data[i - 1] == b'\r';
-        if b == b'\n' && !prev_was_cr {
-            // Collect trailing SP/HT chars (in reverse order).
-            let mut trailing: Vec<u8> = Vec::new();
-            while let Some(&last) = out.last() {
-                if last == b' ' || last == b'\t' {
-                    out.pop();
-                    trailing.push(last);
-                } else {
-                    break;
-                }
-            }
-            // Re-emit them as =HH (in original order).
-            for &c in trailing.iter().rev() {
-                out.extend_from_slice(format!("={:02X}", c).as_bytes());
-            }
-            out.extend_from_slice(line_break);
-            col = 0;
-            i += 1;
-            continue;
-        }
-        let encode = b == b'=' || !(0x20..=0x7e).contains(&b);
-        // Decide chunk length needed.
-        let chunk_len = if encode { 3 } else { 1 };
-        if col + chunk_len > max_col {
-            // Soft break: peek backwards: if last char is whitespace, encode it.
-            if !out.is_empty() {
-                let last = *out.last().unwrap();
-                if last == b' ' || last == b'\t' {
-                    out.pop();
-                    out.extend_from_slice(format!("={:02X}", last).as_bytes());
-                }
-            }
-            out.push(b'=');
-            out.extend_from_slice(line_break);
-            col = 0;
-        }
-        if encode {
-            out.extend_from_slice(format!("={:02X}", b).as_bytes());
-            col += 3;
-        } else {
-            out.push(b);
-            col += 1;
-        }
-        i += 1;
-    }
-    if closing {
-        // Encode trailing space/tab so they're not lost.
-        if !out.is_empty() {
-            let last = *out.last().unwrap();
-            if last == b' ' || last == b'\t' {
-                out.pop();
-                out.extend_from_slice(format!("={:02X}", last).as_bytes());
-            }
-        }
-        fi.leftover.clear();
-        fi.col = 0;
-    } else {
-        fi.col = col;
-        fi.leftover.clear();
-    }
-    out
-}
-
-fn qp_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool) -> Vec<u8> {
-    let mut fi = f.borrow_mut();
-    let mut data = std::mem::take(&mut fi.leftover);
-    data.extend_from_slice(input);
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    let n = data.len();
-    while i < n {
-        let b = data[i];
-        if b == b'=' {
-            // Need at least 2 more bytes (hex digits) to decode.
-            if i + 2 < n {
-                let h1 = data[i + 1];
-                let h2 = data[i + 2];
-                // Soft line break: =\r\n
-                if h1 == b'\r' && h2 == b'\n' {
-                    i += 3;
-                    continue;
-                }
-                // Soft line break: =\n or =\r alone.
-                if h1 == b'\n' || h1 == b'\r' {
-                    i += 2;
-                    continue;
-                }
-                if let (Some(v1), Some(v2)) = (hex_digit(h1), hex_digit(h2)) {
-                    out.push((v1 << 4) | v2);
-                    i += 3;
-                    continue;
-                }
-                // Invalid - keep as-is.
-                out.push(b);
-                i += 1;
-                continue;
-            } else if i + 1 < n && (data[i + 1] == b'\n' || data[i + 1] == b'\r') {
-                // Soft line break with only one byte after `=`.
-                i += 2;
-                continue;
-            } else if !closing {
-                // Carry over incomplete trailer.
-                fi.leftover = data[i..].to_vec();
-                return out;
-            } else {
-                // At end of stream with incomplete `=X` or just `=`:
-                // strip the trailer.
-                break;
-            }
-        } else {
-            out.push(b);
-            i += 1;
-        }
-    }
-    if closing {
-        fi.leftover.clear();
-    }
-    out
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn dechunk_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool) -> Vec<u8> {
-    let mut fi = f.borrow_mut();
-    let mut data = std::mem::take(&mut fi.leftover);
-    data.extend_from_slice(input);
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    let n = data.len();
-    loop {
-        match fi.dechunk_state {
-            DechunkState::Done => break,
-            DechunkState::Header => {
-                // Read chunk size: hex digits up to ';' or '\n' (LF or CRLF).
-                let line_end = find_line_end(&data[i..]);
-                let Some((line_len, skip)) = line_end else {
-                    // Need more data.
-                    break;
-                };
-                let line = &data[i..i + line_len];
-                // Take hex digits up to ';' or whitespace.
-                let mut hex_end = 0usize;
-                for &b in line {
-                    if b.is_ascii_hexdigit() {
-                        hex_end += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let size_str = std::str::from_utf8(&line[..hex_end]).unwrap_or("0");
-                let size = usize::from_str_radix(size_str, 16).unwrap_or(0);
-                i += line_len + skip;
-                if size == 0 {
-                    fi.dechunk_state = DechunkState::Done;
-                    // Consume trailing trailers / blank line.
-                    break;
-                }
-                fi.dechunk_state = DechunkState::Body(size);
-            }
-            DechunkState::Body(remaining) => {
-                let take = remaining.min(n - i);
-                out.extend_from_slice(&data[i..i + take]);
-                i += take;
-                let new_remaining = remaining - take;
-                if new_remaining == 0 {
-                    fi.dechunk_state = DechunkState::AfterChunk;
-                } else {
-                    fi.dechunk_state = DechunkState::Body(new_remaining);
-                    break;
-                }
-            }
-            DechunkState::AfterChunk => {
-                // Consume optional CRLF after chunk body.
-                if i >= n {
-                    break;
-                }
-                if data[i] == b'\r' && i + 1 < n && data[i + 1] == b'\n' {
-                    i += 2;
-                } else if data[i] == b'\n' {
-                    i += 1;
-                }
-                fi.dechunk_state = DechunkState::Header;
-            }
-        }
-    }
-    if closing {
-        fi.leftover.clear();
-    } else {
-        fi.leftover = data[i..].to_vec();
-    }
-    out
-}
-
-fn find_line_end(buf: &[u8]) -> Option<(usize, usize)> {
-    for (idx, &b) in buf.iter().enumerate() {
-        if b == b'\r' && idx + 1 < buf.len() && buf[idx + 1] == b'\n' {
-            return Some((idx, 2));
-        }
-        if b == b'\n' {
-            return Some((idx, 1));
-        }
+        cut = p;
     }
     None
 }
 
-fn run_user_filter(
-    vm: &mut Vm,
-    f: &Rc<RefCell<FilterInstance>>,
-    input: &[u8],
-    closing: bool,
-) -> Vec<u8> {
-    let obj = match f.borrow().user_obj.clone() {
-        Some(o) => o,
-        None => return input.to_vec(),
+/// Name of the running internal function, for php_error_docref().
+fn cur_fn(vm: &Vm) -> String {
+    vm.current_builtin_name().unwrap_or_default()
+}
+
+/// php_error_docref(NULL, E_WARNING, ...)
+pub fn docref_warning(vm: &mut Vm, msg: &str) {
+    let f = cur_fn(vm);
+    if f.is_empty() {
+        vm.emit_warning(msg);
+    } else {
+        vm.emit_warning(&format!("{}(): {}", f, msg));
+    }
+}
+
+fn docref_notice(vm: &mut Vm, msg: &str) {
+    let f = cur_fn(vm);
+    let line = vm.current_line;
+    if f.is_empty() {
+        vm.emit_notice_at(msg, line);
+    } else {
+        vm.emit_notice_at(&format!("{}(): {}", f, msg), line);
+    }
+}
+
+fn pending(vm: &Vm) -> VmError {
+    VmError {
+        message: String::new(),
+        line: vm.current_line,
+    }
+}
+
+fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
+    let exc = if class == b"TypeError" {
+        vm.throw_type_error(msg.to_string())
+    } else {
+        vm.create_exception(class, msg, vm.current_line)
     };
-    // Build $in and $out bucket brigades. We represent each as a PHP
-    // object with a sentinel resource id; the bucket helper functions
-    // resolve those ids through BUCKET_BRIGADES.
-    let in_brigade = new_brigade();
-    if !input.is_empty() {
-        push_bucket(in_brigade, input.to_vec());
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
     }
-    let out_brigade = new_brigade();
-    // Create resource objects.
-    let in_res = Value::Resource(in_brigade);
-    goro_core::value::register_resource(in_brigade, b"userfilter.bucket brigade");
-    let out_res = Value::Resource(out_brigade);
-    goro_core::value::register_resource(out_brigade, b"userfilter.bucket brigade");
-    // consumed must be passed by reference; we wrap it in a Reference.
-    let consumed_rc = Rc::new(RefCell::new(Value::Long(0)));
-    let consumed_ref = Value::Reference(consumed_rc.clone());
-    let closing_val = if closing { Value::True } else { Value::False };
-    // Invoke filter() method on the object.
-    let args = vec![in_res, out_res, consumed_ref, closing_val];
-    let obj_val = Value::Object(obj.clone());
-    let _ = vm.call_object_method(&obj_val, b"filter", &args);
-    // Drain output brigade.
-    let out = drain_brigade(out_brigade);
-    // Cleanup brigades.
-    BUCKET_BRIGADES.with(|m| {
-        let mut m = m.borrow_mut();
-        m.remove(&in_brigade);
-        m.remove(&out_brigade);
-    });
-    goro_core::value::close_resource(in_brigade);
-    goro_core::value::close_resource(out_brigade);
-    if closing && out.is_empty() {
-        // No more output expected from this filter.
-    }
-    out
 }
 
-// --------- Bucket brigade primitives (for user filters) ----------
-
-thread_local! {
-    static BUCKET_BRIGADES: RefCell<HashMap<i64, Vec<Vec<u8>>>> = RefCell::new(HashMap::new());
-    static NEXT_BRIGADE_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(800_000) };
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
 }
 
-fn new_brigade() -> i64 {
-    let id = NEXT_BRIGADE_ID.with(|c| {
-        let n = c.get();
-        c.set(n + 1);
-        n
-    });
-    BUCKET_BRIGADES.with(|m| {
-        m.borrow_mut().insert(id, Vec::new());
-    });
-    id
-}
-
-fn push_bucket(brigade: i64, data: Vec<u8>) {
-    BUCKET_BRIGADES.with(|m| {
-        if let Some(b) = m.borrow_mut().get_mut(&brigade) {
-            b.push(data);
+/// php_stream_filter_create(). Ok(None) when the filter could not be
+/// created (the warnings were emitted); Err for exceptions.
+pub fn create_filter(
+    vm: &mut Vm,
+    name: &[u8],
+    params: Option<&Value>,
+    persistent: bool,
+) -> Result<Option<Filter>, VmError> {
+    let (key, user_class) = match find_factory(name) {
+        Some(f) => f,
+        None => {
+            docref_warning(vm, &format!("Unable to locate filter \"{}\"", lossy(name)));
+            return Ok(None);
         }
-    });
+    };
+    let ops = match user_class {
+        Some(class) => user_filter_create(vm, name, &class, params, persistent)?,
+        None => builtin_create(vm, &key, name, params),
+    };
+    match ops {
+        Some(ops) => Ok(Some(Filter {
+            name: name.to_vec(),
+            ops,
+            stream: 0,
+            is_read: false,
+            res: 0,
+        })),
+        None => {
+            if vm.current_exception.is_none() {
+                docref_warning(
+                    vm,
+                    &format!("Unable to create or locate filter \"{}\"", lossy(name)),
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
-fn pop_bucket(brigade: i64) -> Option<Vec<u8>> {
-    BUCKET_BRIGADES.with(|m| {
-        m.borrow_mut().get_mut(&brigade).and_then(|b| {
-            if b.is_empty() {
-                None
-            } else {
-                Some(b.remove(0))
+fn builtin_create(vm: &mut Vm, key: &[u8], name: &[u8], params: Option<&Value>) -> Option<Ops> {
+    let b = match key {
+        b"string.rot13" => Builtin::Rot13,
+        b"string.toupper" => Builtin::ToUpper,
+        b"string.tolower" => Builtin::ToLower,
+        b"consumed" => Builtin::Consumed {
+            offset: None,
+            consumed: 0,
+        },
+        b"convert.*" => match ConvertFilter::create(name, params) {
+            Ok(f) => Builtin::Convert(Box::new(f)),
+            Err(w) => {
+                for m in w {
+                    docref_warning(vm, &m);
+                }
+                return None;
             }
+        },
+        b"dechunk" => match DechunkFilter::create(name, params) {
+            Ok(f) => Builtin::Dechunk(Box::new(f)),
+            Err(w) => {
+                for m in w {
+                    docref_warning(vm, &m);
+                }
+                return None;
+            }
+        },
+        b"zlib.*" => zlib_create(vm, name, params)?,
+        b"bzip2.*" => bz2_create(vm, name, params)?,
+        // convert.iconv.* needs the iconv extension.
+        _ => return None,
+    };
+    Some(Ops::Builtin(b))
+}
+
+// ---------------------------------------------------------------------------
+// Running filters
+// ---------------------------------------------------------------------------
+
+/// fops->filter()
+fn call_filter(
+    vm: &mut Vm,
+    f: &FilterRef,
+    inp: &BrigadeRef,
+    out: &BrigadeRef,
+    consumed: Option<&mut usize>,
+    flags: i32,
+) -> i32 {
+    let is_user = matches!(f.borrow().ops, Ops::User(_));
+    if is_user {
+        return user_filter_filter(vm, f, inp, out, consumed, flags);
+    }
+    let stream = f.borrow().stream;
+    let mut fb = f.borrow_mut();
+    let Ops::Builtin(b) = &mut fb.ops else {
+        return PSFS_ERR_FATAL;
+    };
+    let mut inp = inp.borrow_mut();
+    let mut out = out.borrow_mut();
+    builtin_filter(vm, b, stream, &mut inp, &mut out, consumed, flags)
+}
+
+fn builtin_filter(
+    vm: &mut Vm,
+    b: &mut Builtin,
+    stream: i64,
+    inp: &mut Brigade,
+    out: &mut Brigade,
+    consumed: Option<&mut usize>,
+    flags: i32,
+) -> i32 {
+    let simple = |inp: &mut Brigade, out: &mut Brigade, map: fn(u8) -> u8| -> usize {
+        let mut c = 0;
+        while let Some(bk) = inp.pop_front() {
+            {
+                let mut bm = bk.borrow_mut();
+                for x in bm.buf.iter_mut() {
+                    *x = map(*x);
+                }
+                c += bm.buf.len();
+            }
+            out.append(bk);
+        }
+        c
+    };
+    match b {
+        Builtin::Rot13 => {
+            let c = simple(inp, out, |x| match x {
+                b'a'..=b'm' | b'A'..=b'M' => x + 13,
+                b'n'..=b'z' | b'N'..=b'Z' => x - 13,
+                _ => x,
+            });
+            if let Some(cp) = consumed {
+                *cp = c;
+            }
+            PSFS_PASS_ON
+        }
+        Builtin::ToUpper => {
+            let c = simple(inp, out, |x| x.to_ascii_uppercase());
+            if let Some(cp) = consumed {
+                *cp = c;
+            }
+            PSFS_PASS_ON
+        }
+        Builtin::ToLower => {
+            let c = simple(inp, out, |x| x.to_ascii_lowercase());
+            if let Some(cp) = consumed {
+                *cp = c;
+            }
+            PSFS_PASS_ON
+        }
+        Builtin::Consumed {
+            offset,
+            consumed: total,
+        } => {
+            // consumed_filter_filter()
+            if offset.is_none() {
+                *offset = Some(crate::misc::filter_stream_tell(stream).unwrap_or(-1));
+            }
+            let mut c = 0;
+            while let Some(bk) = inp.pop_front() {
+                c += bk.borrow().buf.len();
+                out.append(bk);
+            }
+            if let Some(cp) = consumed {
+                *cp = c;
+            }
+            if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                let pos = offset.unwrap_or(0) + *total as i64;
+                crate::misc::filter_stream_seek(stream, pos);
+            }
+            *total += c;
+            PSFS_PASS_ON
+        }
+        Builtin::Convert(cf) => {
+            let r = cf.filter(&inp.bufs(), flags);
+            finish_conv(vm, r, out, consumed)
+        }
+        Builtin::Dechunk(df) => {
+            let r = df.filter(&inp.bufs(), flags);
+            finish_conv(vm, r, out, consumed)
+        }
+        Builtin::ZlibInflate(z) => z.filter(vm, inp, out, consumed, flags),
+        Builtin::ZlibDeflate(z) => z.filter(inp, out, consumed, flags),
+        Builtin::BzDecompress(z) => z.filter(vm, inp, out, consumed, flags),
+        Builtin::BzCompress(z) => z.filter(inp, out, consumed, flags),
+    }
+}
+
+fn finish_conv(
+    vm: &mut Vm,
+    r: crate::filters_conv::FilterOutput,
+    out: &mut Brigade,
+    consumed: Option<&mut usize>,
+) -> i32 {
+    for w in &r.warnings {
+        docref_warning(vm, w);
+    }
+    for o in r.out {
+        out.append(new_bucket(o));
+    }
+    if let Some(cp) = consumed {
+        *cp = r.consumed;
+    }
+    r.status
+}
+
+/// Result of running a chain.
+pub struct ChainResult {
+    pub status: i32,
+    /// PSFS_PASS_ON output of the last filter.
+    pub out: Vec<u8>,
+}
+
+fn chain_of(stream: i64, is_read: bool) -> Vec<FilterRef> {
+    CHAINS.with(|m| {
+        m.borrow()
+            .get(&stream)
+            .map(|c| {
+                if is_read {
+                    c.read.clone()
+                } else {
+                    c.write.clone()
+                }
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn run_chain(
+    vm: &mut Vm,
+    chain: &[FilterRef],
+    data: Option<&[u8]>,
+    mut consumed: Option<&mut usize>,
+    flags: i32,
+) -> ChainResult {
+    let mut inp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+    let mut outp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+    if let Some(d) = data {
+        inp.borrow_mut().append(new_bucket(d.to_vec()));
+    }
+    let mut status = PSFS_ERR_FATAL;
+    for (i, f) in chain.iter().enumerate() {
+        let c = if i == 0 {
+            consumed.as_deref_mut()
+        } else {
+            None
+        };
+        status = call_filter(vm, f, &inp, &outp, c, flags);
+        if status != PSFS_PASS_ON {
+            break;
+        }
+        std::mem::swap(&mut inp, &mut outp);
+        outp.borrow_mut().clear();
+    }
+    let out = if status == PSFS_PASS_ON {
+        inp.borrow_mut().take_all()
+    } else {
+        Vec::new()
+    };
+    ChainResult { status, out }
+}
+
+/// _php_stream_write_filtered(): returns the bytes consumed by the first
+/// filter (-1 for PSFS_ERR_FATAL) and the data to write to the stream.
+pub fn run_write_chain(
+    vm: &mut Vm,
+    stream: i64,
+    data: Option<&[u8]>,
+    flags: i32,
+) -> (isize, Vec<u8>) {
+    let chain = chain_of(stream, false);
+    if chain.is_empty() {
+        return (
+            data.map(|d| d.len()).unwrap_or(0) as isize,
+            data.unwrap_or_default().to_vec(),
+        );
+    }
+    let mut consumed = 0usize;
+    let r = run_chain(vm, &chain, data, Some(&mut consumed), flags);
+    match r.status {
+        PSFS_PASS_ON => (consumed as isize, r.out),
+        PSFS_ERR_FATAL => (-1, Vec::new()),
+        _ => (consumed as isize, Vec::new()),
+    }
+}
+
+/// One iteration of php_stream_fill_read_buffer()'s filtered loop: feed
+/// `data` (a chunk just read, None when nothing was read) through the read
+/// chain.
+pub fn run_read_chain(vm: &mut Vm, stream: i64, data: Option<&[u8]>, flags: i32) -> ChainResult {
+    let chain = chain_of(stream, true);
+    run_chain(vm, &chain, data.filter(|d| !d.is_empty()), None, flags)
+}
+
+pub fn chain_has_direction(stream_id: i64, direction: i64) -> bool {
+    CHAINS.with(|m| {
+        m.borrow().get(&stream_id).is_some_and(|c| {
+            (direction & STREAM_FILTER_READ != 0 && !c.read.is_empty())
+                || (direction & STREAM_FILTER_WRITE != 0 && !c.write.is_empty())
         })
     })
 }
 
-fn drain_brigade(brigade: i64) -> Vec<u8> {
-    BUCKET_BRIGADES.with(|m| {
-        let mut m = m.borrow_mut();
-        let v = m.get_mut(&brigade);
-        let mut out = Vec::new();
-        if let Some(v) = v {
-            for chunk in v.drain(..) {
-                out.extend_from_slice(&chunk);
-            }
-        }
-        out
-    })
+pub fn chain_has_any(stream_id: i64) -> bool {
+    chain_has_direction(stream_id, STREAM_FILTER_ALL)
 }
 
-/// PHP function: stream_bucket_make_writeable($brigade): ?object
-/// Returns an object with `data`, `datalen`, `eof` properties or null.
-pub fn stream_bucket_make_writeable(
+/// php_stream_filter_append_ex() / prepend_ex(): link `f` into a chain.
+/// For an append to the read chain, pre-buffered data is run through the
+/// new filter: `buffered` holds the stream's unread data and is replaced
+/// by the filter's output. Err(()) when the filter failed on it (the
+/// filter was unlinked and freed).
+pub fn attach(
     vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, goro_core::vm::VmError> {
-    let id = args.first().map(|v| v.to_long()).unwrap_or(0);
-    match pop_bucket(id) {
-        Some(data) => {
-            let obj_id = vm.next_object_id();
-            let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
-            let len = data.len() as i64;
-            obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(data)));
-            obj.set_property(b"datalen".to_vec(), Value::Long(len));
-            obj.set_property(b"eof".to_vec(), Value::False);
-            Ok(Value::Object(Rc::new(RefCell::new(obj))))
+    stream: i64,
+    f: Filter,
+    is_read: bool,
+    append: bool,
+    buffered: Option<&mut Vec<u8>>,
+) -> Result<FilterRef, FilterFailed> {
+    let mut f = f;
+    f.stream = stream;
+    f.is_read = is_read;
+    let fr = Rc::new(RefCell::new(f));
+    CHAINS.with(|m| {
+        let mut m = m.borrow_mut();
+        let c = m.entry(stream).or_default();
+        let chain = if is_read { &mut c.read } else { &mut c.write };
+        if append {
+            chain.push(fr.clone());
+        } else {
+            chain.insert(0, fr.clone());
         }
+    });
+    if append && is_read {
+        if let Some(buf) = buffered {
+            if !buf.is_empty() {
+                let inp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+                let out: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+                inp.borrow_mut().append(new_bucket(buf.clone()));
+                let mut consumed = 0usize;
+                let mut status =
+                    call_filter(vm, &fr, &inp, &out, Some(&mut consumed), PSFS_FLAG_NORMAL);
+                if consumed > buf.len() {
+                    status = PSFS_ERR_FATAL;
+                }
+                match status {
+                    PSFS_ERR_FATAL => {
+                        docref_warning(vm, "Filter failed to process pre-buffered data");
+                        detach(vm, &fr, true);
+                        return Err(FilterFailed);
+                    }
+                    PSFS_FEED_ME => {
+                        buf.clear();
+                    }
+                    _ => {
+                        *buf = out.borrow_mut().take_all();
+                    }
+                }
+            }
+        }
+    }
+    Ok(fr)
+}
+
+/// A filter failed (PSFS_ERR_FATAL / FAILURE).
+#[derive(Debug)]
+pub struct FilterFailed;
+
+/// Give `f` a "stream filter" resource.
+pub fn register_resource(f: &FilterRef) -> i64 {
+    let id = crate::misc::alloc_resource_id();
+    f.borrow_mut().res = id;
+    FILTER_RES.with(|m| m.borrow_mut().insert(id, f.clone()));
+    goro_core::value::register_resource(id, b"stream filter");
+    id
+}
+
+pub fn filter_by_resource(res: i64) -> Option<FilterRef> {
+    if !goro_core::value::is_open_resource(res) {
+        return None;
+    }
+    FILTER_RES.with(|m| m.borrow().get(&res).cloned())
+}
+
+pub fn is_filter_resource(res: i64) -> bool {
+    filter_by_resource(res).is_some()
+}
+
+/// php_stream_filter_remove(filter, call_dtor): unlink from the chain,
+/// close the resource and (optionally) run the destructor.
+pub fn detach(vm: &mut Vm, f: &FilterRef, call_dtor: bool) {
+    let (stream, is_read, res) = {
+        let b = f.borrow();
+        (b.stream, b.is_read, b.res)
+    };
+    CHAINS.with(|m| {
+        if let Some(c) = m.borrow_mut().get_mut(&stream) {
+            let chain = if is_read { &mut c.read } else { &mut c.write };
+            chain.retain(|x| !Rc::ptr_eq(x, f));
+        }
+    });
+    if res != 0 {
+        FILTER_RES.with(|m| m.borrow_mut().remove(&res));
+        goro_core::value::close_resource(res);
+        f.borrow_mut().res = 0;
+    }
+    f.borrow_mut().stream = 0;
+    if call_dtor {
+        filter_dtor(vm, f);
+    }
+}
+
+/// fops->dtor(): user filters get onClose().
+fn filter_dtor(vm: &mut Vm, f: &FilterRef) {
+    let obj = match &f.borrow().ops {
+        Ops::User(o) => o.clone(),
+        _ => return,
+    };
+    let saved = vm.current_exception.take();
+    let _ = crate::misc::userstream::call_method_pub(vm, &obj, b"onclose", vec![]);
+    if vm.current_exception.is_none() {
+        vm.current_exception = saved;
+    }
+}
+
+/// _php_stream_free(): remove every filter of a stream (read chain first).
+pub fn remove_stream_filters(vm: &mut Vm, stream_id: i64) {
+    let chains = CHAINS.with(|m| m.borrow_mut().remove(&stream_id));
+    if let Some(c) = chains {
+        for f in c.read.iter().chain(c.write.iter()) {
+            let res = f.borrow().res;
+            if res != 0 {
+                FILTER_RES.with(|m| m.borrow_mut().remove(&res));
+                goro_core::value::close_resource(res);
+                f.borrow_mut().res = 0;
+            }
+            f.borrow_mut().stream = 0;
+            filter_dtor(vm, f);
+        }
+    }
+}
+
+/// _php_stream_filter_flush(filter, finish): run the chain from `f` on.
+/// Ok(Some((is_read, data))) gives data to put in the read buffer or write
+/// to the stream; Err(()) on PSFS_ERR_FATAL.
+pub fn flush_filter(
+    vm: &mut Vm,
+    f: &FilterRef,
+    finish: bool,
+) -> Result<Option<(bool, Vec<u8>)>, FilterFailed> {
+    let (stream, is_read) = {
+        let b = f.borrow();
+        (b.stream, b.is_read)
+    };
+    if stream == 0 {
+        return Err(FilterFailed);
+    }
+    let chain = chain_of(stream, is_read);
+    let start = match chain.iter().position(|x| Rc::ptr_eq(x, f)) {
+        Some(p) => p,
+        None => return Err(FilterFailed),
+    };
+    let mut inp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+    let mut outp: BrigadeRef = Rc::new(RefCell::new(Brigade::new()));
+    let mut flags = if finish {
+        PSFS_FLAG_FLUSH_CLOSE
+    } else {
+        PSFS_FLAG_FLUSH_INC
+    };
+    for cur in &chain[start..] {
+        let status = call_filter(vm, cur, &inp, &outp, None, flags);
+        if status == PSFS_FEED_ME {
+            return Ok(None);
+        }
+        if status == PSFS_ERR_FATAL {
+            return Err(FilterFailed);
+        }
+        std::mem::swap(&mut inp, &mut outp);
+        outp.borrow_mut().clear();
+        flags = PSFS_FLAG_NORMAL;
+    }
+    let data = inp.borrow_mut().take_all();
+    if data.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((is_read, data)))
+}
+
+// ---------------------------------------------------------------------------
+// User filters (user_filters.c)
+// ---------------------------------------------------------------------------
+
+/// user_filter_factory_create()
+fn user_filter_create(
+    vm: &mut Vm,
+    name: &[u8],
+    class: &[u8],
+    params: Option<&Value>,
+    persistent: bool,
+) -> Result<Option<Ops>, VmError> {
+    if persistent {
+        docref_warning(
+            vm,
+            "Cannot use a user-space filter with a persistent stream",
+        );
+        return Ok(None);
+    }
+    let cl = class.to_ascii_lowercase();
+    if !vm.classes.contains_key(&cl) {
+        vm.try_autoload_class(class);
+        if vm.current_exception.is_some() {
+            return Err(pending(vm));
+        }
+    }
+    let (canonical, flags) = match vm.classes.get(&cl) {
+        Some(c) => (
+            c.name.clone(),
+            (c.is_abstract, c.is_interface, c.is_trait, c.is_enum),
+        ),
+        None => {
+            docref_warning(
+                vm,
+                &format!(
+                    "User-filter \"{}\" requires class \"{}\", but that class is not defined",
+                    lossy(name),
+                    lossy(class)
+                ),
+            );
+            return Ok(None);
+        }
+    };
+    // object_init_ex()
+    let disp = goro_core::value::display_class_name(&canonical).to_string();
+    let kind = if flags.1 {
+        Some("interface")
+    } else if flags.2 {
+        Some("trait")
+    } else if flags.3 {
+        Some("enum")
+    } else if flags.0 {
+        Some("abstract class")
+    } else {
+        None
+    };
+    if let Some(k) = kind {
+        return Err(throw(
+            vm,
+            b"Error",
+            &format!("Cannot instantiate {} {}", k, disp),
+        ));
+    }
+    let id = vm.alloc_object_id();
+    let mut obj = PhpObject::new(canonical.clone(), id);
+    vm.apply_class_property_defaults(&mut obj, &cl);
+    let objv = Value::Object(Rc::new(RefCell::new(obj)));
+    // add_property_string(&obj, "filtername", ...) and params.
+    write_prop(
+        vm,
+        &objv,
+        b"filtername",
+        Value::String(PhpString::from_bytes(name)),
+        None,
+    )?;
+    write_prop(
+        vm,
+        &objv,
+        b"params",
+        params.cloned().unwrap_or(Value::Null),
+        None,
+    )?;
+    if vm
+        .classes
+        .get(&cl)
+        .map(|c| c.get_method(b"__destruct").is_some())
+        .unwrap_or(false)
+    {
+        vm.track_destructible(objv.clone());
+    }
+    // onCreate(): returning false fails the creation.
+    let r = crate::misc::userstream::call_method_pub(vm, &objv, b"oncreate", vec![])?;
+    if vm.current_exception.is_some() {
+        return Err(pending(vm));
+    }
+    if matches!(r, Some(Value::False)) {
+        return Ok(None);
+    }
+    Ok(Some(Ops::User(objv)))
+}
+
+/// Property write through the standard handler (visibility from `scope`,
+/// readonly, typed properties), as zend_update_property()/add_property_*.
+fn write_prop(
+    vm: &mut Vm,
+    obj: &Value,
+    name: &[u8],
+    val: Value,
+    scope: Option<&[u8]>,
+) -> Result<(), VmError> {
+    let Value::Object(o) = obj else {
+        return Ok(());
+    };
+    let cl = o.borrow().class_name.to_ascii_lowercase();
+    let canonical = o.borrow().class_name.clone();
+    let pdef = vm.classes.get(&cl).and_then(|c| {
+        c.properties
+            .iter()
+            .find(|p| p.name == name && !p.is_static)
+            .cloned()
+    });
+    if let Some(pd) = &pdef {
+        let decl = pd.declaring_class.to_ascii_lowercase();
+        let scope_l = scope.map(|s| s.to_ascii_lowercase());
+        let accessible = match pd.visibility {
+            Visibility::Public => true,
+            Visibility::Private => scope_l.as_deref() == Some(decl.as_slice()),
+            Visibility::Protected => match &scope_l {
+                Some(sc) => {
+                    *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
+                }
+                None => false,
+            },
+        };
+        if !accessible {
+            let decl_name = vm
+                .classes
+                .get(&decl)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| canonical.clone());
+            let vis = if matches!(pd.visibility, Visibility::Private) {
+                "private"
+            } else {
+                "protected"
+            };
+            return Err(throw(
+                vm,
+                b"Error",
+                &format!(
+                    "Cannot access {} property {}::${}",
+                    vis,
+                    goro_core::value::display_class_name(&decl_name),
+                    lossy(name)
+                ),
+            ));
+        }
+        if let Some(pt) = &pd.property_type {
+            if !vm.value_matches_type(&val, pt) {
+                let msg = format!(
+                    "Cannot assign {} to property {}::${} of type {}",
+                    Vm::value_type_name(&val),
+                    goro_core::value::display_class_name(&canonical),
+                    lossy(name),
+                    vm.param_type_name(pt)
+                );
+                return Err(throw(vm, b"TypeError", &msg));
+            }
+        }
+    }
+    o.borrow_mut().set_property(name.to_vec(), val);
+    Ok(())
+}
+
+/// has_property(ZEND_PROPERTY_EXISTS): declared (not unset) or dynamic.
+fn prop_exists(obj: &Value, name: &[u8]) -> bool {
+    match obj {
+        Value::Object(o) => o.borrow().has_property(name),
+        _ => false,
+    }
+}
+
+/// Register a brigade as a "userfilter.bucket brigade" resource.
+fn brigade_resource(br: &BrigadeRef) -> i64 {
+    let id = crate::misc::alloc_resource_id();
+    let bid = br.borrow().id;
+    LIVE_BRIGADES.with(|m| m.borrow_mut().insert(bid, br.clone()));
+    BRIGADE_RES.with(|m| m.borrow_mut().insert(id, br.clone()));
+    goro_core::value::register_resource(id, b"userfilter.bucket brigade");
+    id
+}
+
+fn release_brigade_resource(id: i64) {
+    if let Some(br) = BRIGADE_RES.with(|m| m.borrow_mut().remove(&id)) {
+        let bid = br.borrow().id;
+        LIVE_BRIGADES.with(|m| m.borrow_mut().remove(&bid));
+    }
+    goro_core::value::close_resource(id);
+}
+
+/// userfilter_filter()
+fn user_filter_filter(
+    vm: &mut Vm,
+    f: &FilterRef,
+    inp: &BrigadeRef,
+    out: &BrigadeRef,
+    consumed: Option<&mut usize>,
+    flags: i32,
+) -> i32 {
+    let (obj, stream) = {
+        let b = f.borrow();
+        match &b.ops {
+            Ops::User(o) => (o.clone(), b.stream),
+            _ => return PSFS_ERR_FATAL,
+        }
+    };
+    let class = match &obj {
+        Value::Object(o) => o.borrow().class_name.clone(),
+        _ => return PSFS_ERR_FATAL,
+    };
+    // Give the userfilter class a hook back to the stream.
+    let has_stream_prop = prop_exists(&obj, b"stream");
+    if has_stream_prop {
+        let sv = if stream != 0 {
+            Value::Resource(stream)
+        } else {
+            Value::Null
+        };
+        if write_prop(vm, &obj, b"stream", sv, Some(&class)).is_err()
+            || vm.current_exception.is_some()
+        {
+            if !inp.borrow().is_empty() {
+                docref_warning(vm, "Unprocessed filter buckets remaining on input brigade");
+            }
+            return PSFS_ERR_FATAL;
+        }
+    }
+    let in_res = brigade_resource(inp);
+    let out_res = brigade_resource(out);
+    let has_consumed = consumed.is_some();
+    let consumed_rc = Rc::new(RefCell::new(match &consumed {
+        Some(c) => Value::Long(**c as i64),
+        None => Value::Null,
+    }));
+    let args = vec![
+        Value::Resource(in_res),
+        Value::Resource(out_res),
+        Value::Reference(consumed_rc.clone()),
+        if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+            Value::True
+        } else {
+            Value::False
+        },
+    ];
+    let mut ret = PSFS_ERR_FATAL;
+    IN_CALLBACK.with(|v| v.borrow_mut().push(stream));
+    let call = crate::misc::userstream::call_method_pub(vm, &obj, b"filter", args);
+    IN_CALLBACK.with(|v| {
+        let mut v = v.borrow_mut();
+        if let Some(p) = v.iter().rposition(|&x| x == stream) {
+            v.remove(p);
+        }
+    });
+    match call {
+        Ok(Some(v)) if vm.current_exception.is_none() => {
+            ret = v.to_long() as i32;
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if vm.current_exception.is_none() {
+                docref_warning(vm, "Failed to call filter function");
+            }
+        }
+        Err(_) => {}
+    }
+    if has_consumed {
+        if let Some(c) = consumed {
+            *c = consumed_rc.borrow().to_long().max(0) as usize;
+        }
+    }
+    if !inp.borrow().is_empty() {
+        docref_warning(vm, "Unprocessed filter buckets remaining on input brigade");
+    }
+    if has_stream_prop {
+        let saved = vm.current_exception.take();
+        let _ = write_prop(vm, &obj, b"stream", Value::Null, Some(&class));
+        if saved.is_some() {
+            vm.current_exception = saved;
+        }
+    }
+    release_brigade_resource(in_res);
+    release_brigade_resource(out_res);
+    ret
+}
+
+// ---------------------------------------------------------------------------
+// stream_bucket_* (user_filters.c)
+// ---------------------------------------------------------------------------
+
+fn arg_resource(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    n: usize,
+    name: &str,
+) -> Result<i64, VmError> {
+    match args.get(n - 1).map(|v| v.deref()) {
+        Some(Value::Resource(id)) => Ok(id),
+        Some(v) => Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): Argument #{} (${}) must be of type resource, {} given",
+                func,
+                n,
+                name,
+                Vm::value_type_name(&v)
+            ),
+        )),
+        None => Err(throw(
+            vm,
+            b"ArgumentCountError",
+            &format!(
+                "{}() expects exactly 2 arguments, {} given",
+                func,
+                args.len()
+            ),
+        )),
+    }
+}
+
+fn fetch_brigade(vm: &mut Vm, func: &str, id: i64) -> Result<BrigadeRef, VmError> {
+    match BRIGADE_RES.with(|m| m.borrow().get(&id).cloned()) {
+        Some(b) if goro_core::value::is_open_resource(id) => Ok(b),
+        _ => Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): supplied resource is not a valid userfilter.bucket brigade resource",
+                func
+            ),
+        )),
+    }
+}
+
+/// object_init_ex(StreamBucket) with bucket/data/datalen/dataLength.
+fn bucket_object(vm: &mut Vm, b: &BucketRef) -> Value {
+    let rid = crate::misc::alloc_resource_id();
+    BUCKET_RES.with(|m| m.borrow_mut().insert(rid, b.clone()));
+    goro_core::value::register_resource(rid, b"userfilter.bucket");
+    let id = vm.alloc_object_id();
+    let mut obj = PhpObject::new(b"StreamBucket".to_vec(), id);
+    vm.apply_class_property_defaults(&mut obj, b"streambucket");
+    let data = b.borrow().buf.clone();
+    let len = data.len() as i64;
+    obj.set_property(b"bucket".to_vec(), Value::Resource(rid));
+    obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(data)));
+    obj.set_property(b"datalen".to_vec(), Value::Long(len));
+    obj.set_property(b"dataLength".to_vec(), Value::Long(len));
+    Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// PHP_FUNCTION(stream_bucket_make_writeable)
+pub fn stream_bucket_make_writeable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_bucket_make_writeable";
+    if args.len() != 1 {
+        return Err(throw(
+            vm,
+            b"ArgumentCountError",
+            &format!("{}() expects exactly 1 argument, {} given", F, args.len()),
+        ));
+    }
+    let id = arg_resource(vm, F, args, 1, "brigade")?;
+    let br = fetch_brigade(vm, F, id)?;
+    let head = br.borrow_mut().pop_front();
+    match head {
+        Some(b) => Ok(bucket_object(vm, &b)),
         None => Ok(Value::Null),
     }
 }
 
-/// PHP function: stream_bucket_append($brigade, $bucket): void
-pub fn stream_bucket_append(_vm: &mut Vm, args: &[Value]) -> Result<Value, goro_core::vm::VmError> {
-    let id = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let bucket = args.get(1).cloned().unwrap_or(Value::Null);
-    if let Value::Object(obj) = bucket {
-        let data_val = obj.borrow().get_property(b"data");
-        let bytes = data_val.to_php_string().as_bytes().to_vec();
-        push_bucket(id, bytes);
+/// php_stream_bucket_attach()
+fn bucket_attach(vm: &mut Vm, args: &[Value], append: bool) -> Result<Value, VmError> {
+    let f = if append {
+        "stream_bucket_append"
+    } else {
+        "stream_bucket_prepend"
+    };
+    if args.len() != 2 {
+        return Err(throw(
+            vm,
+            b"ArgumentCountError",
+            &format!("{}() expects exactly 2 arguments, {} given", f, args.len()),
+        ));
+    }
+    let id = arg_resource(vm, f, args, 1, "brigade")?;
+    let obj = match args[1].deref() {
+        Value::Object(o) if o.borrow().class_name.eq_ignore_ascii_case(b"StreamBucket") => o,
+        v => {
+            return Err(throw(
+                vm,
+                b"TypeError",
+                &format!(
+                    "{}(): Argument #2 ($bucket) must be of type StreamBucket, {} given",
+                    f,
+                    Vm::value_type_name(&v)
+                ),
+            ));
+        }
+    };
+    let br = fetch_brigade(vm, f, id)?;
+    let bucket_v = obj.borrow().get_property(b"bucket");
+    let bucket = match bucket_v.deref() {
+        Value::Resource(rid) if goro_core::value::is_open_resource(rid) => {
+            BUCKET_RES.with(|m| m.borrow().get(&rid).cloned())
+        }
+        _ => None,
+    };
+    let Some(bucket) = bucket else {
+        return Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): supplied resource is not a valid userfilter.bucket resource",
+                f
+            ),
+        ));
+    };
+    let data = obj.borrow().get_property(b"data");
+    if !matches!(data, Value::Undef) {
+        let d = data.deref().to_php_string().as_bytes().to_vec();
+        bucket.borrow_mut().buf = d;
+    }
+    bucket_unlink(&bucket);
+    if append {
+        br.borrow_mut().append(bucket);
+    } else {
+        br.borrow_mut().prepend(bucket);
     }
     Ok(Value::Null)
 }
 
-/// PHP function: stream_bucket_prepend($brigade, $bucket): void
-pub fn stream_bucket_prepend(
-    _vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, goro_core::vm::VmError> {
-    let id = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let bucket = args.get(1).cloned().unwrap_or(Value::Null);
-    if let Value::Object(obj) = bucket {
-        let data_val = obj.borrow().get_property(b"data");
-        let bytes = data_val.to_php_string().as_bytes().to_vec();
-        BUCKET_BRIGADES.with(|m| {
-            if let Some(b) = m.borrow_mut().get_mut(&id) {
-                b.insert(0, bytes);
-            }
-        });
+pub fn stream_bucket_append(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    bucket_attach(vm, args, true)
+}
+
+pub fn stream_bucket_prepend(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    bucket_attach(vm, args, false)
+}
+
+/// PHP_FUNCTION(stream_bucket_new)
+pub fn stream_bucket_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const F: &str = "stream_bucket_new";
+    if args.len() != 2 {
+        return Err(throw(
+            vm,
+            b"ArgumentCountError",
+            &format!("{}() expects exactly 2 arguments, {} given", F, args.len()),
+        ));
     }
-    Ok(Value::Null)
+    let id = arg_resource(vm, F, args, 1, "stream")?;
+    if !crate::misc::has_file_handle(id) {
+        return Err(throw(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): Argument #1 ($stream) must be an open stream resource",
+                F
+            ),
+        ));
+    }
+    let data = match args[1].deref() {
+        Value::Array(_) => {
+            return Err(throw(
+                vm,
+                b"TypeError",
+                &format!(
+                    "{}(): Argument #2 ($buffer) must be of type string, array given",
+                    F
+                ),
+            ));
+        }
+        Value::Object(_) => {
+            let v = args[1].deref();
+            vm.value_to_string_checked(&v)?.as_bytes().to_vec()
+        }
+        v => v.to_php_string().as_bytes().to_vec(),
+    };
+    let b = new_bucket(data);
+    Ok(bucket_object(vm, &b))
 }
 
-/// PHP function: stream_bucket_new($stream, $data): object
-pub fn stream_bucket_new(vm: &mut Vm, args: &[Value]) -> Result<Value, goro_core::vm::VmError> {
-    let data = args.get(1).cloned().unwrap_or(Value::Null);
-    let bytes = data.to_php_string().as_bytes().to_vec();
-    let len = bytes.len() as i64;
-    let obj_id = vm.next_object_id();
-    let mut obj = PhpObject::new(b"stdClass".to_vec(), obj_id);
-    obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(bytes)));
-    obj.set_property(b"datalen".to_vec(), Value::Long(len));
-    obj.set_property(b"eof".to_vec(), Value::False);
-    Ok(Value::Object(Rc::new(RefCell::new(obj))))
-}
-
-/// Reset all filter state (between independent tests). Mirrors
-/// `reset_resources()` in goro_core::value.
+/// Reset all filter state (between independent tests).
 pub fn reset_all() {
-    FILTERS.with(|m| m.borrow_mut().clear());
-    STREAM_CHAINS.with(|m| m.borrow_mut().clear());
-    USER_FILTER_CLASSES.with(|m| m.borrow_mut().clear());
-    BUCKET_BRIGADES.with(|m| m.borrow_mut().clear());
+    CHAINS.with(|m| m.borrow_mut().clear());
+    FILTER_RES.with(|m| m.borrow_mut().clear());
+    USER_FILTERS.with(|m| m.borrow_mut().clear());
+    BRIGADE_RES.with(|m| m.borrow_mut().clear());
+    BUCKET_RES.with(|m| m.borrow_mut().clear());
+    LIVE_BRIGADES.with(|m| m.borrow_mut().clear());
+}
+
+// ---------------------------------------------------------------------------
+// zlib.* (ext/zlib/zlib_filter.c)
+// ---------------------------------------------------------------------------
+
+const ZLIB_BUF: usize = 0x8000;
+
+/// Find a key of an array or object parameter (zend_hash_str_find_ind on
+/// HASH_OF()).
+fn param_find(params: &Value, key: &[u8]) -> Option<Value> {
+    match params.deref() {
+        Value::Array(a) => a
+            .borrow()
+            .get(&ArrayKey::String(PhpString::from_bytes(key)))
+            .map(|v| v.deref()),
+        Value::Object(o) => {
+            let o = o.borrow();
+            if o.has_property(key) {
+                Some(o.get_property(key).deref())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Raw / zlib / gzip framing chosen by windowBits.
+#[derive(Clone, Copy, PartialEq)]
+enum ZFormat {
+    Raw,
+    Zlib,
+    Gzip,
+    /// Inflate: detect zlib or gzip (windowBits + 32).
+    Auto,
+}
+
+fn zformat(window: i64, inflate: bool) -> ZFormat {
+    if window < 0 {
+        ZFormat::Raw
+    } else if window > 15 + 16 && inflate {
+        ZFormat::Auto
+    } else if window > 15 {
+        ZFormat::Gzip
+    } else {
+        ZFormat::Zlib
+    }
+}
+
+pub struct ZlibInflate {
+    fmt: ZFormat,
+    dec: Option<flate2::Decompress>,
+    /// Header bytes collected before the format is known / gzip header.
+    header: Vec<u8>,
+    header_done: bool,
+    finished: bool,
+}
+
+pub struct ZlibDeflate {
+    fmt: ZFormat,
+    enc: flate2::Compress,
+    finished: bool,
+    started: bool,
+    crc: flate2::Crc,
+    trailer_done: bool,
+}
+
+fn zlib_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Builtin> {
+    if name.eq_ignore_ascii_case(b"zlib.inflate") {
+        let mut window: i64 = -15;
+        if let Some(p) = params {
+            if matches!(p.deref(), Value::Array(_) | Value::Object(_)) {
+                if let Some(t) = param_find(p, b"window") {
+                    let tmp = t.to_long();
+                    if !(-15..=15 + 32).contains(&tmp) {
+                        docref_warning(
+                            vm,
+                            &format!("Invalid parameter given for window size ({})", tmp),
+                        );
+                    } else {
+                        window = tmp;
+                    }
+                }
+            }
+        }
+        let fmt = zformat(window, true);
+        // inflateInit2() rejects windowBits 0..7 and a few others.
+        if (0..8).contains(&window) || (-7..0).contains(&window) {
+            return None;
+        }
+        Some(Builtin::ZlibInflate(Box::new(ZlibInflate {
+            fmt,
+            dec: match fmt {
+                ZFormat::Raw => Some(flate2::Decompress::new(false)),
+                ZFormat::Zlib => Some(flate2::Decompress::new(true)),
+                _ => None,
+            },
+            header: Vec::new(),
+            header_done: matches!(fmt, ZFormat::Raw | ZFormat::Zlib),
+            finished: false,
+        })))
+    } else if name.eq_ignore_ascii_case(b"zlib.deflate") {
+        let mut level: i64 = -1;
+        let mut window: i64 = -15;
+        let set_level = |vm: &mut Vm, tmp: i64, level: &mut i64| {
+            if !(-1..=9).contains(&tmp) {
+                docref_warning(
+                    vm,
+                    &format!("Invalid compression level specified. ({})", tmp),
+                );
+            } else {
+                *level = tmp;
+            }
+        };
+        if let Some(p) = params {
+            match p.deref() {
+                Value::Array(_) | Value::Object(_) => {
+                    if let Some(t) = param_find(p, b"memory") {
+                        let tmp = t.to_long();
+                        if !(1..=9).contains(&tmp) {
+                            docref_warning(
+                                vm,
+                                &format!("Invalid parameter given for memory level ({})", tmp),
+                            );
+                        }
+                    }
+                    if let Some(t) = param_find(p, b"window") {
+                        let tmp = t.to_long();
+                        if !(-15..=15 + 16).contains(&tmp) {
+                            docref_warning(
+                                vm,
+                                &format!("Invalid parameter given for window size ({})", tmp),
+                            );
+                        } else {
+                            window = tmp;
+                        }
+                    }
+                    if let Some(t) = param_find(p, b"level") {
+                        set_level(vm, t.to_long(), &mut level);
+                    }
+                }
+                Value::String(_) | Value::Double(_) | Value::Long(_) => {
+                    set_level(vm, p.deref().to_long(), &mut level);
+                }
+                _ => docref_warning(vm, "Invalid filter parameter, ignored"),
+            }
+        }
+        if (0..8).contains(&window) || (-8..0).contains(&window) {
+            return None;
+        }
+        let lvl = if level < 0 { 6 } else { level as u32 };
+        let fmt = zformat(window, false);
+        Some(Builtin::ZlibDeflate(Box::new(ZlibDeflate {
+            fmt,
+            enc: flate2::Compress::new(flate2::Compression::new(lvl), fmt == ZFormat::Zlib),
+            finished: true,
+            started: false,
+            crc: flate2::Crc::new(),
+            trailer_done: false,
+        })))
+    } else {
+        None
+    }
+}
+
+/// Parse a gzip member header; Some(len) once complete.
+fn gzip_header_len(h: &[u8]) -> Option<Result<usize, ()>> {
+    if h.len() < 10 {
+        return None;
+    }
+    if h[0] != 0x1f || h[1] != 0x8b || h[2] != 8 {
+        return Some(Err(()));
+    }
+    let flg = h[3];
+    let mut p = 10;
+    if flg & 4 != 0 {
+        if h.len() < p + 2 {
+            return None;
+        }
+        let xlen = h[p] as usize | (h[p + 1] as usize) << 8;
+        p += 2 + xlen;
+        if h.len() < p {
+            return None;
+        }
+    }
+    for bit in [8u8, 16] {
+        if flg & bit != 0 {
+            let z = h[p..].iter().position(|&c| c == 0)?;
+            p += z + 1;
+        }
+    }
+    if flg & 2 != 0 {
+        p += 2;
+        if h.len() < p {
+            return None;
+        }
+    }
+    Some(Ok(p))
+}
+
+impl ZlibInflate {
+    /// php_zlib_inflate_filter()
+    fn filter(
+        &mut self,
+        vm: &mut Vm,
+        inp: &mut Brigade,
+        out: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: i32,
+    ) -> i32 {
+        let mut exit = PSFS_FEED_ME;
+        let mut total = 0usize;
+        while let Some(b) = inp.pop_front() {
+            let buf = std::mem::take(&mut b.borrow_mut().buf);
+            total += buf.len();
+            if self.finished {
+                continue;
+            }
+            let mut data: &[u8] = &buf;
+            let owned;
+            if !self.header_done {
+                self.header.extend_from_slice(data);
+                if self.fmt == ZFormat::Auto && self.header.len() >= 2 {
+                    if self.header[0] == 0x1f && self.header[1] == 0x8b {
+                        self.fmt = ZFormat::Gzip;
+                    } else {
+                        self.fmt = ZFormat::Zlib;
+                        self.dec = Some(flate2::Decompress::new(true));
+                        self.header_done = true;
+                    }
+                }
+                if self.fmt == ZFormat::Gzip {
+                    match gzip_header_len(&self.header) {
+                        None => continue,
+                        Some(Err(())) => {
+                            docref_notice(vm, "zlib: data error");
+                            return PSFS_ERR_FATAL;
+                        }
+                        Some(Ok(n)) => {
+                            owned = self.header.split_off(n);
+                            self.header.clear();
+                            self.dec = Some(flate2::Decompress::new(false));
+                            self.header_done = true;
+                            data = &owned;
+                        }
+                    }
+                } else if !self.header_done {
+                    continue;
+                } else {
+                    owned = std::mem::take(&mut self.header);
+                    data = &owned;
+                }
+            }
+            let flush = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                flate2::FlushDecompress::Finish
+            } else {
+                flate2::FlushDecompress::Sync
+            };
+            let dec = self.dec.as_mut().unwrap();
+            let mut pos = 0;
+            loop {
+                let mut obuf = vec![0u8; ZLIB_BUF];
+                let before_in = dec.total_in();
+                let before_out = dec.total_out();
+                let r = dec.decompress(&data[pos..], &mut obuf, flush);
+                let used = (dec.total_in() - before_in) as usize;
+                let made = (dec.total_out() - before_out) as usize;
+                pos += used;
+                if made > 0 {
+                    obuf.truncate(made);
+                    out.append(new_bucket(obuf));
+                    exit = PSFS_PASS_ON;
+                }
+                match r {
+                    Ok(flate2::Status::StreamEnd) => {
+                        self.finished = true;
+                        exit = PSFS_PASS_ON;
+                        break;
+                    }
+                    Ok(_) => {
+                        if pos >= data.len() && made < ZLIB_BUF {
+                            break;
+                        }
+                        if used == 0 && made == 0 {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        docref_notice(vm, "zlib: data error");
+                        return PSFS_ERR_FATAL;
+                    }
+                }
+            }
+        }
+        if !self.finished && flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+            if let Some(dec) = self.dec.as_mut() {
+                loop {
+                    let mut obuf = vec![0u8; ZLIB_BUF];
+                    let before_out = dec.total_out();
+                    let r = dec.decompress(&[], &mut obuf, flate2::FlushDecompress::Finish);
+                    let made = (dec.total_out() - before_out) as usize;
+                    if made > 0 {
+                        obuf.truncate(made);
+                        out.append(new_bucket(obuf));
+                        exit = PSFS_PASS_ON;
+                    }
+                    if made == 0 || !matches!(r, Ok(flate2::Status::Ok)) {
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(c) = consumed {
+            *c = total;
+        }
+        exit
+    }
+}
+
+impl ZlibDeflate {
+    fn gzip_header(&mut self, out: &mut Brigade) {
+        if self.fmt == ZFormat::Gzip && !self.started {
+            out.append(new_bucket(vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]));
+        }
+        self.started = true;
+    }
+
+    fn run(&mut self, input: &[u8], mode: flate2::FlushCompress, out: &mut Brigade) -> (bool, i32) {
+        let mut exit = false;
+        let mut pos = 0;
+        loop {
+            let mut obuf = vec![0u8; ZLIB_BUF];
+            let before_in = self.enc.total_in();
+            let before_out = self.enc.total_out();
+            let r = self.enc.compress(&input[pos..], &mut obuf, mode);
+            let used = (self.enc.total_in() - before_in) as usize;
+            let made = (self.enc.total_out() - before_out) as usize;
+            pos += used;
+            if made > 0 {
+                obuf.truncate(made);
+                out.append(new_bucket(obuf));
+                exit = true;
+            }
+            match r {
+                Ok(flate2::Status::StreamEnd) => return (exit, 1),
+                Ok(_) => {
+                    if pos >= input.len() && made < ZLIB_BUF {
+                        return (exit, 0);
+                    }
+                    if used == 0 && made == 0 {
+                        return (exit, 0);
+                    }
+                }
+                Err(_) => return (exit, -1),
+            }
+        }
+    }
+
+    /// php_zlib_deflate_filter()
+    fn filter(
+        &mut self,
+        inp: &mut Brigade,
+        out: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: i32,
+    ) -> i32 {
+        let mut exit = PSFS_FEED_ME;
+        let mut total = 0usize;
+        while let Some(b) = inp.pop_front() {
+            let buf = std::mem::take(&mut b.borrow_mut().buf);
+            total += buf.len();
+            if buf.is_empty() {
+                continue;
+            }
+            self.gzip_header(out);
+            self.crc.update(&buf);
+            let mode = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                flate2::FlushCompress::Full
+            } else if flags & PSFS_FLAG_FLUSH_INC != 0 {
+                flate2::FlushCompress::Sync
+            } else {
+                flate2::FlushCompress::None
+            };
+            self.finished = !matches!(mode, flate2::FlushCompress::None);
+            let (made, st) = self.run(&buf, mode, out);
+            if made {
+                exit = PSFS_PASS_ON;
+            }
+            if st < 0 {
+                return PSFS_ERR_FATAL;
+            }
+        }
+        if flags & PSFS_FLAG_FLUSH_CLOSE != 0
+            || (flags & PSFS_FLAG_FLUSH_INC != 0 && !self.finished)
+        {
+            self.gzip_header(out);
+            let close = flags & PSFS_FLAG_FLUSH_CLOSE != 0;
+            if !(close && self.trailer_done) {
+                let mode = if close {
+                    flate2::FlushCompress::Finish
+                } else {
+                    flate2::FlushCompress::Sync
+                };
+                let (made, st) = self.run(&[], mode, out);
+                if made {
+                    exit = PSFS_PASS_ON;
+                }
+                if close && st == 1 && self.fmt == ZFormat::Gzip && !self.trailer_done {
+                    let mut t = self.crc.sum().to_le_bytes().to_vec();
+                    t.extend_from_slice(&self.crc.amount().to_le_bytes());
+                    out.append(new_bucket(t));
+                    exit = PSFS_PASS_ON;
+                }
+                if close {
+                    self.trailer_done = true;
+                }
+            }
+            self.finished = true;
+        }
+        if let Some(c) = consumed {
+            *c = total;
+        }
+        exit
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bzip2.* (ext/bz2/bz2_filter.c)
+// ---------------------------------------------------------------------------
+
+const BZ_BUF: usize = 2048;
+
+#[derive(PartialEq, Clone, Copy)]
+enum BzStatus {
+    Uninitialized,
+    Running,
+    Finished,
+}
+
+pub struct BzDecompress {
+    dec: Option<bzip2::Decompress>,
+    status: BzStatus,
+    small: bool,
+    concatenated: bool,
+}
+
+pub struct BzCompress {
+    enc: bzip2::Compress,
+    is_flushed: bool,
+}
+
+fn bz2_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Builtin> {
+    if name.eq_ignore_ascii_case(b"bzip2.decompress") {
+        let mut small = false;
+        let mut concatenated = false;
+        if let Some(p) = params {
+            let tmp = if matches!(p.deref(), Value::Array(_) | Value::Object(_)) {
+                if let Some(c) = param_find(p, b"concatenated") {
+                    concatenated = c.is_truthy();
+                }
+                param_find(p, b"small")
+            } else {
+                Some(p.deref())
+            };
+            if let Some(t) = tmp {
+                small = t.is_truthy();
+            }
+        }
+        Some(Builtin::BzDecompress(Box::new(BzDecompress {
+            dec: None,
+            status: BzStatus::Uninitialized,
+            small,
+            concatenated,
+        })))
+    } else if name.eq_ignore_ascii_case(b"bzip2.compress") {
+        let mut blocks = 4u32;
+        let mut work = 0u32;
+        if let Some(p) = params {
+            if matches!(p.deref(), Value::Array(_) | Value::Object(_)) {
+                if let Some(t) = param_find(p, b"blocks") {
+                    let b = t.to_long();
+                    if !(1..=9).contains(&b) {
+                        docref_warning(
+                            vm,
+                            &format!(
+                                "Invalid parameter given for number of blocks to allocate ({})",
+                                b
+                            ),
+                        );
+                    } else {
+                        blocks = b as u32;
+                    }
+                }
+                if let Some(t) = param_find(p, b"work") {
+                    let w = t.to_long();
+                    if !(0..=250).contains(&w) {
+                        docref_warning(
+                            vm,
+                            &format!("Invalid parameter given for work factor ({})", w),
+                        );
+                    } else {
+                        work = w as u32;
+                    }
+                }
+            }
+        }
+        Some(Builtin::BzCompress(Box::new(BzCompress {
+            enc: bzip2::Compress::new(bzip2::Compression::new(blocks), work),
+            is_flushed: true,
+        })))
+    } else {
+        None
+    }
+}
+
+impl BzDecompress {
+    /// php_bz2_decompress_filter()
+    fn filter(
+        &mut self,
+        vm: &mut Vm,
+        inp: &mut Brigade,
+        out: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: i32,
+    ) -> i32 {
+        let mut exit = PSFS_FEED_ME;
+        let mut total = 0usize;
+        while let Some(b) = inp.pop_front() {
+            let buf = std::mem::take(&mut b.borrow_mut().buf);
+            let mut bin = 0;
+            while bin < buf.len() {
+                if self.status == BzStatus::Uninitialized {
+                    self.dec = Some(bzip2::Decompress::new(self.small));
+                    self.status = BzStatus::Running;
+                }
+                if self.status != BzStatus::Running {
+                    total += buf.len();
+                    break;
+                }
+                let desired = (buf.len() - bin).min(BZ_BUF);
+                let dec = self.dec.as_mut().unwrap();
+                let mut obuf = vec![0u8; BZ_BUF];
+                let before_in = dec.total_in();
+                let before_out = dec.total_out();
+                let r = dec.decompress(&buf[bin..bin + desired], &mut obuf);
+                let used = (dec.total_in() - before_in) as usize;
+                let made = (dec.total_out() - before_out) as usize;
+                let ended = matches!(r, Ok(bzip2::Status::StreamEnd));
+                match r {
+                    Ok(bzip2::Status::StreamEnd) => {
+                        self.status = if self.concatenated {
+                            BzStatus::Uninitialized
+                        } else {
+                            BzStatus::Finished
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        docref_notice(vm, "bzip2 decompression failed");
+                        return PSFS_ERR_FATAL;
+                    }
+                }
+                total += used;
+                bin += used;
+                if made > 0 {
+                    obuf.truncate(made);
+                    out.append(new_bucket(obuf));
+                    exit = PSFS_PASS_ON;
+                } else if ended {
+                    return PSFS_PASS_ON;
+                } else if used == 0 {
+                    // No progress possible with this input.
+                    break;
+                }
+            }
+        }
+        if self.status == BzStatus::Running && flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+            if let Some(dec) = self.dec.as_mut() {
+                loop {
+                    let mut obuf = vec![0u8; BZ_BUF];
+                    let before_out = dec.total_out();
+                    let r = dec.decompress(&[], &mut obuf);
+                    let made = (dec.total_out() - before_out) as usize;
+                    if made > 0 {
+                        obuf.truncate(made);
+                        out.append(new_bucket(obuf));
+                        exit = PSFS_PASS_ON;
+                    } else {
+                        break;
+                    }
+                    if !matches!(r, Ok(bzip2::Status::Ok)) {
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(c) = consumed {
+            *c = total;
+        }
+        exit
+    }
+}
+
+impl BzCompress {
+    fn run(&mut self, input: &[u8], action: bzip2::Action, out: &mut Brigade) -> Result<bool, ()> {
+        let mut made_any = false;
+        let mut pos = 0;
+        loop {
+            let mut obuf = vec![0u8; BZ_BUF];
+            let before_in = self.enc.total_in();
+            let before_out = self.enc.total_out();
+            let r = self.enc.compress(&input[pos..], &mut obuf, action);
+            let used = (self.enc.total_in() - before_in) as usize;
+            let made = (self.enc.total_out() - before_out) as usize;
+            pos += used;
+            if made > 0 {
+                obuf.truncate(made);
+                out.append(new_bucket(obuf));
+                made_any = true;
+            }
+            match r {
+                Ok(bzip2::Status::StreamEnd) => return Ok(made_any),
+                Ok(bzip2::Status::RunOk) => {
+                    if pos >= input.len() {
+                        return Ok(made_any);
+                    }
+                }
+                Ok(bzip2::Status::FlushOk) | Ok(bzip2::Status::FinishOk) => {}
+                Ok(_) => {
+                    if pos >= input.len() && made == 0 {
+                        return Ok(made_any);
+                    }
+                }
+                Err(_) => return Err(()),
+            }
+            if pos >= input.len() && made == 0 && matches!(action, bzip2::Action::Run) {
+                return Ok(made_any);
+            }
+        }
+    }
+
+    /// php_bz2_compress_filter()
+    fn filter(
+        &mut self,
+        inp: &mut Brigade,
+        out: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: i32,
+    ) -> i32 {
+        let mut exit = PSFS_FEED_ME;
+        let mut total = 0usize;
+        while let Some(b) = inp.pop_front() {
+            let buf = std::mem::take(&mut b.borrow_mut().buf);
+            total += buf.len();
+            if buf.is_empty() {
+                continue;
+            }
+            let action = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                bzip2::Action::Finish
+            } else if flags & PSFS_FLAG_FLUSH_INC != 0 {
+                bzip2::Action::Flush
+            } else {
+                bzip2::Action::Run
+            };
+            self.is_flushed = !matches!(action, bzip2::Action::Run);
+            match self.run(&buf, action, out) {
+                Ok(true) => exit = PSFS_PASS_ON,
+                Ok(false) => {}
+                Err(()) => return PSFS_ERR_FATAL,
+            }
+        }
+        if flags & PSFS_FLAG_FLUSH_CLOSE != 0
+            || (flags & PSFS_FLAG_FLUSH_INC != 0 && !self.is_flushed)
+        {
+            let action = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
+                bzip2::Action::Finish
+            } else {
+                bzip2::Action::Flush
+            };
+            if let Ok(true) = self.run(&[], action, out) {
+                exit = PSFS_PASS_ON;
+            }
+            self.is_flushed = true;
+        }
+        if let Some(c) = consumed {
+            *c = total;
+        }
+        exit
+    }
 }

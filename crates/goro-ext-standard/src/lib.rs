@@ -4,6 +4,7 @@ pub mod crypt;
 mod crypt_blowfish_tables;
 pub mod csv;
 pub mod filters;
+pub mod filters_conv;
 pub mod highlight;
 pub mod html;
 pub(crate) mod html_tables;
