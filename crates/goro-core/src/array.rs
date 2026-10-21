@@ -1,5 +1,5 @@
 use crate::string::PhpString;
-use crate::value::{Value, memory_alloc, memory_free};
+use crate::value::{Value, memory_alloc_reporting, memory_charge, memory_free};
 
 /// Array key - either integer or string
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -54,6 +54,21 @@ pub struct PhpArray {
     index: Vec<u32>,
     /// In the cycle collector's root buffer (Zend's GC_INFO); see gc.rs.
     pub(crate) gc_buffered: std::cell::Cell<bool>,
+    /// memory_limit accounting: the nTableSize of the Zend HashTable this
+    /// array stands for (0 = no data block allocated yet) and whether that
+    /// block is packed. See `zend_size`.
+    zcap: u32,
+    zpacked: bool,
+    /// Not accounted (the global symbol table, preallocated by the engine).
+    untracked: bool,
+}
+
+/// Size of a zend_array (56-byte header) whose data block holds `cap`
+/// slots: 16-byte zvals plus a 2-slot hash for a packed array, 32-byte
+/// Buckets plus a 2*cap uint32 hash otherwise.
+#[inline]
+fn zend_ht_data_size(cap: usize, packed: bool) -> usize {
+    if packed { cap * 16 + 8 } else { cap * 40 }
 }
 
 /// Arrays smaller than this are searched linearly
@@ -109,10 +124,21 @@ fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Val
 
 impl Clone for PhpArray {
     fn clone(&self) -> Self {
-        // Track memory for the cloned entries
-        let bytes = self.entries.len() * Self::ENTRY_SIZE;
-        if bytes > 0 {
-            memory_alloc(bytes); // Track even if over limit - we're cloning existing data
+        // zend_array_dup(): a table of the same size.
+        let zcap = if self.entries.is_empty() {
+            0
+        } else {
+            self.zcap.max(8)
+        };
+        let zpacked = if self.untracked {
+            self.packed
+        } else {
+            self.zpacked
+        };
+        if zcap > 0 {
+            memory_charge(
+                56 + crate::value::zend_mm_size(zend_ht_data_size(zcap as usize, zpacked)),
+            );
         }
         // Like zend_array_dup(): references held only by this array (rc=1)
         // are copied as plain values, unless they point back at this array.
@@ -161,6 +187,9 @@ impl Clone for PhpArray {
             packed: self.packed,
             index: self.index.clone(),
             gc_buffered: std::cell::Cell::new(false),
+            zcap,
+            zpacked,
+            untracked: false,
         }
     }
 }
@@ -174,6 +203,9 @@ impl PhpArray {
             packed: true,
             index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
+            zcap: 0,
+            zpacked: true,
+            untracked: false,
         }
     }
 
@@ -185,11 +217,85 @@ impl PhpArray {
             packed: true,
             index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
+            zcap: 0,
+            zpacked: true,
+            untracked: false,
         }
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /* ----- memory_limit accounting ----- */
+
+    /// Bytes this array accounts for (header plus data block).
+    fn zend_size(&self) -> usize {
+        if self.untracked || self.zcap == 0 {
+            0
+        } else {
+            56 + crate::value::zend_mm_size(zend_ht_data_size(self.zcap as usize, self.zpacked))
+        }
+    }
+
+    /// Exclude this array from memory accounting (the global symbol
+    /// table, which the engine preallocates).
+    pub fn set_untracked(&mut self) {
+        let size = self.zend_size();
+        if size > 0 {
+            memory_free(size);
+        }
+        self.untracked = true;
+    }
+
+    /// Room for one more element; grows the table (zend_hash_do_resize /
+    /// packed grow) when full. False when memory_limit forbids the growth.
+    #[inline]
+    fn reserve_one(&mut self) -> bool {
+        self.entries.len() < self.zcap as usize || self.grow_table()
+    }
+
+    #[cold]
+    fn grow_table(&mut self) -> bool {
+        let new_cap = if self.zcap == 0 {
+            8
+        } else {
+            self.zcap.saturating_mul(2)
+        };
+        if !self.untracked {
+            let old = self.zend_size();
+            let data = zend_ht_data_size(new_cap as usize, self.packed);
+            let new = 56 + crate::value::zend_mm_size(data);
+            if new > old && !memory_alloc_reporting(new - old, data) {
+                return false;
+            }
+            if new < old {
+                memory_free(old - new);
+            }
+        }
+        self.zcap = new_cap;
+        self.zpacked = self.packed;
+        true
+    }
+
+    /// The table was converted between packed and hash.
+    #[inline]
+    fn sync_packed(&mut self) {
+        if self.zpacked != self.packed {
+            self.resize_accounting();
+        }
+    }
+
+    #[cold]
+    fn resize_accounting(&mut self) {
+        let old = self.zend_size();
+        self.zpacked = self.packed;
+        let new = self.zend_size();
+        if new > old {
+            memory_charge(new - old);
+        } else if old > new {
+            memory_free(old - new);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -369,10 +475,6 @@ impl PhpArray {
         }
     }
 
-    /// Approximate bytes per entry (key + value overhead)
-    /// (a hash Bucket is 32 bytes)
-    pub const ENTRY_SIZE: usize = 32;
-
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {
         // Check if key already exists
@@ -382,7 +484,7 @@ impl PhpArray {
             return;
         }
         // Check memory limit before adding
-        if !memory_alloc(Self::ENTRY_SIZE) {
+        if !self.reserve_one() {
             return; // Memory limit exceeded
         }
         // Track next_int_key (don't overflow: if n is i64::MAX, keep next_int_key at i64::MAX)
@@ -393,6 +495,7 @@ impl PhpArray {
         }
         self.entries.push((key, value));
         self.after_push();
+        self.sync_packed();
     }
 
     /// The key the next append would use (nNextFreeElement).
@@ -409,12 +512,13 @@ impl PhpArray {
         } else {
             self.next_int_key
         };
-        if !memory_alloc(Self::ENTRY_SIZE) {
+        if !self.reserve_one() {
             return; // Memory limit exceeded
         }
         self.next_int_key = key.saturating_add(1);
         self.entries.push((ArrayKey::Int(key), value));
         self.after_push();
+        self.sync_packed();
     }
 
     /// Append a value with the next integer key ($arr[] = value).
@@ -430,12 +534,13 @@ impl PhpArray {
         if already_occupied {
             return Err("Cannot add element to the array as the next element is already occupied");
         }
-        if !memory_alloc(Self::ENTRY_SIZE) {
+        if !self.reserve_one() {
             return Ok(()); // Memory limit exceeded - silently ignore
         }
         self.next_int_key = key.saturating_add(1);
         self.entries.push((ArrayKey::Int(key), value));
         self.after_push();
+        self.sync_packed();
         Ok(())
     }
 
@@ -446,7 +551,6 @@ impl PhpArray {
 
     fn pop_entry_raw(&mut self) -> Option<(ArrayKey, Value)> {
         let e = self.entries.pop()?;
-        memory_free(Self::ENTRY_SIZE);
         if !self.packed && !self.index.is_empty() {
             // Remove the slot pointing at the popped position, then
             // re-insert the rest of its probe cluster (backward-shift).
@@ -489,17 +593,17 @@ impl PhpArray {
         if self.entries.is_empty() {
             None
         } else {
-            memory_free(Self::ENTRY_SIZE);
             let v = self.entries.remove(0).1;
             self.recompute_packed();
             self.rebuild_index();
+            self.sync_packed();
             Some(v)
         }
     }
 
     /// Insert a value at the beginning with key 0 (like array_unshift)
     pub fn unshift(&mut self, value: Value) {
-        if !memory_alloc(Self::ENTRY_SIZE) {
+        if !self.reserve_one() {
             return;
         }
         self.entries.insert(0, (ArrayKey::Int(0), value));
@@ -514,6 +618,7 @@ impl PhpArray {
         self.next_int_key = next;
         self.recompute_packed();
         self.rebuild_index();
+        self.sync_packed();
     }
 
     /// Remove an entry by key
@@ -530,10 +635,10 @@ impl PhpArray {
             if pos + 1 == self.entries.len() {
                 return self.pop_entry_raw().map(|(_, v)| v);
             }
-            memory_free(Self::ENTRY_SIZE);
             let v = self.entries.remove(pos).1;
             self.packed = false;
             self.rebuild_index();
+            self.sync_packed();
             Some(v)
         } else {
             None
@@ -605,8 +710,8 @@ impl Drop for PhpArray {
         if self.gc_buffered.get() {
             crate::gc::root_freed();
         }
-        // Release tracked memory for all entries
-        let bytes = self.entries.len() * Self::ENTRY_SIZE;
+        // Release the accounted table.
+        let bytes = self.zend_size();
         if bytes > 0 {
             memory_free(bytes);
         }

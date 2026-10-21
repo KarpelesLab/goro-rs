@@ -4719,6 +4719,19 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Ok(old.unwrap_or(Value::False));
             }
         }
+        if v != u64::MAX {
+            // zend_set_memory_limit(): the limit cannot go below the memory
+            // already reserved.
+            let real =
+                goro_core::value::memory_real_size(goro_core::value::memory_get_usage()) as u64;
+            if v < real {
+                vm.emit_warning(&format!(
+                    "Failed to set memory limit to {} bytes (Current memory usage is {} bytes)",
+                    v, real
+                ));
+                return Ok(Value::False);
+            }
+        }
         goro_core::value::set_memory_limit(if v == u64::MAX { -1 } else { v as i64 });
     }
     // Handle error_reporting
@@ -8414,15 +8427,26 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ))
     }
 }
-fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(goro_core::value::memory_get_usage() as i64))
+fn memory_get_usage_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cur = goro_core::value::memory_get_usage();
+    let real = args.first().is_some_and(|v| v.is_truthy());
+    Ok(Value::Long(if real {
+        goro_core::value::memory_real_size(cur)
+    } else {
+        cur
+    } as i64))
 }
-fn memory_get_peak_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // We don't track peak separately yet, return current
-    Ok(Value::Long(goro_core::value::memory_get_usage() as i64))
+fn memory_get_peak_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let peak = goro_core::value::memory_get_peak();
+    let real = args.first().is_some_and(|v| v.is_truthy());
+    Ok(Value::Long(if real {
+        goro_core::value::memory_real_size(peak)
+    } else {
+        peak
+    } as i64))
 }
 fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // No-op stub, we don't track peak usage
+    goro_core::value::memory_reset_peak();
     Ok(Value::Null)
 }
 fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10411,9 +10435,13 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     if fid == 3 && vm.cli_direct_output {
         return write_cli_stderr(vm, bytes);
     }
-    if fid == 2 || fid == 3 {
+    if fid == 2 {
+        // CLI: STDOUT is unbuffered and bypasses output buffering.
+        vm.write_stdout_stream(bytes);
+        return bytes.len();
+    }
+    if fid == 3 {
         vm.write_output(bytes);
-        // CLI: STDOUT is unbuffered.
         vm.flush_cli_output();
         return bytes.len();
     }
@@ -10426,7 +10454,11 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     });
     match special {
         SpecialStream::Stderr if vm.cli_direct_output => write_cli_stderr(vm, bytes),
-        SpecialStream::Stdout | SpecialStream::Output | SpecialStream::Stderr => {
+        SpecialStream::Stdout => {
+            vm.write_stdout_stream(bytes);
+            bytes.len()
+        }
+        SpecialStream::Output | SpecialStream::Stderr => {
             vm.write_output(bytes);
             bytes.len()
         }
@@ -15241,6 +15273,23 @@ fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let size = size_long as u64;
+    // php://memory (and php://temp while it is held in memory): growing is
+    // a zend_string_realloc() of the buffer.
+    let in_memory_len = FILE_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        let fh = handles.get(&fid)?;
+        let len = fh.file.metadata().map(|m| m.len()).unwrap_or(0);
+        match fh.special {
+            SpecialStream::Memory => Some(len),
+            SpecialStream::Temp if len <= 2 * 1024 * 1024 => Some(len),
+            _ => None,
+        }
+    });
+    if let Some(len) = in_memory_len
+        && size > len
+    {
+        vm.memory_check((size as usize).saturating_add(25 + 7) & !7)?;
+    }
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {

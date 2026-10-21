@@ -2193,7 +2193,7 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null).to_php_string();
-    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0) as usize;
+    let length = args.get(1).map(|v| v.to_long()).unwrap_or(0).max(0) as usize;
     let pad_string = match args.get(2) {
         Some(Value::Null) | None => PhpString::from_bytes(b" "),
         Some(v) => v.to_php_string(),
@@ -2223,9 +2223,15 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let bytes = input.as_bytes();
-    if bytes.len() >= length || length > 128 * 1024 * 1024 {
+    if bytes.len() >= length {
         return Ok(Value::String(input));
     }
+    // zend_string_safe_alloc(1, len, num_pad_chars, 0)
+    vm.memory_check(
+        bytes
+            .len()
+            .saturating_add((length - bytes.len()).saturating_add(25 + 7) & !7),
+    )?;
 
     let pad_needed = length - bytes.len();
 

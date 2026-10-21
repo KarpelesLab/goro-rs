@@ -876,7 +876,12 @@ impl Vm {
             user_functions: Default::default(),
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
-            globals: Rc::new(RefCell::new(PhpArray::new())),
+            globals: Rc::new(RefCell::new({
+                // EG(symbol_table) is preallocated by the engine.
+                let mut t = PhpArray::new();
+                t.set_untracked();
+                t
+            })),
             object_store_no_reuse: false,
             classes: Default::default(),
             next_object_id: 1,
@@ -13479,7 +13484,26 @@ impl Vm {
             limit, tried
         );
         let line = self.current_line;
-        self.emit_fatal_at(&msg, line)
+        crate::value::set_memory_overflow(true);
+        // php_error_cb(): a memory-limit error discards all output buffers
+        // (their handlers still run, with the limit lifted).
+        self.ob_discard_all();
+        let e = self.emit_fatal_at(&msg, line);
+        crate::value::set_memory_overflow(false);
+        e
+    }
+
+    /// An emalloc(size) about to happen: over memory_limit it raises the
+    /// "Allowed memory size" fatal error right away (zend_mm_safe_error()).
+    pub fn memory_check(&mut self, size: usize) -> Result<(), VmError> {
+        let limit = crate::value::memory_get_limit();
+        if limit > 0
+            && crate::value::memory_get_usage().saturating_add(size) > limit
+            && crate::value::raise_memory_exhausted(size)
+        {
+            return Err(self.memory_limit_fatal());
+        }
+        Ok(())
     }
 
     /// zend_timeout(): the "Maximum execution time" fatal error.
@@ -13494,6 +13518,22 @@ impl Vm {
         );
         let line = self.current_line;
         self.emit_fatal_at(&msg, line)
+    }
+
+    /// A write to the CLI's STDOUT / php://stdout stream: it goes to file
+    /// descriptor 1 directly, bypassing the output layer (no output
+    /// buffers, no output handlers).
+    pub fn write_stdout_stream(&mut self, data: &[u8]) {
+        if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
+            self.output.extend_from_slice(data);
+        }
+        if self.cli_direct_output && !self.output.is_empty() {
+            use std::io::Write;
+            let out = std::mem::take(&mut self.output);
+            let mut so = std::io::stdout().lock();
+            let _ = so.write_all(&out);
+            let _ = so.flush();
+        }
     }
 
     /// CLI only: hand output that is not held by an output buffer to stdout
@@ -14369,6 +14409,11 @@ impl Vm {
         let exited = self.exit_requested;
         self.exit_requested = false;
         self.fatal_bailout = false;
+        // A bailout (fatal error) abandoned every executing frame, fibers'
+        // included: shutdown functions run on an empty stack.
+        if result.is_err() {
+            self.call_stack.clear();
+        }
         'shutdown: loop {
             let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
             if shutdown_fns.is_empty() {
@@ -45488,6 +45533,8 @@ impl Vm {
                             check = parent_lower;
                         }
                     }
+                    // Properties added from here on are dynamic ones.
+                    obj.mark_declared();
 
                     let obj_value = Value::Object(Rc::new(RefCell::new(obj)));
                     if let Value::Object(ref rc) = obj_value {
@@ -48638,8 +48685,12 @@ impl Vm {
                                         });
                                     }
                                     let threw = obj.borrow().get_property(b"__fiber_threw");
-                                    if matches!(threw, Value::True) {
-                                        let msg = "Cannot get fiber return value: The fiber threw an exception";
+                                    if matches!(threw, Value::True | Value::Long(2)) {
+                                        let msg = if matches!(threw, Value::Long(2)) {
+                                            "Cannot get fiber return value: The fiber exited with a fatal error"
+                                        } else {
+                                            "Cannot get fiber return value: The fiber threw an exception"
+                                        };
                                         // Push call stack entry so Fiber->getReturn() appears in stack trace
                                         self.call_stack.push((
                                             "Fiber->getReturn".to_string(),
@@ -51505,8 +51556,13 @@ impl Vm {
                     });
                 }
                 let threw = obj_rc.borrow().get_property(b"__fiber_threw");
-                if matches!(threw, Value::True) {
-                    let msg = "Cannot get fiber return value: The fiber threw an exception";
+                if matches!(threw, Value::True | Value::Long(2)) {
+                    // ZEND_FIBER_FLAG_BAILOUT
+                    let msg = if matches!(threw, Value::Long(2)) {
+                        "Cannot get fiber return value: The fiber exited with a fatal error"
+                    } else {
+                        "Cannot get fiber return value: The fiber threw an exception"
+                    };
                     let exc = self.create_exception(b"FiberError", msg, line);
                     self.current_exception = Some(exc);
                     return Err(VmError {
@@ -51802,7 +51858,7 @@ impl Vm {
                 );
                 obj_rc
                     .borrow_mut()
-                    .set_property(b"__fiber_threw".to_vec(), Value::True);
+                    .set_property(b"__fiber_threw".to_vec(), Value::Long(2));
                 Err(VmError {
                     message: msg,
                     line: err_line,
@@ -52584,7 +52640,7 @@ impl Vm {
                 );
                 obj_rc
                     .borrow_mut()
-                    .set_property(b"__fiber_threw".to_vec(), Value::True);
+                    .set_property(b"__fiber_threw".to_vec(), Value::Long(2));
                 Err(VmError {
                     message: msg,
                     line: err_line,
@@ -52696,9 +52752,15 @@ impl Vm {
                         b"__fiber_state".to_vec(),
                         Value::Long(FiberState::Terminated as i64),
                     );
+                    // An exception, or a fatal error (ZEND_FIBER_FLAG_BAILOUT).
+                    let how = if self.current_exception.is_none() && self.fatal_emitted {
+                        Value::Long(2)
+                    } else {
+                        Value::True
+                    };
                     obj_rc
                         .borrow_mut()
-                        .set_property(b"__fiber_threw".to_vec(), Value::True);
+                        .set_property(b"__fiber_threw".to_vec(), how);
                     Err(e)
                 }
             }
@@ -52806,9 +52868,15 @@ impl Vm {
                         b"__fiber_state".to_vec(),
                         Value::Long(FiberState::Terminated as i64),
                     );
+                    // An exception, or a fatal error (ZEND_FIBER_FLAG_BAILOUT).
+                    let how = if self.current_exception.is_none() && self.fatal_emitted {
+                        Value::Long(2)
+                    } else {
+                        Value::True
+                    };
                     obj_rc
                         .borrow_mut()
-                        .set_property(b"__fiber_threw".to_vec(), Value::True);
+                        .set_property(b"__fiber_threw".to_vec(), how);
                     Err(e)
                 }
             }
@@ -52943,6 +53011,7 @@ fn is_php_parse_message(msg: &str) -> bool {
         || msg.starts_with("Invalid ")
         || msg.starts_with("Unclosed '")
         || msg.starts_with("Unmatched '")
+        || msg == "memory exhausted"
         || msg.starts_with("Unterminated comment")
 }
 

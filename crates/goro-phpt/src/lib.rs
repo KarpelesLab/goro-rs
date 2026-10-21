@@ -1545,6 +1545,7 @@ fn execute_php_inner_impl(
                 || err_msg.starts_with("Unterminated comment")
                 || err_msg.starts_with("Unclosed '")
                 || err_msg.starts_with("Unmatched '")
+                || err_msg == "memory exhausted"
             {
                 format!(
                     "\nParse error: {} in {} on line {}\n",

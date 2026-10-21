@@ -941,6 +941,10 @@ fn output_add_rewrite_var_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             _ => strs.push(a.to_php_string().as_bytes().to_vec()),
         }
     }
+    // php_url_scanner_add_var() keeps the encoded name and value plus the
+    // URL and form fragments built from them (all emalloc()ed).
+    let (n, v) = (strs[0].len(), strs[1].len());
+    vm.memory_check((n + v).saturating_mul(3).saturating_add(64))?;
     add_var(vm, &strs[0], &strs[1], true, false);
     Ok(Value::True)
 }

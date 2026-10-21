@@ -45,6 +45,21 @@ thread_local! {
     /// Size of the allocation that hit the memory limit (0 = none pending);
     /// the VM turns it into the "Allowed memory size ... exhausted" fatal.
     static MEMORY_EXHAUSTED: Cell<usize> = const { Cell::new(0) };
+    /// heap->overflow: the memory-limit fatal is being reported; the limit
+    /// is not enforced meanwhile.
+    static MEMORY_OVERFLOW: Cell<bool> = const { Cell::new(false) };
+    /// heap->peak: the highest MEMORY_USAGE since start / the last
+    /// memory_reset_peak_usage().
+    static MEMORY_PEAK: Cell<usize> = const { Cell::new(0) };
+}
+
+#[inline]
+fn note_peak(total: usize) {
+    MEMORY_PEAK.with(|p| {
+        if total > p.get() {
+            p.set(total);
+        }
+    });
 }
 
 /// Set when a comparison ran into a container already being compared
@@ -106,9 +121,31 @@ pub fn memory_exhausted() -> usize {
     MEMORY_EXHAUSTED.with(|c| c.get())
 }
 
+/// Set/clear heap->overflow (see MEMORY_OVERFLOW).
+pub fn set_memory_overflow(on: bool) {
+    MEMORY_OVERFLOW.with(|o| o.set(on));
+}
+
 /// Take the pending memory-limit violation (0 = none).
 pub fn take_memory_exhausted() -> usize {
     MEMORY_EXHAUSTED.with(|c| c.replace(0))
+}
+
+/// The block size Zend's allocator hands out for an `n`-byte request: a
+/// small-bin size up to 3072 bytes, whole 4 KiB pages above.
+#[inline]
+pub fn zend_mm_size(n: usize) -> usize {
+    const BINS: [usize; 22] = [
+        80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536,
+        1792, 2048, 2560, 3072,
+    ];
+    if n <= 64 {
+        n.max(1).next_multiple_of(8)
+    } else if n <= 3072 {
+        BINS[BINS.partition_point(|&b| b < n)]
+    } else {
+        n.next_multiple_of(4096)
+    }
 }
 
 /// Track a memory allocation. Returns false if over limit.
@@ -124,15 +161,14 @@ pub fn memory_alloc_reporting(bytes: usize, reported: usize) -> bool {
         let current = m.get();
         let limit = MEMORY_LIMIT.with(|l| l.get());
         let new_total = current.saturating_add(bytes);
-        if limit > 0 && new_total > limit {
-            MEMORY_EXHAUSTED.with(|c| {
-                if c.get() == 0 {
-                    c.set(reported.max(1));
-                }
-            });
+        // heap->overflow: while the memory-limit error is pending or
+        // being reported, allocations go through (the error message, its
+        // backtrace, ini lookups...).
+        if limit > 0 && new_total > limit && raise_memory_exhausted(reported) {
             return false;
         }
         m.set(new_total);
+        note_peak(new_total);
         true
     })
 }
@@ -140,17 +176,37 @@ pub fn memory_alloc_reporting(bytes: usize, reported: usize) -> bool {
 /// Account an allocation that cannot fail (objects): it is always added;
 /// going over the limit raises the pending memory-limit error.
 pub fn memory_charge(bytes: usize) {
+    memory_charge_reporting(bytes, bytes)
+}
+
+/// memory_charge() reporting `reported` bytes as the failed allocation.
+pub fn memory_charge_reporting(bytes: usize, reported: usize) {
     MEMORY_USAGE.with(|m| {
         let new_total = m.get().saturating_add(bytes);
         let limit = MEMORY_LIMIT.with(|l| l.get());
         if limit > 0 && new_total > limit {
-            MEMORY_EXHAUSTED.with(|c| {
-                if c.get() == 0 {
-                    c.set(bytes.max(1));
-                }
-            });
+            raise_memory_exhausted(reported);
         }
         m.set(new_total);
+        note_peak(new_total);
+    })
+}
+
+/// zend_mm_safe_error(): record a memory-limit violation unless one is
+/// already pending or being reported (heap->overflow). Returns true when
+/// it was recorded, i.e. the allocation must fail.
+#[cold]
+pub fn raise_memory_exhausted(reported: usize) -> bool {
+    if MEMORY_OVERFLOW.with(|o| o.get()) {
+        return false;
+    }
+    MEMORY_EXHAUSTED.with(|c| {
+        if c.get() == 0 {
+            c.set(reported.max(1));
+            true
+        } else {
+            false
+        }
     })
 }
 
@@ -167,6 +223,24 @@ pub fn memory_get_usage() -> usize {
     MEMORY_USAGE.with(|m| m.get())
 }
 
+/// heap->peak (memory_get_peak_usage()).
+pub fn memory_get_peak() -> usize {
+    MEMORY_PEAK.with(|p| p.get()).max(memory_get_usage())
+}
+
+/// memory_reset_peak_usage(): the peak restarts from the current usage.
+pub fn memory_reset_peak() {
+    let cur = memory_get_usage();
+    MEMORY_PEAK.with(|p| p.set(cur));
+}
+
+/// heap->real_size / real_peak (memory_get_usage(true)): the memory
+/// reserved from the system, in 2 MiB chunks.
+pub fn memory_real_size(bytes: usize) -> usize {
+    const CHUNK: usize = 2 * 1024 * 1024;
+    bytes.div_ceil(CHUNK).max(1) * CHUNK
+}
+
 /// Get memory limit.
 pub fn memory_get_limit() -> usize {
     MEMORY_LIMIT.with(|l| l.get())
@@ -176,11 +250,33 @@ pub fn memory_get_limit() -> usize {
 pub fn set_memory_limit(bytes: i64) {
     let limit = if bytes <= 0 { 0 } else { bytes as usize };
     MEMORY_LIMIT.with(|l| l.set(limit));
+    // The binary caps its address space (RLIMIT_AS, 2 GiB) as a safety net
+    // for memory the accounting does not see; a larger memory_limit lifts
+    // that cap so the script reaches memory_limit first.
+    #[cfg(unix)]
+    if limit > 1 << 30 {
+        let want = (limit as u64).saturating_add(1 << 30);
+        unsafe {
+            let mut cur = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_AS, &mut cur) == 0
+                && cur.rlim_cur != libc::RLIM_INFINITY
+                && cur.rlim_cur < want
+            {
+                cur.rlim_cur = want.min(cur.rlim_max);
+                libc::setrlimit(libc::RLIMIT_AS, &cur);
+            }
+        }
+    }
 }
 
 /// Reset memory tracking (for test isolation).
 pub fn memory_reset() {
     MEMORY_USAGE.with(|m| m.set(0));
+    MEMORY_PEAK.with(|p| p.set(0));
+    MEMORY_OVERFLOW.with(|o| o.set(false));
     MEMORY_EXHAUSTED.with(|c| c.set(0));
 }
 

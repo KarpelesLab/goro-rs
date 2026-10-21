@@ -221,6 +221,64 @@ pub struct PhpObject {
     /// SimpleXML object). Objects carrying it get their native object
     /// handlers consulted (see `Vm::native_object_handlers`).
     pub native: Option<NativeData>,
+    /// memory_limit accounting (see `PhpObject::account`).
+    pub mem: ObjectMem,
+}
+
+/// Bytes an object accounts for against memory_limit, and how many of its
+/// properties are declared slots (the rest live in a properties
+/// HashTable). A copy of an object is a new allocation: cloning charges
+/// the same amount again, dropping releases it.
+#[derive(Debug)]
+pub struct ObjectMem {
+    charged: std::cell::Cell<u32>,
+    declared: std::cell::Cell<u32>,
+}
+
+impl ObjectMem {
+    fn new() -> Self {
+        ObjectMem {
+            charged: std::cell::Cell::new(0),
+            declared: std::cell::Cell::new(u32::MAX),
+        }
+    }
+}
+
+impl Clone for ObjectMem {
+    fn clone(&self) -> Self {
+        let c = self.charged.get();
+        if c > 0 {
+            crate::value::memory_charge(c as usize);
+        }
+        ObjectMem {
+            charged: std::cell::Cell::new(c),
+            declared: std::cell::Cell::new(self.declared.get()),
+        }
+    }
+}
+
+impl Drop for ObjectMem {
+    fn drop(&mut self) {
+        let c = self.charged.get();
+        if c > 0 {
+            crate::value::memory_free(c as usize);
+        }
+    }
+}
+
+/// zend_object_alloc(): the zend_object header (with its first property
+/// slot) plus one zval per further declared property; dynamic properties
+/// add a properties HashTable sized for all of them. A Closure is a
+/// zend_closure (object + op_array copy).
+fn object_zend_size(nprops: usize, declared: u32, closure: bool) -> usize {
+    use crate::value::zend_mm_size;
+    let d = nprops.min(declared as usize);
+    let base = if closure { 320 } else { 40 };
+    let mut size = zend_mm_size(base + 16 * d);
+    if nprops > d {
+        size += 56 + zend_mm_size(40 * nprops.next_power_of_two().max(8));
+    }
+    size
 }
 
 /// Extension payload attached to a `PhpObject`: opaque data plus the
@@ -282,7 +340,6 @@ impl Drop for PhpObject {
         drop(self.native.take());
         drop(std::mem::take(&mut self.properties));
         drop(self.closure.take());
-        crate::value::memory_free(OBJECT_SIZE);
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 && !weak_target {
             // Use try_with so we don't panic during thread-local
@@ -293,13 +350,9 @@ impl Drop for PhpObject {
     }
 }
 
-/// Accounted size of an object (zend_object header).
-const OBJECT_SIZE: usize = 56;
-
 impl PhpObject {
     pub fn new(class_name: Vec<u8>, object_id: u64) -> Self {
-        crate::value::memory_charge(OBJECT_SIZE);
-        Self {
+        let o = Self {
             class_name,
             properties: Vec::new(),
             object_id,
@@ -309,7 +362,35 @@ impl PhpObject {
             weak_key: GcFlag::default(),
             closure: None,
             native: None,
+            mem: ObjectMem::new(),
+        };
+        o.account();
+        o
+    }
+
+    /// Bring the memory_limit accounting in line with the object's current
+    /// shape (going over the limit raises the pending fatal error).
+    pub fn account(&self) {
+        let want = object_zend_size(
+            self.properties.len(),
+            self.mem.declared.get(),
+            self.closure.is_some(),
+        ) as u32;
+        let have = self.mem.charged.get();
+        if want != have {
+            if want > have {
+                crate::value::memory_charge((want - have) as usize);
+            } else {
+                crate::value::memory_free((have - want) as usize);
+            }
+            self.mem.charged.set(want);
         }
+    }
+
+    /// The declared properties are initialized: further ones are dynamic.
+    pub fn mark_declared(&self) {
+        self.mem.declared.set(self.properties.len() as u32);
+        self.account();
     }
 
     /// Whether this object is a Closure instance (wrapping a callable).
@@ -346,6 +427,7 @@ impl PhpObject {
             }
         }
         self.properties.push((name, value));
+        self.account();
     }
 
     /// Bind a property slot to an existing reference (`$obj->p = &$x`).
@@ -358,6 +440,7 @@ impl PhpObject {
             }
         }
         self.properties.push((name, Value::Reference(r)));
+        self.account();
     }
 
     /// Get (creating if needed) a reference to a property slot (`$x = &$obj->p`).
@@ -381,6 +464,7 @@ impl PhpObject {
         let r = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
         self.properties
             .push((name.to_vec(), Value::Reference(r.clone())));
+        self.account();
         r
     }
 

@@ -1,11 +1,14 @@
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use crate::value::{memory_alloc, memory_free};
+use crate::value::{memory_alloc_reporting, memory_free};
 
-/// Overhead per PhpString allocation (Rc + Cell + Vec header)
-/// (zend_string: 24-byte header + NUL, rounded)
-const STRING_OVERHEAD: usize = 32;
+/// Accounted size of a `len`-byte string: a zend_string (24-byte header,
+/// the bytes and a NUL) as the Zend allocator sizes it.
+#[inline]
+fn zstr_size(len: usize) -> usize {
+    crate::value::zend_mm_size(len + 25)
+}
 
 /// PHP binary-safe string with cached hash
 #[derive(Clone)]
@@ -47,8 +50,8 @@ impl PhpString {
     }
 
     pub fn from_bytes(data: &[u8]) -> Self {
-        let bytes = data.len() + STRING_OVERHEAD;
-        if !memory_alloc(bytes) {
+        let bytes = zstr_size(data.len());
+        if !memory_alloc_reporting(bytes, (data.len() + 25).next_multiple_of(8)) {
             return Self::empty();
         }
         Self {
@@ -120,8 +123,8 @@ impl PhpString {
     }
 
     pub fn from_vec(data: Vec<u8>) -> Self {
-        let bytes = data.len() + STRING_OVERHEAD;
-        if !memory_alloc(bytes) {
+        let bytes = zstr_size(data.len());
+        if !memory_alloc_reporting(bytes, (data.len() + 25).next_multiple_of(8)) {
             return Self::empty();
         }
         Self {
@@ -196,12 +199,12 @@ impl PhpString {
         let new_len = inner.data.len() + extra.len();
         // An untracked string (empty / interned) becomes a tracked one, as
         // a freshly built string would be.
-        let charge = if inner.tracked_bytes == 0 {
-            new_len + STRING_OVERHEAD
-        } else {
-            extra.len()
-        };
-        if !crate::value::memory_alloc_reporting(charge, new_len + STRING_OVERHEAD) {
+        // zend_string_extend(): erealloc() to the new size.
+        let new_size = zstr_size(new_len);
+        let charge = new_size.saturating_sub(inner.tracked_bytes);
+        if charge > 0
+            && !crate::value::memory_alloc_reporting(charge, (new_len + 25).next_multiple_of(8))
+        {
             return true;
         }
         inner.tracked_bytes += charge;

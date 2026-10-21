@@ -91,6 +91,7 @@ impl Vm {
         let id = self.alloc_object_id();
         let mut o = PhpObject::new(b"Closure".to_vec(), id);
         o.closure = Some(Box::new(inner));
+        o.account();
         Value::Object(Rc::new(RefCell::new(o)))
     }
 

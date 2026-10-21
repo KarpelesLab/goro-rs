@@ -258,17 +258,6 @@ fn replace_entry(arr: &RefCell<PhpArray>, key: ArrayKey, v: Value) -> Option<Val
     None
 }
 
-/// Table entries backing a global-scope CV are preallocated in PHP (the
-/// CV slots themselves), so creating / removing them is not accounted as a
-/// memory_get_usage() change.
-fn cv_slot_entry_created() {
-    crate::value::memory_free(PhpArray::ENTRY_SIZE);
-}
-
-fn cv_slot_entry_released() {
-    crate::value::memory_alloc(PhpArray::ENTRY_SIZE);
-}
-
 /// The CVs of `op_array` in php-src's order.  goro's CV layout is
 /// [$this][closure uses][params][locals]; php-src's is params, then uses,
 /// then locals.
@@ -764,7 +753,6 @@ impl Vm {
                     let ours = matches!(tab.arr.borrow().get(&key), Some(Value::Reference(r)) if Rc::ptr_eq(r, &c));
                     if ours {
                         let old = if global {
-                            cv_slot_entry_released();
                             tab.arr.borrow_mut().remove(&key)
                         } else {
                             tab.arr
@@ -808,9 +796,6 @@ impl Vm {
                         let c = Rc::new(RefCell::new(v));
                         let old = replace_entry(&tab.arr, key, Value::Reference(c.clone()));
                         tab.bump();
-                        if global {
-                            cv_slot_entry_created();
-                        }
                         drop(old);
                         c
                     }
@@ -839,7 +824,6 @@ impl Vm {
             let ours = matches!(fs.tab.arr.borrow().get(&key), Some(Value::Reference(r)) if Rc::ptr_eq(r, &c));
             if ours {
                 let old = if global {
-                    cv_slot_entry_released();
                     fs.tab.arr.borrow_mut().remove(&key)
                 } else {
                     fs.tab

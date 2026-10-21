@@ -62,7 +62,6 @@ pub enum ObKind {
     InternalFallible(ObInternalFallibleFn),
 }
 
-#[derive(Clone)]
 pub struct ObHandler {
     pub id: u64,
     pub name: Vec<u8>,
@@ -70,6 +69,17 @@ pub struct ObHandler {
     pub chunk_size: usize,
     pub flags: i64,
     pub buffer_size: usize,
+    /// Bytes of buffer growth charged against memory_limit (the buffer is
+    /// erealloc()ed in php-src).
+    pub charged: usize,
+}
+
+impl Drop for ObHandler {
+    fn drop(&mut self) {
+        if self.charged > 0 {
+            crate::value::memory_free(self.charged);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,6 +128,7 @@ impl Vm {
                 chunk_size: 0,
                 flags: OBH_STDFLAGS | OBH_INTERNAL,
                 buffer_size: OB_DEFAULT_SIZE,
+                charged: 0,
             });
         }
         self.ob_handlers.truncate(self.ob_stack.len());
@@ -195,7 +206,12 @@ impl Vm {
         if free <= add {
             let grow_int = initbuf_size(h.chunk_size);
             let grow_buf = initbuf_size(add - free);
-            h.buffer_size += grow_int.max(grow_buf);
+            let grow = grow_int.max(grow_buf);
+            h.buffer_size += grow;
+            // erealloc() of the buffer: going over memory_limit raises the
+            // pending fatal error.
+            crate::value::memory_charge_reporting(grow, h.buffer_size + 1);
+            h.charged += grow;
         }
     }
 
@@ -392,6 +408,8 @@ impl Vm {
                 self.ob_handlers[idx].flags |= OBH_DISABLED;
                 ctx.out = Some(std::mem::take(&mut self.ob_stack[idx]));
                 self.ob_handlers[idx].buffer_size = 0;
+                let c = std::mem::take(&mut self.ob_handlers[idx].charged);
+                crate::value::memory_free(c);
             }
             ObStatus::NoData => {
                 ctx.reset();
@@ -515,6 +533,7 @@ impl Vm {
             chunk_size,
             flags: (flags & !0xf00f) | type_flag,
             buffer_size: initbuf_size(chunk_size),
+            charged: 0,
         }
     }
 

@@ -346,6 +346,34 @@ impl Parser {
     /// The first bracket nesting error the scanner would raise
     /// (enter_nesting / exit_nesting / check_nesting_at_end in
     /// zend_language_scanner.l): (token index, message, line).
+    /// Bison's parser stack is limited to YYMAXDEPTH (10000) states; each
+    /// open bracket still awaiting its closing one holds at least one, so
+    /// nesting that deep fails with "memory exhausted" (reported at the
+    /// line of the token that overflowed the stack).
+    fn parser_stack_exhausted(&self) -> Option<u32> {
+        const YYMAXDEPTH: usize = 10000;
+        let mut depth = 0usize;
+        for tok in &self.tokens {
+            match tok.kind {
+                TokenKind::OpenParen
+                | TokenKind::OpenBracket
+                | TokenKind::AttributeOpen
+                | TokenKind::OpenBrace
+                | TokenKind::DollarOpenBrace => {
+                    depth += 1;
+                    if depth >= YYMAXDEPTH {
+                        return Some(tok.span.line);
+                    }
+                }
+                TokenKind::CloseParen | TokenKind::CloseBracket | TokenKind::CloseBrace => {
+                    depth = depth.saturating_sub(1)
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn first_nesting_error(&self) -> Option<(usize, String, u32)> {
         let mut stack: Vec<(u8, u32)> = Vec::new();
         for (i, tok) in self.tokens.iter().enumerate() {
@@ -420,6 +448,14 @@ impl Parser {
 
     /// Parse a complete PHP program
     pub fn parse(&mut self) -> ParseResult<Program> {
+        if let Some(line) = self.parser_stack_exhausted() {
+            let mut span = self.current().span;
+            span.line = line;
+            return Err(ParseError {
+                message: "memory exhausted".into(),
+                span,
+            });
+        }
         let nesting = self.first_nesting_error();
         let result = self.parse_program();
         match (result, nesting) {
