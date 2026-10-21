@@ -13,6 +13,62 @@ use super::*;
 pub enum Stream {
     Tcp(TcpStream),
     Unix(UnixStream),
+    Tls(Box<TlsStream>),
+}
+
+/// A TCP stream after STREAM_CRYPTO_METHOD_TLS_CLIENT was enabled on it
+pub struct TlsStream {
+    sock: TcpStream,
+    tls: purecrypto::tls::Connection,
+    plain: Vec<u8>,
+    ppos: usize,
+}
+
+fn tls_io_error(e: purecrypto::tls::Error) -> std::io::Error {
+    std::io::Error::other(format!("{:?}", e))
+}
+
+impl TlsStream {
+    fn flush_wire(&mut self) -> std::io::Result<()> {
+        let out = self.tls.pop().map_err(tls_io_error)?;
+        if !out.is_empty() {
+            self.sock.write_all(&out)?;
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.ppos < self.plain.len() {
+                let n = (self.plain.len() - self.ppos).min(buf.len());
+                buf[..n].copy_from_slice(&self.plain[self.ppos..self.ppos + n]);
+                self.ppos += n;
+                return Ok(n);
+            }
+            self.plain = self.tls.recv().map_err(tls_io_error)?;
+            self.ppos = 0;
+            if !self.plain.is_empty() {
+                continue;
+            }
+            if self.tls.received_close_notify() {
+                return Ok(0);
+            }
+            let mut wire = [0u8; 16384];
+            let n = self.sock.read(&mut wire)?;
+            if n == 0 {
+                return Ok(0);
+            }
+            self.tls.feed(&wire[..n]).map_err(tls_io_error)?;
+            // post-handshake messages may need an answer
+            self.flush_wire()?;
+        }
+    }
+
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tls.send(buf).map_err(tls_io_error)?;
+        self.flush_wire()?;
+        Ok(buf.len())
+    }
 }
 
 impl Stream {
@@ -20,24 +76,28 @@ impl Stream {
         match self {
             Stream::Tcp(s) => s.read(buf),
             Stream::Unix(s) => s.read(buf),
+            Stream::Tls(s) => s.read(buf),
         }
     }
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Stream::Tcp(s) => s.write(buf),
             Stream::Unix(s) => s.write(buf),
+            Stream::Tls(s) => s.write(buf),
         }
     }
     fn set_read_timeout(&self, d: Option<Duration>) {
         let _ = match self {
             Stream::Tcp(s) => s.set_read_timeout(d),
             Stream::Unix(s) => s.set_read_timeout(d),
+            Stream::Tls(s) => s.sock.set_read_timeout(d),
         };
     }
     fn set_write_timeout(&self, d: Option<Duration>) {
         let _ = match self {
             Stream::Tcp(s) => s.set_write_timeout(d),
             Stream::Unix(s) => s.set_write_timeout(d),
+            Stream::Tls(s) => s.sock.set_write_timeout(d),
         };
     }
     pub fn raw_fd(&self) -> i32 {
@@ -45,6 +105,7 @@ impl Stream {
         match self {
             Stream::Tcp(s) => s.as_raw_fd(),
             Stream::Unix(s) => s.as_raw_fd(),
+            Stream::Tls(s) => s.sock.as_raw_fd(),
         }
     }
 }
@@ -75,6 +136,8 @@ pub struct Vio {
     pub ssl_passphrase: Option<String>,
     pub ssl_verify_peer: SslPeer,
     pub ssl: bool,
+    /// the host of the tcp:// scheme (peer name for TLS)
+    pub host: String,
 }
 
 impl Vio {
@@ -97,6 +160,7 @@ impl Vio {
             ssl_passphrase: None,
             ssl_verify_peer: SslPeer::Default,
             ssl: false,
+            host: String::new(),
         }
     }
 
@@ -116,8 +180,14 @@ impl Vio {
     /// mysqlnd_vio::close_stream
     pub fn close_stream(&mut self) {
         if let Some(s) = self.stream.take() {
-            if let Stream::Tcp(t) = &s {
-                let _ = t.shutdown(std::net::Shutdown::Both);
+            match &s {
+                Stream::Tcp(t) => {
+                    let _ = t.shutdown(std::net::Shutdown::Both);
+                }
+                Stream::Tls(t) => {
+                    let _ = t.sock.shutdown(std::net::Shutdown::Both);
+                }
+                Stream::Unix(_) => {}
             }
             drop(s);
         }
@@ -151,6 +221,12 @@ impl Vio {
                 }
             }
         } else if let Some(hostport) = scheme.strip_prefix("tcp://") {
+            self.host = match hostport.rfind(':') {
+                Some(i) => hostport[..i]
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .to_string(),
+                None => hostport.to_string(),
+            };
             match connect_tcp(hostport, connect_timeout) {
                 Ok(s) => {
                     self.is_unix = false;
@@ -190,6 +266,105 @@ impl Vio {
             None
         });
         self.stream = Some(stream);
+        true
+    }
+
+    /// mysqlnd_vio::enable_ssl: the ssl stream context options, then
+    /// php_stream_xport_crypto_setup/enable(STREAM_CRYPTO_METHOD_TLS_CLIENT)
+    pub fn enable_ssl(&mut self) -> bool {
+        use purecrypto::tls::{Config, Connection, HandshakeStatus, RootCertStore};
+        let any_flag = self.ssl_key.is_some()
+            || self.ssl_cert.is_some()
+            || self.ssl_ca.is_some()
+            || self.ssl_capath.is_some()
+            || self.ssl_passphrase.is_some()
+            || self.ssl_cipher.is_some();
+        if self.ssl_verify_peer == SslPeer::Default {
+            self.ssl_verify_peer = if any_flag {
+                SslPeer::Verify
+            } else {
+                SslPeer::DontVerify
+            };
+        }
+        let verify = self.ssl_verify_peer == SslPeer::Verify;
+        // php_openssl_enable_crypto: cafile / capath
+        let mut roots = RootCertStore::new();
+        if let Some(ca) = &self.ssl_ca {
+            match std::fs::read_to_string(ca) {
+                Ok(pem) if roots.add_pem(&pem).is_ok() => {}
+                _ => {
+                    php_error(E_WARNING, format!("failed loading cafile stream: `{}'", ca));
+                    return false;
+                }
+            }
+        }
+        if let Some(dir) = &self.ssl_capath {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    if let Ok(pem) = std::fs::read_to_string(e.path()) {
+                        let _ = roots.add_pem(&pem);
+                    }
+                }
+            }
+        }
+        let stream = match self.stream.take() {
+            Some(Stream::Tcp(s)) => s,
+            other => {
+                self.stream = other;
+                return false;
+            }
+        };
+        // TLS 1.3 suites first, AES-256 preferred like OpenSSL's defaults
+        let suites: [u16; 9] = [
+            0x1302, 0x1303, 0x1301, 0xC02C, 0xC030, 0xCCA9, 0xCCA8, 0xC02B, 0xC02F,
+        ];
+        let mut b = Config::builder()
+            .rng(std::sync::Arc::new(purecrypto::rng::OsRng))
+            .tls_only()
+            .roots(roots)
+            .cipher_suites(&suites)
+            .verify_certificates(verify);
+        if self.host.parse::<std::net::IpAddr>().is_err() && !self.host.is_empty() {
+            b = b.server_name(self.host.clone());
+        }
+        let cfg = b.build();
+        let mut tls = match Connection::client(&cfg) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let mut sock = stream;
+        let mut wire = [0u8; 16384];
+        let ok = loop {
+            if let Ok(out) = tls.pop() {
+                if !out.is_empty() && sock.write_all(&out).is_err() {
+                    break false;
+                }
+            }
+            match tls.handshake() {
+                Ok(HandshakeStatus::Complete) => break true,
+                Ok(HandshakeStatus::WantWrite) => continue,
+                Ok(HandshakeStatus::WantRead) => match sock.read(&mut wire) {
+                    Ok(0) | Err(_) => break false,
+                    Ok(n) => {
+                        if tls.feed(&wire[..n]).is_err() {
+                            break false;
+                        }
+                    }
+                },
+                Err(_) => break false,
+            }
+        };
+        if !ok {
+            let _ = sock.shutdown(std::net::Shutdown::Both);
+            return false;
+        }
+        self.stream = Some(Stream::Tls(Box::new(TlsStream {
+            sock,
+            tls,
+            plain: Vec::new(),
+            ppos: 0,
+        })));
+        self.ssl = true;
         true
     }
 

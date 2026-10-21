@@ -872,8 +872,14 @@ impl Conn {
         if self.pfc.flags & super::vio::MYSQLND_PROTOCOL_FLAG_USE_COMPRESSION != 0 {
             mysql_flags |= CLIENT_COMPRESS;
         }
-        // SSL is not supported by this build of mysqlnd
-        mysql_flags &= !CLIENT_SSL;
+        if self.vio.ssl_key.is_some()
+            || self.vio.ssl_cert.is_some()
+            || self.vio.ssl_ca.is_some()
+            || self.vio.ssl_capath.is_some()
+            || self.vio.ssl_cipher.is_some()
+        {
+            mysql_flags |= CLIENT_SSL;
+        }
         if self
             .options
             .connect_attr

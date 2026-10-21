@@ -128,6 +128,57 @@ pub fn run_authentication(
     ret
 }
 
+/// mysqlnd_command::enable_ssl (via mysqlnd_switch_to_ssl_if_needed)
+fn enable_ssl(
+    conn: &mut Conn,
+    client_capabilities: u32,
+    server_capabilities: u32,
+    charset_no: u32,
+) -> bool {
+    if client_capabilities & CLIENT_SSL == 0 {
+        return true;
+    }
+    let close_conn = |conn: &mut Conn| {
+        conn.state = ConnState::QuitSent;
+        conn.send_close();
+        conn.error_info
+            .set_str(CR_SERVER_GONE_ERROR, UNKNOWN_SQLSTATE, MYSQLND_SERVER_GONE);
+        false
+    };
+    if server_capabilities & CLIENT_SSL == 0 {
+        return close_conn(conn);
+    }
+    // the auth packet without auth data: the SSL request
+    let mut p = Vec::new();
+    int4store(&mut p, client_capabilities);
+    int4store(&mut p, MYSQLND_ASSEMBLED_PACKET_MAX_SIZE);
+    p.push(charset_no as u8);
+    p.extend_from_slice(&[0u8; 23]);
+    let sent = conn
+        .pfc
+        .send(&mut conn.vio, &p, &mut conn.stats, &mut conn.error_info);
+    if sent == 0 {
+        return close_conn(conn);
+    }
+    conn.vio.ssl_verify_peer = if client_capabilities & CLIENT_SSL_VERIFY_SERVER_CERT != 0 {
+        super::vio::SslPeer::Verify
+    } else if client_capabilities & CLIENT_SSL_DONT_VERIFY_SERVER_CERT != 0 {
+        super::vio::SslPeer::DontVerify
+    } else {
+        super::vio::SslPeer::Default
+    };
+    if !conn.vio.enable_ssl() {
+        conn.state = ConnState::QuitSent;
+        conn.error_info.set_str(
+            CR_CONNECTION_ERROR,
+            UNKNOWN_SQLSTATE,
+            "Cannot connect to MySQL using SSL",
+        );
+        return false;
+    }
+    true
+}
+
 /// mysqlnd_connect_run_authentication
 #[allow(clippy::too_many_arguments)]
 pub fn connect_run_authentication(
@@ -141,7 +192,9 @@ pub fn connect_run_authentication(
     server_capabilities: u32,
     mysql_flags: u32,
 ) -> bool {
-    // mysqlnd_switch_to_ssl_if_needed: CLIENT_SSL is never requested here
+    if !enable_ssl(conn, mysql_flags, server_capabilities, charset_no) {
+        return false;
+    }
     run_authentication(
         conn,
         user,

@@ -9,6 +9,6 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "bignum", "rng", "rsa", "der"] }
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "bignum", "rng", "rsa", "der", "tls"] }
 flate2 = "1"
 libc = "0.2"
