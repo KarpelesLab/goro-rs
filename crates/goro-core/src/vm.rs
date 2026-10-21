@@ -679,6 +679,9 @@ pub struct Vm {
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
     pub ini_set_hooks: HashMap<Vec<u8>, fn(&mut Vm, &[u8], &Value) -> bool>,
+    /// PHP_MINFO handlers of extensions: each returns its module's text-mode
+    /// phpinfo() section (INFO_MODULES).
+    pub phpinfo_hooks: Vec<fn(&mut Vm) -> String>,
     /// Extension startup handlers, run by the SAPI once the INI settings
     /// are in place and before the script runs.
     pub startup_hooks: Vec<fn(&mut Vm)>,
@@ -1752,6 +1755,7 @@ impl Vm {
             cv_frames: Vec::new(),
             ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
+            phpinfo_hooks: Vec::new(),
             startup_hooks: Vec::new(),
             request_startup_hooks: Vec::new(),
             request_shutdown_hooks: Vec::new(),

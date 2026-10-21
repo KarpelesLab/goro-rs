@@ -9528,12 +9528,11 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "sleep(): Argument #1 ($seconds) must be greater than or equal to 0",
         ));
     }
-    // Actually sleep up to 2 seconds to support tests that compare timestamps
-    // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
+    // Scripts rely on the full duration (e.g. outliving a server's
+    // wait_timeout).
     _vm.flush_cli_output();
     if secs > 0 {
-        let actual = (secs as u64).min(2);
-        std::thread::sleep(std::time::Duration::from_secs(actual));
+        std::thread::sleep(std::time::Duration::from_secs(secs as u64));
     }
     Ok(Value::Long(0))
 }
@@ -16892,6 +16891,9 @@ fn phpinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if what & 8 != 0 {
         out.push_str("Core\n\n");
+        for hook in vm.phpinfo_hooks.clone() {
+            out.push_str(&hook(vm));
+        }
     }
     if what & 32 != 0 {
         out.push_str("PHP Variables\n\n");
