@@ -1759,6 +1759,9 @@ impl<'a, 'b> Cx<'a, 'b> {
     /// xmlSnprintfElements
     fn snprintf_elements(&self, first: Option<NodeId>) -> String {
         let size = 5000usize;
+        if first.is_none() {
+            return String::new();
+        }
         let mut buf = String::from("(");
         let mut cur = first;
         while let Some(c) = cur {
