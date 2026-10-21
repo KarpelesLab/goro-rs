@@ -1466,6 +1466,23 @@ impl Vm {
         let iv_lower = b"random\\intervalboundary".to_vec();
         vm.classes.insert(iv_lower, iv);
 
+        // Built-in backed enum: PropertyHookType (ReflectionProperty::getHook())
+        {
+            let mut ph = ClassEntry::new(b"PropertyHookType".to_vec());
+            ph.is_enum = true;
+            ph.is_final = true;
+            ph.enum_backing_type = Some(b"string".to_vec());
+            ph.interfaces.push(b"UnitEnum".to_vec());
+            ph.interfaces.push(b"BackedEnum".to_vec());
+            for (name, value) in [(b"Get".as_slice(), b"get".as_slice()), (b"Set".as_slice(), b"set".as_slice())] {
+                ph.enum_cases.push((name.to_vec(), Value::String(PhpString::from_bytes(value))));
+                let mut marker = b"__enum_case__::".to_vec();
+                marker.extend_from_slice(name);
+                ph.constants.insert(name.to_vec(), Value::String(PhpString::from_vec(marker)));
+            }
+            vm.classes.insert(b"propertyhooktype".to_vec(), ph);
+        }
+
         // Built-in attribute class: Deprecated
         {
             use crate::object::{PropertyDef, Visibility as ObjVis};
@@ -8198,6 +8215,8 @@ impl Vm {
                 b"getvalue" | b"setvalue"
                     | b"getattributes"
                     | b"skiplazyinitialization"
+                    | b"gethook"
+                    | b"hashook"
                     | b"islazy"
                     | b"setrawvaluewithoutlazyinitialization"
                     | b"setrawvalue"

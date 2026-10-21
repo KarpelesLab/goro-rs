@@ -4495,13 +4495,13 @@ pub fn reflection_property_method(
             Some(if is_prot_set { Value::True } else { Value::False })
         }
         b"gethooks" => {
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-        }
-        b"gethook" => {
-            Some(Value::Null)
-        }
-        b"hashook" => {
-            Some(Value::False)
+            let mut arr = PhpArray::new();
+            for kind in ["get", "set"] {
+                if let Some(m) = reflection_property_hook_method(vm, &class_lower, prop_name.as_bytes(), kind) {
+                    arr.set(crate::array::ArrayKey::String(PhpString::from_string(kind.to_string())), m);
+                }
+            }
+            Some(Value::Array(Rc::new(RefCell::new(arr))))
         }
         b"getsettabletype" => {
             // Default behavior: same as getType(); asymmetric setter types
@@ -4827,6 +4827,28 @@ pub fn reflection_property_docall(
                     ob.set_property(prop_name.as_bytes().to_vec(), value);
                 }
                 Some(Value::Null)
+            }
+            b"gethook" | b"hashook" => {
+                // Argument: a PropertyHookType case.
+                let kind = match args.get(1) {
+                    Some(Value::Object(o)) => {
+                        let ob = o.borrow();
+                        let v = ob.get_property(b"value").to_php_string().to_string_lossy().to_ascii_lowercase();
+                        if v.is_empty() { ob.get_property(b"name").to_php_string().to_string_lossy().to_ascii_lowercase() } else { v }
+                    }
+                    Some(other) => other.to_php_string().to_string_lossy().to_ascii_lowercase(),
+                    None => String::new(),
+                };
+                let m = if kind == "get" || kind == "set" {
+                    reflection_property_hook_method(vm, &class_lower, prop_name.as_bytes(), &kind)
+                } else {
+                    None
+                };
+                if method == b"hashook" {
+                    Some(if m.is_some() { Value::True } else { Value::False })
+                } else {
+                    Some(m.unwrap_or(Value::Null))
+                }
             }
             b"skiplazyinitialization" => {
                 // Mark property as non-lazy, and initialize to default value.
@@ -6543,6 +6565,22 @@ pub fn create_reflection_method_with_lookup(vm: &mut Vm, class_name: &str, metho
             Value::String(PhpString::from_string(lookup_canonical)));
     }
     Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// ReflectionMethod for the `kind` ("get"/"set") hook of a property, named
+/// `$prop::get` / `$prop::set` and owned by the hook's declaring class.
+fn reflection_property_hook_method(vm: &mut Vm, class_lower: &[u8], prop: &[u8], kind: &str) -> Option<Value> {
+    let mut m = format!("__property_{}_", kind).into_bytes();
+    m.extend(prop.iter().map(|b| b.to_ascii_lowercase()));
+    let decl = vm.classes.get(class_lower)?.get_method(&m)?.declaring_class.clone();
+    let decl_display = vm.classes.get(&decl).map(|c| String::from_utf8_lossy(&c.name).to_string())
+        .unwrap_or_else(|| String::from_utf8_lossy(&decl).to_string());
+    let method_name = String::from_utf8_lossy(&m).to_string();
+    let rm = create_reflection_method(vm, &decl_display, &method_name);
+    if let Value::Object(o) = &rm {
+        o.borrow_mut().set_property(b"name".to_vec(), Value::String(PhpString::from_string(format!("${}::{}", String::from_utf8_lossy(prop), kind))));
+    }
+    Some(rm)
 }
 
 /// Create a ReflectionProperty object
