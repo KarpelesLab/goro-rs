@@ -294,6 +294,14 @@ static AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// Returns true if the fixture is available.
 pub fn ensure_started() -> bool {
     INIT.call_once(|| {
+        // An externally provided server (MYSQL_TEST_* already set, as for
+        // php-src's run-tests.php) is used as is.
+        if std::env::var_os("MYSQL_TEST_HOST").is_some()
+            && std::env::var_os("GORO_MYSQL_FIXTURE").is_none()
+        {
+            AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
         if let Some(fx) = try_start() {
             // Export env vars BEFORE spawning any test child processes.
             unsafe {
