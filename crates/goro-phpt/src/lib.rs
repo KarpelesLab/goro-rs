@@ -430,7 +430,13 @@ pub fn run_test_with_dir_and_filename(
     };
 
     // Execute the source with a timeout (longer for tests that spawn a server).
-    let timeout_secs: u64 = if source.contains("php_cli_server_start") {
+    // Tests talking to a database server do real I/O; a few of them insert
+    // rows "for 5 seconds" on purpose.
+    let uses_mysqli = test
+        .sections
+        .get("EXTENSIONS")
+        .is_some_and(|e| e.split_whitespace().any(|x| x == "mysqli"));
+    let timeout_secs: u64 = if source.contains("php_cli_server_start") || uses_mysqli {
         30
     } else {
         5
@@ -1956,8 +1962,18 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                     if ai >= ab.len() || !ab[ai].is_ascii_digit() {
                         return false;
                     }
+                    let start = ai;
                     while ai < ab.len() && ab[ai].is_ascii_digit() {
                         ai += 1;
+                    }
+                    // \d+ backtracks: "%d%d" matches "12"
+                    if pb.get(pi) == Some(&b'%') && pb.get(pi + 1) == Some(&b'd') {
+                        for try_ai in (start + 1..=ai).rev() {
+                            if match_expectf_at(pb, pi, ab, try_ai) {
+                                return true;
+                            }
+                        }
+                        return false;
                     }
                 }
                 b'i' => {
