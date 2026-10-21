@@ -7,6 +7,14 @@ use std::os::unix::io::FromRawFd;
 
 pub mod mysqli_test;
 
+const VALID_SECTIONS: &[&str] = &[
+    "TEST", "FILE", "FILEEOF", "EXPECT", "EXPECTF", "EXPECTREGEX", "SKIPIF", "INI", "ARGS",
+    "ENV", "STDIN", "POST", "POST_RAW", "GZIP_POST", "DEFLATE_POST", "PUT", "GET", "COOKIE",
+    "HEADERS", "CLEAN", "CREDITS", "DESCRIPTION", "EXTENSIONS", "CONFLICTS", "XFAIL", "XLEAK",
+    "CAPTURE_STDIO", "FILE_EXTERNAL", "EXPECT_EXTERNAL", "EXPECTF_EXTERNAL", "EXPECTHEADERS",
+    "CGI", "PHPDBG", "REDIRECTTEST", "FLAKY", "WHITESPACE_SENSITIVE", "EXPECTREGEX_EXTERNAL",
+];
+
 /// A parsed PHPT test file
 #[derive(Debug)]
 pub struct PhptTest {
@@ -21,38 +29,7 @@ impl PhptTest {
         let mut current_section: Option<String> = None;
         let mut current_content = String::new();
 
-        let valid_sections = [
-            "TEST",
-            "FILE",
-            "EXPECT",
-            "EXPECTF",
-            "EXPECTREGEX",
-            "SKIPIF",
-            "INI",
-            "ARGS",
-            "ENV",
-            "STDIN",
-            "POST",
-            "POST_RAW",
-            "PUT",
-            "GET",
-            "COOKIE",
-            "HEADERS",
-            "CLEAN",
-            "CREDITS",
-            "DESCRIPTION",
-            "EXTENSIONS",
-            "CONFLICTS",
-            "XFAIL",
-            "XLEAK",
-            "CAPTURE_STDIO",
-            "FILE_EXTERNAL",
-            "EXPECT_EXTERNAL",
-            "EXPECTF_EXTERNAL",
-            "EXPECTHEADERS",
-            "CGI",
-            "PHPDBG",
-        ];
+        let valid_sections = VALID_SECTIONS;
         for line in content.lines() {
             if line.starts_with("--") && line.ends_with("--") && line.len() > 4 {
                 let section_name = &line[2..line.len() - 2];
@@ -86,9 +63,59 @@ impl PhptTest {
             sections.insert(sec.clone(), current_content.clone());
         }
 
+        // run-tests.php keeps the FILE section byte-exact (including the
+        // trailing newline, which matters for inline HTML after `?>`), stops
+        // it at a `===DONE===` line, and strips trailing newlines of FILEEOF.
+        if let Some(raw) = Self::raw_file_section(content) {
+            sections.insert("FILE".to_string(), raw);
+        }
+
         let name = sections.get("TEST")?.clone();
 
         Some(PhptTest { name, sections })
+    }
+
+    /// Extract the FILE (or FILEEOF) section exactly as run-tests.php does.
+    fn raw_file_section(content: &str) -> Option<String> {
+        let mut out: Option<String> = None;
+        let mut eof = false;
+        let mut in_file = false;
+        let mut done = false;
+        for line in content.split_inclusive('\n') {
+            let bare = line.trim_end_matches(['\n', '\r']);
+            if bare.len() > 4 && bare.starts_with("--") && bare.ends_with("--")
+                && VALID_SECTIONS.contains(&&bare[2..bare.len() - 2])
+            {
+                let name = &bare[2..bare.len() - 2];
+                if name == "FILE" || name == "FILEEOF" {
+                    in_file = true;
+                    eof = name == "FILEEOF";
+                    done = false;
+                    out = Some(String::new());
+                    continue;
+                }
+                if in_file {
+                    in_file = false;
+                }
+                continue;
+            }
+            if in_file && !done {
+                if let Some(o) = out.as_mut() {
+                    o.push_str(line);
+                }
+                if bare.starts_with("===DONE===") && bare[10..].trim().is_empty() {
+                    done = true;
+                }
+            }
+        }
+        if eof {
+            if let Some(o) = out.as_mut() {
+                while o.ends_with('\n') || o.ends_with('\r') {
+                    o.pop();
+                }
+            }
+        }
+        out
     }
 
     pub fn file_section(&self) -> Option<&str> {
@@ -983,13 +1010,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // The phpt parser strips the trailing newline of the FILE
-        // section. Real php-src test runners write the source with a
-        // final newline, so tests that read __FILE__ see the same byte
-        // sequence as the original .phpt block.
-        let mut full = source.to_vec();
-        if !full.last().is_some_and(|&b| b == b'\n') { full.push(b'\n'); }
-        std::fs::write(path, &full).is_ok()
+        // The FILE section is kept byte-exact (as run-tests.php writes it).
+        std::fs::write(path, source).is_ok()
     } else {
         false
     };
