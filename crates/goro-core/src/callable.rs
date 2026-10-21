@@ -31,6 +31,11 @@ pub struct CallableCheck {
     pub calling_scope: Option<Vec<u8>>,
     /// The method is called with an object
     pub has_object: bool,
+    /// That object
+    pub object: Option<Value>,
+    /// The call goes through __call() / __callStatic() for this method name
+    /// (a trampoline: the method is missing or not accessible).
+    pub trampoline: Option<Vec<u8>>,
     /// Deprecations raised by the check (emitted by zend_is_callable_ex)
     pub deprecations: Vec<String>,
 }
@@ -52,6 +57,7 @@ struct Fcc {
     called_scope: Option<Vec<u8>>,
     object: Option<Value>,
     deprecations: Vec<String>,
+    trampoline: Option<Vec<u8>>,
 }
 
 fn lower(b: &[u8]) -> Vec<u8> {
@@ -542,6 +548,9 @@ impl Vm {
         if fcc.object.is_some() && handler.as_ref().is_some_and(|m| m.is_static) {
             fcc.object = None;
         }
+        if retval && via_handler {
+            fcc.trampoline = Some(mname);
+        }
         retval
     }
 
@@ -732,6 +741,8 @@ impl Vm {
         out.calling_scope = fcc.calling_scope;
         out.has_object = fcc.object.is_some();
         out.deprecations = fcc.deprecations;
+        out.object = fcc.object;
+        out.trampoline = fcc.trampoline;
         out
     }
 

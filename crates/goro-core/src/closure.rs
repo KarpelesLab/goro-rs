@@ -1095,6 +1095,26 @@ impl Vm {
         if callable.is_closure_obj() {
             return Ok(callable);
         }
+        // zend_is_callable_ex() decides; its deprecations are raised while
+        // the callable is resolved below.
+        let check = self.zend_is_callable_ex(
+            &callable,
+            crate::callable::IS_CALLABLE_SUPPRESS_DEPRECATIONS,
+        );
+        if self.current_exception.is_some() {
+            return Err(String::new());
+        }
+        if !check.ok {
+            // The check's deprecations are raised before its error.
+            let line = self.current_line;
+            for d in self.is_callable_pure(&callable, 0).deprecations {
+                self.emit_deprecated_at(&d, line);
+            }
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+            return Err(check.error.unwrap_or_default());
+        }
         match &callable {
             Value::String(s) => {
                 let b = s.as_bytes().to_vec();

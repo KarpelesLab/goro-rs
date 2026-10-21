@@ -1267,22 +1267,61 @@ pub(crate) fn check_callable(
 
 /// Reject callbacks that cannot possibly be resolved (zend_fcall_info_init errors).
 fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmError> {
-    let (ok, _, err) = check_callable(vm, cb, false);
+    validate_callback_arg_check(vm, func, cb).map(|_| ())
+}
+
+/// zend_fcall_info_init() for call_user_func() and friends: the check, or
+/// the TypeError.
+fn validate_callback_arg_check(
+    vm: &mut Vm,
+    func: &str,
+    cb: &Value,
+) -> Result<goro_core::callable::CallableCheck, VmError> {
+    let r = vm.zend_is_callable_ex(cb, 0);
     if vm.current_exception.is_some() {
         return Err(VmError {
             message: "Uncaught exception".into(),
             line: vm.current_line,
         });
     }
-    if !ok {
+    if !r.ok {
         let msg = format!(
             "{}(): Argument #1 ($callback) must be a valid callback, {}",
             func,
-            err.unwrap_or_default()
+            r.error.unwrap_or_default()
         );
         return Err(throw_type_error_msg(vm, msg));
     }
-    Ok(())
+    Ok(r)
+}
+
+/// A callable naming an existing method the caller may not call, which
+/// zend_is_callable_ex() resolved to the class's __call() / __callStatic()
+/// trampoline: call that with the method name and the arguments.
+fn call_inaccessible_via_trampoline(
+    vm: &mut Vm,
+    r: &goro_core::callable::CallableCheck,
+    args: PhpArray,
+) -> Option<Result<Value, VmError>> {
+    let m = r.trampoline.as_ref()?;
+    let class = vm.classes.get(r.calling_scope.as_ref()?)?;
+    class.get_method(m)?;
+    let (target, magic): (Value, &[u8]) = match &r.object {
+        Some(o) => (o.clone(), b"__call"),
+        None => (
+            Value::String(PhpString::from_vec(class.name.clone())),
+            b"__callStatic",
+        ),
+    };
+    let mut cb = PhpArray::new();
+    cb.push(target);
+    cb.push(Value::String(PhpString::from_bytes(magic)));
+    let cb = Value::Array(Rc::new(RefCell::new(cb)));
+    let name = Value::String(PhpString::from_vec(m.clone()));
+    Some(call_user_func(
+        vm,
+        &[cb, name, Value::Array(Rc::new(RefCell::new(args)))],
+    ))
 }
 
 /// forward_static_call(): like call_user_func(), but a static method of a
@@ -1385,14 +1424,31 @@ fn forward_static_call_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
 
 fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
-        validate_callback_arg(vm, "call_user_func", cb)?;
+        let r = validate_callback_arg_check(vm, "call_user_func", cb)?;
+        if r.trampoline.is_some() && vm.pending_named_args.is_empty() {
+            let mut a = PhpArray::new();
+            for v in &args[1..] {
+                a.push(v.deref());
+            }
+            if let Some(res) = call_inaccessible_via_trampoline(vm, &r, a) {
+                return res;
+            }
+        }
     }
     call_user_func(vm, args)
 }
 
 fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
-        validate_callback_arg(vm, "call_user_func_array", cb)?;
+        let r = validate_callback_arg_check(vm, "call_user_func_array", cb)?;
+        if r.trampoline.is_some() {
+            if let Some(Value::Array(a)) = args.get(1).map(|v| v.deref()) {
+                let a = a.borrow().clone();
+                if let Some(res) = call_inaccessible_via_trampoline(vm, &r, a) {
+                    return res;
+                }
+            }
+        }
     }
     call_user_func_array(vm, args)
 }
