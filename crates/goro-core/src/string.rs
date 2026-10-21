@@ -69,6 +69,17 @@ impl PhpString {
         }
     }
 
+    /// ZSTR_CHAR(c): the interned one-byte string (zend_one_char_string),
+    /// shared and not counted by memory_get_usage(). String offset reads and
+    /// chr() return these without allocating.
+    pub fn one_char(c: u8) -> Self {
+        thread_local! {
+            static ONE_CHAR: Vec<PhpString> =
+                (0..=255u8).map(|c| PhpString::from_bytes_untracked(&[c])).collect();
+        }
+        ONE_CHAR.with(|t| t[c as usize].clone())
+    }
+
     pub fn from_vec(data: Vec<u8>) -> Self {
         let bytes = data.len() + STRING_OVERHEAD;
         if !memory_alloc(bytes) {

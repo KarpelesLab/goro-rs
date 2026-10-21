@@ -1765,7 +1765,7 @@ impl PhpGenerator {
                             let idx = key_val.to_long();
                             let bytes = s.as_bytes();
                             if idx >= 0 && (idx as usize) < bytes.len() {
-                                Value::String(PhpString::from_bytes(&[bytes[idx as usize]]))
+                                Value::String(PhpString::one_char(bytes[idx as usize]))
                             } else {
                                 Value::String(PhpString::empty())
                             }

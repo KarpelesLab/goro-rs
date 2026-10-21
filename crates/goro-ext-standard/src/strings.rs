@@ -1124,7 +1124,7 @@ fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
     }
     let code = ((n % 256 + 256) % 256) as u8;
-    Ok(Value::String(PhpString::from_bytes(&[code])))
+    Ok(Value::String(PhpString::one_char(code)))
 }
 
 fn ord(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -29751,7 +29751,7 @@ impl Vm {
                             idx as usize
                         };
                         if actual_idx < bytes.len() {
-                            Value::String(PhpString::from_bytes(&[bytes[actual_idx]]))
+                            Value::String(PhpString::one_char(bytes[actual_idx]))
                         } else {
                             self.emit_warning_at(
                                 &format!("Uninitialized string offset {}", idx),
