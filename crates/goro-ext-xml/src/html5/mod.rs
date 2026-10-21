@@ -18,6 +18,9 @@ mod tokenizer;
 mod tree;
 mod treemodes;
 
+#[cfg(test)]
+mod tests;
+
 use dom::{LDom, NodeId};
 use std::collections::HashMap;
 pub use tables::*;
