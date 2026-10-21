@@ -9,15 +9,16 @@ closures, generators, fibers, property hooks, lazy objects, typed properties and
 match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
 extensions run the official php-src test suite.
 
-**php-src 8.5.4 test suite** (full run, master `92b69e9d`, 2026-10-22):
+**php-src 8.5.4 test suite** (full run, master `3a0d6fd3`, 2026-10-22):
 
 | Metric | Count |
 |---|---|
 | Total tests | 21455 |
-| Pass | 13103 (61.1% of all, **86.9% of runnable**) |
-| Fail | 1938 |
-| Skip | 6376 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
-| Error | 38 |
+| Pass | 13526 (63.0% of all, **89.7% of runnable**) |
+| Fail | 1533 |
+| Skip | 6363 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
+| Error | 27 |
+| XFail / XPass | 5 / 1 |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -26,30 +27,31 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 | Area | Pass | Run | Rate |
 |---|---|---|---|
-| Zend/tests | 4112 | 5161 | 79.7% |
-| tests/ (lang, classes, basic, …) | 749 | 826 | 90.7% |
-| ext/standard | 3021 | 3281 | 92.1% |
-| ext/spl | 711 | 775 | 91.7% |
+| Zend/tests | 4340 | 5160 | 84.1% |
+| tests/ (lang, classes, basic, …) | 758 | 825 | 91.9% |
+| ext/standard | 3069 | 3292 | 93.2% |
+| ext/spl | 715 | 775 | 92.3% |
 | ext/date | 673 | 676 | 99.6% |
-| ext/reflection | 403 | 485 | 83.1% |
-| ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 819 | 843 | 97.2% |
+| ext/reflection | 404 | 485 | 83.3% |
+| ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 824 | 845 | 97.5% |
 | ext/simplexml / xml / xmlreader / xmlwriter | 296 | 316 | 93.7% |
-| ext/mbstring | 388 | 414 | 93.7% |
+| ext/mbstring | 389 | 414 | 94.0% |
 | ext/openssl (incl. TLS streams) | 205 | 212 | 96.7% |
-| ext/mysqli (embedded MySQL fixture) | 404 | 425 | 95.1% |
-| ext/session | 254 | 257 | 98.8% |
+| ext/mysqli (embedded MySQL fixture) | 405 | 422 | 96.0% |
+| ext/session | 254 | 256 | 99.2% |
+| ext/pcre (PCRE2 port) | 151 | 152 | 99.3% |
+| ext/hash / ext/random / ext/zlib | 283 | 283 | 100% |
 | ext/json | 79 | 87 | 90.8% |
 | ext/gmp | 91 | 98 | 92.9% |
 | ext/ctype / ext/uri | 166 | 166 | 100% |
-| ext/opcache (behavioural tests) | 211 | 292 | 72.3% |
+| ext/opcache (behavioural tests) | 221 | 292 | 75.7% |
 
-Zend highlights: type_declarations 83.5%, traits 90.0%, enum 86.6%, generators 80.4%,
-closures 82.2%, lazy_objects 88.3%, property_hooks 87.0%, fibers 89.7%, gc 88.2%,
-attributes 82.1%. (Type declarations, pcre, hash, random and zlib have improved further
-since this run.)
+Zend highlights: type_declarations 95.1%, traits 90.5%, enum 90.8%, generators 82.6%,
+closures 87.4%, lazy_objects 88.7%, property_hooks 87.5%, fibers 90.7%, gc 89.5%,
+attributes 91.3%.
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
-EXPECTF/EXPECTREGEX matching, per-test timeouts and an embedded MySQL fixture for ext/mysqli.*
+EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts and an embedded MySQL fixture for ext/mysqli.*
 
 ## Features
 
