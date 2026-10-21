@@ -364,6 +364,9 @@ impl Compiler {
                     (b"socket_recvfrom", 1) => true,
                     (b"socket_recvfrom", 4) => true,
                     (b"socket_recvfrom", 5) => true,
+                    (b"socket_recv", 1) => true,
+                    (b"socket_recvmsg", 1) => true,
+                    (b"socket_select", 0..=2) => true,
                     // mysqli_poll(&$read, &$error, &$reject, $sec, $usec)
                     (b"mysqli_poll", 0..=2) => true,
                     // mysqli_stmt_bind_param($stmt, $types, &$var1, &$var2, ...)
