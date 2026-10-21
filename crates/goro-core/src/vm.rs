@@ -21057,6 +21057,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     } else {
+                                        self.call_stack.pop();
                                         return Err(VmError {
                                             message: format!("Uncaught TypeError: {}", err_msg),
                                             line: def_line,
@@ -21072,6 +21073,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     }
+                                    self.call_stack.pop();
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
                                         line: op.line,
@@ -24723,6 +24725,9 @@ impl Vm {
                                     ip = catch_target as usize;
                                     return Ok(Flow::Continue);
                                 } else {
+                                    // The callee's frame is not entered: our own
+                                    // frame is the one the caller pops.
+                                    self.call_stack.pop();
                                     return Err(VmError {
                                         message: format!(
                                             "Uncaught {}: {}",
@@ -24783,6 +24788,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     } else {
+                                        self.call_stack.pop();
                                         return Err(VmError {
                                             message: format!(
                                                 "Uncaught ArgumentCountError: {}",
@@ -24852,6 +24858,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     } else {
+                                        self.call_stack.pop();
                                         return Err(VmError {
                                             message: format!("Uncaught TypeError: {}", err_msg),
                                             line: def_line,
@@ -24867,6 +24874,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     }
+                                    self.call_stack.pop();
                                     return Err(VmError {
                                         message: "Uncaught exception".into(),
                                         line: op.line,
