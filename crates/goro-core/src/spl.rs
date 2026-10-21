@@ -31,9 +31,9 @@ impl Vm {
                     crate::vm::get_builtin_parent(&cur)
                         .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
                 });
-            match next {
-                Some(n) => cur = n,
-                None => return None,
+            {
+                let n = next?;
+                cur = n
             }
         }
         None
@@ -92,9 +92,9 @@ impl Vm {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
                 return Some(m);
             }
-            match crate::vm::get_builtin_parent(&cur) {
-                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
-                None => return None,
+            {
+                let p = crate::vm::get_builtin_parent(&cur)?;
+                cur = p.iter().map(|b| b.to_ascii_lowercase()).collect()
             }
         }
         None
@@ -107,9 +107,9 @@ impl Vm {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
                 return Some((cur, m));
             }
-            match crate::vm::get_builtin_parent(&cur) {
-                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
-                None => return None,
+            {
+                let p = crate::vm::get_builtin_parent(&cur)?;
+                cur = p.iter().map(|b| b.to_ascii_lowercase()).collect()
             }
         }
         None

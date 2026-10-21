@@ -589,9 +589,7 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let pattern = str_arg(vm, f, args, 0, "pattern")?;
     let string = str_arg(vm, f, args, 1, "string")?;
     let mut count: u64 = if present(args, 2) { long_arg(vm, f, args, 2, "limit")? as u64 } else { u64::MAX };
-    if count > 0 {
-        count -= 1;
-    }
+    count = count.saturating_sub(1);
     if !check_mbctype_encoding(&string) {
         return Ok(Value::False);
     }
@@ -817,13 +815,13 @@ fn mb_regex_set_options(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (o, syn) = match s {
         Some(s) => {
             let (o, syn) = init_options(vm, &s)?;
-            let prev = with(|m| {
+            
+            with(|m| {
                 let prev = (m.default_options, m.default_syntax);
                 m.default_options = o;
                 m.default_syntax = syn;
                 prev
-            });
-            prev
+            })
         }
         None => with(|m| (m.default_options, m.default_syntax)),
     };

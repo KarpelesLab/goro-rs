@@ -1535,7 +1535,7 @@ impl Vm {
     /// (int) cast of a float: out-of-range or non-finite values warn and
     /// wrap modulo 2^64 (non-finite gives 0), as in PHP 8.5.
     pub fn float_to_int_cast(&mut self, d: f64, line: u32) -> i64 {
-        if d.is_finite() && d >= -9.223372036854775808e18 && d < 9.223372036854775808e18 {
+        if d.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
             return d as i64;
         }
         let repr = Value::Double(d).to_php_string().to_string_lossy();
@@ -3879,7 +3879,7 @@ impl Vm {
     fn coerce_param_types(
         user_fn: &OpArray,
         args: &mut [Value],
-        implicit_args: usize,
+        _implicit_args: usize,
         caller_strict: bool,
     ) {
         for (i, arg) in args.iter_mut().enumerate() {
@@ -4190,7 +4190,7 @@ impl Vm {
                     }
                 }
                 b"bool" | b"boolean" => {
-                    if strict { false } else { true }
+                    !strict
                 }
                 _ => false,
             },
@@ -4775,13 +4775,13 @@ impl Vm {
                                 self.user_functions.insert(func_lower, op_array);
                                 Value::String(PhpString::from_vec(func_name))
                             } else {
-                                let msg = format!("Failed to create closure from callable: class method not found");
+                                let msg = "Failed to create closure from callable: class method not found".to_string();
                                 let exc = self.create_exception(b"TypeError", &msg, line);
                                 self.current_exception = Some(exc);
                                 Value::Null
                             }
                         } else {
-                            let msg = format!("Failed to create closure from callable: class not found");
+                            let msg = "Failed to create closure from callable: class not found".to_string();
                             let exc = self.create_exception(b"TypeError", &msg, line);
                             self.current_exception = Some(exc);
                             Value::Null
@@ -4847,7 +4847,7 @@ impl Vm {
                             Value::Array(Rc::new(RefCell::new(closure_arr)))
                         } else {
                             drop(arr_borrow);
-                            let msg = format!("Failed to create closure from callable: method not found");
+                            let msg = "Failed to create closure from callable: method not found".to_string();
                             let exc = self.create_exception(b"TypeError", &msg, line);
                             self.current_exception = Some(exc);
                             Value::Null
@@ -4881,7 +4881,7 @@ impl Vm {
                             Value::String(PhpString::from_vec(func_name))
                         } else {
                             drop(arr_borrow);
-                            let msg = format!("Failed to create closure from callable: method not found");
+                            let msg = "Failed to create closure from callable: method not found".to_string();
                             let exc = self.create_exception(b"TypeError", &msg, line);
                             self.current_exception = Some(exc);
                             Value::Null
@@ -5261,7 +5261,7 @@ impl Vm {
                 }
 
                 part.push('$');
-                part.push_str(&param_name.trim_start_matches('$'));
+                part.push_str(param_name.trim_start_matches('$'));
 
                 // Check if has default value (optional)
                 if i as u32 >= op.required_param_count && op.variadic_param != Some(cv_idx as u32) {
@@ -5281,7 +5281,7 @@ impl Vm {
                                     format!("'{}'", String::from_utf8_lossy(b))
                                 }
                             }
-                            Value::Array(a) => if a.borrow().len() == 0 { "[]".to_string() } else { "[...]".to_string() },
+                            Value::Array(a) => if a.borrow().is_empty() { "[]".to_string() } else { "[...]".to_string() },
                             _ => "null".to_string(),
                         }
                     } else if let Some(c) = crate::reflection::extract_param_default_constant(op, cv_idx as u32) {
@@ -5438,10 +5438,10 @@ impl Vm {
             (_, ParamType::Intersection(_)) => true,
             // Union in parent: child type should be a subset
             (ParamType::Union(_), ParamType::Union(_)) => true, // too complex, be permissive
-            (ParamType::Simple(name), ParamType::Union(parent_types)) => {
+            (ParamType::Simple(_name), ParamType::Union(parent_types)) => {
                 parent_types.iter().any(|pt| Self::is_return_type_compatible(child_rt, pt))
             }
-            (ParamType::Union(child_types), ParamType::Simple(_)) => {
+            (ParamType::Union(_child_types), ParamType::Simple(_)) => {
                 // Union child -> simple parent: only compatible if all child types are compatible
                 // But this is complex (class types), be permissive
                 true
@@ -5451,8 +5451,8 @@ impl Vm {
                 let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
                 let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"callable", b"iterable", b"object"];
-                let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
-                let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
+                let a_is_prim = primitives.contains(&a_lower.as_slice());
+                let b_is_prim = primitives.contains(&b_lower.as_slice());
                 if a_is_prim || b_is_prim {
                     // If either is a primitive type and they're different -> incompatible
                     // Exception: child is a class and parent is 'object' -> compatible (covariant)
@@ -5513,13 +5513,12 @@ impl Vm {
                     true
                 } else {
                     let primitives = [b"int".as_slice(), b"float", b"string", b"bool", b"array", b"null", b"object", b"callable", b"iterable"];
-                    let a_is_prim = primitives.iter().any(|p| *p == a_lower.as_slice());
-                    let b_is_prim = primitives.iter().any(|p| *p == b_lower.as_slice());
+                    let a_is_prim = primitives.contains(&a_lower.as_slice());
+                    let b_is_prim = primitives.contains(&b_lower.as_slice());
                     if a_is_prim || b_is_prim {
                         // child is 'object' and parent is a class -> compatible (contravariant widening)
                         if a_lower == b"object" && !b_is_prim { true }
-                        else if a_lower == b"iterable" && b_lower == b"array" { true }
-                        else { false }
+                        else { a_lower == b"iterable" && b_lower == b"array" }
                     } else {
                         // Both are class names - different class names are incompatible
                         false
@@ -5714,7 +5713,7 @@ impl Vm {
                 ParamType::Union(expanded)
             }
             ParamType::Intersection(types) => {
-                ParamType::Intersection(types.iter().map(|t| Self::normalize_param_type(t)).collect())
+                ParamType::Intersection(types.iter().map(Self::normalize_param_type).collect())
             }
         }
     }
@@ -5857,7 +5856,7 @@ impl Vm {
                         truncated = true;
                         break;
                     }
-                    if b >= 0x20 && b < 0x7f {
+                    if (0x20..0x7f).contains(&b) {
                         escaped.push(b as char);
                     } else {
                         escaped.push_str(&format!("\\x{:02X}", b));
@@ -6216,9 +6215,9 @@ impl Vm {
             if let Some(h) = self.native_class_handlers.get(&cur) {
                 return Some((cur, *h));
             }
-            match self.classes.get(&cur).and_then(|c| c.parent.clone()) {
-                Some(p) => cur = p.to_ascii_lowercase(),
-                None => return None,
+            {
+                let p = self.classes.get(&cur).and_then(|c| c.parent.clone())?;
+                cur = p.to_ascii_lowercase()
             }
         }
         None
@@ -6541,7 +6540,7 @@ impl Vm {
                         drop(ob);
                         let mut arr = PhpArray::new();
                         arr.set(ArrayKey::Int(0), Value::String(PhpString::from_string(hex)));
-                        if props_arr.len() > 0 {
+                        if !props_arr.is_empty() {
                             arr.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(props_arr))));
                         }
                         Some(Value::Array(Rc::new(RefCell::new(arr))))
@@ -7167,23 +7166,20 @@ impl Vm {
             let obj_val = Value::Object(obj.clone());
             let has_children = self.call_object_method(&obj_val, b"callHasChildren", &[]).unwrap_or(Value::False);
             if has_children.is_truthy() {
-                match mode {
-                    1 => {
-                        // SELF_FIRST: emit parent before descending
-                        // We mark that we've emitted this so next() will descend instead
-                        // Use property __spl_emitted_self per stack level
-                        let stack_arr = obj.borrow().get_property(b"__spl_iter_stack");
-                        let depth = if let Value::Array(s) = &stack_arr { s.borrow().len() - 1 } else { 0 };
-                        let key = format!("__spl_emitted_self_{}", depth).into_bytes();
-                        let already = matches!(obj.borrow().get_property(&key), Value::True);
-                        if !already {
-                            obj.borrow_mut().set_property(key, Value::True);
-                            return; // emit
-                        }
-                        // Already emitted, descend
-                        obj.borrow_mut().set_property(format!("__spl_emitted_self_{}", depth).into_bytes(), Value::Undef);
+                if mode == 1 {
+                    // SELF_FIRST: emit parent before descending
+                    // We mark that we've emitted this so next() will descend instead
+                    // Use property __spl_emitted_self per stack level
+                    let stack_arr = obj.borrow().get_property(b"__spl_iter_stack");
+                    let depth = if let Value::Array(s) = &stack_arr { s.borrow().len() - 1 } else { 0 };
+                    let key = format!("__spl_emitted_self_{}", depth).into_bytes();
+                    let already = matches!(obj.borrow().get_property(&key), Value::True);
+                    if !already {
+                        obj.borrow_mut().set_property(key, Value::True);
+                        return; // emit
                     }
-                    0 | 2 | _ => {}
+                    // Already emitted, descend
+                    obj.borrow_mut().set_property(format!("__spl_emitted_self_{}", depth).into_bytes(), Value::Undef);
                 }
                 // Descend: get children via callGetChildren on outer, push, rewind, call beginChildren
                 let obj_val = Value::Object(obj.clone());
@@ -7519,7 +7515,7 @@ impl Vm {
             }
             b"hasnext" => {
                 let ob = obj.borrow();
-                let inner = ob.get_property(b"__spl_inner");
+                let _inner = ob.get_property(b"__spl_inner");
                 drop(ob);
                 // Check if the inner iterator has more after current
                 // Actually, CachingIterator's hasNext() checks if the inner has already been advanced past
@@ -7737,7 +7733,7 @@ impl Vm {
                     // RegexIterator: match current() against the stored regex pattern
                     let ob = obj.borrow();
                     let pattern = ob.get_property(b"__regex_pattern");
-                    let regex_mode = ob.get_property(b"__regex_mode").to_long();
+                    let _regex_mode = ob.get_property(b"__regex_mode").to_long();
                     drop(ob);
                     // USE_KEY = 1 (mode flag that uses key instead of current value)
                     let subject_val = self.call_object_method(&inner, b"current", &[]).unwrap_or(Value::Null);
@@ -8459,7 +8455,7 @@ impl Vm {
                                     let tod = ((result_ts % 86400) + 86400) % 86400;
                                     let (cy, cm, cd) = vm_days_to_ymd(days_now);
                                     let new_m = cm as i64 + sign * m;
-                                    let total_months = (cy * 12 + new_m - 1 + sign * y * 12) as i64;
+                                    let total_months = cy * 12 + new_m - 1 + sign * y * 12;
                                     let ny = total_months / 12;
                                     let nm = (total_months % 12 + 1) as u32;
                                     let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
@@ -8522,7 +8518,7 @@ impl Vm {
                                     let tod = ((result_ts % 86400) + 86400) % 86400;
                                     let (cy, cm, cd) = vm_days_to_ymd(days_now);
                                     let new_m = cm as i64 + sign * m;
-                                    let total_months = (cy * 12 + new_m - 1 + sign * y * 12) as i64;
+                                    let total_months = cy * 12 + new_m - 1 + sign * y * 12;
                                     let ny = total_months / 12;
                                     let nm = (total_months % 12 + 1) as u32;
                                     let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
@@ -8638,7 +8634,7 @@ impl Vm {
                             let s = get_dual(b"s", b"__s").to_long();
                             let days = ob.get_property(b"days");
                             let invert = get_dual(b"invert", b"__invert").to_long();
-                            let f = get_dual(b"f", b"__f").to_double();
+                            let _f = get_dual(b"f", b"__f").to_double();
 
                             let mut result = String::new();
                             let fmt_bytes = format_str.as_bytes();
@@ -8750,7 +8746,7 @@ impl Vm {
                         }
                         b"getlocation" => {
                             let ob = obj.borrow();
-                            let tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
+                            let _tz_name = ob.get_property(b"timezone").to_php_string().to_string_lossy();
                             drop(ob);
                             let mut arr = PhpArray::new();
                             // Default values - simplified
@@ -8778,7 +8774,7 @@ impl Vm {
                         }
                         b"listabbreviations" => {
                             // Static method but may be called on instance
-                            let mut arr = PhpArray::new();
+                            let arr = PhpArray::new();
                             // Return a simplified version
                             Some(Value::Array(Rc::new(RefCell::new(arr))))
                         }
@@ -9395,8 +9391,7 @@ impl Vm {
                     let node_borrow = node_obj.borrow();
                     if *part == "." {
                         next_nodes.push(Value::Object(node_obj.clone()));
-                    } else if part.starts_with('@') {
-                        let attr_name = &part[1..];
+                    } else if let Some(attr_name) = part.strip_prefix('@') {
                         let attrs = node_borrow.get_property(b"@attributes");
                         if let Value::Array(attrs_arr) = &attrs {
                             let attrs_borrow = attrs_arr.borrow();
@@ -9497,14 +9492,14 @@ impl Vm {
                     match val {
                         Value::Object(_) => {
                             results.push(val.clone());
-                            self.simplexml_collect_descendants(&val, results);
+                            self.simplexml_collect_descendants(val, results);
                         }
                         Value::Array(arr) => {
                             let arr_borrow = arr.borrow();
                             for (_k, v) in arr_borrow.iter() {
                                 if let Value::Object(_) = v {
                                     results.push(v.clone());
-                                    self.simplexml_collect_descendants(&v, results);
+                                    self.simplexml_collect_descendants(v, results);
                                 }
                             }
                         }
@@ -9917,9 +9912,7 @@ impl Vm {
                 }
             }
             b"splobjectstorage" => {
-                match const_name {
-                    _ => None,
-                }
+                None
             }
             b"cachingiterator" => {
                 match const_name {
@@ -10173,7 +10166,7 @@ impl Vm {
     /// Format a timestamp with timezone info
     fn format_datetime_timestamp_tz(&self, format: &str, local_secs: i64, tz_abbrev: &str, offset_secs: i64) -> String {
         let days_since_epoch = if local_secs >= 0 { local_secs / 86400 } else { (local_secs - 86399) / 86400 };
-        let time_of_day = ((local_secs % 86400) + 86400) % 86400;
+        let time_of_day = local_secs.rem_euclid(86400);
         let hours = time_of_day / 3600;
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
@@ -10210,8 +10203,8 @@ impl Vm {
                 b'w' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; result.push_str(&format!("{}", dow)); }
                 b'D' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let names = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; result.push_str(names[dow as usize % 7]); }
                 b'l' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let names = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]; result.push_str(names[dow as usize % 7]); }
-                b'F' => { let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]; if month >= 1 && month <= 12 { result.push_str(names[(month-1) as usize]); } }
-                b'M' => { let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; if month >= 1 && month <= 12 { result.push_str(names[(month-1) as usize]); } }
+                b'F' => { let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]; if (1..=12).contains(&month) { result.push_str(names[(month-1) as usize]); } }
+                b'M' => { let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; if (1..=12).contains(&month) { result.push_str(names[(month-1) as usize]); } }
                 b't' => { let dim = match month { 1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30, 2 => if (year%4==0 && year%100!=0) || year%400==0 { 29 } else { 28 }, _ => 30 }; result.push_str(&format!("{}", dim)); }
                 b'L' => { let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 }; result.push_str(&format!("{}", leap)); }
                 b'S' => { let suffix = match day % 10 { 1 if day != 11 => "st", 2 if day != 12 => "nd", 3 if day != 13 => "rd", _ => "th" }; result.push_str(suffix); }
@@ -10220,7 +10213,7 @@ impl Vm {
                 b'z' => {
                     let days_in_months_arr = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
                     let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1 } else { 0 };
-                    let mut doy = days_in_months_arr[((month - 1).max(0) as usize).min(11)] + day - 1;
+                    let mut doy = days_in_months_arr[((month - 1) as usize).min(11)] + day - 1;
                     if month > 2 { doy += leap; }
                     result.push_str(&format!("{}", doy));
                 }
@@ -10230,9 +10223,9 @@ impl Vm {
                     let iso_jan1_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
                     let days_in_months_arr = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
                     let leap = if (year%4==0 && year%100!=0) || year%400==0 { 1u32 } else { 0 };
-                    let mut ordinal_day = days_in_months_arr[((month - 1).max(0) as usize).min(11)] + day;
+                    let mut ordinal_day = days_in_months_arr[((month - 1) as usize).min(11)] + day;
                     if month > 2 { ordinal_day += leap; }
-                    let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1) as i64) / 7;
+                    let wk = (ordinal_day as i64 - 1 + (iso_jan1_dow - 1)) / 7;
                     let iso_week = if iso_jan1_dow <= 4 { wk + 1 } else { wk };
                     let iso_week = if iso_week == 0 { 52 } else { iso_week };
                     result.push_str(&format!("{:02}", iso_week));
@@ -10240,7 +10233,7 @@ impl Vm {
                 b'o' => {
                     // ISO year
                     let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
-                    let iso_dow = if dow == 0 { 7 } else { dow };
+                    let _iso_dow = if dow == 0 { 7 } else { dow };
                     let jan1_days = vm_ymd_to_days(year, 1, 1);
                     let jan1_dow = ((jan1_days + 4) % 7 + 7) % 7;
                     let jan1_iso_dow = if jan1_dow == 0 { 7 } else { jan1_dow };
@@ -10268,7 +10261,7 @@ impl Vm {
                     result.push_str(&format!("{:03}", beats as i64 % 1000));
                 }
                 b'c' => { let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}", year, month, day, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60)); }
-                b'r' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let dnames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; let mnames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} {}{:02}{:02}", dnames[dow as usize % 7], day, mnames[(month-1).max(0) as usize % 12], year, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60)); }
+                b'r' => { let dow = ((days_since_epoch + 4) % 7 + 7) % 7; let dnames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; let mnames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]; let sign = if offset_secs < 0 { '-' } else { '+' }; let abs = offset_secs.unsigned_abs(); result.push_str(&format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} {}{:02}{:02}", dnames[dow as usize % 7], day, mnames[(month-1) as usize % 12], year, hours, minutes, seconds, sign, abs/3600, (abs%3600)/60)); }
                 _ => result.push(c as char),
             }
             i += 1;
@@ -10294,7 +10287,7 @@ impl Vm {
     /// Format a UTC timestamp as "Y-m-d H:i:s.000000" for DateTime var_dump display
     fn format_utc_datetime(secs: i64) -> String {
         let days_since_epoch = if secs >= 0 { secs / 86400 } else { (secs - 86399) / 86400 };
-        let time_of_day = ((secs % 86400) + 86400) % 86400;
+        let time_of_day = secs.rem_euclid(86400);
         let hours = time_of_day / 3600;
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
@@ -10314,7 +10307,7 @@ impl Vm {
 
     fn format_datetime_timestamp(&self, format: &str, secs: i64) -> String {
         let days_since_epoch = secs / 86400;
-        let time_of_day = ((secs % 86400) + 86400) % 86400;
+        let time_of_day = secs.rem_euclid(86400);
         let hours = time_of_day / 3600;
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
@@ -10356,11 +10349,11 @@ impl Vm {
                 }
                 b'U' => result.push_str(&format!("{}", secs)),
                 b'N' => {
-                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                    let dow = (days_since_epoch % 7 + 4 + 7) % 7;
                     result.push_str(&format!("{}", if dow == 0 { 7 } else { dow }));
                 }
                 b'w' => {
-                    let dow = ((days_since_epoch % 7 + 4 + 7) % 7) as i64;
+                    let dow = (days_since_epoch % 7 + 4 + 7) % 7;
                     result.push_str(&format!("{}", dow));
                 }
                 b'D' => {
@@ -10395,8 +10388,8 @@ impl Vm {
                 b'e' | b'T' => result.push_str("UTC"),
                 b'O' => result.push_str("+0000"),
                 b'P' => result.push_str("+00:00"),
-                b'p' => result.push_str("Z"),
-                b'Z' => result.push_str("0"),
+                b'p' => result.push('Z'),
+                b'Z' => result.push('0'),
                 b'c' => {
                     result.push_str(&format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
                         year, month, day, hours, minutes, seconds));
@@ -10825,7 +10818,7 @@ impl Vm {
                         if let Value::Object(key_rc) = &key_obj {
                             let key_oid = key_rc.borrow().object_id;
                             let weak = Rc::downgrade(key_rc);
-                            let entries = self.weak_map_entries.entry(wm_id).or_insert_with(Vec::new);
+                            let entries = self.weak_map_entries.entry(wm_id).or_default();
                             if let Some(entry) = entries.iter_mut().find(|(oid, _, _)| *oid == key_oid) {
                                 entry.2 = val;
                             } else {
@@ -11289,7 +11282,7 @@ impl Vm {
                     }
                     // [internal function] is encoded by file="" and line=0.
                     self.call_stack.push((handler_name, String::new(), 0, frame_args, false));
-                    let handler_result = self.call_callback(&handler, &[exc.clone()]);
+                    let handler_result = self.call_callback(&handler, std::slice::from_ref(&exc));
                     self.call_stack.pop();
                     match handler_result {
                         Ok(_) => {
@@ -11472,7 +11465,7 @@ impl Vm {
     fn execute_op_array(
         &mut self,
         op_array: &OpArray,
-        mut cvs: Vec<Value>,
+        cvs: Vec<Value>,
     ) -> Result<Value, VmError> {
         self.call_depth += 1;
         if self.call_depth > 100 {
@@ -11494,7 +11487,7 @@ impl Vm {
         // Detect implicit return: the compiler emits `Return Null` with line=0 for implicit returns
         // If result is Ok(Null) or Ok(Undef), and there was no explicit return, it's "none returned"
         let implicit_return = matches!(result, Ok(Value::Undef) | Ok(Value::Null))
-            && op_array.ops.last().map_or(false, |op| op.opcode == OpCode::Return && op.line == 0)
+            && op_array.ops.last().is_some_and(|op| op.opcode == OpCode::Return && op.line == 0)
             && !op_array.ops.iter().any(|op| op.opcode == OpCode::Return && op.line != 0);
         let mut result = result.map(|v| if matches!(v, Value::Undef) { Value::Null } else { v });
         // Coerce return value in weak mode
@@ -11747,7 +11740,7 @@ impl Vm {
                 }
 
                 OpCode::Assign => {
-                    let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     // The previous CV slot's object id (if any) is recycled
                     // via PhpObject::drop when Rc<...> hits zero. Pushing here
                     // as well caused duplicates in the free pool and silent
@@ -14755,7 +14748,7 @@ impl Vm {
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
                                     let weak = Rc::downgrade(key_rc);
-                                    let entries = self.weak_map_entries.entry(wm_id).or_insert_with(Vec::new);
+                                    let entries = self.weak_map_entries.entry(wm_id).or_default();
                                     if let Some(entry) = entries.iter_mut().find(|(oid, _, _)| *oid == key_oid) {
                                         entry.2 = val;
                                     } else {
@@ -14998,11 +14991,11 @@ impl Vm {
                             // Look-ahead helper: is next token directly adjacent (no
                             // intervening whitespace/comments) and a given kind?
                             let adjacent = |idx: usize, end_pos: usize| -> bool {
-                                tokens.get(idx).map_or(false, |t| t.span.start as usize == end_pos)
+                                tokens.get(idx).is_some_and(|t| t.span.start as usize == end_pos)
                             };
 
                             // Case 1: starts with `\` Backslash + Identifier → T_NAME_FULLY_QUALIFIED
-                            if matches!(tok.kind, TK::Backslash) && adjacent(i + 1, s_end) && tokens.get(i + 1).map_or(false, |t| is_ident(&t.kind)) {
+                            if matches!(tok.kind, TK::Backslash) && adjacent(i + 1, s_end) && tokens.get(i + 1).is_some_and(|t| is_ident(&t.kind)) {
                                 let mut j = i + 1;
                                 let mut end = tokens[j].span.end as usize;
                                 j += 1;
@@ -15024,8 +15017,8 @@ impl Vm {
                             }
                             // Case 2: `namespace` (T_NAMESPACE = 374) + `\` + Identifier → T_NAME_RELATIVE
                             if matches!(tok.kind, TK::Namespace) && adjacent(i + 1, s_end)
-                                && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
-                                && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+                                && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
+                                && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
                                 && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
                             {
                                 let mut j = i + 3;
@@ -15045,9 +15038,9 @@ impl Vm {
                             }
                             // Case 3: Identifier + `\` + Identifier → T_NAME_QUALIFIED
                             if is_ident(&tok.kind)
-                                && tokens.get(i + 1).map_or(false, |t| matches!(t.kind, TK::Backslash))
+                                && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
                                 && tokens[i + 1].span.start as usize == s_end
-                                && tokens.get(i + 2).map_or(false, |t| is_ident(&t.kind))
+                                && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
                                 && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
                             {
                                 let mut j = i + 3;
@@ -15068,8 +15061,8 @@ impl Vm {
 
                             // Fallback: emit single token.
                             let id_for_combined = if token_id == 0 {
-                                let c = src.get(s_start).copied().unwrap_or(0) as i64;
-                                c
+                                
+                                src.get(s_start).copied().unwrap_or(0) as i64
                             } else {
                                 token_id
                             };
@@ -15245,7 +15238,7 @@ impl Vm {
                         if let Value::Array(arr) = &arr_arg {
                             let arr_b = arr.borrow();
                             let check = |key: &[u8], pred: &dyn Fn(&Value) -> bool| -> bool {
-                                if let Some(v) = arr_b.get_str(key) { pred(&v) } else { true }
+                                if let Some(v) = arr_b.get_str(key) { pred(v) } else { true }
                             };
                             let is_obj_or_null = |v: &Value| matches!(v, Value::Object(_) | Value::Null);
                             let is_obj_di = |v: &Value| {
@@ -16007,7 +16000,7 @@ impl Vm {
                                 || func_name_lower == b"forward_static_call_array";
                             if forwards_named {
                                 // Store named args on VM for forwarding
-                                self.pending_named_args = call.named_args.drain(..).collect();
+                                self.pending_named_args = std::mem::take(&mut call.named_args);
                             } else if let Some(param_names) = self.builtin_param_names.get(&func_name_lower).cloned() {
                                 let param_refs: Vec<&[u8]> = param_names.iter().map(|p| p.as_slice()).collect();
                                 let resolved = call.resolve_named_args_builtin(&param_refs);
@@ -16297,7 +16290,7 @@ impl Vm {
                                         }
                                     }
                                 } else if func_name_lower.ends_with(b"::__callstatic") {
-                                    if let Some(Value::String(s)) = call.args.get(0) {
+                                    if let Some(Value::String(s)) = call.args.first() {
                                         if let Some(sep) = fn_display.rfind("::") {
                                             fn_display = format!("{}::{}", &fn_display[..sep], s.to_string_lossy());
                                         }
@@ -16420,7 +16413,7 @@ impl Vm {
                                                                     let cs_op = cs_method.op_array.clone();
                                                                     let cs_declaring = cs_method.declaring_class.clone();
                                                                     let mut fn_cvs = vec![Value::Undef; cs_op.cv_names.len()];
-                                                                    if fn_cvs.len() > 0 {
+                                                                    if !fn_cvs.is_empty() {
                                                                         fn_cvs[0] = Value::String(PhpString::from_vec(method_part_owned.clone()));
                                                                     }
                                                                     if fn_cvs.len() > 1 {
@@ -16443,7 +16436,7 @@ impl Vm {
                                                                     let call_op = call_method.op_array.clone();
                                                                     let call_declaring = call_method.declaring_class.clone();
                                                                     let mut fn_cvs = vec![Value::Undef; call_op.cv_names.len()];
-                                                                    if fn_cvs.len() > 0 {
+                                                                    if !fn_cvs.is_empty() {
                                                                         fn_cvs[0] = cvs[0].clone(); // $this
                                                                     }
                                                                     if fn_cvs.len() > 1 {
@@ -16470,7 +16463,7 @@ impl Vm {
                                                                     let cs_op = cs_method.op_array.clone();
                                                                     let cs_declaring = cs_method.declaring_class.clone();
                                                                     let mut fn_cvs = vec![Value::Undef; cs_op.cv_names.len()];
-                                                                    if fn_cvs.len() > 0 {
+                                                                    if !fn_cvs.is_empty() {
                                                                         fn_cvs[0] = Value::String(PhpString::from_vec(method_part_owned.clone()));
                                                                     }
                                                                     if fn_cvs.len() > 1 {
@@ -17648,9 +17641,9 @@ impl Vm {
                                                         }
                                                         return Err(VmError { message: msg, line: op.line });
                                                     }
-                                                    Value::String(s) => {
+                                                    Value::String(_s) => {
                                                         drop(obj_mut);
-                                                        let msg = format!("SplFixedArray::__construct(): Argument #1 ($size) must be of type int, string given");
+                                                        let msg = "SplFixedArray::__construct(): Argument #1 ($size) must be of type int, string given".to_string();
                                                         let exc = self.throw_type_error(msg.clone());
                                                         self.current_exception = Some(exc);
                                                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -18656,7 +18649,7 @@ impl Vm {
                                                     (b"Uri\\WhatWg\\InvalidUrlException" as &[u8], msg)
                                                 } else {
                                                     (b"Uri\\InvalidUriException" as &[u8],
-                                                     format!("The specified URI is malformed"))
+                                                     "The specified URI is malformed".to_string())
                                                 };
                                                 let exc = self.create_exception(exc_class, &msg, op.line);
                                                 self.current_exception = Some(exc);
@@ -18929,7 +18922,7 @@ impl Vm {
                                         // Only parent::method() from instance method should use __call
                                         // Regular ClassName::method() and $obj::method() should use __callStatic
                                         let class_part_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        let is_parent_call = class_part_lower == b"parent";
+                                        let _is_parent_call = class_part_lower == b"parent";
                                         // In instance context: $this is an object AND calling class is in inheritance chain
                                         // Exclude traits: traits should always use __callStatic for direct static calls
                                         let calling_class_is_trait = self.classes.get(&class_lower)
@@ -18964,7 +18957,7 @@ impl Vm {
                                                 let mut fn_cvs =
                                                     vec![Value::Undef; call_op.cv_names.len()];
                                                 // __call($name, $arguments): CV[0]=$this, CV[1]=$name, CV[2]=$args
-                                                if fn_cvs.len() > 0 {
+                                                if !fn_cvs.is_empty() {
                                                     fn_cvs[0] = cvs[0].clone(); // $this
                                                 }
                                                 if fn_cvs.len() > 1 {
@@ -19004,7 +18997,7 @@ impl Vm {
                                                 let mut fn_cvs =
                                                     vec![Value::Undef; call_static_op.cv_names.len()];
                                                 // __callStatic($name, $arguments)
-                                                if fn_cvs.len() > 0 {
+                                                if !fn_cvs.is_empty() {
                                                     fn_cvs[0] = Value::String(PhpString::from_vec(
                                                         method_part.to_vec(),
                                                     ));
@@ -19248,7 +19241,7 @@ impl Vm {
                                                 // mysqli_* functions expect $this as args[0], so we
                                                 // can just pass call.args directly.
                                                 let bridge_args: Vec<Value> = if call.args.first().map(|v| matches!(v, Value::Object(_))).unwrap_or(false) {
-                                                    call.args.iter().cloned().collect()
+                                                    call.args.to_vec()
                                                 } else {
                                                     let mut v = vec![this_val.clone()];
                                                     v.extend(call.args.iter().cloned());
@@ -19402,11 +19395,7 @@ impl Vm {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     // Try extension-provided long cast (e.g. GMP).
                     let long_val = if let Some(handler) = self.object_to_long {
-                        if let Some(n) = handler(&val) {
-                            Some(n)
-                        } else {
-                            None
-                        }
+                        handler(&val)
                     } else {
                         None
                     };
@@ -19443,11 +19432,7 @@ impl Vm {
                 OpCode::CastFloat => {
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let double_val = if let Some(handler) = self.object_to_double {
-                        if let Some(d) = handler(&val) {
-                            Some(d)
-                        } else {
-                            None
-                        }
+                        handler(&val)
                     } else {
                         None
                     };
@@ -20266,7 +20251,7 @@ impl Vm {
                         let offsetget_result = self.handle_spl_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
                                 // Try user-defined offsetGet method
-                                self.call_object_method(&arr_val, b"offsetget", &[key_val.clone()])
+                                self.call_object_method(&arr_val, b"offsetget", std::slice::from_ref(&key_val))
                                     .unwrap_or(Value::Null)
                             });
                         if let Some(exc_val) = self.current_exception.take() {
@@ -20384,7 +20369,7 @@ impl Vm {
                         let args = vec![arr_val.clone(), key_val.clone()];
                         let offsetget_result2 = self.handle_spl_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
-                                self.call_object_method(&arr_val, b"offsetget", &[key_val.clone()])
+                                self.call_object_method(&arr_val, b"offsetget", std::slice::from_ref(&key_val))
                                     .unwrap_or(Value::Null)
                             });
                         if let Some(exc_val) = self.current_exception.take() {
@@ -20421,7 +20406,7 @@ impl Vm {
                 }
 
                 OpCode::ForeachInit => {
-                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
 
                     if let Value::Generator(gen_rc) = &arr_val {
                         // For generators, advance to the first yield on init only if not already started.
@@ -21150,7 +21135,7 @@ impl Vm {
                 }
 
                 OpCode::ForeachInitRef => {
-                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let arr_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
 
                     // Handle Generator values - delegate to ForeachInit behavior
                     if let Value::Generator(gen_rc) = &arr_val {
@@ -21182,9 +21167,7 @@ impl Vm {
                                         ip = catch_target as usize;
                                         continue;
                                     }
-                                    if let Err(e) = resume_result {
-                                        return Err(e);
-                                    }
+                                    resume_result?;
                                     return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
                                 }
                             }
@@ -22005,10 +21988,10 @@ impl Vm {
                         op1_val.to_php_string()
                     };
                     // Clone op2 so we can emit undefined-variable warning (requires &mut self)
-                    let op2_clone = op.op2.clone();
+                    let op2_clone = op.op2;
                     let op_line = op.line;
                     let prop_name_val = self
-                        .read_operand_warn(&op2_clone, &cvs, &tmps, &op_array.literals, &op_array, op_line);
+                        .read_operand_warn(&op2_clone, &cvs, &tmps, &op_array.literals, op_array, op_line);
                     // Validate prop name type for all const fetches: only strings are valid
                     if !matches!(prop_name_val, Value::String(_)) {
                         let type_name = match &prop_name_val {
@@ -23397,7 +23380,7 @@ impl Vm {
                                 let err_msg = if e.message.contains("unexpected") || e.message.contains("syntax error") || e.message.starts_with("Invalid ") {
                                     e.message.clone()
                                 } else {
-                                    format!("syntax error")
+                                    "syntax error".to_string()
                                 };
                                 let msg = format!("\nParse error: {} in {}({}) : eval()'d code on line {}\n",
                                     err_msg, self.current_file, op.line, e.span.line);
@@ -25012,7 +24995,7 @@ impl Vm {
                             return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
                         }
                         // ArrayAccess: the element is fetched via offsetGet (by value).
-                        let v = self.call_object_method(&arr_val, b"offsetGet", &[key_val.clone()]).unwrap_or(Value::Null);
+                        let v = self.call_object_method(&arr_val, b"offsetGet", std::slice::from_ref(&key_val)).unwrap_or(Value::Null);
                         self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if matches!(arr_val, Value::Null | Value::Undef) && matches!(op.op1, OperandType::Cv(_)) {
                         // Write fetch on an unset/null variable vivifies an array.
@@ -25470,8 +25453,8 @@ impl Vm {
                     // Spread source array/traversable/generator elements into target array.
                     // Returns Err(msg) for invalid types or bad keys; sets current_exception
                     // if a Traversable method threw.
-                    let target_op = op.op1.clone();
-                    let source = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, &op_array, op.line);
+                    let target_op = op.op1;
+                    let source = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
 
                     let collected: Result<Vec<(ArrayKey, Value)>, String> = match &source {
                         Value::Array(source_arr) => {
@@ -25566,7 +25549,7 @@ impl Vm {
                                 let arr = arr.borrow();
                                 // Validate keys from SPL array
                                 let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
-                                let mut spread_err: Option<String> = None;
+                                let spread_err: Option<String> = None;
                                 for (k, v) in arr.iter() {
                                     pairs.push((k.clone(), v.clone()));
                                 }
@@ -26009,8 +25992,8 @@ impl Vm {
                                 }
                                 // Check if parent is final
                                 if parent.is_final {
-                                    let parent_display = String::from_utf8_lossy(parent_name).to_string();
-                                    let child_display = String::from_utf8_lossy(&name_val.to_php_string().as_bytes()).to_string();
+                                    let _parent_display = String::from_utf8_lossy(parent_name).to_string();
+                                    let child_display = String::from_utf8_lossy(name_val.to_php_string().as_bytes()).to_string();
                                     let parent_display = String::from_utf8_lossy(&parent.name).to_string();
                                     return Err(VmError {
                                         message: format!("Class {} cannot extend final class {}", child_display, parent_display),
@@ -26020,7 +26003,7 @@ impl Vm {
                                 // Check if parent is an enum (enums cannot be extended)
                                 if parent.is_enum {
                                     let parent_display = String::from_utf8_lossy(parent_name).to_string();
-                                    let child_display = String::from_utf8_lossy(&name_val.to_php_string().as_bytes()).to_string();
+                                    let child_display = String::from_utf8_lossy(name_val.to_php_string().as_bytes()).to_string();
                                     return Err(VmError {
                                         message: format!("Class {} cannot extend enum {}", child_display, parent_display),
                                         line: op.line,
@@ -26175,7 +26158,7 @@ impl Vm {
                                                 });
                                             }
                                         }
-                                        let parent_decl_name = self
+                                        let _parent_decl_name = self
                                             .classes
                                             .get(&method.declaring_class.to_ascii_lowercase())
                                             .map(|c| c.name.clone())
@@ -26238,7 +26221,7 @@ impl Vm {
                                     }
                                 }
                                 // Inherit properties (parent properties come first, child overrides take precedence)
-                                let child_prop_names: Vec<Vec<u8>> =
+                                let _child_prop_names: Vec<Vec<u8>> =
                                     class.properties.iter().map(|p| p.name.clone()).collect();
                                 // If the child is not abstract/interface and the parent has
                                 // abstract property hooks, the child must implement them.
@@ -27769,7 +27752,7 @@ impl Vm {
                                             iface_origin = String::from_utf8_lossy(&dc.name).to_string();
                                         } else {
                                             iface_origin = String::from_utf8_lossy(
-                                                &name_val.to_php_string().as_bytes(),
+                                                name_val.to_php_string().as_bytes(),
                                             )
                                             .to_string();
                                         }
@@ -27875,7 +27858,7 @@ impl Vm {
                         let class_name_orig = name_val.to_php_string().as_bytes().to_vec();
 
                         // Register all methods as callable functions: ClassName::methodName
-                        for (method_name, method) in &class.methods {
+                        for (_method_name, method) in &class.methods {
                             let mut func_name = class_name_orig.clone();
                             func_name.extend_from_slice(b"::");
                             func_name.extend_from_slice(&method.name);
@@ -27969,7 +27952,7 @@ impl Vm {
                                             let err_msg = if ref_exists && ref_still_deferred {
                                                 // Circular reference: A = self::B, B = self::A
                                                 // PHP reports the name of the referenced constant
-                                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                                let _class_display = String::from_utf8_lossy(&class.name).to_string();
                                                 let const_display = String::from_utf8_lossy(ref_const).to_string();
                                                 format!("Cannot declare self-referencing constant self::{}", const_display)
                                             } else if !ref_exists {
@@ -28345,7 +28328,7 @@ impl Vm {
                             let (canonical, prev_info) = if let Some(existing) = self.classes.get(&name_lower) {
                                 let name = String::from_utf8_lossy(&existing.name).to_string();
                                 let prev = if existing.start_line > 0 {
-                                    format!(" (previously declared in {}:{})", &self.current_file, existing.start_line)
+                                    format!(" (previously declared in {}:{})", self.current_file, existing.start_line)
                                 } else {
                                     String::new()
                                 };
@@ -29048,7 +29031,7 @@ impl Vm {
                         obj.set_property(b"previous".to_vec(), Value::Null);
                         // Build trace from call stack
                         let mut trace_arr = PhpArray::new();
-                        for (_i, (func_name, file, line, args, is_instance)) in self.call_stack.iter().rev().enumerate() {
+                        for (func_name, file, line, args, is_instance) in self.call_stack.iter().rev() {
                             let mut frame = PhpArray::new();
                             frame.set(ArrayKey::String(PhpString::from_bytes(b"file")), Value::String(PhpString::from_string(file.clone())));
                             frame.set(ArrayKey::String(PhpString::from_bytes(b"line")), Value::Long(*line as i64));
@@ -29901,16 +29884,13 @@ impl Vm {
                                     if let Some(class) = self.classes.get(&class_lower) {
                                         if let Some(prop_def) = class.properties.iter().find(|p| p.name == prop_name.as_bytes()) {
                                             if let Some(ref pt) = prop_def.property_type {
-                                                match pt {
-                                                    ParamType::Simple(t) => match t.as_slice() {
-                                                        b"int" | b"integer" => { result = Value::Long(result.to_long()); }
-                                                        b"float" | b"double" => { result = Value::Double(result.to_double()); }
-                                                        b"string" => { result = Value::String(result.to_php_string()); }
-                                                        b"bool" | b"boolean" => { result = if result.is_truthy() { Value::True } else { Value::False }; }
-                                                        _ => {}
-                                                    }
+                                                if let ParamType::Simple(t) = pt { match t.as_slice() {
+                                                    b"int" | b"integer" => { result = Value::Long(result.to_long()); }
+                                                    b"float" | b"double" => { result = Value::Double(result.to_double()); }
+                                                    b"string" => { result = Value::String(result.to_php_string()); }
+                                                    b"bool" | b"boolean" => { result = if result.is_truthy() { Value::True } else { Value::False }; }
                                                     _ => {}
-                                                }
+                                                } }
                                             }
                                         }
                                     }
@@ -30014,7 +29994,7 @@ impl Vm {
                                         // Typed property was unset — throw Error
                                         let class_display = crate::value::display_class_name(&class_name_orig);
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
-                                        let type_name = self.param_type_name(tp.property_type.as_ref().unwrap());
+                                        let _type_name = self.param_type_name(tp.property_type.as_ref().unwrap());
                                         let msg = format!("Typed property {}::${} must not be accessed before initialization",
                                             class_display, prop_display);
                                         let exc = self.create_exception(b"Error", &msg, op.line);
@@ -31395,7 +31375,7 @@ impl Vm {
                             // method with that name, use the caller's version.
                             let method_resolved = {
                                 let initial_method = class.get_method(&method_name_lower);
-                                if let Some(ref m) = initial_method {
+                                if let Some(m) = initial_method {
                                     if m.visibility == Visibility::Private {
                                         let declaring_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         let caller_scope = self.current_class_scope();
@@ -31806,9 +31786,7 @@ impl Vm {
                                             ip = catch_target as usize;
                                             continue;
                                         }
-                                        if let Err(e) = resume_result {
-                                            return Err(e);
-                                        }
+                                        resume_result?;
                                         return Err(VmError { message: "Uncaught exception in generator".to_string(), line: op.line });
                                     }
                                 } else if gen_borrow.advanced_past_first {
@@ -33129,7 +33107,8 @@ impl Vm {
             // same OS thread, so no aliasing occurs while we hold it.
             let vm: &mut Vm = unsafe { &mut *vm_ptr };
 
-            let outcome = match vm.call_callback(&callback, &args_owned) {
+            
+            match vm.call_callback(&callback, &args_owned) {
                 Ok(v) => crate::fiber::FiberOutcome::Returned(v),
                 Err(e) => {
                     if let Some(exc) = vm.current_exception.take() {
@@ -33140,8 +33119,7 @@ impl Vm {
                         crate::fiber::FiberOutcome::Failed(e.message, e.line)
                     }
                 }
-            };
-            outcome
+            }
         };
 
         let mut fiber = crate::fiber::PhpFiber::new(display_name_for_stack.clone(), body);
@@ -34216,7 +34194,7 @@ pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         return Some(now);
     }
     // Try absolute date formats
-    let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
+    let parts: Vec<&str> = s.splitn(2, [' ', 'T']).collect();
     let date_str_raw = parts.first().unwrap_or(&"");
     // Handle leading "+" (expanded ISO year) and "-" (negative year).
     let (year_sign, date_str): (i64, &str) = if let Some(rest) = date_str_raw.strip_prefix('+') {
@@ -34227,16 +34205,16 @@ pub fn vm_parse_datetime_string(input: &str, now: i64) -> Option<i64> {
         (1, *date_str_raw)
     };
     // Support `-` and `/` as date separators (e.g. "2005/8/12").
-    let date_parts: Vec<&str> = date_str.split(|c: char| c == '-' || c == '/').collect();
+    let date_parts: Vec<&str> = date_str.split(['-', '/']).collect();
     if date_parts.len() == 3 {
         if let (Ok(year_abs), Ok(month), Ok(day)) = (date_parts[0].parse::<i64>(), date_parts[1].parse::<u32>(), date_parts[2].parse::<u32>()) {
             let year = year_abs * year_sign;
-            if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+            if (1..=12).contains(&month) && (1..=31).contains(&day) {
                 let mut h = 0i64;
                 let mut m = 0i64;
                 let mut sec = 0i64;
                 if let Some(time_str) = parts.get(1) {
-                    let time_clean = time_str.trim_end_matches(|c: char| c == 'Z' || c == 'z');
+                    let time_clean = time_str.trim_end_matches(['Z', 'z']);
                     let time_no_tz = time_clean.split('+').next().unwrap_or(time_clean);
                     // Also strip any trailing tz abbreviation/identifier or sign-offset.
                     // The first space (or '-' after a digit) ends the time portion.
@@ -34387,7 +34365,7 @@ fn vm_apply_unit(ts: i64, amount: i64, unit: &str) -> Option<i64> {
         "week" => Some(ts + amount * 7 * 86400),
         "month" => {
             let days = ts / 86400;
-            let tod = ((ts % 86400) + 86400) % 86400;
+            let tod = ts.rem_euclid(86400);
             let (year, month, day) = vm_days_to_ymd(days);
             let new_m = month as i64 + amount;
             let (adj_y, adj_m) = if new_m > 0 {
@@ -34403,7 +34381,7 @@ fn vm_apply_unit(ts: i64, amount: i64, unit: &str) -> Option<i64> {
         }
         "year" => {
             let days = ts / 86400;
-            let tod = ((ts % 86400) + 86400) % 86400;
+            let tod = ts.rem_euclid(86400);
             let (year, month, day) = vm_days_to_ymd(days);
             let ny = year + amount;
             let is_leap = ny % 4 == 0 && (ny % 100 != 0 || ny % 400 == 0);
@@ -34457,8 +34435,8 @@ fn create_date_interval_from_timestamps(vm: &mut Vm, ts1: i64, ts2: i64, absolut
     let (y1, m1, d1) = vm_days_to_ymd(days1);
     let (y2, m2, d2) = vm_days_to_ymd(days2);
 
-    let time1 = ((ts1 % 86400) + 86400) % 86400;
-    let time2 = ((ts2 % 86400) + 86400) % 86400;
+    let time1 = ts1.rem_euclid(86400);
+    let time2 = ts2.rem_euclid(86400);
     let h1 = time1 / 3600; let i1 = (time1 % 3600) / 60; let s1 = time1 % 60;
     let h2 = time2 / 3600; let i2 = (time2 % 3600) / 60; let s2 = time2 % 60;
 
@@ -34518,7 +34496,7 @@ fn vm_parse_with_format(format: &str, datetime: &str, now: i64) -> Option<i64> {
 fn vm_parse_with_format_ex(format: &str, datetime: &str, now: i64) -> Option<(i64, Option<(String, i64)>)> {
     let now_days = now / 86400;
     let (now_year, now_month, now_day) = vm_days_to_ymd(now_days);
-    let now_tod = ((now % 86400) + 86400) % 86400;
+    let now_tod = now.rem_euclid(86400);
     let now_hour = now_tod / 3600;
     let now_minute = (now_tod % 3600) / 60;
     let now_second = now_tod % 60;
@@ -34764,7 +34742,7 @@ fn vm_is_us_dst(timestamp: i64, std_offset: i64) -> bool {
     let days = if local >= 0 { local / 86400 } else { (local - 86399) / 86400 };
     let tod = ((local % 86400) + 86400) % 86400;
     let (year, month, day) = Vm::days_to_ymd_static(days);
-    if month < 3 || month > 11 { return false; }
+    if !(3..=11).contains(&month) { return false; }
     if month > 3 && month < 11 { return true; }
     if month == 3 {
         let mar1 = vm_ymd_to_days(year, 3, 1);
@@ -34789,7 +34767,7 @@ fn vm_is_us_dst(timestamp: i64, std_offset: i64) -> bool {
 fn vm_is_eu_dst(timestamp: i64) -> bool {
     let days = if timestamp >= 0 { timestamp / 86400 } else { (timestamp - 86399) / 86400 };
     let (year, month, _day) = Vm::days_to_ymd_static(days);
-    if month < 3 || month > 10 { return false; }
+    if !(3..=10).contains(&month) { return false; }
     if month > 3 && month < 10 { return true; }
     if month == 3 {
         let mar31 = vm_ymd_to_days(year, 3, 31);
@@ -34921,7 +34899,7 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
             // Australia DST: first Sunday in October to first Sunday in April
             let days = if timestamp >= 0 { timestamp / 86400 } else { (timestamp - 86399) / 86400 };
             let (_, month, _) = Vm::days_to_ymd_static(days);
-            if month >= 4 && month <= 9 {
+            if (4..=9).contains(&month) {
                 (9 * 3600 + 1800, "ACST".to_string())
             } else {
                 (10 * 3600 + 1800, "ACDT".to_string())
@@ -34930,7 +34908,7 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
         "Australia/Sydney" | "Australia/Melbourne" | "Australia/Hobart" => {
             let days = if timestamp >= 0 { timestamp / 86400 } else { (timestamp - 86399) / 86400 };
             let (_, month, _) = Vm::days_to_ymd_static(days);
-            if month >= 4 && month <= 9 {
+            if (4..=9).contains(&month) {
                 (10 * 3600, "AEST".to_string())
             } else {
                 (11 * 3600, "AEDT".to_string())
@@ -34940,7 +34918,7 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
         "Pacific/Auckland" | "NZ" => {
             let days = if timestamp >= 0 { timestamp / 86400 } else { (timestamp - 86399) / 86400 };
             let (_, month, _) = Vm::days_to_ymd_static(days);
-            if month >= 4 && month <= 9 {
+            if (4..=9).contains(&month) {
                 (12 * 3600, "NZST".to_string())
             } else {
                 (13 * 3600, "NZDT".to_string())
@@ -34949,9 +34927,9 @@ pub fn vm_timezone_offset_and_abbrev(tz_name: &str, timestamp: i64) -> (i64, Str
         "Pacific/Fiji" => (12 * 3600, "FJT".to_string()),
         "Africa/Cairo" => (2 * 3600, "EET".to_string()),
         "Africa/Johannesburg" | "Africa/Harare" => (2 * 3600, "SAST".to_string()),
-        "Africa/Lagos" | "Africa/Douala" => (1 * 3600, "WAT".to_string()),
+        "Africa/Lagos" | "Africa/Douala" => (3600, "WAT".to_string()),
         "Africa/Nairobi" | "Africa/Addis_Ababa" => (3 * 3600, "EAT".to_string()),
-        "Africa/Casablanca" => (1 * 3600, "WET".to_string()),
+        "Africa/Casablanca" => (3600, "WET".to_string()),
         "Atlantic/Reykjavik" | "Iceland" => (0, "GMT".to_string()),
         "Atlantic/Azores" => {
             if vm_is_eu_dst(timestamp) { (0, "AZOST".to_string()) }

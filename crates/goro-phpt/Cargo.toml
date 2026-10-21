@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "PHPT test runner for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }

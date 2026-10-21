@@ -25,12 +25,24 @@ members = [
 ]
 resolver = "2"
 
+# Style lints that would churn large parts of the codebase; everything else
+# in clippy's default set is enforced in CI with -D warnings.
+[workspace.lints.clippy]
+collapsible_if = "allow"
+collapsible_else_if = "allow"
+collapsible_match = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+
 [package]
 name = "goro"
 version = "0.1.0"
 edition = "2024"
 description = "A PHP 8.5 implementation in Rust"
 license = "MIT"
+
+[lints]
+workspace = true
 
 [dependencies]
 goro-core = { path = "crates/goro-core" }

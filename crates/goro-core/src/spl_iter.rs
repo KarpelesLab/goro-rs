@@ -1299,7 +1299,7 @@ impl Vm {
                     return Some(Value::False);
                 }
                 if let Value::Array(a) = Self::dit_cur(obj) {
-                    return Some(bv(a.borrow().len() > 0));
+                    return Some(bv(!a.borrow().is_empty()));
                 }
                 return Some(self.regex_accept(obj));
             }

@@ -219,7 +219,7 @@ fn initialize_from_ts_double(vm: &mut Vm, fname: &str, ts: f64) -> R<Time> {
         );
         throw(vm, b"DateRangeError", &msg)
     };
-    if sec_dval.is_nan() || !(sec_dval >= -9.223372036854775808e18 && sec_dval < 9.223372036854775808e18) {
+    if sec_dval.is_nan() || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&sec_dval) {
         return Err(range_err(vm));
     }
     let mut sec = sec_dval as i64;
@@ -574,10 +574,7 @@ pub fn construct_datetime(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
         check_count(vm, &fname, &uargs, 0, 2)?;
         let time_str = str_arg(vm, &fname, &uargs, 0, "datetime", false)?.unwrap_or_default();
         let tz = obj_arg(vm, &fname, &uargs, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-        let tzobj = match &tz {
-            Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
-            None => None,
-        };
+        let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
         if let Some(t) = date_initialize(vm, &time_str, None, tzobj.as_ref(), INIT_CTOR)? {
             date_set(&this, &t);
         }
@@ -675,7 +672,7 @@ fn period_init_iso(vm: &mut Vm, p: &mut PeriodObj, base_ce: &[u8], isostr: &[u8]
 }
 
 fn period_init_finish(vm: &mut Vm, p: &mut PeriodObj, options: i64, recurrences: i64, fname: &str) -> R<()> {
-    if p.end.is_none() && (recurrences < 1 || recurrences > MAX_RECURRENCES) {
+    if p.end.is_none() && !(1..=MAX_RECURRENCES).contains(&recurrences) {
         return Err(throw(
             vm,
             b"DateMalformedPeriodStringException",
@@ -1220,10 +1217,7 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
             let format = str_arg(vm, &f, args, 0, "format", false)?.unwrap_or_default();
             let ts = path_arg(vm, &f, args, 1, "datetime")?.unwrap_or_default();
             let tz = obj_arg(vm, &f, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-            let tzobj = match &tz {
-                Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
-                None => None,
-            };
+            let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
             let cls = called_or_base(vm);
             check_instantiable(vm, &cls)?;
             match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
@@ -1323,7 +1317,7 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
     };
     let mut out = new_arr();
     let fmt = b"x-m-d\\TH:i:sP";
-    let mut add_el = |vm: &mut Vm, out: &mut PhpArray, ts: i64, offset: i64, isdst: bool, abbr: String| {
+    let add_el = |vm: &mut Vm, out: &mut PhpArray, ts: i64, offset: i64, isdst: bool, abbr: String| {
         let mut el = new_arr();
         arr_set(&mut el, "ts", Value::Long(ts));
         arr_set(&mut el, "time", Value::String(PhpString::from_vec(php_format_date(vm, fmt, ts, false))));
@@ -1342,10 +1336,10 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
         add_el(vm, out, begin, t.offset as i64, t.isdst != 0, tz.abbr_at(t.abbr_idx));
     };
     let mut beg = 0usize;
-    let found;
-    if begin == i64::MIN {
+    
+    let found = if begin == i64::MIN {
         add_nominal(vm, &mut out);
-        found = true;
+        true
     } else {
         let mut f = false;
         if tz.timecnt > 0 {
@@ -1362,8 +1356,8 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
                 beg += 1;
             }
         }
-        found = f;
-    }
+        f
+    };
     let has_posix_end = tz.posix_info.as_ref().map(|p| p.dst_end.is_some()).unwrap_or(false);
     if !found {
         if tz.timecnt > 0 {
@@ -1585,7 +1579,7 @@ pub fn dval_to_lval(vm: &mut Vm, d: f64) -> i64 {
         vm.emit_warning(&format!("The float {} is not representable as an int, cast occurred", goro_core::value::format_php_float(d)));
         return 0;
     }
-    if !(d >= -9.223372036854775808e18 && d < 9.223372036854775808e18) {
+    if !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
         vm.emit_warning(&format!("The float {} is not representable as an int, cast occurred", goro_core::value::format_php_float(d)));
         let two64 = 18446744073709551616.0f64;
         let mut dmod = d % two64;
@@ -1989,10 +1983,7 @@ fn date_create_common(vm: &mut Vm, args: &[Value], fname: &str, cls: &[u8]) -> R
     check_count(vm, fname, args, 0, 2)?;
     let time_str = str_arg(vm, fname, args, 0, "datetime", false)?.unwrap_or_default();
     let tz = obj_arg(vm, fname, args, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-    let tzobj = match &tz {
-        Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
-        None => None,
-    };
+    let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
     match date_initialize(vm, &time_str, None, tzobj.as_ref(), 0)? {
         Some(t) => {
             let o = new_object(vm, cls);
@@ -2016,10 +2007,7 @@ fn date_create_from_format_common(vm: &mut Vm, args: &[Value], fname: &str, cls:
     let format = str_arg(vm, fname, args, 0, "format", false)?.unwrap_or_default();
     let ts = path_arg(vm, fname, args, 1, "datetime")?.unwrap_or_default();
     let tz = obj_arg(vm, fname, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-    let tzobj = match &tz {
-        Some(o) => Some(tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None })),
-        None => None,
-    };
+    let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
     match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
         Some(t) => {
             let o = new_object(vm, cls);

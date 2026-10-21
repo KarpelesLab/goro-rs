@@ -700,7 +700,7 @@ fn socket_write(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args
         .get(1)
         .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::empty());
+        .unwrap_or_else(PhpString::empty);
     let max_len = args.get(2).and_then(|v| match v {
         Value::Null | Value::Undef => None,
         _ => Some(v.to_long() as usize),
@@ -757,7 +757,7 @@ fn socket_send(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args
         .get(1)
         .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::empty());
+        .unwrap_or_else(PhpString::empty);
     let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(0);
     let _flags = args.get(3).map(|v| v.to_long()).unwrap_or(0);
 
@@ -1180,11 +1180,11 @@ fn get_socket_option(handle: &SocketHandle, level: i64, optname: i64) -> std::io
             let mut arr = PhpArray::new();
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"sec")),
-                Value::Long(timeval.tv_sec as i64),
+                Value::Long(timeval.tv_sec),
             );
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"usec")),
-                Value::Long(timeval.tv_usec as i64),
+                Value::Long(timeval.tv_usec),
             );
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         } else {
@@ -1621,13 +1621,13 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let exists = SOCKETS.with(|s| {
                             let sockets = s.borrow();
                             if let Some(handle) = sockets.get(&sid) {
-                                let fd = match handle {
+                                
+                                match handle {
                                     SocketHandle::TcpClient(s) => Some(s.as_raw_fd()),
                                     SocketHandle::TcpServer(s) => Some(s.as_raw_fd()),
                                     SocketHandle::Udp(s) => Some(s.as_raw_fd()),
                                     SocketHandle::Closed => None,
-                                };
-                                fd
+                                }
                             } else {
                                 None
                             }
@@ -1710,7 +1710,7 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             // Update arrays
-            let write_into = |arg: Option<&Value>, fds: &[(i64, i32)], set: &libc::fd_set, vm: &mut Vm| {
+            let write_into = |arg: Option<&Value>, fds: &[(i64, i32)], set: &libc::fd_set, _vm: &mut Vm| {
                 if let Some(val) = arg {
                     if let Value::Reference(rc) = val {
                         let mut arr = PhpArray::new();
@@ -1846,7 +1846,7 @@ fn socket_create_pair_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     // PHP only validates type against a fixed list when it's clearly out of range.
     // The value 0 is accepted (socketpair() will fail with EPROTOTYPE at runtime).
     // Reject only large invalid values (e.g. 31337).
-    if sock_type > 10 || sock_type < -1 {
+    if !(-1..=10).contains(&sock_type) {
         return Err(throw_value_error(
             vm,
             "socket_create_pair(): Argument #2 ($type) must be one of SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET, SOCK_RAW, or SOCK_RDM",
@@ -2192,7 +2192,7 @@ fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args
         .get(1)
         .map(|v| v.to_php_string())
-        .unwrap_or_else(|| PhpString::empty());
+        .unwrap_or_else(PhpString::empty);
     let length = args.get(2).map(|v| v.to_long() as usize).unwrap_or(0);
     let _flags = args.get(3).map(|v| v.to_long()).unwrap_or(0);
     let address = args

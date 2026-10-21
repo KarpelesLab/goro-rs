@@ -246,9 +246,9 @@ pub fn set_timezone(t: &mut Time, tz: &Rc<TzInfo>) {
 }
 
 pub fn valid_time(h: i64, i: i64, s: i64) -> bool {
-    !(h < 0 || h > 23 || i < 0 || i > 59 || s < 0 || s > 59)
+    !(!(0..=23).contains(&h) || !(0..=59).contains(&i) || !(0..=59).contains(&s))
 }
 
 pub fn valid_date(y: i64, m: i64, d: i64) -> bool {
-    !(m < 1 || m > 12 || d < 1 || d > dow::days_in_month(y, m))
+    !(!(1..=12).contains(&m) || d < 1 || d > dow::days_in_month(y, m))
 }

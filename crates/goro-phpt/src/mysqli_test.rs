@@ -108,7 +108,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
         let install_db = ["/usr/bin/mariadb-install-db", "/usr/bin/mysql_install_db"]
             .iter()
             .find(|p| std::path::Path::new(p).exists())
-            .map(|p| PathBuf::from(p));
+            .map(PathBuf::from);
         if let Some(install_bin) = install_db {
             Command::new(install_bin)
                 .arg(format!("--datadir={}", datadir.display()))
@@ -218,7 +218,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
     let mysql_cli = ["/usr/bin/mysql", "/usr/local/bin/mysql", "/usr/bin/mariadb"]
         .iter()
         .find(|p| std::path::Path::new(p).exists())
-        .map(|p| PathBuf::from(p));
+        .map(PathBuf::from);
     if let Some(cli) = mysql_cli {
         let _ = Command::new(&cli)
             .arg(format!("--socket={}", socket.display()))

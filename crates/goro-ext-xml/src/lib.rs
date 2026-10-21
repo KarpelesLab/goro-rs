@@ -1719,9 +1719,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             value_idx += 1;
                         }
 
-                        if depth > 0 {
-                            depth -= 1;
-                        }
+                        depth = depth.saturating_sub(1);
                     }
                     XmlEvent::CharacterData { data: cdata } => {
                         // Append value to the most recent open element

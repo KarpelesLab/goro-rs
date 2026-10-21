@@ -79,7 +79,7 @@ pub(crate) fn require_string_arg(
     match arg {
         Value::String(s) => Some(s.to_string_lossy()),
         Value::Long(n) => Some(n.to_string()),
-        Value::Double(d) => {
+        Value::Double(_d) => {
             // Match PHP's number formatting for floats
             Some(arg.to_php_string().to_string_lossy())
         }
@@ -377,9 +377,7 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
         if let Some(pos) = arg.find("::") {
             (arg[..pos].to_string(), arg[pos + 2..].to_string())
         } else {
-            let err_msg = format!(
-                "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name"
-            );
+            let err_msg = "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name".to_string();
             let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
             vm.current_exception = Some(exc);
             return false;
@@ -891,7 +889,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
         let pc = m.op_array.param_count as usize;
         let visible_count = pc.saturating_sub(method_cv_offset);
         if param_idx >= visible_count {
-            let err_msg = format!("The parameter specified by its offset could not be found");
+            let err_msg = "The parameter specified by its offset could not be found".to_string();
             let exc = vm.create_exception(b"ReflectionException", &err_msg, _line);
             vm.current_exception = Some(exc);
             return false;
@@ -916,7 +914,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
     } else if let Some(op_array) = vm.user_functions.get(&func_lower).cloned() {
         let param_idx = param_idx_opt.unwrap_or(0);
         if param_idx >= op_array.param_count as usize {
-            let err_msg = format!("The parameter specified by its offset could not be found");
+            let err_msg = "The parameter specified by its offset could not be found".to_string();
             let exc = vm.create_exception(b"ReflectionException", &err_msg, _line);
             vm.current_exception = Some(exc);
             return false;
@@ -1437,7 +1435,7 @@ pub fn reflection_class_method(
             let no_ctorless: &[&[u8]] = &[
                 b"generator", b"fiber", b"closure",
             ];
-            if no_ctorless.iter().any(|c| *c == class_lower.as_slice()) {
+            if no_ctorless.contains(&class_lower.as_slice()) {
                 let canonical = vm.classes.get(&class_lower)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower));
@@ -2224,7 +2222,7 @@ pub fn reflection_class_docall(
                 if has_constructor {
                     let ctor_visibility = vm.classes.get(&class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
-                        .map(|m| m.visibility.clone());
+                        .map(|m| m.visibility);
                     if matches!(ctor_visibility, Some(Visibility::Protected) | Some(Visibility::Private)) {
                         let canonical_name = String::from_utf8_lossy(&canonical).to_string();
                         let err_msg = format!("Access to non-public constructor of class {}", canonical_name);
@@ -2367,7 +2365,7 @@ pub fn reflection_class_docall(
                 if has_constructor {
                     let ctor_visibility = vm.classes.get(&class_lower)
                         .and_then(|c| c.get_method(b"__construct"))
-                        .map(|m| m.visibility.clone());
+                        .map(|m| m.visibility);
                     if matches!(ctor_visibility, Some(Visibility::Protected) | Some(Visibility::Private)) {
                         let canonical_name = String::from_utf8_lossy(&canonical).to_string();
                         let err_msg = format!("Access to non-public constructor of class {}", canonical_name);
@@ -2998,7 +2996,7 @@ pub fn reflection_method_method(
         }
         b"getmodifiers" => {
             let mods = vm.classes.get(&class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| reflection_method_modifiers(m)))
+                .and_then(|c| c.get_method(method_lower.as_bytes()).map(reflection_method_modifiers))
                 .unwrap_or(1); // default public
             Some(Value::Long(mods))
         }
@@ -3452,7 +3450,7 @@ pub fn reflection_method_docall(
                         b"reflectionattribute", b"reflectiongenerator",
                         b"reflectionfiber", b"reflectionreference",
                     ];
-                    if no_direct.iter().any(|c| *c == class_lower.as_slice()) {
+                    if no_direct.contains(&class_lower.as_slice()) {
                         let canonical = match class_lower.as_slice() {
                             b"reflectionattribute" => "ReflectionAttribute",
                             b"reflectiongenerator" => "ReflectionGenerator",
@@ -3845,7 +3843,7 @@ pub fn reflection_function_method(
         b"getnumberofparameters" => {
             if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
                 Some(Value::Long(op_array.param_count as i64))
-            } else if let Some(_) = vm.functions.get(func_lower.as_slice()) {
+            } else if vm.functions.get(func_lower.as_slice()).is_some() {
                 // For built-in functions, check param names
                 let count = vm.builtin_param_names.get(func_lower.as_slice())
                     .map(|p| p.len() as i64)
@@ -4360,7 +4358,7 @@ pub fn reflection_property_method(
         }
         b"getmodifiers" => {
             let mods = vm.classes.get(&class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(|p| reflection_property_modifiers(p)))
+                .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()).map(reflection_property_modifiers))
                 .unwrap_or(1);
             Some(Value::Long(mods))
         }
@@ -5626,7 +5624,7 @@ pub fn reflection_extension_method(
             let mut result = PhpArray::new();
             let class_list = get_extension_classes(&ext_lower);
             for cname in class_list {
-                if vm.is_known_builtin_class(&cname.to_ascii_lowercase().as_bytes().to_vec())
+                if vm.is_known_builtin_class(cname.to_ascii_lowercase().as_bytes())
                     || vm.classes.contains_key(cname.to_ascii_lowercase().as_bytes())
                 {
                     let rc = create_reflection_class(vm, cname);
@@ -5642,7 +5640,7 @@ pub fn reflection_extension_method(
             let mut result = PhpArray::new();
             let class_list = get_extension_classes(&ext_lower);
             for cname in class_list {
-                if vm.is_known_builtin_class(&cname.to_ascii_lowercase().as_bytes().to_vec())
+                if vm.is_known_builtin_class(cname.to_ascii_lowercase().as_bytes())
                     || vm.classes.contains_key(cname.to_ascii_lowercase().as_bytes())
                 {
                     result.push(Value::String(PhpString::from_string(cname.to_string())));
@@ -5695,7 +5693,7 @@ pub fn reflection_extension_method(
                         .map(|v| v.to_php_string().to_string_lossy())
                         .unwrap_or_else(|| "UTC".to_string());
                     s.push_str(&format!("Default timezone => {}\n", tz));
-                    s.push_str("\n");
+                    s.push('\n');
                     s.push_str("Directive => Local Value => Master Value\n");
                     s.push_str(&format!("date.timezone => {} => {}\n", tz, tz));
                     s.push_str("date.default_latitude => 31.7667 => 31.7667\n");
@@ -6504,7 +6502,7 @@ fn find_constant_declaring_class(vm: &Vm, class_lower: &[u8], const_name: &[u8])
 /// Create ReflectionParameter objects for a function's parameters
 pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
     let mut result = PhpArray::new();
-    let func_name = String::from_utf8_lossy(&op_array.name).to_string();
+    let _func_name = String::from_utf8_lossy(&op_array.name).to_string();
     let func_lower: Vec<u8> = op_array.name.iter().map(|b| b.to_ascii_lowercase()).collect();
     for i in 0..op_array.param_count as usize {
         let param_name = if i < op_array.cv_names.len() {
@@ -6526,7 +6524,7 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
 pub fn create_reflection_parameters_method(vm: &mut Vm, op_array: &OpArray, is_static: bool) -> Value {
     let mut result = PhpArray::new();
     let skip = if !is_static { 1usize } else { 0usize };
-    let param_count = if op_array.param_count as usize > skip { op_array.param_count as usize - skip } else { 0 };
+    let param_count = (op_array.param_count as usize).saturating_sub(skip);
     for i in 0..param_count {
         let cv_idx = i + skip;
         let param_name = if cv_idx < op_array.cv_names.len() {
@@ -7298,7 +7296,7 @@ fn reflection_method_to_string_section(s: &mut String, m: &crate::object::Method
     // on instance methods, but `required_param_count` is just the user-declared
     // count without $this. So we subtract `skip` from `param_count` only.
     let skip = if !m.is_static { 1usize } else { 0usize };
-    let param_count = if m.op_array.param_count as usize > skip { m.op_array.param_count as usize - skip } else { 0 };
+    let param_count = (m.op_array.param_count as usize).saturating_sub(skip);
     let required_count = m.op_array.required_param_count as usize;
 
     // PHP omits the "Parameters [0]" section for user methods that
@@ -7363,11 +7361,11 @@ fn param_type_name(pt: &crate::opcode::ParamType) -> String {
         ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
         ParamType::Nullable(inner) => format!("?{}", param_type_name(inner)),
         ParamType::Union(types) => {
-            let names: Vec<String> = types.iter().map(|t| param_type_name(t)).collect();
+            let names: Vec<String> = types.iter().map(param_type_name).collect();
             names.join("|")
         }
         ParamType::Intersection(types) => {
-            let names: Vec<String> = types.iter().map(|t| param_type_name(t)).collect();
+            let names: Vec<String> = types.iter().map(param_type_name).collect();
             names.join("&")
         }
     }

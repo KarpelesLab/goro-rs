@@ -17,7 +17,7 @@ thread_local! {
     /// Each entry is (severity_label, message, line) where severity_label is
     /// e.g. "Warning" or "Deprecated".
     static PENDING_COMPILE_DIAGNOSTICS: std::cell::RefCell<Vec<(&'static str, String, u32)>>
-        = std::cell::RefCell::new(Vec::new());
+        = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Drain compile-time diagnostics collected during the most recent compile pass.
@@ -1925,14 +1925,14 @@ impl Compiler {
                 let val_tmp = self.op_array.alloc_temp();
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
-                    let jmp = self.op_array.emit(Op {
+                    
+                    self.op_array.emit(Op {
                         opcode: OpCode::ForeachNextRef,
                         op1: OperandType::Tmp(iter_tmp),
                         op2: OperandType::JmpTarget(0), // patched later
                         result: OperandType::Tmp(val_tmp),
                         line: stmt.span.line,
-                    });
-                    jmp
+                    })
                 } else {
                     self.op_array.emit(Op {
                         opcode: OpCode::ForeachNext,
@@ -4166,7 +4166,7 @@ impl Compiler {
                             // Abstract+final is not allowed
                             if *prop_is_abstract && *prop_is_final {
                                 return Err(CompileError {
-                                    message: format!("Cannot use the final modifier on an abstract property"),
+                                    message: "Cannot use the final modifier on an abstract property".to_string(),
                                     line: stmt.span.line,
                                 });
                             }
@@ -5584,7 +5584,7 @@ impl Compiler {
                                     ExprKind::Closure {
                                         params: closure_params,
                                         body: closure_body,
-                                        use_vars: closure_use_vars,
+                                        use_vars: _closure_use_vars,
                                         is_static: closure_is_static,
                                         attributes: closure_attrs,
                                         ..
@@ -5709,7 +5709,7 @@ impl Compiler {
                                         marker.extend_from_slice(&closure_name);
                                         Value::String(PhpString::from_vec(marker))
                                     }
-                                    ExprKind::New { class: new_class, args: new_args } => {
+                                    ExprKind::New { class: new_class, args: _new_args } => {
                                         // new Foo() in const expression - store as deferred
                                         if let ExprKind::Identifier(cn) = &new_class.kind {
                                             let resolved = self.resolve_class_name(cn);
@@ -5789,7 +5789,7 @@ impl Compiler {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {
                                 return Err(CompileError {
-                                    message: format!("Case can only be used in enums"),
+                                    message: "Case can only be used in enums".to_string(),
                                     line: stmt.span.line,
                                 });
                             }
@@ -5810,14 +5810,14 @@ impl Compiler {
                             }
                             // Enum cases: store the backing value for backed enums
                             let backing_value = if let Some(val_expr) = value {
-                                if let Some(v) = Self::eval_const_expr(&val_expr) {
+                                if let Some(v) = Self::eval_const_expr(val_expr) {
                                     v
                                 } else {
                                     // Handle class constant references and magic constants like class constant defaults
                                     match &val_expr.kind {
                                         ExprKind::ClassConstAccess { class: class_expr, constant } => {
                                             // Try to resolve from same class or other classes
-                                            if let Some(val) = Self::eval_class_const_expr(&val_expr, &class, &qualified_name, extends.as_deref(), self) {
+                                            if let Some(val) = Self::eval_class_const_expr(val_expr, &class, &qualified_name, extends.as_deref(), self) {
                                                 val
                                             } else {
                                                 let class_name = match &class_expr.kind {
@@ -6185,7 +6185,7 @@ impl Compiler {
                     });
                     self.pending_gotos
                         .entry(name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push((jmp, stmt.span.line));
                 }
                 Ok(())
@@ -6354,7 +6354,7 @@ impl Compiler {
                                     key: a.name.as_ref().map(|n| {
                                         Expr {
                                             kind: ExprKind::String(n.clone()),
-                                            span: a.value.span.clone(),
+                                            span: a.value.span,
                                         }
                                     }),
                                     value: a.value.clone(),
@@ -7970,7 +7970,7 @@ impl Compiler {
                     },
                     span: expr.span,
                 };
-                return self.compile_expr(&synthetic_call);
+                self.compile_expr(&synthetic_call)
             }
 
             ExprKind::NullCoalesce { left, right } => {
@@ -8011,8 +8011,8 @@ impl Compiler {
                         let isset_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::ArrayIsset,
-                            op1: current.clone(),
-                            op2: idx.clone(),
+                            op1: current,
+                            op2: idx,
                             result: OperandType::Tmp(isset_tmp),
                             line: expr.span.line,
                         });
@@ -8042,7 +8042,7 @@ impl Compiler {
                     let check_tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::IssetCheck,
-                        op1: current.clone(),
+                        op1: current,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(check_tmp),
                         line: expr.span.line,
@@ -8084,7 +8084,7 @@ impl Compiler {
                     // Right side: use default value
                     let right_target = self.op_array.current_offset();
                     for jmp_pos in jmp_to_right {
-                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(right_target as u32);
+                        self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(right_target);
                     }
                     self.op_array.emit(Op {
                         opcode: OpCode::ErrorRestore,
@@ -8966,8 +8966,8 @@ impl Compiler {
                                     let isset_tmp = self.op_array.alloc_temp();
                                     self.op_array.emit(Op {
                                         opcode: OpCode::ArrayIsset,
-                                        op1: current.clone(),
-                                        op2: idx.clone(),
+                                        op1: current,
+                                        op2: idx,
                                         result: OperandType::Tmp(isset_tmp),
                                         line: expr.span.line,
                                     });
@@ -9118,8 +9118,8 @@ impl Compiler {
                             let isset_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::PropertyIsset,
-                                op1: obj_op.clone(),
-                                op2: prop_op.clone(),
+                                op1: obj_op,
+                                op2: prop_op,
                                 result: OperandType::Tmp(isset_tmp),
                                 line: expr.span.line,
                             });
@@ -9158,8 +9158,8 @@ impl Compiler {
                             let isset_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::ArrayIsset,
-                                op1: current.clone(),
-                                op2: idx.clone(),
+                                op1: current,
+                                op2: idx,
                                 result: OperandType::Tmp(isset_tmp),
                                 line: expr.span.line,
                             });
@@ -9391,15 +9391,15 @@ impl Compiler {
                     let mut current = base_op;
 
                     for (i, idx_expr) in chain.iter().enumerate() {
-                        let is_last = i == chain.len() - 1;
+                        let _is_last = i == chain.len() - 1;
                         let idx = self.compile_expr(idx_expr)?;
 
                         // Check offsetExists
                         let isset_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::ArrayIsset,
-                            op1: current.clone(),
-                            op2: idx.clone(),
+                            op1: current,
+                            op2: idx,
                             result: OperandType::Tmp(isset_tmp),
                             line: expr.span.line,
                         });
@@ -9518,7 +9518,7 @@ impl Compiler {
             } => {
                 check_duplicate_params(params, expr.span.line)?;
                 // Compile closure body as a child function
-                let closure_id = self.op_array.child_functions.len();
+                let _closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
                 let closure_name = format!("__closure_{}", global_id).into_bytes();
                 // Compute the canonical PHP closure display name from current scope.
@@ -9817,7 +9817,7 @@ impl Compiler {
                     .filter(|v| !param_names.contains(v))
                     .collect();
 
-                let closure_id = self.op_array.child_functions.len();
+                let _closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
                 let closure_name = format!("__arrow_{}", global_id).into_bytes();
                 // Arrow functions share the canonical `{closure:...}` display name format.
@@ -10890,7 +10890,7 @@ impl Compiler {
                         let idx = self.compile_expr(index)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySetRef,
-                            op1: arr.clone(),
+                            op1: arr,
                             op2: OperandType::Tmp(ref_tmp),
                             result: idx,
                             line: expr.span.line,
@@ -10938,7 +10938,7 @@ impl Compiler {
                         self.op_array.emit(Op {
                             opcode: OpCode::PropertySetRef,
                             op1: obj,
-                            op2: value_op.clone(),
+                            op2: value_op,
                             result: name,
                             line: expr.span.line,
                         });
@@ -11172,7 +11172,7 @@ impl Compiler {
             }
 
             ExprKind::FirstClassCallable(target) => {
-                return self.compile_first_class_callable(target, expr.span.line);
+                self.compile_first_class_callable(target, expr.span.line)
             }
 
             ExprKind::ConstantAccess(parts) if parts.len() == 1 => {
@@ -11248,7 +11248,7 @@ impl Compiler {
             });
         }
 
-        let closure_id = self.op_array.child_functions.len();
+        let _closure_id = self.op_array.child_functions.len();
         let global_id = next_closure_id();
         let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
 
@@ -11538,7 +11538,7 @@ impl Compiler {
             }
             E::NullCoalesce { left, right } => Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right),
             E::Array(elements) => elements.iter().all(|e| {
-                e.key.as_ref().map(|k| Self::is_const_attr_expr(k)).unwrap_or(true)
+                e.key.as_ref().map(Self::is_const_attr_expr).unwrap_or(true)
                     && Self::is_const_attr_expr(&e.value)
             }),
             E::New { class: _, args } => {
@@ -12364,8 +12364,8 @@ fn type_hint_display(hint: &TypeHint) -> String {
     match hint {
         TypeHint::Simple(name) => String::from_utf8_lossy(name).to_string(),
         TypeHint::Nullable(inner) => format!("?{}", type_hint_display(inner)),
-        TypeHint::Union(types) => types.iter().map(|t| type_hint_display(t)).collect::<Vec<_>>().join("|"),
-        TypeHint::Intersection(types) => types.iter().map(|t| type_hint_display(t)).collect::<Vec<_>>().join("&"),
+        TypeHint::Union(types) => types.iter().map(type_hint_display).collect::<Vec<_>>().join("|"),
+        TypeHint::Intersection(types) => types.iter().map(type_hint_display).collect::<Vec<_>>().join("&"),
     }
 }
 
@@ -12433,18 +12433,10 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                         // Resolve self/parent to actual class name for duplicate checking
                         let resolved = match lower.as_slice() {
                             b"self" => {
-                                if let Some(cn) = class_name {
-                                    Some(cn.to_vec())
-                                } else {
-                                    None
-                                }
+                                class_name.map(|cn| cn.to_vec())
                             }
                             b"parent" => {
-                                if let Some(pn) = parent_class_name {
-                                    Some(pn.to_vec())
-                                } else {
-                                    None
-                                }
+                                parent_class_name.map(|pn| pn.to_vec())
                             }
                             _ => None,
                         };

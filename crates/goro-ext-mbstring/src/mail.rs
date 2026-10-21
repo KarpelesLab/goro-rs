@@ -268,7 +268,7 @@ fn detect_multiple_crlf(hdr: &[u8]) -> bool {
         return false;
     }
     let c = hdr[0];
-    if c < 33 || c > 126 || c == b':' {
+    if !(33..=126).contains(&c) || c == b':' {
         return true;
     }
     let at = |i: usize| -> u8 { hdr.get(i).copied().unwrap_or(0) };

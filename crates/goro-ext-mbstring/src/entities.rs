@@ -23,7 +23,7 @@ fn make_conversion_map(vm: &mut Vm, func: &str, args: &[Value]) -> Result<Vec<u3
         }
     };
     let vals: Vec<Value> = arr.borrow().values().cloned().collect();
-    if vals.len() % 4 != 0 {
+    if !vals.len().is_multiple_of(4) {
         return Err(arg_value_error(vm, func, 2, "map", "must have a multiple of 4 elements"));
     }
     let mut map = Vec::with_capacity(vals.len());
@@ -66,7 +66,7 @@ fn make_conversion_map(vm: &mut Vm, func: &str, args: &[Value]) -> Result<Vec<u3
 }
 
 fn entity_convert(w: u32, map: &[u32]) -> Option<u32> {
-    for m in map.chunks_exact(4) {
+    for m in map.as_chunks::<4>().0 {
         if w >= m[0] && w <= m[1] {
             return Some(w.wrapping_add(m[2]) & m[3]);
         }
@@ -124,7 +124,7 @@ fn mb_encode_numericentity(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn entity_deconvert(number: u32, map: &[u32]) -> Option<u32> {
-    for m in map.chunks_exact(4) {
+    for m in map.as_chunks::<4>().0 {
         let cp = number.wrapping_sub(m[2]);
         if cp >= m[0] && cp <= m[1] {
             return Some(cp);
@@ -164,7 +164,7 @@ fn entity_decode(input: &[u8], enc: &Encoding, map: &[u32]) -> Vec<u8> {
                     p2 += 1;
                 }
                 let len = p2 - p;
-                if len < HEX_ENTITY_MINLEN || len > HEX_ENTITY_MAXLEN {
+                if !(HEX_ENTITY_MINLEN..=HEX_ENTITY_MAXLEN).contains(&len) {
                     out.extend_from_slice(&w[p..p2]);
                 } else {
                     let mut value: u32 = 0;
@@ -191,7 +191,7 @@ fn entity_decode(input: &[u8], enc: &Encoding, map: &[u32]) -> Vec<u8> {
                     p2 += 1;
                 }
                 let len = p2 - p;
-                if len < DEC_ENTITY_MINLEN || len > DEC_ENTITY_MAXLEN {
+                if !(DEC_ENTITY_MINLEN..=DEC_ENTITY_MAXLEN).contains(&len) {
                     out.extend_from_slice(&w[p..p2]);
                 } else {
                     let mut value: u32 = 0;

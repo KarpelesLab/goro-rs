@@ -103,6 +103,12 @@ impl Mt19937State {
     }
 }
 
+impl Default for Mt19937State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ===== Xoshiro256** =====
 
 #[derive(Clone)]
@@ -166,6 +172,12 @@ impl Xoshiro256State {
     }
 }
 
+impl Default for Xoshiro256State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ===== PcgOneseq128XslRr64 =====
 
 #[derive(Clone)]
@@ -216,6 +228,12 @@ impl PcgState {
             delta >>= 1;
         }
         self.state = acc_mult.wrapping_mul(self.state).wrapping_add(acc_plus);
+    }
+}
+
+impl Default for PcgState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

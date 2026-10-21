@@ -87,8 +87,8 @@ fn to_long(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &
     match v {
         Value::Long(n) => Ok(*n),
         Value::Double(f) => {
-            if !f.is_finite() || f.fract() != 0.0 || *f >= 9.2233720368547758e18 || *f < -9.2233720368547758e18 {
-                if f.is_finite() && f.fract() != 0.0 && *f < 9.2233720368547758e18 && *f >= -9.2233720368547758e18 {
+            if !f.is_finite() || f.fract() != 0.0 || *f >= 9.223_372_036_854_776e18 || *f < -9.223_372_036_854_776e18 {
+                if f.is_finite() && f.fract() != 0.0 && *f < 9.223_372_036_854_776e18 && *f >= -9.223_372_036_854_776e18 {
                     // Fractional part: deprecated implicit conversion (handled by VM) — truncate
                     return Ok(*f as i64);
                 }
@@ -106,7 +106,7 @@ fn to_long(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &
             match parse_numeric_str(b) {
                 Some(Num::Int(n)) => Ok(n),
                 Some(Num::Float(f)) => {
-                    if f.is_finite() && f < 9.2233720368547758e18 && f >= -9.2233720368547758e18 {
+                    if f.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&f) {
                         Ok(f as i64)
                     } else {
                         Err(type_error(

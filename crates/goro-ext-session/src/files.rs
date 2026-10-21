@@ -292,11 +292,7 @@ pub(crate) fn destroy(key: &[u8]) -> bool {
             if data.fd.is_some() {
                 data.fd = None;
                 let p = lossy(&path);
-                if std::fs::remove_file(&p).is_err() && std::path::Path::new(&p).exists() {
-                    false
-                } else {
-                    true
-                }
+                !(std::fs::remove_file(&p).is_err() && std::path::Path::new(&p).exists())
             } else {
                 true
             }

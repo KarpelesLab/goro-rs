@@ -527,7 +527,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                     }
                     Node::Arr(a) => {
                         if let Ok(mut b) = a.try_borrow_mut() {
-                            dead_arrays.push(std::mem::replace(&mut *b, PhpArray::new()));
+                            dead_arrays.push(std::mem::take(&mut *b));
                             count += 1;
                         }
                     }

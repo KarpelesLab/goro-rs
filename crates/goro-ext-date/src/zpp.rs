@@ -117,7 +117,7 @@ pub fn numeric_str(s: &[u8]) -> Option<Result<i64, f64>> {
 }
 
 fn double_fits_long(d: f64) -> bool {
-    d.is_finite() && d >= -9.223372036854775808e18 && d < 9.223372036854775808e18
+    d.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d)
 }
 
 fn float_to_long(vm: &mut Vm, fname: &str, idx: usize, pname: &str, d: f64, orig: &Value, from_string: Option<&[u8]>) -> R<i64> {

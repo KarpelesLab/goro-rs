@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "PHP curl extension for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 goro-core = { path = "../goro-core" }
 ureq = { version = "3", features = ["rustls"] }

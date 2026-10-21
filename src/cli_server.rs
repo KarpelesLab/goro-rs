@@ -295,7 +295,7 @@ fn handle_connection(
                     // The remaining parts include an empty trailing element
                     // if decoded_path ended with "/", so just join them.
                     path_info = format!("/{}", parts[idx + 1..].join("/"));
-                } else if decoded_path.ends_with('/') && parts[idx] != "" {
+                } else if decoded_path.ends_with('/') && !parts[idx].is_empty() {
                     path_info = "/".to_string();
                 }
             } else {
@@ -365,7 +365,7 @@ fn handle_connection(
 
     // If the target is not a PHP file, serve it as static.
     if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
-        if ext.to_ascii_lowercase() != "php" && router.is_none() {
+        if !ext.eq_ignore_ascii_case("php") && router.is_none() {
             return serve_static(&mut stream, &target);
         }
     } else if router.is_none() {
@@ -496,7 +496,7 @@ fn send_response_with_host_proto(
     let mut have_date = false;
     let mut have_xpb = false;
     let mut have_conn = false;
-    for (k, v) in headers {
+    for (k, _v) in headers {
         if k.eq_ignore_ascii_case(b"Content-Type") { have_ct = true; }
         if k.eq_ignore_ascii_case(b"Content-Length") { have_cl = true; }
         if k.eq_ignore_ascii_case(b"Host") { have_host = true; }
@@ -650,7 +650,7 @@ fn execute_php_request(
     remote_port: u16,
     method: &str,
     request_uri: &str,
-    path: &str,
+    _path: &str,
     query: &str,
     protocol: &str,
     script_name: &str,

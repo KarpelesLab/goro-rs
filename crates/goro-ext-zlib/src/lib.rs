@@ -115,7 +115,7 @@ fn comp(level: i64) -> Compression {
 }
 
 fn validate_level(vm: &mut Vm, func_name: &str, level: i64) -> Result<bool, VmError> {
-    if level < -1 || level > 9 {
+    if !(-1..=9).contains(&level) {
         let msg = format!("{}(): Argument #2 ($level) must be between -1 and 9", func_name);
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
@@ -1045,17 +1045,17 @@ fn parse_gzip_header(buf: &[u8]) -> Option<usize> {
     // FNAME
     if flg & 0x08 != 0 {
         let end = buf[pos..].iter().position(|&b| b == 0);
-        match end {
-            Some(e) => pos += e + 1,
-            None => return None,
+        {
+            let e = end?;
+            pos += e + 1
         }
     }
     // FCOMMENT
     if flg & 0x10 != 0 {
         let end = buf[pos..].iter().position(|&b| b == 0);
-        match end {
-            Some(e) => pos += e + 1,
-            None => return None,
+        {
+            let e = end?;
+            pos += e + 1
         }
     }
     // FHCRC
@@ -1155,7 +1155,7 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if let Some(v) = level_val {
             level = v.to_long();
-            if level < -1 || level > 9 {
+            if !(-1..=9).contains(&level) {
                 let msg = "deflate_init(): \"level\" option must be between -1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
@@ -1164,7 +1164,7 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if let Some(v) = memory_val {
             let m = v.to_long();
-            if m < 1 || m > 9 {
+            if !(1..=9).contains(&m) {
                 let msg = "deflate_init(): \"memory\" option must be between 1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
@@ -1198,7 +1198,7 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let flush_mode = args.get(2).map(|v| v.to_long()).unwrap_or(2); // ZLIB_SYNC_FLUSH
 
-    if flush_mode < 0 || flush_mode > 5 {
+    if !(0..=5).contains(&flush_mode) {
         let msg = "deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
@@ -1214,7 +1214,8 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
 
-    let result = DEFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
+    
+    DEFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
         let mut ctxs = ctxs.borrow_mut();
         if let Some(ctx) = ctxs.get_mut(&cid) {
             let flush = match flush_mode {
@@ -1268,8 +1269,7 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(msg);
             Ok(Value::False)
         }
-    });
-    result
+    })
 }
 
 fn inflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1328,7 +1328,7 @@ fn inflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let flush_mode = args.get(2).map(|v| v.to_long()).unwrap_or(2); // ZLIB_SYNC_FLUSH
 
-    if flush_mode < 0 || flush_mode > 5 {
+    if !(0..=5).contains(&flush_mode) {
         let msg = "inflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
@@ -1343,7 +1343,8 @@ fn inflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(VmError { message: msg.to_string(), line: vm.current_line });
     }
 
-    let result = INFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
+    
+    INFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
         let mut ctxs = ctxs.borrow_mut();
         if let Some(ctx) = ctxs.get_mut(&cid) {
             // After STREAM_END, decide whether to reset for reuse or consume trailer.
@@ -1480,8 +1481,7 @@ fn inflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(msg);
             Ok(Value::False)
         }
-    });
-    result
+    })
 }
 
 fn inflate_get_read_len_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

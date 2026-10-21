@@ -371,7 +371,7 @@ impl Vm {
     pub(crate) fn ao_has_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) -> bool {
         if self.ao_user_has(obj, b"offsetexists") {
             let ov = Value::Object(obj.clone());
-            let r = self.call_object_method(&ov, b"offsetExists", &[offset.clone()]).unwrap_or(Value::False);
+            let r = self.call_object_method(&ov, b"offsetExists", std::slice::from_ref(offset)).unwrap_or(Value::False);
             return self.current_exception.is_none() && r.is_truthy();
         }
         self.ao_offset_exists(obj, offset, 0)
@@ -386,7 +386,7 @@ impl Vm {
         let key = Value::String(PhpString::from_bytes(name));
         if self.ao_user_has(obj, b"offsetexists") {
             let ov = Value::Object(obj.clone());
-            let r = self.call_object_method(&ov, b"offsetExists", &[key.clone()]).unwrap_or(Value::False);
+            let r = self.call_object_method(&ov, b"offsetExists", std::slice::from_ref(&key)).unwrap_or(Value::False);
             if self.current_exception.is_some() || !r.is_truthy() {
                 return Some(false);
             }
@@ -398,7 +398,7 @@ impl Vm {
     pub(crate) fn ao_unset_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) {
         if self.ao_user_has(obj, b"offsetunset") {
             let ov = Value::Object(obj.clone());
-            self.call_object_method(&ov, b"offsetUnset", &[offset.clone()]);
+            self.call_object_method(&ov, b"offsetUnset", std::slice::from_ref(offset));
             return;
         }
         self.ao_offset_unset(obj, offset)

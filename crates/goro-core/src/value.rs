@@ -657,7 +657,7 @@ impl Value {
             (Value::Null | Value::Undef, Value::Double(f))
             | (Value::Double(f), Value::Null | Value::Undef) => *f == 0.0,
             (Value::Null | Value::Undef, Value::Array(a))
-            | (Value::Array(a), Value::Null | Value::Undef) => a.borrow().len() == 0,
+            | (Value::Array(a), Value::Null | Value::Undef) => a.borrow().is_empty(),
             (Value::Null | Value::Undef, _) | (_, Value::Null | Value::Undef) => false,
             (Value::True, other) | (other, Value::True) => other.is_truthy(),
             (Value::False, other) | (other, Value::False) => !other.is_truthy(),
@@ -792,7 +792,7 @@ impl Value {
             (Value::Object(_), Value::Double(f)) | (Value::Double(f), Value::Object(_)) => {
                 *f == 1.0
             }
-            (Value::Object(_), Value::String(s)) | (Value::String(s), Value::Object(_)) => {
+            (Value::Object(_), Value::String(_s)) | (Value::String(_s), Value::Object(_)) => {
                 // Object compared to string: not equal in PHP 8
                 false
             }
@@ -976,10 +976,10 @@ impl Value {
                 }
             }
             (Value::Null | Value::Undef, Value::Array(a)) => {
-                if a.borrow().len() == 0 { 0 } else { -1 }
+                if a.borrow().is_empty() { 0 } else { -1 }
             }
             (Value::Array(a), Value::Null | Value::Undef) => {
-                if a.borrow().len() == 0 { 0 } else { 1 }
+                if a.borrow().is_empty() { 0 } else { 1 }
             }
             (Value::Null | Value::Undef, _) => -1,
             (_, Value::Null | Value::Undef) => 1,
@@ -1522,7 +1522,7 @@ fn parse_leading_float(s: &str) -> f64 {
 
 /// True if `d` fits in a PHP int (ZEND_DOUBLE_FITS_LONG).
 pub fn php_double_fits_long(d: f64) -> bool {
-    !(d >= 9.223372036854775808e18 || d < -9.223372036854775808e18)
+    !(d >= 9.223_372_036_854_776e18 || d < -9.223_372_036_854_776e18)
 }
 
 /// zend_dval_to_lval: non-finite -> 0, out of range -> modular arithmetic.
@@ -1764,8 +1764,8 @@ fn compare_integer_strings(a: &str, b: &str) -> i64 {
     if a_neg != b_neg {
         return if a_neg { -1 } else { 1 };
     }
-    let a_digits = a.trim_start_matches(|c: char| c == '-' || c == '+').trim_start_matches('0');
-    let b_digits = b.trim_start_matches(|c: char| c == '-' || c == '+').trim_start_matches('0');
+    let a_digits = a.trim_start_matches(['-', '+']).trim_start_matches('0');
+    let b_digits = b.trim_start_matches(['-', '+']).trim_start_matches('0');
     let cmp = if a_digits.len() != b_digits.len() {
         if a_digits.len() < b_digits.len() { -1 } else { 1 }
     } else {

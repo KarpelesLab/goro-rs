@@ -503,7 +503,7 @@ fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let iterations = iterations_raw as usize;
     let length = length_raw as usize;
 
-    let output_len = if length == 0 { hash_len } else if raw { length } else { (length + 1) / 2 };
+    let output_len = if length == 0 { hash_len } else if raw { length } else { length.div_ceil(2) };
 
     // PBKDF2 implementation
     let block_size = hash_block_size(&algo);
@@ -531,7 +531,7 @@ fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let mut result = Vec::new();
-    let blocks = (output_len + hash_len - 1) / hash_len;
+    let blocks = output_len.div_ceil(hash_len);
 
     for block in 1..=blocks {
         let mut salt_block = salt.as_bytes().to_vec();

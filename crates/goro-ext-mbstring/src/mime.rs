@@ -25,7 +25,7 @@ fn needs_qencode(c: u8) -> bool {
 
 fn transfer_encoded_size(tmp: &[u8], base64: bool) -> usize {
     if base64 {
-        ((tmp.len() + 2) / 3) * 4
+        tmp.len().div_ceil(3) * 4
     } else {
         tmp.iter().map(|&c| if needs_qencode(c) { 3 } else { 1 }).sum()
     }
@@ -119,7 +119,7 @@ pub fn mime_header_encode(input: &[u8], incode: &Encoding, outcode: &Encoding, b
                     checking_leading_spaces = false;
                 }
             }
-            if w < 0x21 || w > 0x7E || w == b'=' as u32 || w == b'?' as u32 || w == b'_' as u32 {
+            if !(0x21..=0x7E).contains(&w) || w == b'=' as u32 || w == b'?' as u32 || w == b'_' as u32 {
                 passthrough = false;
                 break;
             }
@@ -153,7 +153,7 @@ pub fn mime_header_encode(input: &[u8], incode: &Encoding, outcode: &Encoding, b
         while p < e {
             let w = wbuf[p];
             p += 1;
-            if w < 0x20 || w > 0x7E || w == b'?' as u32 || w == b'=' as u32 || w == b'_' as u32 || (w == b' ' as u32 && (p - word_start) > 74) {
+            if !(0x20..=0x7E).contains(&w) || w == b'?' as u32 || w == b'=' as u32 || w == b'_' as u32 || (w == b' ' as u32 && (p - word_start) > 74) {
                 feed = true;
                 break;
             } else if w == b' ' as u32 {

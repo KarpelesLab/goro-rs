@@ -425,7 +425,7 @@ fn mb_substitute_character(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn set_subst_codepoint(vm: &mut Vm, cp: i64) -> Result<Value, VmError> {
-    if cp < 0 || cp >= 0x110000 || (0xd800..=0xdfff).contains(&cp) {
+    if !(0..0x110000).contains(&cp) || (0xd800..=0xdfff).contains(&cp) {
         return Err(arg_value_error(vm, "mb_substitute_character", 1, "substitute_character", "is not a valid codepoint"));
     }
     state::with(|s| {

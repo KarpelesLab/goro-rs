@@ -973,7 +973,7 @@ impl<'a> Parser<'a> {
         let mut v: u32 = 0;
         let mut n = 0;
         while n < max {
-            match self.peek().and_then(|c| char::from_u32(c)).and_then(|c| c.to_digit(16)) {
+            match self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(16)) {
                 Some(d) => {
                     v = v.wrapping_mul(16) + d;
                     self.pos += 1;
@@ -1025,17 +1025,14 @@ impl<'a> Parser<'a> {
                     }
                     v
                 } else {
-                    match self.parse_hex(2) {
-                        Some(v) => v,
-                        None => 0,
-                    }
+                    self.parse_hex(2).unwrap_or_default()
                 }
             }
             'u' if self.syntax == Syntax::Ruby || self.syntax == Syntax::Java => {
                 let save = self.pos;
                 let mut v = 0u32;
                 for _ in 0..4 {
-                    match self.peek().and_then(|c| char::from_u32(c)).and_then(|c| c.to_digit(16)) {
+                    match self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(16)) {
                         Some(d) => {
                             v = v * 16 + d;
                             self.pos += 1;

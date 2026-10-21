@@ -157,7 +157,7 @@ fn json_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let mut recursion_detected = false;
-    let s = json_encode_value_flags_tracked(&val, 0, flags, max_depth, &mut seen, &mut recursion_detected);
+    let s = json_encode_value_flags_tracked(val, 0, flags, max_depth, &mut seen, &mut recursion_detected);
     if s.contains("\x00ENUM_ERROR") {
         // Non-backed enum cannot be serialized
         let err_msg = "Non-backed enums have no default serialization";
@@ -526,7 +526,7 @@ fn json_encode_value_flags_tracked(val: &Value, depth: usize, flags: i64, max_de
             let is_list = !force_object && arr_ref.iter().enumerate().all(
                 |(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64),
             );
-            if arr_ref.len() == 0 {
+            if arr_ref.is_empty() {
                 seen.remove(&arr_ptr);
                 if is_list {
                     return "[]".to_string();
@@ -756,7 +756,7 @@ fn json_encode_string(bytes: &[u8], flags: i64) -> String {
                         i += skip;
                         continue;
                     } else {
-                        return format!("\x00UTF8_ERROR");
+                        return "\x00UTF8_ERROR".to_string();
                     }
                 }
             }
@@ -1245,12 +1245,11 @@ impl<'a, 'b> JsonParser<'a, 'b> {
                                 self.error_code = 10; // JSON_ERROR_UTF16
                                 return None;
                             } else {
-                                if let Some(c) = char::from_u32(cp as u32) {
+                                {
+                                    let c = char::from_u32(cp as u32)?;
                                     let mut buf = [0u8; 4];
                                     let s = c.encode_utf8(&mut buf);
                                     result.extend_from_slice(s.as_bytes());
-                                } else {
-                                    return None;
                                 }
                             }
                         }

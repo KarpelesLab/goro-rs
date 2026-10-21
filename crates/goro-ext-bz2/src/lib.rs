@@ -136,7 +136,7 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Null) | Some(Value::Undef) | None => 4,
         Some(v) => {
             let bs = v.to_long();
-            if bs < 1 || bs > 9 {
+            if !(1..=9).contains(&bs) {
                 let msg = "bzcompress(): Argument #2 ($block_size) must be between 1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
@@ -150,7 +150,7 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Null) | Some(Value::Undef) | None => {}
         Some(v) => {
             let wf = v.to_long();
-            if wf < 0 || wf > 250 {
+            if !(0..=250).contains(&wf) {
                 let msg = "bzcompress(): Argument #3 ($work_factor) must be between 0 and 250";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
@@ -250,7 +250,7 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 });
             }
             goro_core::value::register_resource(bid, b"stream");
-            return Ok(Value::Resource(bid));
+            Ok(Value::Resource(bid))
         }
         Value::String(s) => {
             // Check for null bytes

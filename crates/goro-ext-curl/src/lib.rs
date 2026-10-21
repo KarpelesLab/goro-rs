@@ -733,8 +733,7 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let request_data = with_curl_handles(|handles| {
         let handles = handles.borrow();
-        if let Some(handle) = handles.get(&handle_id) {
-            Some((
+        handles.get(&handle_id).map(|handle| (
                 handle.url.clone(),
                 handle.custom_request.clone().unwrap_or_else(|| handle.method.clone()),
                 handle.headers.clone(),
@@ -752,9 +751,6 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 handle.nobody,
                 handle.fail_on_error,
             ))
-        } else {
-            None
-        }
     });
 
     let (
@@ -1438,7 +1434,7 @@ fn curl_share_init(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn curl_share_init_persistent(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let arr_ref = arr.borrow();
-        if arr_ref.len() == 0 {
+        if arr_ref.is_empty() {
             return Err(throw_value_error(
                 vm,
                 "curl_share_init_persistent(): Argument #1 ($share_options) must not be empty",
@@ -1446,7 +1442,7 @@ fn curl_share_init_persistent(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         }
         for (_, val) in arr_ref.iter() {
             let n = val.to_long();
-            if !matches!(n, 2 | 3 | 4 | 5 | 6) {
+            if !matches!(n, 2..=6) {
                 return Err(throw_value_error(
                     vm,
                     "curl_share_init_persistent(): Argument #1 ($share_options) must contain only CURL_LOCK_DATA_* constants",
@@ -1541,9 +1537,9 @@ fn curl_upkeep(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
+    let filename = args.first().map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
     let mime_type = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"application/octet-stream"));
-    let posted_filename = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
+    let posted_filename = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
 
     let id = vm.next_object_id();
     let mut obj = PhpObject::new(b"CURLFile".to_vec(), id);
@@ -1556,7 +1552,7 @@ fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// curl_escape(CurlHandle $handle, string $string): string|false
 fn curl_escape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _handle_id = arg_curl_id(args.first());
-    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
+    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
     let mut result = String::new();
     for byte in s.as_bytes() {
         match *byte {
@@ -1572,7 +1568,7 @@ fn curl_escape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// curl_unescape(CurlHandle $handle, string $string): string|false
 fn curl_unescape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _handle_id = arg_curl_id(args.first());
-    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::empty());
+    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
     let bytes = s.as_bytes();
     let mut result = Vec::new();
     let mut i = 0;

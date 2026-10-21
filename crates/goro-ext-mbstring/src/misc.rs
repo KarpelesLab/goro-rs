@@ -42,7 +42,7 @@ fn jp_kana_convert(input: &[u8], enc: &Encoding, mode: u32) -> Vec<u8> {
     from_wchars(enc, &out)
 }
 
-const KANA_FLAGS: [u8; 17] = [b'A', b'R', b'N', b'S', b'K', b'H', b'M', b'C', b'a', b'r', b'n', b's', b'k', b'h', b'm', b'c', b'V'];
+const KANA_FLAGS: [u8; 17] = *b"ARNSKHMCarnskhmcV";
 
 fn mb_convert_kana(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_convert_kana";

@@ -94,7 +94,7 @@ pub fn populate_from_url_with_source_flags(
     // :443 for https). WhatWg strips them to None. `url` crate strips
     // defaults; for RFC 3986 we recover them from the source text.
     let explicit_port = if preserve_rfc3986 {
-        source.and_then(|src| extract_explicit_port(src))
+        source.and_then(extract_explicit_port)
     } else {
         None
     };
@@ -111,11 +111,11 @@ pub fn populate_from_url_with_source_flags(
     // empty. Otherwise, report NULL.
     let source_has_userinfo = source
         .and_then(|s| s.find("://").map(|i| &s[i + 3..]))
-        .and_then(|rest| {
+        .map(|rest| {
             let end = rest
-                .find(|c: char| matches!(c, '/' | '?' | '#'))
+                .find(['/', '?', '#'])
                 .unwrap_or(rest.len());
-            Some(&rest[..end])
+            &rest[..end]
         })
         .is_some_and(|auth| auth.contains('@'));
     // For WhatWg, if there's an `@` in the authority, both username and
@@ -224,7 +224,7 @@ fn rfc3986_brackets_valid(uri: &str) -> bool {
     }
     // Find end of authority (first '/', '?', '#').
     let auth_end = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let post_auth = &rest[auth_end..];
@@ -269,12 +269,12 @@ fn rfc3986_brackets_valid(uri: &str) -> bool {
 /// for IPv6 addresses). Returns `Some("")` if the authority is present but
 /// empty (e.g. `file:///...`), or None if there's no authority at all.
 fn extract_raw_host(src: &str) -> Option<String> {
-    let after_scheme = match src.find("://") {
-        Some(i) => &src[i + 3..],
-        None => return None,
+    let after_scheme = {
+        let i = src.find("://")?;
+        &src[i + 3..]
     };
     let end = after_scheme
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..end];
     // Strip userinfo if present
@@ -305,7 +305,7 @@ fn source_has_empty_path(src: &str) -> bool {
     };
     // Authority ends at first '/', '?', '#', or end of string
     let end = after_scheme
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     // If authority consumed everything, path is empty.
     if end == after_scheme.len() {
@@ -321,13 +321,13 @@ fn source_has_empty_path(src: &str) -> bool {
 /// in the authority.
 fn extract_explicit_port(src: &str) -> Option<u16> {
     // Find "//" (authority delimiter)
-    let after_scheme = match src.find("://") {
-        Some(i) => &src[i + 3..],
-        None => return None,
+    let after_scheme = {
+        let i = src.find("://")?;
+        &src[i + 3..]
     };
     // Authority ends at first '/', '?', '#', or end of string
     let end = after_scheme
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..end];
     // Strip userinfo if present
@@ -449,7 +449,7 @@ fn try_parse_generic_authority_uri(
     }
     let rest = &uri[sep + 3..];
     let auth_end = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];
@@ -634,7 +634,7 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
     if let Some(sep) = uri.find("://") {
         let rest = &uri[sep + 3..];
         let end = rest
-            .find(|c: char| matches!(c, '/' | '?' | '#'))
+            .find(['/', '?', '#'])
             .unwrap_or(rest.len());
         let authority = &rest[..end];
         let (has_userinfo, host_port) = match authority.rfind('@') {
@@ -794,7 +794,7 @@ fn try_parse_empty_authority_uri(
     }
     // Locate end of authority (first '/', '?', '#', or end).
     let auth_end = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];
@@ -922,7 +922,7 @@ fn populate_network_path(obj: &mut PhpObject, uri: &str) {
     // Strip the leading "//"
     let rest = &uri[2..];
     let auth_end = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];

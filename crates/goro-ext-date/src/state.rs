@@ -63,9 +63,9 @@ pub fn base_of(vm: &Vm, class_name: &[u8]) -> Option<Base> {
         if let Some(b) = Base::from_lower(&cur) {
             return Some(b);
         }
-        match vm.classes.get(&cur).and_then(|c| c.parent.clone()) {
-            Some(p) => cur = p.to_ascii_lowercase(),
-            None => return None,
+        {
+            let p = vm.classes.get(&cur).and_then(|c| c.parent.clone())?;
+            cur = p.to_ascii_lowercase()
         }
     }
     None

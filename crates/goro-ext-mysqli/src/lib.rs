@@ -19,7 +19,7 @@ const MYSQLI_BOTH: i64 = 3;
 // ── Tokio runtime (created lazily, thread-local) ──────────────────────
 
 thread_local! {
-    static RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = RefCell::new(None);
+    static RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = const { RefCell::new(None) };
 }
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -60,8 +60,8 @@ struct MysqliConnection {
 
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<u64, MysqliConnection>> = RefCell::new(HashMap::new());
-    static LAST_CONNECT_ERROR: RefCell<String> = RefCell::new(String::new());
-    static LAST_CONNECT_ERRNO: RefCell<i64> = RefCell::new(0);
+    static LAST_CONNECT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    static LAST_CONNECT_ERRNO: RefCell<i64> = const { RefCell::new(0) };
 }
 
 // ── Result storage ────────────────────────────────────────────────────
@@ -277,7 +277,7 @@ fn f32_to_php_double(f: f32) -> f64 {
     // the exponent is < -4 or >= precision. Mirror that here.
     let abs = f.abs() as f64;
     let exp = abs.log10().floor() as i32;
-    let use_scientific = exp < -4 || exp >= 6;
+    let use_scientific = !(-4..6).contains(&exp);
     let s = if use_scientific {
         // %.5e is 6 significant digits with one before the dot.
         format!("{:.5e}", f as f64)

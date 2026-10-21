@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Virtual filesystem abstraction for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]

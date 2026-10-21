@@ -396,7 +396,7 @@ fn mb_strcut(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     if len < 0 {
-        len = (slen - from) + len;
+        len += slen - from;
         if len < 0 {
             len = 0;
         }
@@ -765,7 +765,7 @@ fn mb_chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if is_unsupported_for_ord(enc.no) {
         return Err(value_error(vm, format!("mb_chr() does not support the \"{}\" encoding", enc.name)));
     }
-    if cp < 0 || cp > 0x10ffff {
+    if !(0..=0x10ffff).contains(&cp) {
         return Ok(Value::False);
     }
     if is_utf8_family(enc.no) {

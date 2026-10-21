@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "PHP mysqli extension for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 goro-core = { path = "../goro-core" }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }

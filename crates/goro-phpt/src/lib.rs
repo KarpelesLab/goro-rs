@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 
@@ -627,7 +625,7 @@ fn has_remote_network_call(file: &str) -> bool {
             // Grab the first argument: roughly the text up to the first comma
             // or closing paren, on a single line.
             let end = after
-                .find(|c: char| c == ',' || c == ')' || c == '\n')
+                .find([',', ')', '\n'])
                 .unwrap_or(after.len());
             let first_arg = &after[..end];
             if !is_loopback_arg(first_arg) {
@@ -643,7 +641,7 @@ fn has_remote_network_call(file: &str) -> bool {
         while let Some(pos) = search.find(fn_name) {
             let after = &search[pos + fn_name.len()..];
             let end = after
-                .find(|c: char| c == ',' || c == ')' || c == '\n')
+                .find([',', ')', '\n'])
                 .unwrap_or(after.len());
             let first_arg = &after[..end];
             if url_is_remote(first_arg) {
@@ -748,7 +746,7 @@ fn has_remote_curl_url(file: &str) -> bool {
         };
         let value = &after[val_start..];
         let end = value
-            .find(|c: char| c == ')' || c == ';' || c == '\n')
+            .find([')', ';', '\n'])
             .unwrap_or(value.len());
         let url_expr = &value[..end];
         if url_is_remote(url_expr) {
@@ -1100,11 +1098,11 @@ fn execute_php_with_timeout_and_filename(
 }
 
 fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
-    use goro_core::compiler::Compiler;
-    use goro_core::vm::Vm;
-    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision, memory_reset, set_memory_limit};
-    use goro_core::string::PhpString;
-    use goro_parser::{Lexer, Parser};
+    
+    
+    
+    
+    
 
     // Write source to the expected file path so __FILE__ works with fopen/file etc.
     let file_written = if !filename.is_empty() && filename != "Unknown.php" {
@@ -2111,7 +2109,7 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"].iter().any(|k| not_empty(k))
         || test.sections.get("EXPECTHEADERS").is_some_and(|s| !php_trim(s).is_empty());
     let mut env: Vec<(String, String)> = Vec::new();
-    let mut set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
+    let set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
         env.retain(|(a, _)| a != k);
         env.push((k.to_string(), v));
     };

@@ -676,7 +676,7 @@ pub const RELUNIT_LOOKUP: &[(&str, i32, i64)] = &[
 ];
 
 fn eq_ci(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 fn lookup_relative_text(ptr: &mut Ptr, behavior: &mut i32) -> i64 {

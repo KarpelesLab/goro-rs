@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "PHP gmp extension for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 goro-core = { path = "../goro-core" }
 num-bigint = "0.4"

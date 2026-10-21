@@ -71,13 +71,13 @@ fn do_range_limit_days(y: &mut i64, m: &mut i64, d: &mut i64) -> bool {
     let leapyear = is_leap(*y);
     while *d <= 0 && *m > 0 {
         let mut previous_month = *m - 1;
-        let previous_year;
-        if previous_month < 1 {
+        
+        let previous_year = if previous_month < 1 {
             previous_month += 12;
-            previous_year = *y - 1;
+            *y - 1
         } else {
-            previous_year = *y;
-        }
+            *y
+        };
         let days_in_previous_month = dim(is_leap(previous_year), previous_month);
         *d += days_in_previous_month;
         *m -= 1;

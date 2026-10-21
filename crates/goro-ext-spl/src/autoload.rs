@@ -255,7 +255,7 @@ pub fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             );
         }
     }
-    let prepend = args.get(2).map_or(false, |v| v.to_bool());
+    let prepend = args.get(2).is_some_and(|v| v.to_bool());
     if vm.autoload_functions.iter().any(|e| same_callable(e, &normalized)) {
         return Ok(Value::True);
     }

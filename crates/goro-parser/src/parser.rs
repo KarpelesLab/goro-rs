@@ -303,7 +303,7 @@ impl Parser {
             let stmt = self.parse_statement()?;
             // Drain any anonymous class declarations collected during expression parsing
             if !self.anon_class_stmts.is_empty() {
-                let anon_stmts: Vec<_> = self.anon_class_stmts.drain(..).collect();
+                let anon_stmts: Vec<_> = std::mem::take(&mut self.anon_class_stmts);
                 for anon_stmt in anon_stmts {
                     statements.push(anon_stmt);
                 }
@@ -964,7 +964,7 @@ impl Parser {
                     let is_closure_assign = match self.peek() {
                         TokenKind::Variable(_) => {
                             // Look ahead for Assign followed by Function/Fn/Static(Function|Fn)
-                            let mut p = self.pos + 1;
+                            let p = self.pos + 1;
                             // Allow array-/object-access between var and =
                             while p < self.tokens.len() {
                                 match self.tokens.get(p).map(|t| &t.kind) {
@@ -1831,7 +1831,7 @@ impl Parser {
         if modifiers.is_abstract && modifiers.is_final {
             return Err(ParseError {
                 message: "Cannot use the final modifier on an abstract class".into(),
-                span: span.clone(),
+                span,
             });
         }
 
@@ -2136,7 +2136,7 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                return Ok(ClassMember::EnumCase { name, value, attributes: member_attributes, doc_comment: member_doc_comment });
+                Ok(ClassMember::EnumCase { name, value, attributes: member_attributes, doc_comment: member_doc_comment })
             }
             TokenKind::Use => {
                 // trait use
@@ -2955,22 +2955,22 @@ impl Parser {
                     let expr = self.parse_expression()?;
                     self.expect_semicolon()?;
                     // Generate: $this->propname = expr;
-                    let this_expr = Expr { kind: ExprKind::Variable(b"this".to_vec()), span: span.clone() };
-                    let prop_ident = Expr { kind: ExprKind::Identifier(prop_name.to_vec()), span: span.clone() };
+                    let this_expr = Expr { kind: ExprKind::Variable(b"this".to_vec()), span };
+                    let prop_ident = Expr { kind: ExprKind::Identifier(prop_name.to_vec()), span };
                     let prop_access = Expr {
                         kind: ExprKind::PropertyAccess {
                             object: Box::new(this_expr),
                             property: Box::new(prop_ident),
                             nullsafe: false,
                         },
-                        span: span.clone(),
+                        span,
                     };
                     let assign = Expr {
                         kind: ExprKind::Assign {
                             target: Box::new(prop_access),
                             value: Box::new(expr),
                         },
-                        span: span.clone(),
+                        span,
                     };
                     let assign_stmt = Statement {
                         kind: StmtKind::Expression(assign),
@@ -3905,10 +3905,10 @@ impl Parser {
                 })
             }
             TokenKind::RealCast => {
-                return Err(ParseError {
+                Err(ParseError {
                     message: "The (real) cast has been removed, use (float) instead".to_string(),
                     span,
-                });
+                })
             }
             TokenKind::At => {
                 self.advance();

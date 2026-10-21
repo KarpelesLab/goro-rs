@@ -102,7 +102,7 @@ impl Vm {
         if !self.sos_user_get_hash(storage) {
             return Some(Value::Long(oid));
         }
-        let r = self.call_object_method(&Value::Object(storage.clone()), b"getHash", &[o.clone()]);
+        let r = self.call_object_method(&Value::Object(storage.clone()), b"getHash", std::slice::from_ref(o));
         if self.current_exception.is_some() {
             return None;
         }
@@ -206,7 +206,7 @@ impl Vm {
         let mut out = self.spl_std_props(obj);
         let e = load(obj);
         let mut st = PhpArray::new();
-        for (o, inf) in e.objs.into_iter().zip(e.infs.into_iter()) {
+        for (o, inf) in e.objs.into_iter().zip(e.infs) {
             let mut entry = PhpArray::new();
             entry.set(skey(b"obj"), o);
             entry.set(skey(b"inf"), inf);
@@ -266,7 +266,7 @@ impl Vm {
             b"addall" => {
                 let other = self.sos_storage_arg("SplObjectStorage::addAll", a.first())?;
                 let oe = load(&other);
-                for (o, inf) in oe.objs.into_iter().zip(oe.infs.into_iter()) {
+                for (o, inf) in oe.objs.into_iter().zip(oe.infs) {
                     if !self.sos_attach(obj, &o, inf) {
                         break;
                     }
@@ -363,7 +363,7 @@ impl Vm {
             b"__serialize" => {
                 let e = load(obj);
                 let mut st = PhpArray::new();
-                for (o, inf) in e.objs.into_iter().zip(e.infs.into_iter()) {
+                for (o, inf) in e.objs.into_iter().zip(e.infs) {
                     st.push(o);
                     st.push(inf);
                 }
@@ -403,7 +403,7 @@ impl Vm {
                 let e = load(obj);
                 let mut out: Vec<u8> = b"x:".to_vec();
                 out.extend_from_slice(format!("i:{};", e.objs.len()).as_bytes());
-                for (o, inf) in e.objs.into_iter().zip(e.infs.into_iter()) {
+                for (o, inf) in e.objs.into_iter().zip(e.infs) {
                     let so = self.spl_call_builtin(b"serialize", &[o]).unwrap_or(Value::Null);
                     out.extend_from_slice(so.to_php_string().as_bytes());
                     out.push(b',');
@@ -655,7 +655,7 @@ impl Vm {
                     return self.spl_throw(b"RuntimeException", &msg);
                 }
                 let mut out = PhpArray::new();
-                for (it, inf) in e.objs.into_iter().zip(e.infs.into_iter()) {
+                for (it, inf) in e.objs.into_iter().zip(e.infs) {
                     if self.current_exception.is_some() {
                         break;
                     }

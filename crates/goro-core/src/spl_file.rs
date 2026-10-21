@@ -66,9 +66,7 @@ pub(crate) fn split_file_name(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
     while path_len > 1 && !is_slash(path[path_len - 1]) {
         path_len -= 1;
     }
-    if path_len > 0 {
-        path_len -= 1;
-    }
+    path_len = path_len.saturating_sub(1);
     (file_name, path[..path_len].to_vec())
 }
 
@@ -94,10 +92,7 @@ impl Vm {
     /// function failed (an exception may be set).
     pub(crate) fn spl_call_builtin(&mut self, name: &[u8], args: &[Value]) -> Option<Value> {
         let f = self.functions.get(name).copied()?;
-        match f(self, args) {
-            Ok(v) => Some(v),
-            Err(_) => None,
-        }
+        f(self, args).ok()
     }
 
     fn sfo_class_disp(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
@@ -167,7 +162,7 @@ impl Vm {
     }
 
     fn sfo_eof(&mut self, stream: &Value) -> bool {
-        self.spl_call_builtin(b"feof", &[stream.clone()]).map(|v| v.is_truthy()).unwrap_or(true)
+        self.spl_call_builtin(b"feof", std::slice::from_ref(stream)).map(|v| v.is_truthy()).unwrap_or(true)
     }
 
     fn sfo_cannot_read(&mut self, obj: &Rc<RefCell<PhpObject>>) {
@@ -194,7 +189,7 @@ impl Vm {
         let buf = if max > 0 {
             self.spl_call_builtin(b"fgets", &[stream.clone(), Value::Long(max + 1)])
         } else {
-            self.spl_call_builtin(b"fgets", &[stream.clone()])
+            self.spl_call_builtin(b"fgets", std::slice::from_ref(&stream))
         };
         let line: Vec<u8> = match buf {
             Some(Value::String(s)) => {
@@ -242,7 +237,7 @@ impl Vm {
         let stream = Self::sfo_stream(obj)?;
         let mut start;
         loop {
-            start = self.spl_call_builtin(b"ftell", &[stream.clone()]).unwrap_or(Value::False);
+            start = self.spl_call_builtin(b"ftell", std::slice::from_ref(&stream)).unwrap_or(Value::False);
             if !self.sfo_read(obj, silent, true) {
                 return None;
             }
@@ -680,9 +675,7 @@ impl Vm {
         while path_len > 1 && orig[path_len - 1] != b'/' {
             path_len -= 1;
         }
-        if path_len > 0 {
-            path_len -= 1;
-        }
+        path_len = path_len.saturating_sub(1);
         set_prop(obj, b"__spl_path", Value::String(PhpString::from_vec(orig[..path_len].to_vec())));
         true
     }

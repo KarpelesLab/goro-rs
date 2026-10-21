@@ -190,9 +190,7 @@ fn operand_to_bigint_for_op(val: &Value) -> Result<BigInt, String> {
                         .map_err(|_| ve("Number is not an integer string"))
                 }
             } else {
-                Err(format!(
-                    "Number must be of type GMP|string|int, float given"
-                ))
+                Err("Number must be of type GMP|string|int, float given".to_string())
             }
         }
         Value::String(s) => {
@@ -518,12 +516,12 @@ fn parse_bigint_str_strict(s: &str, base: u32) -> Result<BigInt, String> {
         let valid = if actual_base <= 10 {
             ch >= b'0' && ch < b'0' + actual_base as u8
         } else if actual_base <= 36 {
-            (ch >= b'0' && ch <= b'9')
+            ch.is_ascii_digit()
                 || (ch >= b'a' && ch < b'a' + (actual_base - 10) as u8)
                 || (ch >= b'A' && ch < b'A' + (actual_base - 10) as u8)
         } else {
-            (ch >= b'0' && ch <= b'9')
-                || (ch >= b'a' && ch <= b'z')
+            ch.is_ascii_digit()
+                || ch.is_ascii_lowercase()
                 || (ch >= b'A' && ch < b'A' + (actual_base - 36) as u8)
         };
         if !valid {
@@ -607,13 +605,13 @@ fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
         let valid = if actual_base <= 10 {
             ch >= b'0' && ch < b'0' + actual_base as u8
         } else if actual_base <= 36 {
-            (ch >= b'0' && ch <= b'9')
+            ch.is_ascii_digit()
                 || (ch >= b'a' && ch < b'a' + (actual_base - 10) as u8)
                 || (ch >= b'A' && ch < b'A' + (actual_base - 10) as u8)
         } else {
             // bases 37..=62: 0-9, a-z (10-35), A-Z (36-61)
-            (ch >= b'0' && ch <= b'9')
-                || (ch >= b'a' && ch <= b'z')
+            ch.is_ascii_digit()
+                || ch.is_ascii_lowercase()
                 || (ch >= b'A' && ch < b'A' + (actual_base - 36) as u8)
         };
         if !valid {
@@ -1221,7 +1219,7 @@ fn kronecker_symbol(a: &BigInt, n: &BigInt) -> i32 {
     if v > 0 {
         // Handle (a/2) for each factor of 2
         let a_mod_8 = a.mod_floor(&BigInt::from(8)).to_i64().unwrap_or(0);
-        if v % 2 != 0 {
+        if !v.is_multiple_of(2) {
             if a_mod_8 == 3 || a_mod_8 == 5 {
                 result = -result;
             }
@@ -1300,13 +1298,13 @@ fn binomial(n: &BigInt, k: i64) -> BigInt {
 }
 
 fn binomial_positive(n: &BigInt, k: u64) -> BigInt {
-    if n.to_u64().map_or(false, |nv| k > nv) {
+    if n.to_u64().is_some_and(|nv| k > nv) {
         return BigInt::zero();
     }
     let mut result = BigInt::one();
     for i in 0..k {
-        result = result * (n - BigInt::from(i));
-        result = result / BigInt::from(i + 1);
+        result *= n - BigInt::from(i);
+        result /= BigInt::from(i + 1);
     }
     result
 }
@@ -1357,7 +1355,7 @@ fn gmp_init_inner(
     let base_val = args1.map(|v| v.to_long()).unwrap_or(0);
 
     // Validate base
-    if base_val != 0 && (base_val < 2 || base_val > 62) {
+    if base_val != 0 && !(2..=62).contains(&base_val) {
         let msg = format!("{}(): Argument #2 ($base) must be 0 or between 2 and 62", func_name);
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -1449,7 +1447,7 @@ pub fn gmp_construct_native(vm: &mut Vm, args: &[Value], line: u32) -> Result<()
 
     // Compute BigInt using same rules as gmp_init (but error class name is GMP::__construct).
     let base_val = base_val_ref.map(|v| v.to_long()).unwrap_or(0);
-    if base_val != 0 && (base_val < 2 || base_val > 62) {
+    if base_val != 0 && !(2..=62).contains(&base_val) {
         let msg = "GMP::__construct(): Argument #2 ($base) must be 0 or between 2 and 62".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, line);
         vm.current_exception = Some(exc);
@@ -2247,7 +2245,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Guard against malicious/huge word_size that would overflow when padding.
     // PHP's gmp_export rejects this with a ValueError.
     if word_size_usize > 0 && word_size_usize > 1_000_000_000 {
-        let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+        let msg = "gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
@@ -2258,7 +2256,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     {
         Some(n) if n <= 1_000_000_000 => n,
         _ => {
-            let msg = format!("gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)");
+            let msg = "gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
@@ -2317,7 +2315,7 @@ fn gmp_import_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(bigint_to_gmp_value(vm, BigInt::zero()));
     }
 
-    if bytes.len() % word_size != 0 {
+    if !bytes.len().is_multiple_of(word_size) {
         let msg = "gmp_import(): Argument #1 ($data) must be a multiple of argument #2 ($word_size)".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -2353,7 +2351,7 @@ fn gmp_import_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // Simple PRNG for random functions
 thread_local! {
-    static RNG_STATE: RefCell<u64> = RefCell::new(0);
+    static RNG_STATE: RefCell<u64> = const { RefCell::new(0) };
 }
 
 fn gmp_random_seed(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2398,7 +2396,7 @@ fn gmp_random_bits(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Generate random bytes
-    let num_bytes = ((bits as usize) + 7) / 8;
+    let num_bytes = (bits as usize).div_ceil(8);
     let mut bytes = Vec::with_capacity(num_bytes);
     for _ in 0..num_bytes {
         bytes.push((next_random() & 0xFF) as u8);
@@ -2409,7 +2407,7 @@ fn gmp_random_bits(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let excess = num_bytes * 8 - bits as usize;
     if excess > 0 {
         let mask = (BigInt::one() << bits as u64) - BigInt::one();
-        n = n & mask;
+        n &= mask;
     }
 
     Ok(bigint_to_gmp_value(vm, n))
@@ -2432,7 +2430,7 @@ fn gmp_random_range(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let bits = range.bits();
-    let num_bytes = ((bits as usize) + 7) / 8;
+    let num_bytes = (bits as usize).div_ceil(8);
     let mut bytes = Vec::with_capacity(num_bytes);
     for _ in 0..num_bytes {
         bytes.push((next_random() & 0xFF) as u8);

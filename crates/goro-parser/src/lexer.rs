@@ -2249,6 +2249,38 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Encode a `\u{...}` escape like zend_language_scanner.l: invalid or empty
+/// sequences and codepoints above U+10FFFF are compile errors; surrogate
+/// halves are encoded as plain 3-byte sequences.
+fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
+    if bad || hex.is_empty() {
+        crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence".to_string(), line);
+        return;
+    }
+    let cp = match u64::from_str_radix(hex, 16) {
+        Ok(v) if v <= 0x10FFFF => v as u32,
+        _ => {
+            crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence: Codepoint too large".to_string(), line);
+            return;
+        }
+    };
+    if cp < 0x80 {
+        out.push(cp as u8);
+    } else if cp < 0x800 {
+        out.push(0xC0 | (cp >> 6) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
+    } else if cp < 0x10000 {
+        out.push(0xE0 | (cp >> 12) as u8);
+        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
+    } else {
+        out.push(0xF0 | (cp >> 18) as u8);
+        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
+        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2318,37 +2350,5 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::LongNumber(255));
         assert_eq!(tokens[3].kind, TokenKind::LongNumber(10));
         assert_eq!(tokens[5].kind, TokenKind::LongNumber(63));
-    }
-}
-
-/// Encode a `\u{...}` escape like zend_language_scanner.l: invalid or empty
-/// sequences and codepoints above U+10FFFF are compile errors; surrogate
-/// halves are encoded as plain 3-byte sequences.
-fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
-    if bad || hex.is_empty() {
-        crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence".to_string(), line);
-        return;
-    }
-    let cp = match u64::from_str_radix(hex, 16) {
-        Ok(v) if v <= 0x10FFFF => v as u32,
-        _ => {
-            crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence: Codepoint too large".to_string(), line);
-            return;
-        }
-    };
-    if cp < 0x80 {
-        out.push(cp as u8);
-    } else if cp < 0x800 {
-        out.push(0xC0 | (cp >> 6) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else if cp < 0x10000 {
-        out.push(0xE0 | (cp >> 12) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else {
-        out.push(0xF0 | (cp >> 18) as u8);
-        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
     }
 }

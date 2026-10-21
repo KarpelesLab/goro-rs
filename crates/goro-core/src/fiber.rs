@@ -173,7 +173,7 @@ impl PhpFiber {
     pub fn force_unwind(&mut self) {
         if let Some(mut co) = self.coroutine.take() {
             if co.started() && !co.done() {
-                let _ = co.force_unwind();
+                co.force_unwind();
             }
         }
     }

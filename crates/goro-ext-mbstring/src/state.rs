@@ -292,7 +292,7 @@ pub fn parse_encoding_list(st: &MbState, value: &[u8]) -> Result<Vec<&'static En
             }
         }
         while let Some((&c, rest)) = s.split_last() {
-            if (c == b' ' || c == b'\t') && rest.len() > 0 {
+            if (c == b' ' || c == b'\t') && !rest.is_empty() {
                 s = rest;
             } else {
                 break;

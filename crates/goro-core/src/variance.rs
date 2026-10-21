@@ -170,12 +170,12 @@ impl LinkClass {
 thread_local! {
     /// Classes whose declaration is in progress (visible to variance checks of
     /// classes loaded while they link, like PHP's unlinked class table entries).
-    static LINKING: RefCell<Vec<(ClassEntry, bool)>> = RefCell::new(Vec::new());
+    static LINKING: RefCell<Vec<(ClassEntry, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
     /// Hoisted classes whose early binding was deferred to their source position.
-    static DEFERRED: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
+    static DEFERRED: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn defer(name: &[u8]) {
@@ -217,7 +217,7 @@ pub(crate) fn push_linking(ce: &ClassEntry) {
 
 thread_local! {
     /// A fatal (non-exception) error raised while running an autoloader.
-    static AUTOLOAD_FATAL: RefCell<Option<super::VmError>> = RefCell::new(None);
+    static AUTOLOAD_FATAL: RefCell<Option<super::VmError>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn set_autoload_fatal(e: super::VmError) {
@@ -324,7 +324,7 @@ impl<'a> Ctx<'a> {
                 b"datetime" | b"datetimeimmutable" => &[b"datetimeinterface"],
                 _ => &[],
             };
-            if extra.iter().any(|e| *e == bl.as_slice()) {
+            if extra.contains(&bl.as_slice()) {
                 return true;
             }
             return super::is_builtin_subclass(&al, &bl)
@@ -865,7 +865,7 @@ fn value_display(v: &Value) -> String {
             if b.len() > 10 { format!("'{}...'", shown) } else { format!("'{}'", shown) }
         }
         Value::Array(a) => {
-            if a.borrow().len() == 0 { "[]".into() } else { "[...]".into() }
+            if a.borrow().is_empty() { "[]".into() } else { "[...]".into() }
         }
         other => other.to_php_string().to_string_lossy(),
     }

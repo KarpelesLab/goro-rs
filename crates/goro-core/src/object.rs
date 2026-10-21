@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use indexmap::IndexMap;
 
 use crate::opcode::OpArray;
@@ -182,7 +181,7 @@ impl ClassEntry {
 /// `alloc_object_id` calls can reuse it. Matches PHP's handle recycling.
 std::thread_local! {
     pub static FREED_OBJECT_IDS: std::cell::RefCell<Vec<u64>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A PHP object instance

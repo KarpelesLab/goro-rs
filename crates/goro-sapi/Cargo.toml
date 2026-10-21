@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SAPI trait and implementations for goro-rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-vfs = { path = "../goro-vfs" }
