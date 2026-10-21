@@ -2721,6 +2721,42 @@ impl Vm {
         None
     }
 
+    /// zend_objects_destroy_object visibility check for a runtime destructor
+    /// call; returns the Error message when the current scope may not call it.
+    fn destructor_visibility_error(&self, class_lower: &[u8], vis: crate::object::Visibility, decl: &[u8]) -> Option<String> {
+        use crate::object::Visibility as V;
+        if matches!(vis, V::Public) {
+            return None;
+        }
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let allowed = match (&vis, &scope) {
+            (V::Private, Some(sc)) => sc.as_slice() == class_lower,
+            (V::Protected, Some(sc)) => {
+                let decl_lower = decl.to_ascii_lowercase();
+                let root = self.find_root_declaring_class_for_method(&decl_lower, b"__destruct");
+                *sc == root || self.class_extends(sc, &root) || self.class_extends(&root, sc)
+            }
+            _ => false,
+        };
+        if allowed {
+            return None;
+        }
+        let vis_s = if matches!(vis, V::Private) { "private" } else { "protected" };
+        let cname = self
+            .classes
+            .get(class_lower)
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string());
+        let from = match &scope {
+            Some(sc) => format!(
+                "scope {}",
+                self.classes.get(sc).map(|c| crate::value::display_class_name(&c.name)).unwrap_or_default()
+            ),
+            None => "global scope".to_string(),
+        };
+        Some(format!("Call to {} {}::__destruct() from {}", vis_s, cname, from))
+    }
+
     /// Value of a global variable held in the suspended global frame (if any).
     fn global_stash_get(&self, name: &[u8]) -> Option<Value> {
         let (cvs, names) = self.global_cv_stash.as_ref()?;
@@ -3886,9 +3922,16 @@ impl Vm {
                         if op.attributes.is_empty() && !m.attributes.is_empty() {
                             op.attributes = m.attributes.clone();
                         }
-                        (op, m.attributes.clone())
+                        (op, m.attributes.clone(), m.visibility, m.declaring_class.clone())
                     });
-                if let Some((destruct_op, _method_attrs)) = destruct_info {
+                if let Some((_, _, vis, decl)) = &destruct_info {
+                    if let Some(msg) = self.destructor_visibility_error(&class_lower, *vis, decl) {
+                        let exc = self.create_exception(b"Error", &msg, self.current_line);
+                        self.current_exception = Some(exc);
+                        continue;
+                    }
+                }
+                if let Some((destruct_op, _method_attrs, _, _)) = destruct_info {
                     let class_name_orig = obj_rc.borrow().class_name.clone();
                     let display_fallback = format!("{}::__destruct", String::from_utf8_lossy(&class_name_orig));
                     let line = self.current_line;
@@ -15411,6 +15454,22 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
+                let destruct_vis = self
+                    .classes
+                    .get(&class_lower)
+                    .and_then(|c| c.get_method(b"__destruct"))
+                    .map(|m| m.visibility);
+                if let Some(vis) = destruct_vis {
+                    if !matches!(vis, crate::object::Visibility::Public) {
+                        if self.error_reporting & 2 != 0 {
+                            let vis_s = if matches!(vis, crate::object::Visibility::Private) { "private" } else { "protected" };
+                            let cname = crate::value::display_class_name(&obj_rc.borrow().class_name);
+                            let msg = format!("Call to {} {}::__destruct() from global scope during shutdown ignored", vis_s, cname);
+                            self.display_error("Warning", &msg, "Unknown", 0);
+                        }
+                        continue;
+                    }
+                }
                 let destruct_op = self
                     .classes
                     .get(&class_lower)
@@ -15689,7 +15748,23 @@ impl Vm {
                             }
                         }
                     }
+                    let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
+                    if !had_exc && self.current_exception.is_some() {
+                        if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() {
+                            pending_calls_catch_depth = Some(*_eh_pc);
+                            let catch = *_catch;
+                            let finally = *_finally;
+                            exception_handlers.pop();
+                            if catch > 0 {
+                                ip = catch as usize;
+                            } else if finally > 0 {
+                                ip = finally as usize;
+                            }
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from destructor".into(), line: op.line });
+                    }
                 }
 
                 OpCode::AssignRef => {
@@ -26963,7 +27038,7 @@ impl Vm {
                                             crate::object::Visibility::Protected => "protected",
                                             _ => "public",
                                         };
-                                        let msg = format!("Call to {} {}::__clone() from {}", vis_str, class_name_display, scope_str);
+                                        let msg = format!("Call to {} method {}::__clone() from {}", vis_str, class_name_display, scope_str);
                                         let exc = self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
@@ -27374,7 +27449,23 @@ impl Vm {
                             self.globals.remove(name);
                         }
                     }
+                    let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
+                    if !had_exc && self.current_exception.is_some() {
+                        if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() {
+                            pending_calls_catch_depth = Some(*_eh_pc);
+                            let catch = *_catch;
+                            let finally = *_finally;
+                            exception_handlers.pop();
+                            if catch > 0 {
+                                ip = catch as usize;
+                            } else if finally > 0 {
+                                ip = finally as usize;
+                            }
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught exception from destructor".into(), line: op.line });
+                    }
                 }
 
                 OpCode::ArrayUnset => {
