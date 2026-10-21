@@ -2310,7 +2310,7 @@ impl Compiler {
                         }
                     }
                     // Validate type hint for redundancy and standalone constraints
-                    if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()) {
+                    if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                         return Err(CompileError {
                             message: err,
                             line: stmt.span.line,
@@ -2339,7 +2339,7 @@ impl Compiler {
                             }
                         }
                         // Validate type hint for redundancy and standalone constraints
-                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()) {
+                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                             return Err(CompileError {
                                 message: err,
                                 line: stmt.span.line,
@@ -3421,7 +3421,7 @@ impl Compiler {
                             }
                             // Validate type hint for redundancy and standalone constraints
                             if let Some(hint) = type_hint {
-                                if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                                     return Err(CompileError {
                                         message: err,
                                         line: stmt.span.line,
@@ -4777,7 +4777,7 @@ impl Compiler {
                                         }
                                     }
                                     // Validate type hint
-                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
@@ -4795,7 +4795,7 @@ impl Compiler {
                                                 });
                                             }
                                         }
-                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -4843,7 +4843,7 @@ impl Compiler {
                                         }
                                     }
                                     // Validate return type hint
-                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
@@ -4915,7 +4915,7 @@ impl Compiler {
                                                 });
                                             }
                                         }
-                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()) {
+                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -11430,6 +11430,117 @@ impl Compiler {
         }
     }
 
+    /// Redundancy checks of zend_compile_typename that need resolved class
+    /// names (use imports): duplicate intersection members, DNF members made
+    /// redundant by another member, unresolvable self/parent in intersections.
+    fn type_redundancy_error(&self, hint: &TypeHint) -> Option<String> {
+        fn relative_in_intersection(h: &TypeHint, in_trait: bool) -> Option<String> {
+            match h {
+                TypeHint::Intersection(parts) => {
+                    for p in parts {
+                        if let TypeHint::Simple(n) = p {
+                            if in_trait && (n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent")) {
+                                return Some(format!("Type {} cannot be part of an intersection type", String::from_utf8_lossy(n)));
+                            }
+                        }
+                    }
+                    None
+                }
+                TypeHint::Union(parts) => parts.iter().find_map(|p| relative_in_intersection(p, in_trait)),
+                TypeHint::Nullable(inner) => relative_in_intersection(inner, in_trait),
+                _ => None,
+            }
+        }
+        if let Some(e) = relative_in_intersection(hint, self.is_in_trait) {
+            return Some(e);
+        }
+        let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+        fn names(parts: &[ParamType]) -> Vec<Vec<u8>> {
+            parts.iter().filter_map(|p| if let ParamType::Simple(n) = p { Some(n.clone()) } else { None }).collect()
+        }
+        fn is_builtin(n: &[u8]) -> bool {
+            matches!(n, b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
+                | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
+                | b"void" | b"false" | b"true" | b"never" | b"static" | b"self" | b"parent")
+        }
+        fn join(ns: &[Vec<u8>]) -> String {
+            ns.iter().map(|n| String::from_utf8_lossy(n).to_string()).collect::<Vec<_>>().join("&")
+        }
+        fn contains_ci(list: &[Vec<u8>], n: &[u8]) -> bool {
+            list.iter().any(|x| x.eq_ignore_ascii_case(n))
+        }
+        match &pt {
+            ParamType::Intersection(parts) => {
+                let ns = names(parts);
+                for i in 1..ns.len() {
+                    if contains_ci(&ns[..i], &ns[i]) {
+                        return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(&ns[i])));
+                    }
+                }
+                None
+            }
+            ParamType::Union(parts) => {
+                enum M { C(Vec<u8>), I(Vec<Vec<u8>>) }
+                let mut list: Vec<M> = Vec::new();
+                for p in parts {
+                    match p {
+                        ParamType::Intersection(ip) => {
+                            let new = names(ip);
+                            for i in 1..new.len() {
+                                if contains_ci(&new[..i], &new[i]) {
+                                    return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(&new[i])));
+                                }
+                            }
+                            for prev in &list {
+                                match prev {
+                                    M::I(old) => {
+                                        let (smaller, larger) = if old.len() < new.len() { (old, &new) } else { (&new, old) };
+                                        let sum = smaller.iter().filter(|n| contains_ci(larger, n)).count();
+                                        if sum == smaller.len() {
+                                            // left = new, right = old (zend_are_intersection_types_redundant(single, prev))
+                                            let flipped = old.len() < new.len();
+                                            let (sm_s, lg_s) = if flipped { (join(old), join(&new)) } else { (join(&new), join(old)) };
+                                            if smaller.len() == larger.len() {
+                                                return Some(format!("Type {} is redundant with type {}", sm_s, lg_s));
+                                            }
+                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", lg_s, sm_s));
+                                        }
+                                    }
+                                    M::C(c) => {
+                                        if contains_ci(&new, c) {
+                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", join(&new), String::from_utf8_lossy(c)));
+                                        }
+                                    }
+                                }
+                            }
+                            list.push(M::I(new));
+                        }
+                        ParamType::Simple(n) if !is_builtin(n) => {
+                            for prev in &list {
+                                match prev {
+                                    M::I(old) => {
+                                        if contains_ci(old, n) {
+                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", join(old), String::from_utf8_lossy(n)));
+                                        }
+                                    }
+                                    M::C(c) => {
+                                        if c.eq_ignore_ascii_case(n) {
+                                            return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(n)));
+                                        }
+                                    }
+                                }
+                            }
+                            list.push(M::C(n.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// zend_is_valid_default_value for a compile-time literal default value.
     /// Ok(None): valid or not a literal; Ok(Some(v)): valid once widened to
     /// float (use `v`); Err((type name, value name)) when invalid.
@@ -12319,56 +12430,19 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
             }
             // object + class type is redundant
             if has_object && has_class_type {
-                // Build the full type string for the error message
-                // PHP orders: class types first, then builtin types
-                let mut class_parts: Vec<String> = Vec::new();
-                let mut builtin_parts: Vec<String> = Vec::new();
-                for t in types {
-                    match t {
-                        TypeHint::Simple(n) => {
-                            let l: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let display = if l == b"self" {
-                                if let Some(cn) = class_name {
-                                    String::from_utf8_lossy(cn).to_string()
-                                } else {
-                                    String::from_utf8_lossy(n).to_string()
-                                }
-                            } else if l == b"parent" {
-                                if let Some(pn) = parent_class_name {
-                                    String::from_utf8_lossy(pn).to_string()
-                                } else {
-                                    String::from_utf8_lossy(n).to_string()
-                                }
-                            } else {
-                                String::from_utf8_lossy(n).to_string()
-                            };
-                            // Expand iterable to Traversable|array
-                            if l == b"iterable" {
-                                builtin_parts.push("Traversable".to_string());
-                                builtin_parts.push("array".to_string());
-                            } else if matches!(l.as_slice(),
-                                b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-                                | b"array" | b"object" | b"callable" | b"mixed" | b"null"
-                                | b"void" | b"false" | b"true" | b"never"
-                            ) {
-                                builtin_parts.push(display);
-                            } else {
-                                class_parts.push(display);
-                            }
+                // Render like zend_type_to_string (class names in order, then builtins)
+                let pt = type_hint_to_param_type_with_ns(hint, b"", &HashMap::new());
+                let mut tv = crate::vm::variance::TypeView::from_param_type(&pt);
+                for e in tv.elems.iter_mut() {
+                    if let crate::vm::variance::TElem::Name(n) = e {
+                        if n.eq_ignore_ascii_case(b"self") {
+                            if let Some(cn) = class_name { *n = cn.to_vec(); }
+                        } else if n.eq_ignore_ascii_case(b"parent") {
+                            if let Some(pn) = parent_class_name { *n = pn.to_vec(); }
                         }
-                        TypeHint::Intersection(parts) => {
-                            let inner: Vec<String> = parts.iter().map(|p| match p {
-                                TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                _ => "?".to_string(),
-                            }).collect();
-                            class_parts.push(format!("({})", inner.join("&")));
-                        }
-                        _ => {}
                     }
                 }
-                // Class types first, then builtins
-                class_parts.extend(builtin_parts);
-                let full_type = class_parts.join("|");
+                let full_type = crate::vm::variance::type_to_string(&tv, None);
                 return Some(format!("Type {} contains both object and a class type, which is redundant", full_type));
             }
 
