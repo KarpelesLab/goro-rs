@@ -1171,14 +1171,89 @@ fn m_save_html_file(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         return Err(());
     }
     let d = doc_node(vm, o)?;
-    let out = super::html_serializer::serialize_node(d);
     let enc = tree::with(|t| t.doc_info(d).and_then(|i| i.encoding.clone()));
+    let lower = file.to_ascii_lowercase();
+    if file.contains("://") && !lower.starts_with("file://") {
+        // a stream wrapper sees every write of the serializer
+        return save_html_to_stream(vm, d, &file, enc.as_deref());
+    }
+    let out = super::html_serializer::serialize_node(d);
     let bytes = crate::html5::encoding::encode_output(&out, enc.as_deref());
     let n = crate::io::write_resource_len(vm, &file, &bytes);
     if n < 0 {
         return Ok(Value::False);
     }
     Ok(Value::Long(n))
+}
+
+/// Dom\HTMLDocument::saveHtmlFile to a stream wrapper: one php_stream_write
+/// per serializer write (dom_common_save with dom_write_output_stream).
+fn save_html_to_stream(vm: &mut Vm, d: NodeId, file: &str, enc: Option<&str>) -> R<Value> {
+    let (fopen, fwrite, fclose) = match (
+        vm.functions.get(&b"fopen"[..]).copied(),
+        vm.functions.get(&b"fwrite"[..]).copied(),
+        vm.functions.get(&b"fclose"[..]).copied(),
+    ) {
+        (Some(a), Some(b), Some(c)) => (a, b, c),
+        _ => return Ok(Value::False),
+    };
+    let mut fargs = vec![s(file), s("wb"), Value::False];
+    if let Some(ctx) = crate::libxml::streams_context() {
+        fargs.push(ctx);
+    } else {
+        fargs.truncate(2);
+    }
+    let saved = vm.error_reporting;
+    vm.error_reporting = 0;
+    let opened = fopen(vm, &fargs);
+    vm.error_reporting = saved;
+    let h = match opened {
+        Ok(v @ Value::Resource(_)) => v,
+        _ => {
+            return if vm.current_exception.is_some() {
+                Err(())
+            } else {
+                Ok(Value::False)
+            };
+        }
+    };
+    let out = super::html_serializer::serialize_node_out(d, true);
+    let mut encoder = crate::html5::encoding::OutputEncoder::new(enc);
+    let mut total: i64 = 0;
+    let mut pieces: Vec<Vec<u8>> = out
+        .pieces()
+        .into_iter()
+        .map(|p| encoder.encode(p, false))
+        .collect();
+    pieces.push(encoder.encode("", true));
+    let mut failed = false;
+    for p in pieces {
+        if p.is_empty() {
+            continue;
+        }
+        let r = fwrite(vm, &[h.clone(), Value::String(PhpString::from_vec(p))]);
+        if vm.current_exception.is_some() {
+            failed = true;
+            break;
+        }
+        match r {
+            Ok(Value::Long(n)) => total += n,
+            _ => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    let exc = vm.current_exception.take();
+    let _ = fclose(vm, &[h]);
+    if exc.is_some() {
+        vm.current_exception = exc;
+        return Err(());
+    }
+    if failed {
+        return Ok(Value::False);
+    }
+    Ok(Value::Long(total))
 }
 
 pub fn html_document_methods() -> Vec<(&'static str, MethodFn)> {

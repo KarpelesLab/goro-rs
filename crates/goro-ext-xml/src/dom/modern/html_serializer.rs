@@ -1,21 +1,71 @@
 //! The HTML fragment serialization algorithm (html5_serializer.c), used by
-//! innerHTML/outerHTML of Dom\HTMLDocument nodes. There is no HTML5 parser:
-//! HTML fragment parsing is not supported.
+//! saveHtml and innerHTML/outerHTML of Dom\HTMLDocument nodes, and the
+//! HTML fragment parsing entry point.
 
 use super::*;
 
-fn escape(out: &mut String, s_: &str, attribute_mode: bool) {
-    for c in s_.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '\u{A0}' => out.push_str("&nbsp;"),
-            '"' if attribute_mode => out.push_str("&quot;"),
-            '<' if !attribute_mode => out.push_str("&lt;"),
-            '>' if !attribute_mode => out.push_str("&gt;"),
-            '\0' => break,
-            c => out.push(c),
+/// The serializer output: the string and, when requested, the end offset
+/// of every non-empty write call (saveHtmlFile writes them one by one).
+#[derive(Default)]
+pub struct Out {
+    pub s: String,
+    pub cuts: Option<Vec<usize>>,
+}
+
+impl Out {
+    /// write_string_len
+    fn w(&mut self, x: &str) {
+        if x.is_empty() {
+            return;
+        }
+        self.s.push_str(x);
+        if let Some(c) = &mut self.cuts {
+            c.push(self.s.len());
         }
     }
+
+    /// write_string: C strings stop at a NUL byte
+    fn ws(&mut self, x: &str) {
+        self.w(cstr(x));
+    }
+
+    /// The pieces in write order.
+    pub fn pieces(&self) -> Vec<&str> {
+        let mut v = Vec::new();
+        let mut last = 0;
+        for &c in self.cuts.iter().flatten() {
+            v.push(&self.s[last..c]);
+            last = c;
+        }
+        v
+    }
+}
+
+fn cstr(x: &str) -> &str {
+    match x.find('\0') {
+        Some(i) => &x[..i],
+        None => x,
+    }
+}
+
+/// dom_html5_escape_string
+fn escape(out: &mut Out, s_: &str, attribute_mode: bool) {
+    let s_ = cstr(s_);
+    let mut last = 0;
+    for (i, c) in s_.char_indices() {
+        let rep = match c {
+            '&' => "&amp;",
+            '\u{A0}' => "&nbsp;",
+            '"' if attribute_mode => "&quot;",
+            '<' if !attribute_mode => "&lt;",
+            '>' if !attribute_mode => "&gt;",
+            _ => continue,
+        };
+        out.w(&s_[last..i]);
+        out.w(rep);
+        last = i + c.len_utf8();
+    }
+    out.w(&s_[last..]);
 }
 
 fn is_html(t: &Tree, n: NodeId) -> bool {
@@ -47,26 +97,56 @@ fn serializes_as_void(t: &Tree, n: NodeId) -> bool {
         )
 }
 
-fn tag_name(t: &Tree, out: &mut String, n: NodeId) {
+fn tag_name(t: &Tree, out: &mut Out, n: NodeId) {
     if let Some(ns) = t.nodes[n].ns {
         if let Some(p) = &t.nss[ns].prefix {
             let h = &t.nss[ns].href;
             if h != XHTML_NS && h != MATHML_NS && h != SVG_NS {
-                out.push_str(p);
-                out.push(':');
+                out.ws(p);
+                out.w(":");
             }
         }
     }
-    out.push_str(&t.nodes[n].name);
+    out.ws(&t.nodes[n].name);
 }
 
-fn node(t: &Tree, out: &mut String, n: NodeId) {
+fn attr_name(t: &Tree, out: &mut Out, a: NodeId) {
+    let an = &t.nodes[a];
+    match an.ns {
+        None => out.ws(&an.name),
+        Some(ns) => {
+            let h = t.nss[ns].href.as_str();
+            if h == XML_XML_NAMESPACE {
+                out.w("xml:");
+                out.ws(&an.name);
+            } else if h == XMLNS_NS {
+                if an.name == "xmlns" {
+                    out.w("xmlns");
+                } else {
+                    out.w("xmlns:");
+                    out.ws(&an.name);
+                }
+            } else if h == XLINK_NS {
+                out.w("xlink:");
+                out.ws(&an.name);
+            } else if let Some(p) = &t.nss[ns].prefix {
+                out.ws(p);
+                out.w(":");
+                out.ws(&an.name);
+            } else {
+                out.ws(&an.name);
+            }
+        }
+    }
+}
+
+fn node(t: &Tree, out: &mut Out, n: NodeId) {
     let nd = &t.nodes[n];
     match nd.t {
         NType::Dtd => {
-            out.push_str("<!DOCTYPE ");
-            out.push_str(&nd.name);
-            out.push('>');
+            out.w("<!DOCTYPE ");
+            out.ws(&nd.name);
+            out.w(">");
         }
         NType::CData | NType::Text => {
             let raw = nd
@@ -87,87 +167,63 @@ fn node(t: &Tree, out: &mut String, n: NodeId) {
                 })
                 .unwrap_or(false);
             if raw {
-                out.push_str(&nd.content);
+                out.ws(&nd.content);
             } else {
                 escape(out, &nd.content, false);
             }
         }
         NType::Pi => {
-            out.push_str("<?");
-            out.push_str(&nd.name);
-            out.push(' ');
-            out.push_str(&nd.content);
-            out.push('>');
+            out.w("<?");
+            out.ws(&nd.name);
+            out.w(" ");
+            out.ws(&nd.content);
+            out.w(">");
         }
         NType::Comment => {
-            out.push_str("<!--");
-            out.push_str(&nd.content);
-            out.push_str("-->");
+            out.w("<!--");
+            out.ws(&nd.content);
+            out.w("-->");
         }
         NType::Element => {
-            out.push('<');
+            out.w("<");
             tag_name(t, out, n);
             for a in t.attrs_of(n) {
-                out.push(' ');
-                let an = &t.nodes[a];
-                match an.ns {
-                    None => out.push_str(&an.name),
-                    Some(ns) => {
-                        let h = t.nss[ns].href.as_str();
-                        if h == XML_XML_NAMESPACE {
-                            out.push_str("xml:");
-                            out.push_str(&an.name);
-                        } else if h == XMLNS_NS {
-                            if an.name == "xmlns" {
-                                out.push_str("xmlns");
-                            } else {
-                                out.push_str("xmlns:");
-                                out.push_str(&an.name);
-                            }
-                        } else if h == XLINK_NS {
-                            out.push_str("xlink:");
-                            out.push_str(&an.name);
-                        } else if let Some(p) = &t.nss[ns].prefix {
-                            out.push_str(p);
-                            out.push(':');
-                            out.push_str(&an.name);
-                        } else {
-                            out.push_str(&an.name);
-                        }
-                    }
-                }
-                out.push_str("=\"");
-                let mut c = an.children;
+                out.w(" ");
+                attr_name(t, out, a);
+                out.w("=\"");
+                let mut c = t.nodes[a].children;
                 while let Some(x) = c {
                     match t.nodes[x].t {
                         NType::Text => escape(out, &t.nodes[x].content, true),
                         NType::EntityRef => {
-                            out.push('&');
+                            out.w("&");
                             escape(out, &t.nodes[x].name, true);
-                            out.push(';');
+                            out.w(";");
                         }
                         _ => {}
                     }
                     c = t.nodes[x].next;
                 }
-                out.push('"');
+                out.w("\"");
             }
-            out.push('>');
-            if serializes_as_void(t, n) {
-                return;
-            }
-            let mut c = if is_html(t, n) && nd.name == "template" {
+            out.w(">");
+            // a template element serializes its template contents
+            let children = if is_html(t, n) && nd.name == "template" {
                 nd.template.and_then(|f| t.nodes[f].children)
             } else {
                 nd.children
             };
+            if serializes_as_void(t, n) {
+                return;
+            }
+            let mut c = children;
             while let Some(x) = c {
                 node(t, out, x);
                 c = t.nodes[x].next;
             }
-            out.push_str("</");
+            out.w("</");
             tag_name(t, out, n);
-            out.push('>');
+            out.w(">");
         }
         NType::DocumentFrag | NType::Document | NType::HtmlDocument => {
             let mut c = nd.children;
@@ -177,9 +233,9 @@ fn node(t: &Tree, out: &mut String, n: NodeId) {
             }
         }
         NType::EntityRef => {
-            out.push('&');
-            out.push_str(&nd.name);
-            out.push(';');
+            out.w("&");
+            out.ws(&nd.name);
+            out.w(";");
         }
         _ => {}
     }
@@ -188,15 +244,15 @@ fn node(t: &Tree, out: &mut String, n: NodeId) {
 /// dom_html5_serialize: the children of `n`.
 pub fn serialize_children(n: NodeId) -> String {
     tree::with(|t| {
-        let mut out = String::new();
+        let mut out = Out::default();
         if !matches!(
             t.nodes[n].t,
             NType::Element | NType::DocumentFrag | NType::Document | NType::HtmlDocument
         ) {
-            return out;
+            return out.s;
         }
         if t.nodes[n].t == NType::Element && serializes_as_void(t, n) {
-            return out;
+            return out.s;
         }
         let mut c = match t.nodes[n].template {
             Some(f) => t.nodes[f].children,
@@ -206,14 +262,22 @@ pub fn serialize_children(n: NodeId) -> String {
             node(t, &mut out, x);
             c = t.nodes[x].next;
         }
-        out
+        out.s
     })
 }
 
 /// dom_html5_serialize_outer
 pub fn serialize_node(n: NodeId) -> String {
+    serialize_node_out(n, false).s
+}
+
+/// dom_html5_serialize_outer, optionally recording the write calls.
+pub fn serialize_node_out(n: NodeId, pieces: bool) -> Out {
     tree::with(|t| {
-        let mut out = String::new();
+        let mut out = Out {
+            s: String::new(),
+            cuts: if pieces { Some(Vec::new()) } else { None },
+        };
         node(t, &mut out, n);
         out
     })

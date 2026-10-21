@@ -271,41 +271,63 @@ pub fn to_encoding_rs(name: &str) -> &'static encoding_rs::Encoding {
 /// `label` is the document's encoding (looked up like
 /// lxb_encoding_data_by_name).
 pub fn encode_output(s: &str, label: Option<&str>) -> Vec<u8> {
-    let name = label.and_then(|l| by_name(l.as_bytes())).unwrap_or("UTF-8");
-    match name {
-        "UTF-8" => s.as_bytes().to_vec(),
-        "UTF-16LE" | "UTF-16BE" => {
-            let mut out = Vec::with_capacity(s.len() * 2);
-            for u in s.encode_utf16() {
-                if name == "UTF-16LE" {
-                    out.extend_from_slice(&u.to_le_bytes());
-                } else {
-                    out.extend_from_slice(&u.to_be_bytes());
+    let mut e = OutputEncoder::new(label);
+    let mut out = e.encode(s, false);
+    out.extend(e.encode("", true));
+    out
+}
+
+/// A streaming dom_common_save encoder (one per save, pieces in order).
+pub struct OutputEncoder {
+    name: &'static str,
+    encoder: Option<encoding_rs::Encoder>,
+}
+
+impl OutputEncoder {
+    pub fn new(label: Option<&str>) -> OutputEncoder {
+        let name = label.and_then(|l| by_name(l.as_bytes())).unwrap_or("UTF-8");
+        let encoder = match name {
+            "UTF-8" | "UTF-16LE" | "UTF-16BE" | "replacement" => None,
+            _ => Some(to_encoding_rs(name).new_encoder()),
+        };
+        OutputEncoder { name, encoder }
+    }
+
+    pub fn encode(&mut self, s: &str, last: bool) -> Vec<u8> {
+        match self.name {
+            "UTF-8" => s.as_bytes().to_vec(),
+            "UTF-16LE" | "UTF-16BE" => {
+                let mut out = Vec::with_capacity(s.len() * 2);
+                for u in s.encode_utf16() {
+                    if self.name == "UTF-16LE" {
+                        out.extend_from_slice(&u.to_le_bytes());
+                    } else {
+                        out.extend_from_slice(&u.to_be_bytes());
+                    }
                 }
+                out
             }
-            out
-        }
-        "replacement" => Vec::new(),
-        _ => {
-            let enc = to_encoding_rs(name);
-            let mut encoder = enc.new_encoder();
-            let mut out = Vec::with_capacity(s.len() + 16);
-            let mut src = s;
-            loop {
-                let need = encoder
-                    .max_buffer_length_from_utf8_without_replacement(src.len())
-                    .unwrap_or(src.len() * 4 + 16);
-                out.reserve(need + 16);
-                let (res, read) =
-                    encoder.encode_from_utf8_to_vec_without_replacement(src, &mut out, true);
-                src = &src[read..];
-                match res {
-                    encoding_rs::EncoderResult::InputEmpty => break,
-                    encoding_rs::EncoderResult::OutputFull => continue,
-                    encoding_rs::EncoderResult::Unmappable(_) => out.push(b'?'),
+            "replacement" => Vec::new(),
+            _ => {
+                let encoder = self.encoder.as_mut().unwrap();
+                let mut out = Vec::with_capacity(s.len() + 16);
+                let mut src = s;
+                loop {
+                    let need = encoder
+                        .max_buffer_length_from_utf8_without_replacement(src.len())
+                        .unwrap_or(src.len() * 4 + 16);
+                    out.reserve(need + 16);
+                    let (res, read) =
+                        encoder.encode_from_utf8_to_vec_without_replacement(src, &mut out, last);
+                    src = &src[read..];
+                    match res {
+                        encoding_rs::EncoderResult::InputEmpty => break,
+                        encoding_rs::EncoderResult::OutputFull => continue,
+                        encoding_rs::EncoderResult::Unmappable(_) => out.push(b'?'),
+                    }
                 }
+                out
             }
-            out
         }
     }
 }
