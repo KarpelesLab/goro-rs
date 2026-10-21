@@ -540,8 +540,23 @@ impl PhpGenerator {
                                         vm.current_file.clone()
                                     };
                                     vm.generator_caller = Some((caller_file, op.line));
-                                    let _ = inner.resume(vm);
+                                    let exc_before = vm.current_exception.is_some();
+                                    let start_outcome = inner.resume(vm);
                                     vm.generator_caller = prev_caller;
+                                    if start_outcome.is_err() && !exc_before && vm.current_exception.is_some() {
+                                        // Inner threw while starting - propagate.
+                                        drop(inner);
+                                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                            continue;
+                                        }
+                                        self.state = GeneratorState::Completed;
+                                        self.ip = ip;
+                                        return Err(VmError {
+                                            message: "Uncaught exception in generator".to_string(),
+                                            line: op.line,
+                                        });
+                                    }
                                 }
                                 drop(inner);
                                 self.yield_from_source = Some(iterable);
@@ -556,7 +571,20 @@ impl PhpGenerator {
 
                                 if is_iterator {
                                     // Iterator object - convert to array for simplicity
+                                    let exc_before = vm.current_exception.is_some();
                                     let arr = vm.iterator_to_array(&iterable);
+                                    if !exc_before && vm.current_exception.is_some() {
+                                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                            continue;
+                                        }
+                                        self.state = GeneratorState::Completed;
+                                        self.ip = ip;
+                                        return Err(VmError {
+                                            message: "Uncaught exception in generator".to_string(),
+                                            line: op.line,
+                                        });
+                                    }
                                     self.yield_from_source = Some(Value::Array(Rc::new(RefCell::new(arr))));
                                     self.yield_from_pos = 0;
                                     ip -= 1;
@@ -589,8 +617,8 @@ impl PhpGenerator {
                                     let msg = "Can use \"yield from\" only with arrays and Traversables";
                                     let exc = vm.create_exception(b"Error", msg, op.line);
                                     vm.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                        ip = catch_target as usize;
+                                    if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                                        ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
                                         continue;
                                     }
                                     self.state = GeneratorState::Completed;
@@ -607,8 +635,8 @@ impl PhpGenerator {
                                 let msg = "Can use \"yield from\" only with arrays and Traversables";
                                 let exc = vm.create_exception(b"Error", msg, op.line);
                                 vm.current_exception = Some(exc);
-                                if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                    ip = catch_target as usize;
+                                if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                                    ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
                                     continue;
                                 }
                                 self.state = GeneratorState::Completed;
@@ -1113,8 +1141,8 @@ impl PhpGenerator {
                             }
                             // Check for exception handling in the generator
                             if vm.current_exception.is_some() {
-                                if let Some((catch_target, _, _)) = self.exception_handlers.last() {
-                                    let ct = *catch_target as usize;
+                                if let Some(&(catch_target, finally_target, _)) = self.exception_handlers.last() {
+                                    let ct = if catch_target > 0 { catch_target } else { finally_target } as usize;
                                     self.exception_handlers.pop();
                                     ip = ct;
                                     continue;
@@ -1405,6 +1433,17 @@ impl PhpGenerator {
                 }
 
                 OpCode::CatchException => {
+                    // Graceful-exit unwinding (fiber destruction) skips catch clauses.
+                    if vm.current_exception.as_ref().is_some_and(crate::vm::Vm::is_graceful_exit) {
+                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                            continue;
+                        }
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(VmError { message: "Graceful exit".into(), line: op.line });
+                    }
                     if let Some(exc) = vm.current_exception.take() {
                         self.write_operand(&op.op1, exc);
                     }

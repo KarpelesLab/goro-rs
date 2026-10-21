@@ -13,6 +13,9 @@ use crate::value::Value;
 
 #[path = "variance.rs"]
 pub(crate) mod variance;
+/// Internal class name of the graceful-exit unwinding object thrown into a
+/// fiber that is destroyed while suspended (not a user-visible class).
+pub const GRACEFUL_EXIT_CLASS: &[u8] = b"\0GracefulExit";
 
 thread_local! {
     /// Pointer to the VM that "owns" the currently running fiber on
@@ -4309,6 +4312,10 @@ impl Vm {
             if let Value::Object(ref obj_rc) = obj_val {
                 obj_rc.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
                 let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if class_lower == b"fiber" {
+                    self.fiber_destroy(obj_rc);
+                    continue;
+                }
                 let destruct_info = self.classes.get(&class_lower)
                     .and_then(|c| c.get_method(b"__destruct"))
                     .map(|m| {
@@ -10714,9 +10721,13 @@ impl Vm {
     pub fn iterator_to_array(&mut self, obj_val: &Value) -> PhpArray {
         let mut arr = PhpArray::new();
         // Call rewind() first
+        let exc_before = self.current_exception.is_some();
         self.call_object_method(obj_val, b"rewind", &[]);
         // Iterate: while valid(), get current()/key(), call next()
         loop {
+            if !exc_before && self.current_exception.is_some() {
+                break;
+            }
             let valid = self.call_object_method(obj_val, b"valid", &[]).unwrap_or(Value::False);
             if !valid.is_truthy() {
                 break;
@@ -11414,6 +11425,10 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
+                if class_lower == b"fiber" {
+                    self.fiber_destroy(obj_rc);
+                    continue;
+                }
                 let destruct_vis = self
                     .classes
                     .get(&class_lower)
@@ -14517,14 +14532,14 @@ impl Vm {
                         let suspend_val = call.args.first().cloned().unwrap_or(Value::Null);
                         // Push call stack entry for Fiber::suspend() so it appears in stack traces
                         self.call_stack.push(("Fiber::suspend".to_string(), self.current_file.clone(), op.line, call.args.clone(), false));
-                        if self.fiber_force_closing {
+                        if self.current_fiber_force_closed() {
                             // Trying to suspend in a force-closed fiber's finally block
                             let msg = "Cannot suspend in a force-closed fiber";
                             let exc = self.create_exception(b"FiberError", msg, op.line);
                             self.current_exception = Some(exc);
                             self.call_stack.pop();
-                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
+                            if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
                                 continue;
                             }
                             return Err(VmError { message: format!("Uncaught FiberError: {}", msg), line: op.line });
@@ -14553,7 +14568,7 @@ impl Vm {
                                 Some(crate::fiber::FiberResume::Throw(exc)) => {
                                     // Fiber::throw() — inject the exception at the resume site.
                                     self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, saved_depth, saved_pc)) = exception_handlers.pop() {
+                                    if let Some((catch_target, finally_target, _, saved_depth, saved_pc)) = exception_handlers.pop() {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.pending_calls.truncate(saved_pc);
                                         while self.error_reporting_stack.len() > saved_depth {
@@ -14561,7 +14576,7 @@ impl Vm {
                                                 self.error_reporting = saved;
                                             }
                                         }
-                                        ip = catch_target as usize;
+                                        ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
                                         continue;
                                     }
                                     return Err(VmError { message: "Uncaught exception thrown into fiber".to_string(), line: op.line });
@@ -21819,6 +21834,16 @@ impl Vm {
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
                     }
+                    // A fiber's graceful-exit unwind is never caught: skip the
+                    // catch clauses and continue unwinding (finally blocks run).
+                    if self.current_exception.as_ref().is_some_and(Self::is_graceful_exit) {
+                        if let Some((catch_target, finally_target, _, _, saved_pc)) = exception_handlers.pop() {
+                            self.pending_calls.truncate(saved_pc);
+                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Graceful exit".into(), line: op.line });
+                    }
                     // Store current exception into the CV
                     if let Some(exc) = self.current_exception.take() {
                         self.write_operand(&op.op1, exc, &mut cvs, &mut tmps, &static_cv_keys);
@@ -21902,7 +21927,7 @@ impl Vm {
 
                         // If there's already a pending exception (e.g., we're inside a finally block
                         // entered due to an exception), chain it as the "previous" of the new exception.
-                        if let Some(prev_exc) = self.current_exception.take() {
+                        if let Some(prev_exc) = self.current_exception.take().filter(|e| !Self::is_graceful_exit(e)) {
                             if let Value::Object(ref new_obj) = exc_val {
                                 let mut new_borrow = new_obj.borrow_mut();
                                 // Only set previous if it's currently null
@@ -21927,7 +21952,7 @@ impl Vm {
                     } else {
                         // No handler - check if there's a pending finally from an outer scope
                         // Chain previous exception if any
-                        if let Some(prev_exc) = self.current_exception.take() {
+                        if let Some(prev_exc) = self.current_exception.take().filter(|e| !Self::is_graceful_exit(e)) {
                             if let Value::Object(ref new_obj) = exc_val {
                                 let mut new_borrow = new_obj.borrow_mut();
                                 let current_prev = new_borrow.get_property(b"previous");
@@ -24204,14 +24229,9 @@ impl Vm {
                                     let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
                                     *slot = Value::Undef;
                                     if state == FiberState::Suspended as i64 {
-                                        // Force-close any stored coroutine first; its Drop
-                                        // will unwind the stack and run finally blocks.
-                                        if let Some(mut fiber_co) = self.fiber_coroutines.remove(&fiber_id) {
-                                            self.fiber_force_closing = true;
-                                            fiber_co.force_unwind();
-                                            self.fiber_force_closing = false;
-                                        }
-                                        // Then fall back to the legacy generator path.
+                                        // Coroutine-backed fibers are destroyed by
+                                        // run_pending_destructors() once unreferenced.
+                                        // Legacy generator-backed path:
                                         if let Some(mut fiber_gen) = self.fiber_generators.remove(&fiber_id) {
                                             self.fiber_force_closing = true;
                                             fiber_gen.close(self);
@@ -32626,7 +32646,7 @@ impl Vm {
         // Handle Fiber::suspend() in generator context
         if func_name_lower == b"fiber::suspend" {
             let suspend_val = call.args.first().cloned().unwrap_or(Value::Null);
-            if self.fiber_force_closing {
+            if self.current_fiber_force_closed() {
                 self.call_stack.push(("Fiber::suspend".to_string(), self.current_file.clone(), line, call.args.clone(), false));
                 let msg = "Cannot suspend in a force-closed fiber";
                 let exc = self.create_exception(b"FiberError", msg, line);
@@ -33188,6 +33208,9 @@ impl Vm {
                 fiber.saved_error_reporting = fiber_err_reporting;
                 fiber.saved_error_reporting_stack = fiber_err_stack;
                 self.fiber_coroutines.insert(fiber_id, fiber);
+                // Track the suspended fiber so that dropping its last
+                // reference destroys it (running its `finally` blocks).
+                self.destructible_objects.push(Value::Object(obj_rc.clone()));
                 Ok(v)
             }
             Err(crate::fiber::FiberOutcome::Returned(v)) => {
@@ -33199,6 +33222,174 @@ impl Vm {
                 obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
                 obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
                 // Re-raise the exception in the caller's context.
+                let msg = if let Value::Object(o) = &exc {
+                    let ob = o.borrow();
+                    let cls = crate::value::display_class_name(&ob.class_name);
+                    let m = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                    format!("Uncaught {}: {}", cls, m)
+                } else {
+                    "Uncaught exception from fiber".to_string()
+                };
+                self.current_exception = Some(exc);
+                Err(VmError { message: msg, line })
+            }
+            Err(crate::fiber::FiberOutcome::Failed(msg, err_line)) => {
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
+                Err(VmError { message: msg, line: err_line })
+            }
+        }
+    }
+
+    /// Create the internal "graceful exit" unwinding object (zend_ce_graceful_exit).
+    /// It is thrown out of the pending `Fiber::suspend()` when a suspended fiber
+    /// is destroyed: `finally` blocks run, but no `catch` clause matches it.
+    pub fn create_graceful_exit(&mut self) -> Value {
+        let id = self.alloc_object_id();
+        Value::Object(Rc::new(RefCell::new(PhpObject::new(GRACEFUL_EXIT_CLASS.to_vec(), id))))
+    }
+
+    /// True if `v` is the internal graceful-exit unwinding object.
+    pub fn is_graceful_exit(v: &Value) -> bool {
+        matches!(v, Value::Object(o) if o.borrow().class_name == GRACEFUL_EXIT_CLASS)
+    }
+
+    /// True if the currently running fiber is being destroyed (force-closed).
+    fn current_fiber_force_closed(&self) -> bool {
+        if self.fiber_force_closing {
+            return true;
+        }
+        match &self.current_fiber {
+            Some(Value::Object(o)) => matches!(o.borrow().get_property(b"__fiber_destroyed"), Value::True),
+            _ => false,
+        }
+    }
+
+    /// zend_exception_set_previous(): append `prev` at the end of `exc`'s
+    /// previous-chain (graceful-exit objects are never chained).
+    pub fn exception_set_previous(exc: &Value, prev: Value) {
+        if Self::is_graceful_exit(&prev) {
+            return;
+        }
+        let (Value::Object(head), Value::Object(prev_rc)) = (exc, &prev) else { return };
+        if Rc::ptr_eq(head, prev_rc) {
+            return;
+        }
+        let mut cur = head.clone();
+        let mut guard = 0;
+        loop {
+            let next = cur.borrow().get_property(b"previous");
+            match next {
+                Value::Object(n) => {
+                    if Rc::ptr_eq(&n, prev_rc) {
+                        return;
+                    }
+                    cur = n;
+                }
+                _ => break,
+            }
+            guard += 1;
+            if guard > 10000 {
+                return;
+            }
+        }
+        cur.borrow_mut().set_property(b"previous".to_vec(), prev);
+    }
+
+    /// zend_fiber_object_destroy(): a suspended fiber that is being destroyed is
+    /// resumed with a graceful-exit "exception" so its `finally` blocks run.
+    /// An exception escaping the fiber becomes the current exception (with any
+    /// previously pending exception chained as its previous).
+    pub fn fiber_destroy(&mut self, obj_rc: &Rc<RefCell<PhpObject>>) {
+        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+        if state != FiberState::Suspended as i64 {
+            return;
+        }
+        let fiber_id = obj_rc.borrow().object_id;
+        let Some(fiber) = self.fiber_coroutines.remove(&fiber_id) else { return };
+        let saved_exc = self.current_exception.take();
+        obj_rc.borrow_mut().set_property(b"__fiber_destroyed".to_vec(), Value::True);
+        let ge = self.create_graceful_exit();
+        let line = self.current_line;
+        let r = self.fiber_drive_coroutine(obj_rc.clone(), fiber, crate::fiber::FiberResume::Throw(ge), line);
+        if r.is_err() {
+            if let Some(exc) = self.current_exception.clone() {
+                if let Some(prev) = saved_exc {
+                    Self::exception_set_previous(&exc, prev);
+                }
+                return;
+            }
+        }
+        self.current_exception = saved_exc;
+    }
+
+    /// Drive a suspended corosensei-backed fiber with `input` (a resume value
+    /// or an exception to throw from the pending `Fiber::suspend()`), then
+    /// update the Fiber object's state from the outcome.
+    fn fiber_drive_coroutine(
+        &mut self,
+        obj_rc: Rc<RefCell<PhpObject>>,
+        mut fiber: crate::fiber::PhpFiber,
+        input: crate::fiber::FiberResume,
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let fiber_id = obj_rc.borrow().object_id;
+        obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
+        self.fiber_stack.push(self.current_fiber.take());
+        self.current_fiber = Some(Value::Object(obj_rc.clone()));
+        self.fiber_depth += 1;
+
+        let saved_error_reporting = self.error_reporting;
+        let saved_error_reporting_stack = std::mem::take(&mut self.error_reporting_stack);
+        // Restore the fiber's last-known error_reporting state so a
+        // suspended `@` region still silences errors on resume.
+        self.error_reporting = fiber.saved_error_reporting;
+        self.error_reporting_stack = std::mem::take(&mut fiber.saved_error_reporting_stack);
+
+        let self_ptr: *mut Vm = self as *mut Vm;
+        set_current_vm_ptr(self_ptr);
+        let prev_yielder = crate::fiber::set_current_yielder(fiber.yielder_ptr());
+        let fiber_display_name = fiber.display_name.clone();
+        self.call_stack.push((
+            fiber_display_name,
+            "[internal function]".to_string(),
+            0,
+            Vec::new(),
+            false,
+        ));
+        let result = fiber.resume(input);
+        self.call_stack.pop();
+        clear_current_vm_ptr();
+        crate::fiber::restore_current_yielder(prev_yielder);
+
+        let fiber_err_reporting = self.error_reporting;
+        let fiber_err_stack = std::mem::take(&mut self.error_reporting_stack);
+        self.error_reporting = saved_error_reporting;
+        self.error_reporting_stack = saved_error_reporting_stack;
+        self.fiber_depth -= 1;
+        self.current_fiber = self.fiber_stack.pop().flatten();
+
+        match result {
+            Ok(crate::fiber::FiberYield::Suspend(v)) => {
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
+                fiber.saved_error_reporting = fiber_err_reporting;
+                fiber.saved_error_reporting_stack = fiber_err_stack;
+                self.fiber_coroutines.insert(fiber_id, fiber);
+                Ok(v)
+            }
+            Err(crate::fiber::FiberOutcome::Returned(v)) => {
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), v);
+                Ok(Value::Null)
+            }
+            Err(crate::fiber::FiberOutcome::Threw(exc)) if Self::is_graceful_exit(&exc) => {
+                // The fiber was force-closed and unwound cleanly.
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                Ok(Value::Null)
+            }
+            Err(crate::fiber::FiberOutcome::Threw(exc)) => {
+                obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
+                obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
                 let msg = if let Value::Object(o) = &exc {
                     let ob = o.borrow();
                     let cls = crate::value::display_class_name(&ob.class_name);
@@ -33242,75 +33433,8 @@ impl Vm {
         // Prefer the corosensei-backed coroutine; fall back to the legacy
         // generator-based path if (for any reason) only the generator
         // exists for this fiber id.
-        if let Some(mut fiber) = self.fiber_coroutines.remove(&fiber_id) {
-            obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
-            self.fiber_stack.push(self.current_fiber.take());
-            self.current_fiber = Some(Value::Object(obj_rc.clone()));
-            self.fiber_depth += 1;
-
-            let saved_error_reporting = self.error_reporting;
-            let saved_error_reporting_stack = std::mem::take(&mut self.error_reporting_stack);
-            // Restore the fiber's last-known error_reporting state so a
-            // suspended `@` region still silences errors on resume.
-            self.error_reporting = fiber.saved_error_reporting;
-            self.error_reporting_stack = std::mem::take(&mut fiber.saved_error_reporting_stack);
-
-            let self_ptr: *mut Vm = self as *mut Vm;
-            set_current_vm_ptr(self_ptr);
-            let prev_yielder = crate::fiber::set_current_yielder(fiber.yielder_ptr());
-            let fiber_display_name = fiber.display_name.clone();
-            self.call_stack.push((
-                fiber_display_name,
-                "[internal function]".to_string(),
-                0,
-                Vec::new(),
-                false,
-            ));
-            let result = fiber.resume(crate::fiber::FiberResume::Value(resume_val));
-            self.call_stack.pop();
-            clear_current_vm_ptr();
-            crate::fiber::restore_current_yielder(prev_yielder);
-
-            let fiber_err_reporting = self.error_reporting;
-            let fiber_err_stack = std::mem::take(&mut self.error_reporting_stack);
-            self.error_reporting = saved_error_reporting;
-            self.error_reporting_stack = saved_error_reporting_stack;
-            self.fiber_depth -= 1;
-            self.current_fiber = self.fiber_stack.pop().flatten();
-
-            return match result {
-                Ok(crate::fiber::FiberYield::Suspend(v)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
-                    fiber.saved_error_reporting = fiber_err_reporting;
-                    fiber.saved_error_reporting_stack = fiber_err_stack;
-                    self.fiber_coroutines.insert(fiber_id, fiber);
-                    Ok(v)
-                }
-                Err(crate::fiber::FiberOutcome::Returned(v)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), v);
-                    Ok(Value::Null)
-                }
-                Err(crate::fiber::FiberOutcome::Threw(exc)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
-                    let msg = if let Value::Object(o) = &exc {
-                        let ob = o.borrow();
-                        let cls = crate::value::display_class_name(&ob.class_name);
-                        let m = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
-                        format!("Uncaught {}: {}", cls, m)
-                    } else {
-                        "Uncaught exception from fiber".to_string()
-                    };
-                    self.current_exception = Some(exc);
-                    Err(VmError { message: msg, line })
-                }
-                Err(crate::fiber::FiberOutcome::Failed(msg, err_line)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
-                    Err(VmError { message: msg, line: err_line })
-                }
-            };
+        if let Some(fiber) = self.fiber_coroutines.remove(&fiber_id) {
+            return self.fiber_drive_coroutine(obj_rc, fiber, crate::fiber::FiberResume::Value(resume_val), line);
         }
 
         // Legacy generator-based path
@@ -33395,74 +33519,8 @@ impl Vm {
         let fiber_id = obj_rc.borrow().object_id;
 
         // Prefer the corosensei-backed coroutine path.
-        if let Some(mut fiber) = self.fiber_coroutines.remove(&fiber_id) {
-            obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Running as i64));
-            self.fiber_stack.push(self.current_fiber.take());
-            self.current_fiber = Some(Value::Object(obj_rc.clone()));
-            self.fiber_depth += 1;
-
-            let saved_error_reporting = self.error_reporting;
-            let saved_error_reporting_stack = std::mem::take(&mut self.error_reporting_stack);
-            // Restore the fiber's last-known error_reporting state.
-            self.error_reporting = fiber.saved_error_reporting;
-            self.error_reporting_stack = std::mem::take(&mut fiber.saved_error_reporting_stack);
-
-            let self_ptr: *mut Vm = self as *mut Vm;
-            set_current_vm_ptr(self_ptr);
-            let prev_yielder = crate::fiber::set_current_yielder(fiber.yielder_ptr());
-            let fiber_display_name = fiber.display_name.clone();
-            self.call_stack.push((
-                fiber_display_name,
-                "[internal function]".to_string(),
-                0,
-                Vec::new(),
-                false,
-            ));
-            let result = fiber.resume(crate::fiber::FiberResume::Throw(exception));
-            self.call_stack.pop();
-            clear_current_vm_ptr();
-            crate::fiber::restore_current_yielder(prev_yielder);
-
-            let fiber_err_reporting = self.error_reporting;
-            let fiber_err_stack = std::mem::take(&mut self.error_reporting_stack);
-            self.error_reporting = saved_error_reporting;
-            self.error_reporting_stack = saved_error_reporting_stack;
-            self.fiber_depth -= 1;
-            self.current_fiber = self.fiber_stack.pop().flatten();
-
-            return match result {
-                Ok(crate::fiber::FiberYield::Suspend(v)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Suspended as i64));
-                    fiber.saved_error_reporting = fiber_err_reporting;
-                    fiber.saved_error_reporting_stack = fiber_err_stack;
-                    self.fiber_coroutines.insert(fiber_id, fiber);
-                    Ok(v)
-                }
-                Err(crate::fiber::FiberOutcome::Returned(v)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_return_value".to_vec(), v);
-                    Ok(Value::Null)
-                }
-                Err(crate::fiber::FiberOutcome::Threw(exc)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
-                    let msg = if let Value::Object(o) = &exc {
-                        let ob = o.borrow();
-                        let cls = crate::value::display_class_name(&ob.class_name);
-                        let m = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
-                        format!("Uncaught {}: {}", cls, m)
-                    } else {
-                        "Uncaught exception from fiber".to_string()
-                    };
-                    self.current_exception = Some(exc);
-                    Err(VmError { message: msg, line })
-                }
-                Err(crate::fiber::FiberOutcome::Failed(msg, err_line)) => {
-                    obj_rc.borrow_mut().set_property(b"__fiber_state".to_vec(), Value::Long(FiberState::Terminated as i64));
-                    obj_rc.borrow_mut().set_property(b"__fiber_threw".to_vec(), Value::True);
-                    Err(VmError { message: msg, line: err_line })
-                }
-            };
+        if let Some(fiber) = self.fiber_coroutines.remove(&fiber_id) {
+            return self.fiber_drive_coroutine(obj_rc, fiber, crate::fiber::FiberResume::Throw(exception), line);
         }
 
         // Legacy generator-based path
