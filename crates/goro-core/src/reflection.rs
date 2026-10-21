@@ -1448,7 +1448,7 @@ pub fn reflection_class_method(
                 return Some(Value::Null);
             }
             // Create an instance without calling the constructor
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let canonical = vm.classes.get(&class_lower)
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -1522,7 +1522,7 @@ pub fn reflection_class_method(
             };
             for (case_str, is_backed, canonical) in case_info {
                 let class_type = if is_backed { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let mut case_obj = PhpObject::new(class_type.as_bytes().to_vec(), obj_id);
                 case_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(case_str.clone())));
                 case_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical)));
@@ -1751,7 +1751,7 @@ pub fn reflection_class_docall(
                             _ => None,
                         }
                     };
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
                     rm_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"__invoke")));
                     rm_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_bytes(b"Closure")));
@@ -1825,7 +1825,7 @@ pub fn reflection_class_docall(
                             _ => None,
                         }
                     };
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
                     rm_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"__invoke")));
                     rm_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_bytes(b"Closure")));
@@ -2184,7 +2184,7 @@ pub fn reflection_class_docall(
                     return Some(Value::Null);
                 }
                 // Create instance and call constructor with remaining args
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let canonical = vm.classes.get(&class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -2327,7 +2327,7 @@ pub fn reflection_class_docall(
                     vec![]
                 };
 
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let canonical = vm.classes.get(&class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -2618,7 +2618,7 @@ pub fn reflection_class_docall(
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let canonical = vm.classes.get(&class_lower)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
@@ -2871,7 +2871,7 @@ pub fn reflection_class_docall(
                         let canonical = String::from_utf8_lossy(&ce.name).to_string();
                         let is_backed = ce.enum_backing_type.is_some();
                         let class_type = if is_backed { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
-                        let obj_id = vm.next_object_id();
+                        let obj_id = vm.alloc_object_id();
                         let mut case_obj = PhpObject::new(class_type.as_bytes().to_vec(), obj_id);
                         case_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(case_name.clone())));
                         case_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical)));
@@ -3978,7 +3978,7 @@ pub fn reflection_function_method(
             let func_str = String::from_utf8_lossy(&func_lower);
             let ext_name = get_function_extension(&func_str);
             if let Some(ext) = ext_name {
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
                 ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(ext.to_string())));
                 Some(Value::Object(Rc::new(RefCell::new(ext_obj))))
@@ -5272,7 +5272,7 @@ pub fn reflection_parameter_method(
                 let canonical_class = vm.classes.get(class_bytes)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())
                     .unwrap_or_else(|| class_str.clone());
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let mut rm_obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
                 rm_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(method_str.clone())));
                 rm_obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
@@ -5292,7 +5292,7 @@ pub fn reflection_parameter_method(
             } else {
                 String::new()
             };
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
             rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(canonical_func)));
             rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(func_target.clone()));
@@ -5646,7 +5646,7 @@ pub fn reflection_generator_method(
                 let gb = g.borrow();
                 let fn_name = String::from_utf8_lossy(&gb.op_array.name).to_string();
                 drop(gb);
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
                 let display = if fn_name.is_empty() { "{closure}".to_string() } else { fn_name.clone() };
                 rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display)));
@@ -5955,7 +5955,7 @@ fn get_extension_constants(ext: &str) -> Vec<(&'static str, Value)> {
 }
 
 fn create_reflection_function(vm: &mut Vm, func_name: &str) -> Value {
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
     rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(func_name.to_string())));
     let lower = func_name.to_ascii_lowercase();
@@ -6518,7 +6518,7 @@ pub fn create_reflection_class(vm: &mut Vm, class_name: &str) -> Value {
     // callers like `getDeclaringClass()::class` see the right runtime type.
     let is_enum = vm.classes.get(&class_lower).map(|c| c.is_enum).unwrap_or(false);
     let reflector = if is_enum { b"ReflectionEnum".to_vec() } else { b"ReflectionClass".to_vec() };
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(reflector, obj_id);
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
     obj.set_property(b"__reflection_target".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
@@ -6539,7 +6539,7 @@ pub fn create_reflection_method_with_lookup(vm: &mut Vm, class_name: &str, metho
     let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
     let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
 
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
 
     let canonical_method = vm.classes.get(&class_lower)
@@ -6585,7 +6585,7 @@ fn reflection_property_hook_method(vm: &mut Vm, class_lower: &[u8], prop: &[u8],
 
 /// Create a ReflectionProperty object
 pub fn create_reflection_property(vm: &mut Vm, class_name: &str, prop_name: &str) -> Value {
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"ReflectionProperty".to_vec(), obj_id);
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(prop_name.to_string())));
     obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(class_name.to_string())));
@@ -6596,7 +6596,7 @@ pub fn create_reflection_property(vm: &mut Vm, class_name: &str, prop_name: &str
 
 /// Create a ReflectionClassConstant object
 pub fn create_reflection_class_constant(vm: &mut Vm, class_name: &str, const_name: &str, value: Value) -> Value {
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"ReflectionClassConstant".to_vec(), obj_id);
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(const_name.to_string())));
     // Walk up the parent chain to find which class actually declares this
@@ -6676,7 +6676,7 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
         } else {
             format!("param{}", i)
         };
-        let obj_id = vm.next_object_id();
+        let obj_id = vm.alloc_object_id();
         let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
         obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
         obj.set_property(b"__reflection_func".to_vec(), Value::String(PhpString::from_vec(func_lower.clone())));
@@ -6698,7 +6698,7 @@ pub fn create_reflection_parameters_method(vm: &mut Vm, op_array: &OpArray, is_s
         } else {
             format!("param{}", i)
         };
-        let obj_id = vm.next_object_id();
+        let obj_id = vm.alloc_object_id();
         let mut obj = PhpObject::new(b"ReflectionParameter".to_vec(), obj_id);
         obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(param_name)));
         // Store the user-visible parameter position (0-based, excludes $this).
@@ -6769,7 +6769,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
         ParamType::Simple(name) => {
             let resolved = resolve_name(vm, name, scope_class);
             let type_name = String::from_utf8_lossy(&resolved).to_string();
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
             let is_builtin = matches!(
                 name.as_slice(),
@@ -6789,7 +6789,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                 ParamType::Simple(name) => {
                     let resolved = resolve_name(vm, name, scope_class);
                     let type_name = String::from_utf8_lossy(&resolved).to_string();
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
                     let is_builtin = matches!(
                         name.as_slice(),
@@ -6809,7 +6809,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                     let mut types = PhpArray::new();
                     types.push(inner_type);
                     types.push(null_type);
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut obj = PhpObject::new(b"ReflectionUnionType".to_vec(), obj_id);
                     obj.set_property(b"__types".to_vec(), Value::Array(Rc::new(RefCell::new(types))));
                     obj.set_property(b"__allows_null".to_vec(), Value::True);
@@ -6838,7 +6838,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                 if let ParamType::Simple(name) = non_null[0] {
                     let resolved = resolve_name(vm, name, scope_class);
                     let type_name = String::from_utf8_lossy(&resolved).to_string();
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut obj = PhpObject::new(b"ReflectionNamedType".to_vec(), obj_id);
                     let is_builtin = matches!(
                         name.as_slice(),
@@ -6861,7 +6861,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                 }
                 type_arr.push(rt);
             }
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let mut obj = PhpObject::new(b"ReflectionUnionType".to_vec(), obj_id);
             obj.set_property(b"__types".to_vec(), Value::Array(Rc::new(RefCell::new(type_arr))));
             obj.set_property(b"__allows_null".to_vec(), if allows_null { Value::True } else { Value::False });
@@ -6873,7 +6873,7 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                 let rt = create_reflection_type_scoped(vm, t, scope_class);
                 type_arr.push(rt);
             }
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let mut obj = PhpObject::new(b"ReflectionIntersectionType".to_vec(), obj_id);
             obj.set_property(b"__types".to_vec(), Value::Array(Rc::new(RefCell::new(type_arr))));
             obj.set_property(b"__allows_null".to_vec(), Value::False);
@@ -7704,7 +7704,7 @@ pub fn create_reflection_attributes(
                 }
             }
         }
-        let obj_id = vm.next_object_id();
+        let obj_id = vm.alloc_object_id();
         let mut obj = PhpObject::new(b"ReflectionAttribute".to_vec(), obj_id);
         obj.set_property(b"__attr_name".to_vec(), Value::String(PhpString::from_vec(attr.name.clone())));
         // Store the op_array for lazy argument evaluation
@@ -7806,7 +7806,7 @@ pub fn reflection_attribute_method(
             if builtin_marker_attrs.contains(&class_lower.as_slice())
                 && !vm.classes.contains_key(&class_lower)
             {
-                let obj_id = vm.next_object_id();
+                let obj_id = vm.alloc_object_id();
                 // Preserve canonical PHP class name casing
                 let canonical_name: &[u8] = match class_lower.as_slice() {
                     b"allowdynamicproperties" => b"AllowDynamicProperties",
@@ -7938,7 +7938,7 @@ pub fn reflection_attribute_method(
                 }
             }
             // Create the object and call its constructor
-            let obj_id = vm.next_object_id();
+            let obj_id = vm.alloc_object_id();
             let ce = vm.classes.get(&class_lower).unwrap().clone();
             // Pre-flight: validate constructor visibility and argument count.
             let construct_lower = b"__construct".to_vec();
