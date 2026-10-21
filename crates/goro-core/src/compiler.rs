@@ -1125,6 +1125,70 @@ impl Compiler {
                 break;
             }
         }
+        // strict_types placement (zend_is_first_statement): only other declare()s
+        // may precede it, it must be at the top level, and not use block mode.
+        {
+            fn is_declare_directive(stmt: &Statement) -> Option<bool> {
+                // Some(has_strict_types) for a real declare(); None for anything else
+                if let StmtKind::Declare { directives, .. } = &stmt.kind {
+                    if !directives.is_empty() && directives.iter().all(|(n, _)| {
+                        n.eq_ignore_ascii_case(b"strict_types") || n.eq_ignore_ascii_case(b"ticks") || n.eq_ignore_ascii_case(b"encoding")
+                    }) {
+                        return Some(directives.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"strict_types")));
+                    }
+                }
+                None
+            }
+            fn nested_strict(stmts: &[Statement]) -> Option<u32> {
+                for st in stmts {
+                    match &st.kind {
+                        StmtKind::NamespaceDecl { body: Some(b), .. } => {
+                            if let Some(l) = b.iter().find(|x| is_declare_directive(x) == Some(true)).map(|x| x.span.line) {
+                                return Some(l);
+                            }
+                        }
+                        StmtKind::Declare { body: Some(b), .. } => {
+                            if let Some(l) = b.iter().find(|x| is_declare_directive(x) == Some(true)).map(|x| x.span.line) {
+                                return Some(l);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            let mut seen_other = false;
+            for st in &program.statements {
+                match is_declare_directive(st) {
+                    Some(true) => {
+                        if seen_other {
+                            return Err(CompileError {
+                                message: "strict_types declaration must be the very first statement in the script".into(),
+                                line: st.span.line,
+                            });
+                        }
+                        if let StmtKind::Declare { body: Some(_), .. } = &st.kind {
+                            return Err(CompileError {
+                                message: "strict_types declaration must not use block mode".into(),
+                                line: st.span.line,
+                            });
+                        }
+                    }
+                    Some(false) => {}
+                    None => {
+                        if !matches!(st.kind, StmtKind::Nop) {
+                            seen_other = true;
+                        }
+                    }
+                }
+            }
+            if let Some(line) = nested_strict(&program.statements) {
+                return Err(CompileError {
+                    message: "strict_types declaration must be the very first statement in the script".into(),
+                    line,
+                });
+            }
+        }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;
