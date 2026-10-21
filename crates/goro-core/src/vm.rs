@@ -3356,11 +3356,15 @@ impl Vm {
                             // Strict: only accept int
                             matches!(value, Value::Long(_))
                         } else {
-                        // Non-strict: accept int, float (truncatable), bool, numeric/leading-numeric strings
-                        matches!(
-                            value,
-                            Value::Long(_) | Value::Double(_) | Value::True | Value::False
-                        ) || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())
+                        // Non-strict (zend_parse_arg_long_weak): int, bool, representable
+                        // floats, and fully numeric strings
+                        matches!(value, Value::Long(_) | Value::True | Value::False)
+                            || matches!(value, Value::Double(d) if !d.is_nan() && crate::value::php_double_fits_long(*d))
+                            || matches!(value, Value::String(s) if match variance::numeric_str(s.as_bytes()) {
+                                Some(Value::Long(_)) => true,
+                                Some(Value::Double(d)) => !d.is_nan() && crate::value::php_double_fits_long(d),
+                                _ => false,
+                            })
                         }
                     }
                     b"float" | b"double" => {
@@ -3371,7 +3375,7 @@ impl Vm {
                         matches!(
                             value,
                             Value::Double(_) | Value::Long(_) | Value::True | Value::False
-                        ) || matches!(value, Value::String(s) if crate::value::parse_leading_numeric_string(s.as_bytes()).is_some())
+                        ) || matches!(value, Value::String(s) if variance::numeric_str(s.as_bytes()).is_some())
                         }
                     }
                     b"string" => {
@@ -3818,9 +3822,6 @@ impl Vm {
         implicit_args: usize,
         caller_strict: bool,
     ) {
-        if caller_strict {
-            return; // strict mode doesn't coerce (except int->float)
-        }
         for (i, arg) in args.iter_mut().enumerate() {
             if i >= user_fn.param_types.len() {
                 continue;
@@ -3972,109 +3973,98 @@ impl Vm {
 
     /// Coerce a single value to match a parameter type.
     pub(crate) fn coerce_value_to_type(value: &mut Value, param_type: &ParamType, strict: bool) {
-        match param_type {
-            ParamType::Simple(type_name) => {
-                match type_name.as_slice() {
-                    b"int" | b"integer" => {
-                        match value {
-                            Value::Long(_) => {} // already int
-                            Value::Double(f) if !strict => {
-                                *value = Value::Long(*f as i64);
-                            }
-                            Value::True if !strict => {
-                                *value = Value::Long(1);
-                            }
-                            Value::False if !strict => {
-                                *value = Value::Long(0);
-                            }
-                            Value::String(s) if !strict => {
-                                if let Some((n, _fully_numeric)) = crate::value::parse_leading_numeric_string(s.as_bytes()) {
-                                    *value = Value::Long(n as i64);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    b"float" | b"double" => {
-                        match value {
-                            Value::Double(_) => {} // already float
-                            Value::Long(n) => {
-                                // int->float coercion happens even in strict mode
-                                *value = Value::Double(*n as f64);
-                            }
-                            Value::True if !strict => {
-                                *value = Value::Double(1.0);
-                            }
-                            Value::False if !strict => {
-                                *value = Value::Double(0.0);
-                            }
-                            Value::String(s) if !strict => {
-                                if let Some((n, _fully_numeric)) = crate::value::parse_leading_numeric_string(s.as_bytes()) {
-                                    *value = Value::Double(n);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    b"string" => {
-                        if !strict {
-                            match value {
-                                Value::String(_) => {} // already string
-                                Value::Long(n) => {
-                                    *value = Value::String(PhpString::from_string(n.to_string()));
-                                }
-                                Value::Double(f) => {
-                                    *value = Value::String(PhpString::from_string(
-                                        crate::value::format_php_float(*f),
-                                    ));
-                                }
-                                Value::True => {
-                                    *value = Value::String(PhpString::from_bytes(b"1"));
-                                }
-                                Value::False => {
-                                    *value = Value::String(PhpString::from_bytes(b""));
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    b"bool" | b"boolean" => {
-                        if !strict {
-                            match value {
-                                Value::True | Value::False => {} // already bool
-                                _ => {
-                                    let b = value.is_truthy();
-                                    *value = if b { Value::True } else { Value::False };
-                                }
-                            }
-                        }
-                    }
-                    _ => {} // no coercion for array, object, callable, etc.
+        // Port of zend_verify_scalar_type_hint / zend_verify_weak_scalar_type_hint.
+        use variance::{T_ANY, T_ARRAY, T_BOOL, T_DOUBLE, T_FALSE, T_LONG, T_NULL, T_OBJECT, T_STRING, T_TRUE};
+        let tv = variance::TypeView::from_param_type(param_type);
+        let mask = tv.mask;
+        let vt = match value {
+            Value::Null | Value::Undef => T_NULL,
+            Value::False => T_FALSE,
+            Value::True => T_TRUE,
+            Value::Long(_) => T_LONG,
+            Value::Double(_) => T_DOUBLE,
+            Value::String(_) => T_STRING,
+            Value::Array(_) => T_ARRAY,
+            _ => return, // objects, references, resources: nothing to coerce here
+        };
+        if mask & vt != 0 || mask & T_ANY == T_ANY {
+            return;
+        }
+        let scalar = T_BOOL | T_LONG | T_DOUBLE | T_STRING;
+        if mask & scalar == 0 {
+            return;
+        }
+        if strict {
+            if mask & T_DOUBLE != 0 {
+                if let Value::Long(n) = value {
+                    *value = Value::Double(*n as f64);
                 }
             }
-            ParamType::Nullable(inner) => {
-                if !matches!(value, Value::Null) {
-                    Self::coerce_value_to_type(value, inner, strict);
+            return;
+        }
+        if vt == T_NULL || vt == T_ARRAY {
+            return;
+        }
+        let _ = T_OBJECT;
+        use variance::numeric_str;
+        // int: zend_parse_arg_long_weak
+        fn long_weak(v: &Value) -> Option<i64> {
+            match v {
+                Value::Double(d) => {
+                    if d.is_nan() || !crate::value::php_double_fits_long(*d) { None } else { Some(*d as i64) }
                 }
-            }
-            ParamType::Union(types) => {
-                // For union types, find the first matching type and coerce to it
-                // Priority: exact match first, then coercible match
-                // Check for exact match first
-                for t in types {
-                    if Self::value_exact_match(value, t) {
-                        return; // already exact match
+                Value::String(s) => match numeric_str(s.as_bytes())? {
+                    Value::Long(n) => Some(n),
+                    Value::Double(d) => {
+                        if d.is_nan() || !crate::value::php_double_fits_long(d) { None } else { Some(d as i64) }
                     }
-                }
-                // Try coercion to first coercible type
-                for t in types {
-                    if Self::value_can_coerce(value, t, strict) {
-                        Self::coerce_value_to_type(value, t, strict);
+                    _ => None,
+                },
+                Value::False => Some(0),
+                Value::True => Some(1),
+                _ => None,
+            }
+        }
+        if mask & T_LONG != 0 {
+            if mask & T_DOUBLE != 0 && vt == T_STRING {
+                if let Value::String(s) = value {
+                    if let Some(n) = numeric_str(s.as_bytes()) {
+                        *value = n;
                         return;
                     }
                 }
+            } else if let Some(n) = long_weak(value) {
+                *value = Value::Long(n);
+                return;
             }
-            _ => {} // Intersection types etc. don't need coercion
+        }
+        if mask & T_DOUBLE != 0 {
+            let d = match value {
+                Value::Long(n) => Some(*n as f64),
+                Value::String(s) => match numeric_str(s.as_bytes()) {
+                    Some(Value::Long(n)) => Some(n as f64),
+                    Some(Value::Double(d)) => Some(d),
+                    _ => None,
+                },
+                Value::False => Some(0.0),
+                Value::True => Some(1.0),
+                _ => None,
+            };
+            if let Some(d) = d {
+                *value = Value::Double(d);
+                return;
+            }
+        }
+        if mask & T_STRING != 0 {
+            if matches!(value, Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
+                *value = Value::String(value.to_php_string());
+                return;
+            }
+        }
+        if mask & T_BOOL == T_BOOL {
+            if matches!(value, Value::Long(_) | Value::Double(_) | Value::String(_)) {
+                *value = if value.is_truthy() { Value::True } else { Value::False };
+            }
         }
     }
 
@@ -15901,12 +15891,10 @@ impl Vm {
         // Coerce return value in weak mode
         if let Ok(ref mut val) = result {
             if let Some(ref ret_type) = op_array.return_type {
-                if !op_array.strict_types {
-                    // Note: implicit float-to-int deprecation is emitted at the
-                    // OpCode::Return site (before finally blocks run), not here.
-                    // Weak mode: coerce return value
-                    Self::coerce_value_to_type(val, ret_type, false);
-                }
+                // Note: implicit float-to-int deprecation is emitted at the
+                // OpCode::Return site (before finally blocks run), not here.
+                // (strict mode only widens int to float)
+                Self::coerce_value_to_type(val, ret_type, op_array.strict_types);
                 // For mixed return type, implicit return (no explicit return statement) is an error
                 // because mixed means "must return a value" even though it accepts any type
                 let mixed_implicit_mismatch = implicit_return && matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed"));
@@ -34493,8 +34481,8 @@ impl Vm {
                                     if !op_array.strict_types {
                                         // Emit implicit float-to-int deprecation BEFORE coercion truncates
                                         self.emit_implicit_float_to_int_if_needed(&value, pt, op.line);
-                                        Self::coerce_value_to_type(&mut value, pt, false);
                                     }
+                                    Self::coerce_value_to_type(&mut value, pt, op_array.strict_types);
                                     if !self.value_matches_type(&value, pt) {
                                         let class_display = crate::value::display_class_name(&class_name_orig);
                                         let prop_display = String::from_utf8_lossy(prop_name.as_bytes()).to_string();

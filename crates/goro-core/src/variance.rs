@@ -997,3 +997,48 @@ impl Vm {
         (st, parent_str, parent_name)
     }
 }
+
+/// is_numeric_str_function: whole string numeric (leading/trailing whitespace ok)
+pub(crate) fn numeric_str(b: &[u8]) -> Option<Value> {
+    let t: &[u8] = {
+        let mut st = 0;
+        let mut en = b.len();
+        while st < en && matches!(b[st], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { st += 1; }
+        while en > st && matches!(b[en - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { en -= 1; }
+        &b[st..en]
+    };
+    if t.is_empty() {
+        return None;
+    }
+    let digits = if t[0] == b'+' || t[0] == b'-' { &t[1..] } else { t };
+    if !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = std::str::from_utf8(t).ok()?.trim_start_matches('+').parse::<i64>() {
+            return Some(Value::Long(n));
+        }
+    }
+    // float syntax: digits with optional '.', optional exponent
+    let mut i = 0;
+    let mut nd = 0;
+    while i < digits.len() && digits[i].is_ascii_digit() { i += 1; nd += 1; }
+    if i < digits.len() && digits[i] == b'.' {
+        i += 1;
+        while i < digits.len() && digits[i].is_ascii_digit() { i += 1; nd += 1; }
+    }
+    if nd == 0 {
+        return None;
+    }
+    if i < digits.len() && (digits[i] == b'e' || digits[i] == b'E') {
+        let mut j = i + 1;
+        if j < digits.len() && (digits[j] == b'+' || digits[j] == b'-') { j += 1; }
+        let es = j;
+        while j < digits.len() && digits[j].is_ascii_digit() { j += 1; }
+        if j == es {
+            return None;
+        }
+        i = j;
+    }
+    if i != digits.len() {
+        return None;
+    }
+    std::str::from_utf8(t).ok()?.parse::<f64>().ok().map(Value::Double)
+}
