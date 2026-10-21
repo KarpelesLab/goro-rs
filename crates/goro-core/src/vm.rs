@@ -2692,7 +2692,7 @@ impl Vm {
     /// `class_name_lower` is the object's class. `caller_scope` is the lowercase
     /// name of the currently-executing method's class (if any). The result is the
     /// key to use when reading/writing the property on the instance.
-    fn property_storage_key(
+    pub(crate) fn property_storage_key(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],
@@ -31761,68 +31761,16 @@ impl Vm {
                                 }
                                 target = next;
                             }
-                            // Current class scope determines which private/
-                            // protected slots are visible during iteration.
-                            let scope_lower: Option<Vec<u8>> = self
-                                .current_class_scope()
-                                .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
-                            let obj_class_lower: Vec<u8> = target
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
                             // Plain objects are iterated over their live property
-                            // table (hooked properties: a snapshot through the hooks).
-                            let hooked = self.class_has_hooked_props(&obj_class_lower);
-                            if !hooked {
-                                if let OperandType::Tmp(t) = op.result {
-                                    foreach_obj.insert(t, Rc::downgrade(&target));
-                                    foreach_obj_cur.remove(&t);
-                                }
-                                live_iteration = true;
+                            // table; hooked properties are read as they are
+                            // fetched (foreach_obj_step).
+                            if let OperandType::Tmp(t) = op.result {
+                                foreach_obj.insert(t, Rc::downgrade(&target));
+                                foreach_obj_cur.remove(&t);
                             }
+                            live_iteration = true;
                             let mut arr = PhpArray::new();
-                            if !hooked {
-                                arr.push(Value::Object(target.clone()));
-                            }
-                            if hooked {
-                                let props: Vec<(Vec<u8>, Value)> =
-                                    target.borrow().properties.clone();
-                                for (name, value) in &props {
-                                    if crate::foreach_obj::is_internal_slot(name)
-                                        || matches!(value, Value::Undef)
-                                    {
-                                        continue;
-                                    }
-                                    if let Some(key) = self.foreach_prop_key(
-                                        &obj_class_lower,
-                                        scope_lower.as_deref(),
-                                        name,
-                                    ) {
-                                        arr.set(
-                                            ArrayKey::String(PhpString::from_vec(key)),
-                                            value.clone(),
-                                        );
-                                    }
-                                }
-                            }
-                            if hooked {
-                                match self.hooked_object_iteration_array(&target, &arr) {
-                                    Ok(a) => arr = a,
-                                    Err(e) => {
-                                        if self.current_exception.is_some() {
-                                            if let Some((c, f, _, _, pc)) = exception_handlers.pop()
-                                            {
-                                                pending_calls_catch_depth = Some(pc);
-                                                ip = if c > 0 { c } else { f } as usize;
-                                                return Ok(Flow::Continue);
-                                            }
-                                        }
-                                        return Err(e);
-                                    }
-                                }
-                            }
+                            arr.push(Value::Object(target.clone()));
                             let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
                             self.write_operand(
                                 &op.result,
@@ -32193,7 +32141,21 @@ impl Vm {
                                     foreach_positions.insert(iter_idx, step.next_pos);
                                     false
                                 }
-                                _ => {
+                                Err(msg) => {
+                                    if self.current_exception.is_none() {
+                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                    }
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
+                                    true
+                                }
+                                Ok(None) => {
                                     foreach_obj.remove(&iter_idx);
                                     foreach_obj_cur.remove(&iter_idx);
                                     true
@@ -32911,19 +32873,17 @@ impl Vm {
                                 }
                             }
                             Err(msg) => {
-                                let exc = self.create_exception(b"Error", &msg, op.line);
-                                self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                    exception_handlers.pop()
-                                {
-                                    pending_calls_catch_depth = Some(saved_pc);
-                                    ip = catch_target as usize;
-                                    return Ok(Flow::Continue);
+                                if self.current_exception.is_none() {
+                                    let exc = self.create_exception(b"Error", &msg, op.line);
+                                    self.current_exception = Some(exc);
                                 }
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", msg),
-                                    line: op.line,
-                                });
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
                             }
                         }
                         return Ok(Flow::Continue);
@@ -38833,6 +38793,8 @@ impl Vm {
                             };
                             if self.current_exception.is_some() {
                                 Value::Null
+                            } else if by_ref && matches!(v, Value::Reference(_)) {
+                                v
                             } else if by_ref || matches!(v.deref(), Value::Object(_)) {
                                 v.deref()
                             } else {
@@ -39066,7 +39028,13 @@ impl Vm {
                                 });
                             }
                         }
-                        let hooked = self.prop_hooks_outside(&class_lower, pn).is_some();
+                        let hooks = self.prop_hooks_outside(&class_lower, pn);
+                        let hooked = hooks.is_some();
+                        // The write fetch reads a hooked property through its
+                        // get hook before the assignment fails.
+                        if let Some((true, _)) = hooks {
+                            self.call_prop_get_hook(&obj_val, &class_lower, pn);
+                        }
                         let overloaded = !hooked
                             && !obj.borrow().has_property(pn)
                             && self
@@ -44512,6 +44480,15 @@ impl Vm {
                                 class.allow_dynamic_properties = true;
                             }
                         }
+                        // ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES is inherited, also
+                        // from stdClass (an internal class).
+                        if class
+                            .parent
+                            .as_ref()
+                            .is_some_and(|p| p.eq_ignore_ascii_case(b"stdclass"))
+                        {
+                            class.allow_dynamic_properties = true;
+                        }
                         // Validate #[\Override] attribute on methods
                         if !class.is_trait {
                             // Collect parent method names (non-private, and constructors only if abstract)
@@ -44851,6 +44828,26 @@ impl Vm {
                                         ),
                                         line: op.line,
                                     });
+                                }
+                                // zend_verify_hooked_property(): a backed property's
+                                // `&get` hook cannot coexist with a set hook.
+                                if !prop.is_virtual && prop.has_get_hook && prop.has_set_hook {
+                                    let mut m = b"__property_get_".to_vec();
+                                    m.extend(prop.name.iter().map(|b| b.to_ascii_lowercase()));
+                                    if class
+                                        .methods
+                                        .get(&m)
+                                        .is_some_and(|md| md.op_array.returns_by_ref)
+                                    {
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Get hook of backed property {}::{} with set hook may not return by reference",
+                                                String::from_utf8_lossy(&class.name),
+                                                String::from_utf8_lossy(&prop.name)
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
                                 }
                                 // Validate that the set hook's parameter type is compatible with
                                 // the property type. We use a structural check (same as the parser),
@@ -51882,7 +51879,7 @@ impl Vm {
 
     /// True if `class_lower` has a get hook for `pn` and we are not currently
     /// executing a hook of that property (where accesses hit the backing store).
-    fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
+    pub(crate) fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
         self.has_unguarded_hook(class_lower, pn, b"__property_get_")
     }
 

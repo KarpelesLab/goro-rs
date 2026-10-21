@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::object::PhpObject;
+use crate::object::{PhpObject, Visibility};
 use crate::value::Value;
 use crate::vm::Vm;
 
@@ -144,6 +144,12 @@ impl Vm {
         cur: Option<&[u8]>,
         by_ref: bool,
     ) -> Result<Option<ObjIterStep>, String> {
+        {
+            let cl = obj.borrow().class_name.to_ascii_lowercase();
+            if self.class_has_hooked_props(&cl) {
+                return self.foreach_hooked_step(obj, pos, cur, by_ref);
+            }
+        }
         let scope_lower: Option<Vec<u8>> = self
             .current_class_scope()
             .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
@@ -247,6 +253,215 @@ impl Vm {
             };
             return Ok(Some(ObjIterStep {
                 next_pos: i,
+                name,
+                key,
+                value,
+            }));
+        }
+    }
+
+    /// foreach over an object with hooked properties
+    /// (zend_hooked_object_get_iterator): the declared properties visible
+    /// from the current scope in declaration order (parents first), read
+    /// when fetched (get hooks run per iteration; by reference only through
+    /// `&get` hooks), then the dynamic properties of the live table.
+    /// Positions below the number of declared properties index them; the
+    /// rest index the property table. `Err("")` means the exception is set.
+    fn foreach_hooked_step(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        pos: usize,
+        cur: Option<&[u8]>,
+        by_ref: bool,
+    ) -> Result<Option<ObjIterStep>, String> {
+        let scope_lower: Option<Vec<u8>> = self
+            .current_class_scope()
+            .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
+        let (class_lower, class_name) = {
+            let ob = obj.borrow();
+            (ob.class_name.to_ascii_lowercase(), ob.class_name.clone())
+        };
+        let defs = self.ordered_instance_prop_defs(&class_lower);
+        let n = defs.len();
+        let obj_val = Value::Object(obj.clone());
+        let mut i = pos;
+        while i < n {
+            let d = defs[i].clone();
+            i += 1;
+            let accessible = match d.visibility {
+                Visibility::Public => true,
+                Visibility::Protected => scope_lower
+                    .as_deref()
+                    .is_some_and(|s| self.scope_can_see_protected(s, &class_lower)),
+                Visibility::Private => scope_lower
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&d.declaring_class)),
+            };
+            if !accessible {
+                continue;
+            }
+            let decl_lower = d.declaring_class.to_ascii_lowercase();
+            // From a parent's scope, its own private property shadows a
+            // child's redeclaration of the name.
+            if d.visibility != Visibility::Private
+                && scope_lower.as_deref().is_some_and(|s| {
+                    s != decl_lower.as_slice()
+                        && defs.iter().any(|o| {
+                            o.name == d.name
+                                && o.visibility == Visibility::Private
+                                && o.declaring_class.eq_ignore_ascii_case(s)
+                        })
+                })
+            {
+                continue;
+            }
+            let storage = self.property_storage_key(&class_lower, &d.name, Some(&decl_lower));
+            let value = if d.has_get_hook || d.has_set_hook {
+                if d.is_virtual && !d.has_get_hook {
+                    continue;
+                }
+                let mut m = b"__property_get_".to_vec();
+                m.extend(d.name.iter().map(|b| b.to_ascii_lowercase()));
+                let get_by_ref = d.has_get_hook
+                    && self
+                        .classes
+                        .get(&decl_lower)
+                        .and_then(|c| c.get_method(&m))
+                        .is_some_and(|md| md.op_array.returns_by_ref);
+                let run_hook = d.has_get_hook && self.has_unguarded_get_hook(&class_lower, &d.name);
+                if by_ref && !get_by_ref {
+                    return Err(format!(
+                        "Cannot create reference to property {}::${}",
+                        crate::value::display_class_name(&class_name),
+                        String::from_utf8_lossy(&d.name)
+                    ));
+                }
+                if run_hook && by_ref {
+                    let v = self.call_prop_get_hook(&obj_val, &class_lower, &d.name);
+                    if self.current_exception.is_some() {
+                        return Err(String::new());
+                    }
+                    match v {
+                        Value::Reference(r) => Value::Reference(r),
+                        other => Value::Reference(Rc::new(RefCell::new(other))),
+                    }
+                } else if run_hook {
+                    let r = self.call_get_hook_if_accessible(obj, &d.name);
+                    if self.current_exception.is_some() {
+                        return Err(String::new());
+                    }
+                    match r {
+                        Some(Ok(v)) => v.deref(),
+                        Some(Err(e)) => return Err(e.message),
+                        None => continue,
+                    }
+                } else {
+                    match obj.borrow().get_property(&storage) {
+                        Value::Undef => continue,
+                        v => v.deref(),
+                    }
+                }
+            } else {
+                let slot = obj
+                    .borrow()
+                    .properties
+                    .iter()
+                    .position(|(k, _)| *k == storage);
+                let Some(si) = slot else {
+                    continue;
+                };
+                let v = obj.borrow().properties[si].1.clone();
+                match v {
+                    Value::Undef => continue,
+                    Value::Reference(r) if by_ref => {
+                        self.typed_ref_register_slot(obj, &storage, &r);
+                        Value::Reference(r)
+                    }
+                    other if by_ref => {
+                        if d.is_readonly {
+                            return Err(format!(
+                                "Cannot acquire reference to readonly property {}::${}",
+                                crate::value::display_class_name(
+                                    &self
+                                        .classes
+                                        .get(&decl_lower)
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_else(|| d.declaring_class.clone())
+                                ),
+                                String::from_utf8_lossy(&d.name)
+                            ));
+                        }
+                        let r = Rc::new(RefCell::new(other));
+                        obj.borrow_mut().properties[si].1 = Value::Reference(r.clone());
+                        self.typed_ref_register_slot(obj, &storage, &r);
+                        Value::Reference(r)
+                    }
+                    other => other.deref(),
+                }
+            };
+            return Ok(Some(ObjIterStep {
+                next_pos: i,
+                name: storage,
+                key: d.name.clone(),
+                value,
+            }));
+        }
+        // Dynamic properties.
+        let declared: Vec<Vec<u8>> = defs
+            .iter()
+            .map(|d| {
+                let decl_lower = d.declaring_class.to_ascii_lowercase();
+                self.property_storage_key(&class_lower, &d.name, Some(&decl_lower))
+            })
+            .collect();
+        let mut j = {
+            let ob = obj.borrow();
+            let j = pos.saturating_sub(n);
+            match cur {
+                Some(c) if j > 0 => {
+                    if ob.properties.get(j - 1).map(|(k, _)| k.as_slice()) == Some(c) {
+                        j
+                    } else {
+                        ob.properties
+                            .iter()
+                            .position(|(k, _)| k.as_slice() == c)
+                            .map(|p| p + 1)
+                            .unwrap_or(j - 1)
+                    }
+                }
+                _ => j,
+            }
+        };
+        loop {
+            let (name, value) = {
+                let ob = obj.borrow();
+                match ob.properties.get(j) {
+                    Some((k, v)) => (k.clone(), v.clone()),
+                    None => return Ok(None),
+                }
+            };
+            j += 1;
+            if is_internal_slot(&name) || matches!(value, Value::Undef) || declared.contains(&name)
+            {
+                continue;
+            }
+            let Some(key) = self.foreach_prop_key(&class_lower, scope_lower.as_deref(), &name)
+            else {
+                continue;
+            };
+            let value = match value {
+                Value::Reference(r) if by_ref => Value::Reference(r),
+                other if by_ref => {
+                    let r = Rc::new(RefCell::new(other));
+                    if let Some(slot) = obj.borrow_mut().properties.get_mut(j - 1) {
+                        slot.1 = Value::Reference(r.clone());
+                    }
+                    Value::Reference(r)
+                }
+                other => other.deref(),
+            };
+            return Ok(Some(ObjIterStep {
+                next_pos: n + j,
                 name,
                 key,
                 value,

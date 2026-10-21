@@ -379,11 +379,27 @@ impl Vm {
         let key = Self::prop_hook_key(key, obj_val);
         let mut m = b"__property_get_".to_vec();
         m.extend_from_slice(prop);
+        // A `&get` hook hands out the reference it returns.
+        let by_ref = self
+            .classes
+            .get(class_lower)
+            .and_then(|c| c.get_method(&m.to_ascii_lowercase()))
+            .is_some_and(|md| md.op_array.returns_by_ref);
         self.last_call_by_ref = false;
         self.property_hook_stack.push(key);
+        if by_ref {
+            self.keep_ref_depth = Some(self.call_depth + 1);
+        }
         let r = self.call_object_method(obj_val, &m, &[]);
+        if by_ref {
+            self.keep_ref_depth = None;
+        }
         self.property_hook_stack.pop();
-        r.unwrap_or(Value::Null)
+        let r = r.unwrap_or(Value::Null);
+        if by_ref && matches!(r, Value::Reference(_)) {
+            self.last_call_by_ref = true;
+        }
+        r
     }
 
     /// zend_cannot_pass_by_reference() message for argument `arg_index`
