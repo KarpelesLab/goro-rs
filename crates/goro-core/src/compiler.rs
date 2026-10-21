@@ -3509,6 +3509,11 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: 0,
                         });
+                        Self::emit_recv_default_check(
+                            &mut func_compiler.op_array,
+                            cv,
+                            default_expr,
+                        );
                         let after = func_compiler.op_array.current_offset();
                         func_compiler.op_array.patch_jump(jmp_skip, after);
                     }
@@ -7189,6 +7194,11 @@ impl Compiler {
                                             result: OperandType::Unused,
                                             line: 0,
                                         });
+                                        Self::emit_recv_default_check(
+                                            &mut method_compiler.op_array,
+                                            cv,
+                                            default_expr,
+                                        );
                                         let after = method_compiler.op_array.current_offset();
                                         method_compiler.op_array.patch_jump(jmp_skip, after);
                                     }
@@ -13397,6 +13407,11 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: 0,
                         });
+                        Self::emit_recv_default_check(
+                            &mut closure_compiler.op_array,
+                            cv,
+                            default_expr,
+                        );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
                     }
@@ -13729,6 +13744,11 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: 0,
                         });
+                        Self::emit_recv_default_check(
+                            &mut closure_compiler.op_array,
+                            cv,
+                            default_expr,
+                        );
                         let after = closure_compiler.op_array.current_offset();
                         closure_compiler.op_array.patch_jump(jmp_skip, after);
                     }
@@ -16010,6 +16030,23 @@ impl Compiler {
     /// zend_is_valid_default_value for a compile-time literal default value.
     /// Ok(None): valid or not a literal; Ok(Some(v)): valid once widened to
     /// float (use `v`); Err((type name, value name)) when invalid.
+    /// RECV_INIT: a parameter default that is not a compile-time constant
+    /// (e.g. a constant reference) is type-checked when it is used.
+    fn emit_recv_default_check(op_array: &mut OpArray, cv: u32, default_expr: &Expr) {
+        if Self::eval_const_expr(default_expr).is_some()
+            || !matches!(op_array.param_types.get(cv as usize), Some(Some(_)))
+        {
+            return;
+        }
+        op_array.emit(Op {
+            opcode: OpCode::RecvDefaultCheck,
+            op1: OperandType::Cv(cv),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line: default_expr.span.line,
+        });
+    }
+
     fn check_literal_default(
         pt: &ParamType,
         e: &Expr,

@@ -4241,6 +4241,19 @@ impl Vm {
         self.value_matches_type_mode(value, param_type, true)
     }
 
+    /// Does the object `value` satisfy a non-`string` member of `ty` as is
+    /// (so a weak string coercion through __toString() does not apply)?
+    fn object_matches_class_part(&self, value: &Value, ty: &ParamType) -> bool {
+        match ty {
+            ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string") => false,
+            ParamType::Nullable(inner) => self.object_matches_class_part(value, inner),
+            ParamType::Union(members) => members
+                .iter()
+                .any(|m| self.object_matches_class_part(value, m)),
+            other => self.value_matches_type_mode(value, other, true),
+        }
+    }
+
     fn value_matches_type_mode(&self, value: &Value, param_type: &ParamType, strict: bool) -> bool {
         match param_type {
             ParamType::Simple(type_name) => {
@@ -4274,22 +4287,8 @@ impl Vm {
                     }
                     b"string" => {
                         if strict {
-                            // Strict: only accept string and Stringable objects
+                            // Strict: only a string (no __toString() conversion)
                             matches!(value, Value::String(_))
-                                || if let Value::Object(obj) = value {
-                                    let obj_class_lower: Vec<u8> = obj
-                                        .borrow()
-                                        .class_name
-                                        .iter()
-                                        .map(|b| b.to_ascii_lowercase())
-                                        .collect();
-                                    self.classes
-                                        .get(&obj_class_lower)
-                                        .map(|c| c.get_method(b"__tostring").is_some())
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                }
                         } else {
                             // Non-strict: accept string, int, float, bool, and Stringable objects
                             matches!(
@@ -4320,7 +4319,7 @@ impl Vm {
                             // Strict: only accept bool
                             matches!(value, Value::True | Value::False)
                         } else {
-                            // Non-strict: accept any scalar
+                            // Non-strict: accept any scalar (null is not a scalar)
                             matches!(
                                 value,
                                 Value::True
@@ -4328,7 +4327,6 @@ impl Vm {
                                     | Value::Long(_)
                                     | Value::Double(_)
                                     | Value::String(_)
-                                    | Value::Null
                             )
                         }
                     }
@@ -4699,6 +4697,67 @@ impl Vm {
         None
     }
 
+    /// RECV_INIT check of a parameter that received a non-constant default:
+    /// coerce it (the function's own strict_types) or report the TypeError.
+    fn recv_default_check(
+        &mut self,
+        op_array: &OpArray,
+        operand: &OperandType,
+        cvs: &mut [Value],
+    ) -> Option<String> {
+        let OperandType::Cv(cv) = *operand else {
+            return None;
+        };
+        let cv = cv as usize;
+        let info = op_array.param_types.get(cv)?.as_ref()?;
+        let mut v = cvs.get(cv)?.deref();
+        let strict = op_array.strict_types;
+        if !strict {
+            self.emit_implicit_float_to_int_if_needed(&v, &info.param_type, self.current_line);
+        }
+        Self::coerce_value_to_type(&mut v, &info.param_type, strict);
+        if self.value_matches_type_mode(&v, &info.param_type, strict) {
+            match &mut cvs[cv] {
+                Value::Reference(r) => *r.borrow_mut() = v,
+                slot => *slot = v,
+            }
+            return None;
+        }
+        let implicit =
+            usize::from(op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
+        let func = if !op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&op_array.display_name).into_owned()
+        } else if let Some(scope) = &op_array.scope_class {
+            let class_display = self
+                .classes
+                .get(scope)
+                .map(|c| crate::value::display_class_name(&c.name))
+                .unwrap_or_else(|| crate::value::display_class_name(scope));
+            format!(
+                "{}::{}",
+                class_display,
+                String::from_utf8_lossy(&op_array.name)
+            )
+        } else {
+            String::from_utf8_lossy(&op_array.name).into_owned()
+        };
+        let (file, line) = self
+            .call_stack
+            .last()
+            .map(|f| (f.1.clone(), f.2))
+            .unwrap_or_else(|| (self.current_file.clone(), self.current_line));
+        Some(format!(
+            "{}(): Argument #{} (${}) must be of type {}, {} given, called in {} on line {}",
+            func,
+            (cv + 1).saturating_sub(implicit),
+            String::from_utf8_lossy(&info.param_name),
+            self.param_type_display(&info.param_type),
+            Self::value_type_name(&v),
+            file,
+            line
+        ))
+    }
+
     /// Type-check (and coerce, weak mode) the arguments of a user callable
     /// invoked by an internal function (e.g. a Fiber callback). Returns
     /// `Some((message, declaration line))` on a mismatch.
@@ -4769,7 +4828,14 @@ impl Vm {
                 continue;
             }
             if let Some(type_info) = &user_fn.param_types[i] {
-                Self::coerce_value_to_type(arg, &type_info.param_type, caller_strict);
+                if let Value::Reference(r) = arg {
+                    // A by-reference argument is converted in place.
+                    let mut v = r.borrow().clone();
+                    Self::coerce_value_to_type(&mut v, &type_info.param_type, caller_strict);
+                    *r.borrow_mut() = v;
+                } else {
+                    Self::coerce_value_to_type(arg, &type_info.param_type, caller_strict);
+                }
             }
         }
     }
@@ -14707,7 +14773,49 @@ impl Vm {
                 // Note: implicit float-to-int deprecation is emitted at the
                 // OpCode::Return site (before finally blocks run), not here.
                 // (strict mode only widens int to float)
+                let was_nan =
+                    !op_array.strict_types && matches!(val, Value::Double(d) if d.is_nan());
                 Self::coerce_value_to_type(val, ret_type, op_array.strict_types);
+                if was_nan {
+                    let target = match val {
+                        Value::String(_) => Some("string"),
+                        Value::True | Value::False => Some("bool"),
+                        _ => None,
+                    };
+                    if let Some(t) = target {
+                        let line = if self.last_return_line > 0 {
+                            self.last_return_line
+                        } else {
+                            self.current_line
+                        };
+                        self.emit_warning_at(
+                            &format!("unexpected NAN value was coerced to {}", t),
+                            line,
+                        );
+                    }
+                }
+                // Weak mode: a Stringable object returned for a string type.
+                if !op_array.strict_types
+                    && matches!(val, Value::Object(_))
+                    && variance::TypeView::from_param_type(ret_type).mask & variance::T_STRING != 0
+                    && !self.object_matches_class_part(val, ret_type)
+                {
+                    let has_tostring = match &*val {
+                        Value::Object(o) => {
+                            let cl = o.borrow().class_name.to_ascii_lowercase();
+                            self.classes
+                                .get(&cl)
+                                .is_some_and(|c| c.get_method(b"__tostring").is_some())
+                        }
+                        _ => false,
+                    };
+                    if has_tostring {
+                        let obj = val.clone();
+                        if let Ok(s) = self.value_to_string_checked(&obj) {
+                            *val = Value::String(s);
+                        }
+                    }
+                }
                 // For mixed return type, implicit return (no explicit return statement) is an error
                 // because mixed means "must return a value" even though it accepts any type
                 let mixed_implicit_mismatch = implicit_return
@@ -23212,14 +23320,30 @@ impl Vm {
                                         continue;
                                     }
                                     if let Some(type_info) = &user_fn.param_types[i] {
+                                        // Reported by the callee's RECV (its declaration line).
+                                        let recv_line = if user_fn.decl_line > 0 {
+                                            user_fn.decl_line
+                                        } else {
+                                            op.line
+                                        };
                                         self.emit_implicit_float_to_int_if_needed(
                                             arg,
                                             &type_info.param_type,
-                                            op.line,
+                                            recv_line,
                                         );
                                     }
                                 }
                             }
+                            let nan_args: Vec<usize> = if op_array.strict_types {
+                                Vec::new()
+                            } else {
+                                call.args
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, a)| matches!(a, Value::Double(d) if d.is_nan()))
+                                    .map(|(i, _)| i)
+                                    .collect()
+                            };
                             // Coerce args to their declared types (weak mode)
                             Self::coerce_param_types(
                                 &user_fn,
@@ -23227,16 +23351,46 @@ impl Vm {
                                 implicit_args,
                                 op_array.strict_types,
                             );
+                            for i in nan_args {
+                                let target = match call.args.get(i) {
+                                    Some(Value::String(_)) => "string",
+                                    Some(Value::True | Value::False) => "bool",
+                                    _ => continue,
+                                };
+                                let recv_line = if user_fn.decl_line > 0 {
+                                    user_fn.decl_line
+                                } else {
+                                    op.line
+                                };
+                                self.emit_warning_at(
+                                    &format!("unexpected NAN value was coerced to {}", target),
+                                    recv_line,
+                                );
+                            }
                             // Coerce Stringable objects to string for string-typed params
+                            // (zend_verify_weak_scalar_type_hint: a type with string
+                            // that does not take the object as is).
                             for (i, arg) in call.args.iter_mut().enumerate() {
                                 if i >= user_fn.param_types.len() {
                                     break;
                                 }
                                 if let Some(type_info) = &user_fn.param_types[i] {
-                                    let is_string_param = matches!(&type_info.param_type,
+                                    let is_string_param = matches!(arg, Value::Object(_))
+                                        && variance::TypeView::from_param_type(
+                                            &type_info.param_type,
+                                        )
+                                        .mask
+                                            & variance::T_STRING
+                                            != 0
+                                        && (matches!(&type_info.param_type,
                                         ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string"))
-                                        || matches!(&type_info.param_type,
-                                            ParamType::Nullable(inner) if matches!(inner.as_ref(), ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string")));
+                                            || matches!(&type_info.param_type,
+                                            ParamType::Nullable(inner) if matches!(inner.as_ref(), ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string")))
+                                            || (!op_array.strict_types
+                                                && !self.object_matches_class_part(
+                                                    arg,
+                                                    &type_info.param_type,
+                                                )));
                                     if is_string_param {
                                         if let Value::Object(obj) = arg {
                                             let class_lower: Vec<u8> = obj
@@ -36732,6 +36886,22 @@ impl Vm {
                         }
                     }
                 }
+                OpCode::RecvDefaultCheck => {
+                    if let Some(msg) = self.recv_default_check(op_array, &op.op1, &mut cvs) {
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught TypeError: {}", msg),
+                            line: op.line,
+                        });
+                    }
+                }
+
                 OpCode::MakeRef => {
                     // Convert a CV's value to a Reference if not already one
                     if let OperandType::Cv(idx) = &op.op1 {

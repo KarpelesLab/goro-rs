@@ -332,6 +332,9 @@ pub enum OpCode {
     /// (goro passes those by shared handle): an undefined CV becomes null
     /// silently, as ZEND_SEND_REF would. op1 = CV.
     InitCvNull,
+    /// Verify a parameter CV after its non-constant default value was
+    /// assigned (RECV_INIT type check): op1 = the parameter's CV.
+    RecvDefaultCheck,
     /// Send a value as a reference (for by-ref function args like preg_match &$matches)
     SendRef,
     /// Append to array without deref (preserves Reference wrapper): op1 = array, op2 = CV
