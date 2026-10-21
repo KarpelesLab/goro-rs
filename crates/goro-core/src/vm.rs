@@ -29096,7 +29096,19 @@ impl Vm {
                     if let Value::Object(o) = &arr_val {
                         let cl = o.borrow().class_name.to_ascii_lowercase();
                         if let Some((native, _)) = self.find_native_class_handler(&cl) {
-                            if self.builtin_implements_interface(&native, b"traversable") {
+                            let registered_traversable = self
+                                .classes
+                                .get(&native)
+                                .map(|c| {
+                                    c.interfaces.iter().any(|i| {
+                                        i.eq_ignore_ascii_case(b"traversable")
+                                            || i.eq_ignore_ascii_case(b"iteratoraggregate")
+                                    })
+                                })
+                                .unwrap_or(false);
+                            if self.builtin_implements_interface(&native, b"traversable")
+                                || registered_traversable
+                            {
                                 let msg = "An iterator cannot be used with foreach by reference";
                                 let exc = self.create_exception(b"Error", msg, op.line);
                                 self.current_exception = Some(exc);
