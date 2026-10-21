@@ -971,6 +971,11 @@ pub struct PEntity {
     pub expanding: bool,
     /// Resolved URI of an external entity (ent->URI).
     pub uri: Option<String>,
+    /// Offset of the replacement text in `content` (an external entity's
+    /// content keeps its text declaration, as libxml2's input buffer does).
+    pub content_start: usize,
+    /// (line, column) of `content[0]` in the entity's resource.
+    pub content_base: (u32, u32),
 }
 
 struct NsEntry {
@@ -1831,6 +1836,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                 let mut all = head;
                 all.extend_from_slice(&rest);
                 inp.data = Rc::new(all);
+                // xmlSwitchInputEncoding drops the processed bytes
+                inp.shrink(0);
                 self.st.input_encoding = Some(enc.to_string());
                 self.conv_enc = Some(enc.to_string());
             }
@@ -2690,7 +2697,7 @@ impl<'a, S: Sink> Parser<'a, S> {
                             {
                                 let content = self
                                     .load_entity_content(&e)
-                                    .map(|c| c.0)
+                                    .map(|c| c.0.get(c.1..).unwrap_or("").to_string())
                                     .unwrap_or_default();
                                 if let Some(pe) = self.pentities.get_mut(&name) {
                                     pe.content = content.clone();
@@ -2829,6 +2836,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                         parsed: false,
                         expanding: false,
                         uri: None,
+                        content_start: 0,
+                        content_base: (1, 1),
                     });
                 }
             } else {
@@ -2851,6 +2860,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                             parsed: false,
                             expanding: false,
                             uri: None,
+                            content_start: 0,
+                            content_base: (1, 1),
                         });
                     }
                 }
@@ -2868,6 +2879,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                     parsed: false,
                     expanding: false,
                     uri: None,
+                    content_start: 0,
+                    content_base: (1, 1),
                 });
             }
         } else {
@@ -2906,6 +2919,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                     parsed: false,
                     expanding: false,
                     uri: None,
+                    content_start: 0,
+                    content_base: (1, 1),
                 });
             } else {
                 new_ent = Some(PEntity {
@@ -2919,6 +2934,8 @@ impl<'a, S: Sink> Parser<'a, S> {
                     parsed: false,
                     expanding: false,
                     uri: None,
+                    content_start: 0,
+                    content_base: (1, 1),
                 });
             }
         }
@@ -2953,6 +2970,21 @@ impl<'a, S: Sink> Parser<'a, S> {
                 };
                 if !valid && e.kind == EntKind::InternalGeneral {
                     self.fatal(XML_ERR_REDECL_PREDEF_ENTITY, None);
+                } else if valid
+                    && e.kind == EntKind::InternalGeneral
+                    && !self.entities.contains_key(&e.name)
+                {
+                    // a conforming redeclaration is recorded in the DTD
+                    // (references keep resolving to the predefined entity)
+                    self.sink.entity_decl_p(
+                        &mut self.st,
+                        &e.name,
+                        e.kind,
+                        None,
+                        None,
+                        Some(e.content.as_str()),
+                        e.orig.as_deref(),
+                    );
                 }
                 return;
             }
@@ -3706,6 +3738,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             parsed: true,
             expanding: false,
             uri: None,
+            content_start: 0,
+            content_base: (1, 1),
         });
         if self.st.sax_get_entity && self.st.in_subset == 0 {
             // XML_PARSE_OLDSAX: the SAX getEntity callback is asked first,
@@ -4977,8 +5011,10 @@ impl<'a, S: Sink> Parser<'a, S> {
                 if let Some(pe) = self.entities.get_mut(&name) {
                     // remember the outcome (content, file) in `orig`/`notation`
                     match &r {
-                        Some((c, f)) => {
+                        Some((c, start, base, f)) => {
                             pe.content = c.clone();
+                            pe.content_start = *start;
+                            pe.content_base = *base;
                             pe.orig = Some(f.clone());
                         }
                         None => pe.orig = Some(String::new()),
@@ -4999,7 +5035,13 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         if self.st.replace_entities {
             // parse the entity content inline
-            self.parse_entity_content_file(&name, &ent.content, true, efile);
+            self.parse_entity_content_file(
+                &name,
+                &ent.content,
+                (ent.content_start, ent.content_base),
+                true,
+                efile,
+            );
             return;
         }
         // first reference: parse content into the entity
@@ -5009,7 +5051,13 @@ impl<'a, S: Sink> Parser<'a, S> {
             }
             let wants = self.sink.builds_tree() && self.sink.begin_entity_content(&name);
             if wants {
-                self.parse_entity_content_file(&name, &ent.content, false, efile);
+                self.parse_entity_content_file(
+                    &name,
+                    &ent.content,
+                    (ent.content_start, ent.content_base),
+                    false,
+                    efile,
+                );
                 self.sink.end_entity_content(&name);
             } else {
                 // still check well-formedness of the content
@@ -5031,6 +5079,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         &mut self,
         name: &str,
         content: &str,
+        start: (usize, (u32, u32)),
         inline: bool,
         file: Option<String>,
     ) {
@@ -5051,6 +5100,11 @@ impl<'a, S: Sink> Parser<'a, S> {
             e.expanding = true;
         }
         let mut inp = Input::new(Rc::new(content.as_bytes().to_vec()), file);
+        inp.pos = start.0.min(content.len());
+        inp.base_line = start.1.0;
+        inp.base_col = start.1.1;
+        inp.lc_line = start.1.0;
+        inp.lc_col = start.1.1;
         inp.entity = Some(name.to_string());
         self.st.inputs.push(inp);
         let old_min = self.ns_min;
@@ -6274,7 +6328,7 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     /// xmlLoadEntityContent: the replacement text of an external entity
     /// (text declaration removed). None if it could not be loaded.
-    fn load_entity_content(&mut self, e: &PEntity) -> Option<(String, String)> {
+    fn load_entity_content(&mut self, e: &PEntity) -> Option<(String, usize, (u32, u32), String)> {
         let sys = e.system.clone()?;
         let url = e.uri.clone().unwrap_or_else(|| sys.clone());
         let (data, fname) = self.fetch_external(e.public.as_deref(), &sys, &url)?;
@@ -6285,8 +6339,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             self.parse_text_decl();
         }
         let pos = self.pos();
-        let rest = String::from_utf8_lossy(&self.inp().data[pos..]).into_owned();
+        let all = String::from_utf8_lossy(&self.inp().data).into_owned();
+        let base = (self.inp().base_line, self.inp().base_col);
         self.st.inputs.pop();
-        Some((rest, fname))
+        Some((all, pos, base, fname))
     }
 }

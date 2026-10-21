@@ -1139,6 +1139,8 @@ pub fn parse_in_context(
                                     parsed: t.nodes[*e].children.is_some(),
                                     expanding: false,
                                     uri: None,
+                                    content_start: 0,
+                                    content_base: (1, 1),
                                 });
                             }
                         }
