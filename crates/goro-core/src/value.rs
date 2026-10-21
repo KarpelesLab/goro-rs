@@ -319,7 +319,11 @@ impl Value {
                 !data.is_empty() && data != b"0"
             }
             Value::Array(arr) => !arr.borrow().is_empty(),
-            Value::Object(_) | Value::Generator(_) => true,
+            Value::Object(o) => match native_cast(o, 0) {
+                Some(v) => v.is_truthy(),
+                None => true,
+            },
+            Value::Generator(_) => true,
             Value::Reference(r) => r.borrow().is_truthy(),
             Value::Resource(_) => true,
         }
@@ -410,7 +414,11 @@ impl Value {
                     1
                 }
             }
-            Value::Object(_) | Value::Generator(_) => 1,
+            Value::Object(o) => match native_cast(o, 1) {
+                Some(v) => v.to_long(),
+                None => 1,
+            },
+            Value::Generator(_) => 1,
             Value::Reference(r) => r.borrow().to_long(),
         }
     }
@@ -435,7 +443,11 @@ impl Value {
                     1.0
                 }
             }
-            Value::Object(_) | Value::Generator(_) => 1.0,
+            Value::Object(o) => match native_cast(o, 2) {
+                Some(v) => v.to_double(),
+                None => 1.0,
+            },
+            Value::Generator(_) => 1.0,
             Value::Reference(r) => r.borrow().to_double(),
         }
     }
@@ -451,6 +463,9 @@ impl Value {
             Value::String(s) => s.clone(),
             Value::Array(_) => PhpString::from_bytes(b"Array"),
             Value::Object(obj) => {
+                if let Some(v) = native_cast(obj, 3) {
+                    return v.to_php_string();
+                }
                 let obj = obj.borrow();
                 // SimpleXMLElement: __toString returns text content
                 if obj.class_name.eq_ignore_ascii_case(b"SimpleXMLElement") {
@@ -714,6 +729,9 @@ impl Value {
         if let Value::Reference(r) = other {
             return self.equals(&r.borrow());
         }
+        if let Some(c) = native_compare(self, other) {
+            return c == 0;
+        }
         match (self, other) {
             (Value::Null | Value::Undef, Value::Null | Value::Undef) => true,
             (Value::Null | Value::Undef, Value::False)
@@ -948,6 +966,9 @@ impl Value {
         }
         if let Value::Reference(r) = other {
             return self.compare(&r.borrow());
+        }
+        if let Some(c) = native_compare(self, other) {
+            return if c > 1 { 1 } else { c };
         }
         match (self, other) {
             (Value::Resource(a), Value::Resource(b)) => {
@@ -2118,4 +2139,62 @@ pub fn parse_numeric_str(bytes: &[u8], allow_errors: bool) -> Option<(NumStr, bo
         tmp as i64
     };
     Some((NumStr::Long(v), trailing))
+}
+
+/// Run the native cast handler of an extension object (see
+/// `NativeObjectHandlers::cast`).
+#[inline]
+pub fn native_cast(o: &Rc<RefCell<crate::object::PhpObject>>, kind: u8) -> Option<Value> {
+    let f = {
+        let b = o.borrow();
+        b.native.as_ref().and_then(|n| n.handlers.cast)
+    }?;
+    f(o, kind)
+}
+
+/// Comparison involving an extension object (zend compare handler plus the
+/// cast-based fallback for object vs scalar). None = default behaviour.
+pub fn native_compare(a: &Value, b: &Value) -> Option<i64> {
+    let ha = if let Value::Object(o) = a {
+        o.borrow().native.as_ref().map(|n| n.handlers)
+    } else {
+        None
+    };
+    let hb = if let Value::Object(o) = b {
+        o.borrow().native.as_ref().map(|n| n.handlers)
+    } else {
+        None
+    };
+    if ha.is_none() && hb.is_none() {
+        return None;
+    }
+    if let (Value::Object(_), Value::Object(_)) = (a, b) {
+        let f = ha
+            .and_then(|h| h.compare)
+            .or_else(|| hb.and_then(|h| h.compare))?;
+        return f(a, b);
+    }
+    // object vs scalar: cast the object to the scalar's type
+    let (obj, other, swapped) = match (a, b) {
+        (Value::Object(o), x) => (o, x, false),
+        (x, Value::Object(o)) => (o, x, true),
+        _ => return None,
+    };
+    let h = if swapped { hb } else { ha }?;
+    let cast = h.cast?;
+    let kind = match other {
+        Value::True | Value::False => 0,
+        Value::Long(_) => 1,
+        Value::Double(_) => 2,
+        Value::String(_) => 3,
+        Value::Null | Value::Undef => return Some(if swapped { -1 } else { 1 }),
+        _ => return None,
+    };
+    let cv = cast(obj, kind)?;
+    let r = if swapped {
+        other.compare(&cv)
+    } else {
+        cv.compare(other)
+    };
+    Some(r)
 }

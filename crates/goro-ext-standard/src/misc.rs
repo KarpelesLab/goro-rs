@@ -9099,6 +9099,11 @@ fn gc_enable_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(outer)) = args.first() {
+        if let Some(f) = goro_core::vm::native_handlers(outer).and_then(|h| h.get_properties) {
+            if let Some(a) = f(vm, outer, 1) {
+                return Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(a))));
+            }
+        }
         // Trigger lazy init first so properties are visible.
         vm.maybe_run_lazy_init(outer);
         if vm.current_exception.is_some() {

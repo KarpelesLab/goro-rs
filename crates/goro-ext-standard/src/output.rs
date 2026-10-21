@@ -313,6 +313,38 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             seen.remove(&akey);
         }
         Value::Object(obj) => {
+            if let Some(arr) = native_props(vm, obj, 0) {
+                let (cn, oid) = {
+                    let b = obj.borrow();
+                    (
+                        goro_core::value::display_class_name(&b.class_name).to_string(),
+                        b.object_id,
+                    )
+                };
+                if seen.contains(&oid) {
+                    vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                    return;
+                }
+                vm.write_output(
+                    format!("{}object({})#{} ({}) {{\n", prefix, cn, oid, arr.len()).as_bytes(),
+                );
+                seen.insert(oid);
+                let items: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (key, value) in &items {
+                    match key {
+                        goro_core::array::ArrayKey::Int(n) => {
+                            vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes())
+                        }
+                        goro_core::array::ArrayKey::String(s) => vm.write_output(
+                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                        ),
+                    }
+                    var_dump_value(vm, value, indent + 2, seen);
+                }
+                vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                seen.remove(&oid);
+                return;
+            }
             let mut obj_borrow = obj.borrow();
             // Check if this is an enum case object
             if obj_borrow.has_property(b"__enum_case") {
@@ -1295,6 +1327,11 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
 
     prepare_closure_debug(vm, &args[0]);
+    let materialized = materialize_native(vm, &args[0], 0, &mut HashSet::new());
+    let args: &[Value] = match &materialized {
+        Some(v) => std::slice::from_ref(v),
+        None => args,
+    };
     if return_output {
         let mut buf = Vec::new();
         print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
@@ -2012,7 +2049,23 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 }
                 found
             };
-            let props: Vec<(Vec<u8>, Value)> = if is_array_object
+            let mut native_int_keys: Vec<Vec<u8>> = Vec::new();
+            let native_table = native_props(vm, obj, 1);
+            let props: Vec<(Vec<u8>, Value)> = if let Some(arr) = native_table {
+                arr.iter()
+                    .map(|(k, v)| {
+                        let kb = match k {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                let kb = n.to_string().into_bytes();
+                                native_int_keys.push(kb.clone());
+                                kb
+                            }
+                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        };
+                        (kb, v.clone())
+                    })
+                    .collect()
+            } else if is_array_object
                 && obj.borrow().get_property(b"__spl_flags").to_long() & 1 == 0
             {
                 // ArrayObject without STD_PROP_LIST exports its storage.
@@ -2062,12 +2115,13 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                     let name = crate::serialize::unmangle(key)
                         .map(|(_, n)| n.to_vec())
                         .unwrap_or_else(|| key.clone());
-                    let is_int = is_array_object && !name.is_empty() && {
-                        let s = std::str::from_utf8(&name).unwrap_or("");
-                        s.parse::<i64>()
-                            .map(|n| n.to_string() == s)
-                            .unwrap_or(false)
-                    };
+                    let is_int = native_int_keys.contains(&name)
+                        || is_array_object && !name.is_empty() && {
+                            let s = std::str::from_utf8(&name).unwrap_or("");
+                            s.parse::<i64>()
+                                .map(|n| n.to_string() == s)
+                                .unwrap_or(false)
+                        };
                     if is_int {
                         buf.extend_from_slice(&name);
                     } else {
@@ -2233,4 +2287,126 @@ fn var_dump_mangled_table(
     }
     vm.write_output(format!("{}}}\n", prefix).as_bytes());
     seen.remove(&oid);
+}
+
+/// Property table of an extension object (SimpleXML, DOM) for dumping, or
+/// None for ordinary objects. A user-defined `__debugInfo` wins for debug
+/// output.
+pub fn native_props(
+    vm: &mut Vm,
+    obj: &std::rc::Rc<std::cell::RefCell<goro_core::object::PhpObject>>,
+    purpose: u8,
+) -> Option<goro_core::array::PhpArray> {
+    let f = obj
+        .borrow()
+        .native
+        .as_ref()
+        .and_then(|n| n.handlers.get_properties)?;
+    if purpose == 0 {
+        let cl: Vec<u8> = obj.borrow().class_name.to_ascii_lowercase();
+        if vm
+            .classes
+            .get(&cl)
+            .and_then(|c| c.get_method(b"__debuginfo"))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    f(vm, obj, purpose)
+}
+
+/// Replace extension objects inside `v` by plain shadow objects holding
+/// their property tables, for dumpers that work without VM access
+/// (print_r, var_export). Returns None when nothing changed.
+pub fn materialize_native(
+    vm: &mut Vm,
+    v: &Value,
+    purpose: u8,
+    seen: &mut HashSet<usize>,
+) -> Option<Value> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    match v {
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            materialize_native(vm, &inner, purpose, seen)
+        }
+        Value::Array(a) => {
+            let key = Rc::as_ptr(a) as *const u8 as usize;
+            if !seen.insert(key) {
+                return None;
+            }
+            let entries: Vec<_> = a
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut changed: Vec<(usize, Value)> = Vec::new();
+            for (i, (_, ev)) in entries.iter().enumerate() {
+                if let Some(nv) = materialize_native(vm, ev, purpose, seen) {
+                    changed.push((i, nv));
+                }
+            }
+            seen.remove(&key);
+            if changed.is_empty() {
+                return None;
+            }
+            let mut out = goro_core::array::PhpArray::new();
+            let mut ci = 0;
+            for (i, (k, ev)) in entries.into_iter().enumerate() {
+                if ci < changed.len() && changed[ci].0 == i {
+                    out.set(k, changed[ci].1.clone());
+                    ci += 1;
+                } else {
+                    out.set(k, ev);
+                }
+            }
+            Some(Value::Array(Rc::new(RefCell::new(out))))
+        }
+        Value::Object(o) => {
+            let key = Rc::as_ptr(o) as *const u8 as usize;
+            if !seen.insert(key) {
+                return None;
+            }
+            let result = if let Some(arr) = native_props(vm, o, purpose) {
+                let cn = o.borrow().class_name.clone();
+                let mut shadow = goro_core::object::PhpObject::new(cn, 0);
+                for (k, ev) in arr.iter() {
+                    let nv =
+                        materialize_native(vm, ev, purpose, seen).unwrap_or_else(|| ev.clone());
+                    let name = match k {
+                        goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                        goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    };
+                    shadow.properties.push((name, nv));
+                }
+                Some(Value::Object(Rc::new(RefCell::new(shadow))))
+            } else {
+                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
+                let mut changed = false;
+                let mut newp = Vec::with_capacity(props.len());
+                for (k, pv) in props {
+                    match materialize_native(vm, &pv, purpose, seen) {
+                        Some(nv) => {
+                            changed = true;
+                            newp.push((k, nv));
+                        }
+                        None => newp.push((k, pv)),
+                    }
+                }
+                if changed {
+                    let b = o.borrow();
+                    let mut shadow = goro_core::object::PhpObject::new(b.class_name.clone(), 0);
+                    shadow.properties = newp;
+                    Some(Value::Object(Rc::new(RefCell::new(shadow))))
+                } else {
+                    None
+                }
+            };
+            seen.remove(&key);
+            result
+        }
+        _ => None,
+    }
 }

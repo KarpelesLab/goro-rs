@@ -1,3 +1,20 @@
+pub mod io;
+pub mod libxml;
+pub mod parser;
+pub mod sax2;
+pub mod serialize;
+pub mod simplexml;
+pub mod tree;
+pub mod uri;
+pub mod xpath;
+
+/// The XML node behind a DOM object (for simplexml_import_dom).
+pub fn dom_node_of(
+    _o: &std::rc::Rc<std::cell::RefCell<goro_core::object::PhpObject>>,
+) -> Option<tree::NodeId> {
+    None
+}
+
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
@@ -787,8 +804,6 @@ pub fn register(vm: &mut Vm) {
         xml_set_stub_handler,
     );
     vm.register_function(b"xml_set_end_namespace_decl_handler", xml_set_stub_handler);
-    vm.register_function(b"simplexml_load_string", simplexml_load_string);
-    vm.register_function(b"simplexml_load_file", simplexml_load_file);
 
     // Constants
     vm.constants
@@ -856,83 +871,8 @@ pub fn register(vm: &mut Vm) {
         Value::String(PhpString::from_bytes(b"goro")),
     );
 
-    // LIBXML constants
-    vm.constants
-        .insert(b"LIBXML_VERSION".to_vec(), Value::Long(20913));
-    vm.constants.insert(
-        b"LIBXML_DOTTED_VERSION".to_vec(),
-        Value::String(PhpString::from_bytes(b"2.9.13")),
-    );
-    vm.constants.insert(
-        b"LIBXML_LOADED_VERSION".to_vec(),
-        Value::String(PhpString::from_bytes(b"20913")),
-    );
-    vm.constants
-        .insert(b"LIBXML_NOENT".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"LIBXML_DTDLOAD".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"LIBXML_DTDATTR".to_vec(), Value::Long(8));
-    vm.constants
-        .insert(b"LIBXML_DTDVALID".to_vec(), Value::Long(16));
-    vm.constants
-        .insert(b"LIBXML_NOERROR".to_vec(), Value::Long(32));
-    vm.constants
-        .insert(b"LIBXML_NOWARNING".to_vec(), Value::Long(64));
-    vm.constants
-        .insert(b"LIBXML_NOBLANKS".to_vec(), Value::Long(256));
-    vm.constants
-        .insert(b"LIBXML_XINCLUDE".to_vec(), Value::Long(1024));
-    vm.constants
-        .insert(b"LIBXML_NSCLEAN".to_vec(), Value::Long(8192));
-    vm.constants
-        .insert(b"LIBXML_NOCDATA".to_vec(), Value::Long(16384));
-    vm.constants
-        .insert(b"LIBXML_NONET".to_vec(), Value::Long(2048));
-    vm.constants
-        .insert(b"LIBXML_PEDANTIC".to_vec(), Value::Long(128));
-    vm.constants
-        .insert(b"LIBXML_COMPACT".to_vec(), Value::Long(65536));
-    vm.constants
-        .insert(b"LIBXML_NOXMLDECL".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"LIBXML_PARSEHUGE".to_vec(), Value::Long(524288));
-    vm.constants
-        .insert(b"LIBXML_BIGLINES".to_vec(), Value::Long(4194304));
-    vm.constants
-        .insert(b"LIBXML_NOEMPTYTAG".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"LIBXML_SCHEMA_CREATE".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"LIBXML_HTML_NOIMPLIED".to_vec(), Value::Long(8192));
-    vm.constants
-        .insert(b"LIBXML_HTML_NODEFDTD".to_vec(), Value::Long(4));
-    vm.constants
-        .insert(b"LIBXML_ERR_NONE".to_vec(), Value::Long(0));
-    vm.constants
-        .insert(b"LIBXML_ERR_WARNING".to_vec(), Value::Long(1));
-    vm.constants
-        .insert(b"LIBXML_ERR_ERROR".to_vec(), Value::Long(2));
-    vm.constants
-        .insert(b"LIBXML_ERR_FATAL".to_vec(), Value::Long(3));
-    vm.constants
-        .insert(b"LIBXML_RECOVER".to_vec(), Value::Long(1));
-
-    // libxml functions
-    vm.register_function(b"libxml_use_internal_errors", libxml_use_internal_errors_fn);
-    vm.register_function(b"libxml_get_errors", libxml_get_errors_fn);
-    vm.register_function(b"libxml_clear_errors", libxml_clear_errors_fn);
-    vm.register_function(b"libxml_get_last_error", libxml_get_last_error_fn);
-    vm.register_function(b"libxml_set_streams_context", libxml_set_streams_context_fn);
-    vm.register_function(
-        b"libxml_disable_entity_loader",
-        libxml_disable_entity_loader_fn,
-    );
-    vm.register_function(
-        b"libxml_set_external_entity_loader",
-        libxml_set_external_entity_loader_fn,
-    );
-    vm.register_extension(b"libxml");
+    libxml::register(vm);
+    simplexml::register(vm);
 
     // Register XMLParser as a final, opaque, non-serializable class.
     let mut xmlparser_ce = goro_core::object::ClassEntry::new(b"XMLParser".to_vec());
@@ -1871,220 +1811,7 @@ fn to_callback_value(val: &Value) -> Value {
     }
 }
 
-// ── SimpleXML ───────────────────────────────────────────────────────────────
-
-fn build_simplexml_subtree(
-    vm: &mut Vm,
-    events: &[XmlEvent],
-    pos: &mut usize,
-    tag_name: &str,
-    tag_attrs: &[(String, String)],
-) -> Value {
-    let mut children: HashMap<String, Vec<Value>> = HashMap::new();
-    let mut text_content = String::new();
-    let mut child_order: Vec<String> = Vec::new();
-
-    // Allocate object id parent-first to match PHP's allocation order.
-    let obj_id = vm.next_object_id();
-
-    while *pos < events.len() {
-        match &events[*pos] {
-            XmlEvent::StartElement {
-                name,
-                attributes: attrs,
-            } => {
-                let child_name = name.clone();
-                let child_attrs = attrs.clone();
-                *pos += 1;
-                let child_obj = build_simplexml_subtree(vm, events, pos, &child_name, &child_attrs);
-
-                if !child_order.contains(&child_name) {
-                    child_order.push(child_name.clone());
-                }
-                children.entry(child_name).or_default().push(child_obj);
-            }
-            XmlEvent::EndElement { .. } => {
-                *pos += 1;
-                break;
-            }
-            XmlEvent::CharacterData { data } => {
-                text_content.push_str(data);
-                *pos += 1;
-            }
-            _ => {
-                *pos += 1;
-            }
-        }
-    }
-
-    let mut obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
-
-    // Store the tag name as an internal property (for getName())
-    obj.set_property(
-        b"__sxml_name".to_vec(),
-        Value::String(PhpString::from_string(tag_name.to_string())),
-    );
-
-    // Set attributes
-    if !tag_attrs.is_empty() {
-        let mut attr_arr = PhpArray::new();
-        for (k, v) in tag_attrs {
-            attr_arr.set(
-                ArrayKey::String(PhpString::from_string(k.clone())),
-                Value::String(PhpString::from_string(v.clone())),
-            );
-        }
-        obj.set_property(
-            b"@attributes".to_vec(),
-            Value::Array(Rc::new(RefCell::new(attr_arr))),
-        );
-    }
-
-    // Store text content (non-whitespace) — for both leaf and non-leaf nodes.
-    // For non-leaf nodes this is the text directly inside (mixed content).
-    // PHP SimpleXML does not create text nodes for whitespace-only content.
-    if !text_content.is_empty() && text_content.chars().any(|c| !c.is_whitespace()) {
-        obj.set_property(
-            b"0".to_vec(),
-            Value::String(PhpString::from_string(text_content)),
-        );
-    }
-    if !children.is_empty() {
-        for key in &child_order {
-            let vals = children.get(key).unwrap();
-            if vals.len() == 1 {
-                obj.set_property(key.as_bytes().to_vec(), vals[0].clone());
-            } else {
-                let mut arr = PhpArray::new();
-                for v in vals {
-                    arr.push(v.clone());
-                }
-                obj.set_property(
-                    key.as_bytes().to_vec(),
-                    Value::Array(Rc::new(RefCell::new(arr))),
-                );
-            }
-        }
-    }
-
-    Value::Object(Rc::new(RefCell::new(obj)))
-}
-
-fn simplexml_load_string(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-
-    if data.trim().is_empty() {
-        return Ok(Value::False);
-    }
-
-    // Parse without case folding for SimpleXML (preserves original case)
-    let parse_result = parse_xml(&data, 0, 1, 0, None);
-    match parse_result {
-        Ok((events, _, _, _)) => {
-            if events.is_empty() {
-                return Ok(Value::False);
-            }
-
-            // Find the root element
-            let mut pos = 0;
-            // Skip xml declarations and whitespace
-            while pos < events.len() {
-                if matches!(&events[pos], XmlEvent::StartElement { .. }) {
-                    break;
-                }
-                pos += 1;
-            }
-
-            if pos >= events.len() {
-                return Ok(Value::False);
-            }
-
-            // Extract root element info
-            let (root_name, root_attrs) = if let XmlEvent::StartElement {
-                name, attributes, ..
-            } = &events[pos]
-            {
-                (name.clone(), attributes.clone())
-            } else {
-                return Ok(Value::False);
-            };
-            pos += 1;
-
-            let root = build_simplexml_subtree(vm, &events, &mut pos, &root_name, &root_attrs);
-            // Mark the root for XML declaration emission in asXML/saveXML
-            if let Value::Object(ref obj) = root {
-                obj.borrow_mut()
-                    .set_property(b"__sxml_is_root".to_vec(), Value::True);
-            }
-            Ok(root)
-        }
-        Err(_) => Ok(Value::False),
-    }
-}
-
-fn simplexml_load_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-
-    match std::fs::read_to_string(&filename) {
-        Ok(contents) => {
-            let data_val = Value::String(PhpString::from_string(contents));
-            simplexml_load_string(vm, &[data_val])
-        }
-        Err(_) => Ok(Value::False),
-    }
-}
-
 /// Stub handler for XML set handler functions that are not fully implemented
 fn xml_set_stub_handler(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
-}
-
-// ── libxml function stubs ───────────────────────────────────────────────────
-
-thread_local! {
-    static LIBXML_USE_INTERNAL_ERRORS: Cell<bool> = const { Cell::new(false) };
-}
-
-fn libxml_use_internal_errors_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let previous = LIBXML_USE_INTERNAL_ERRORS.with(|c| c.get());
-    if let Some(val) = args.first() {
-        if !matches!(val, Value::Null | Value::Undef) {
-            LIBXML_USE_INTERNAL_ERRORS.with(|c| c.set(val.is_truthy()));
-        }
-    }
-    Ok(if previous { Value::True } else { Value::False })
-}
-
-fn libxml_get_errors_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return empty array since we don't track libxml errors
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-}
-
-fn libxml_clear_errors_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
-}
-
-fn libxml_get_last_error_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-
-fn libxml_set_streams_context_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
-}
-
-fn libxml_disable_entity_loader_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated("libxml_disable_entity_loader() is deprecated");
-    Ok(Value::True)
-}
-
-fn libxml_set_external_entity_loader_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }

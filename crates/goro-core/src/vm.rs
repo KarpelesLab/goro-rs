@@ -37,6 +37,32 @@ pub(crate) fn clear_current_vm_ptr() {
     CURRENT_VM_PTR.with(|c| c.set(std::ptr::null_mut()));
 }
 
+/// In the execute loop: when a native handler left an exception pending,
+/// jump to the innermost catch handler or return it as uncaught.
+macro_rules! native_exc_check {
+    ($self:ident, $handlers:ident, $pending:ident, $ip:ident, $line:expr) => {
+        if $self.current_exception.is_some() {
+            if let Some((catch_target, _, _, _, saved_pc)) = $handlers.pop() {
+                $pending = Some(saved_pc);
+                $ip = catch_target as usize;
+                continue;
+            }
+            let msg = match &$self.current_exception {
+                Some(Value::Object(o)) => o
+                    .borrow()
+                    .get_property(b"message")
+                    .to_php_string()
+                    .to_string_lossy(),
+                _ => "Uncaught exception".to_string(),
+            };
+            return Err(VmError {
+                message: msg,
+                line: $line,
+            });
+        }
+    };
+}
+
 /// Built-in function signature
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
@@ -62,6 +88,60 @@ pub struct NativeClassHandler {
     pub prop_read: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8]) -> Option<Option<Value>>>,
     /// Parameter names of a method (`__construct` included), for named arguments.
     pub param_names: Option<fn(&[u8], &[u8]) -> Option<&'static [&'static str]>>,
+}
+
+/// Object handlers (zend_object_handlers equivalent) for extension objects
+/// whose `PhpObject::native` is set. Every hook may decline (return None /
+/// false) to get the default behaviour.
+pub struct NativeObjectHandlers {
+    /// `$obj->name` read. mode: 0 = read, 1 = fetch for write, 2 = isset fetch.
+    pub read_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], u8) -> Option<Value>>,
+    /// `$obj->name = v`. Returns true when handled.
+    pub write_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], &Value) -> bool>,
+    /// isset (check_empty = 0) / !empty (check_empty = 1) on `$obj->name`.
+    pub has_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], u8) -> Option<bool>>,
+    pub unset_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8]) -> bool>,
+    /// `$obj[k]` read (k = None for `$obj[]`); mode as for properties.
+    pub read_dimension:
+        Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, Option<&Value>, u8) -> Option<Value>>,
+    pub write_dimension:
+        Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, Option<&Value>, &Value) -> bool>,
+    pub has_dimension: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &Value, u8) -> Option<bool>>,
+    pub unset_dimension: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &Value) -> bool>,
+    /// Property table for dumping (purpose 0: var_dump/print_r/debug,
+    /// 1: (array) cast, get_object_vars, var_export, json_encode).
+    pub get_properties: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, u8) -> Option<PhpArray>>,
+    pub count_elements: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>) -> Option<i64>>,
+    /// Conversion: 0 = bool, 1 = int, 2 = float, 3 = string.
+    pub cast: Option<fn(&Rc<RefCell<PhpObject>>, u8) -> Option<Value>>,
+    /// Loose comparison (`==`, `<`...); returns -1/0/1, or 2 for uncomparable.
+    pub compare: Option<fn(&Value, &Value) -> Option<i64>>,
+    /// Called after `clone` copied the properties: (source, clone).
+    pub clone_obj: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &Rc<RefCell<PhpObject>>)>,
+}
+
+impl NativeObjectHandlers {
+    pub const EMPTY: NativeObjectHandlers = NativeObjectHandlers {
+        read_property: None,
+        write_property: None,
+        has_property: None,
+        unset_property: None,
+        read_dimension: None,
+        write_dimension: None,
+        has_dimension: None,
+        unset_dimension: None,
+        get_properties: None,
+        count_elements: None,
+        cast: None,
+        compare: None,
+        clone_obj: None,
+    };
+}
+
+/// Handlers of an object carrying native data, if any.
+#[inline]
+pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeObjectHandlers> {
+    obj.borrow().native.as_ref().map(|n| n.handlers)
 }
 
 impl Vm {
@@ -26623,7 +26703,13 @@ impl Vm {
                             arr.push(Value::Object(obj));
                             Rc::new(RefCell::new(arr))
                         }
-                        Value::Object(obj) => self.object_to_array(&obj),
+                        Value::Object(obj) => match native_handlers(&obj)
+                            .and_then(|h| h.get_properties)
+                            .and_then(|f| f(self, &obj, 1))
+                        {
+                            Some(a) => Rc::new(RefCell::new(a)),
+                            None => self.object_to_array(&obj),
+                        },
                         Value::Null | Value::Undef => Rc::new(RefCell::new(PhpArray::new())),
                         other => {
                             let mut arr = PhpArray::new();
@@ -26699,6 +26785,21 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Value::Object(obj) = &arr_val {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.write_dimension) {
+                            let v = val.deref();
+                            if f(self, obj, None, &v) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     if let Value::Array(arr) = &arr_val {
                         if let Err(msg) = arr.borrow_mut().try_push(val) {
                             let exc = self.create_exception(b"Error", msg, op.line);
@@ -26809,6 +26910,22 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Value::Object(obj) = &arr_val.deref() {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.write_dimension) {
+                            let v = val.deref();
+                            let k = key_val.deref();
+                            if f(self, obj, Some(&k), &v) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // Array/object keys on a real array throw TypeError (matches
                     // zend_illegal_container_offset). value_to_array_key_checked
                     // silently maps both to Int(0), so check explicitly first.
@@ -27306,6 +27423,28 @@ impl Vm {
                         }
                     }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Value::Object(obj) = &arr_val.deref() {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension) {
+                            let k = key_val.deref();
+                            if let Some(v) = f(self, obj, Some(&k), if is_rw { 1 } else { 0 }) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                self.write_operand(
+                                    &op.result,
+                                    v,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // RW precondition: $arr[$k] op= ... must throw the same
                     // error the matching ArraySet would, before the binary op
                     // can read or warn. Mirrors FETCH_DIM_RW.
@@ -32565,6 +32704,18 @@ impl Vm {
                             });
                         }
                     };
+                    if let (Value::Object(src), Value::Object(dst)) = (&val, &cloned) {
+                        if let Some(f) = native_handlers(src).and_then(|h| h.clone_obj) {
+                            f(self, src, dst);
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                        }
+                    }
                     self.write_operand(&op.result, cloned, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
@@ -32615,6 +32766,25 @@ impl Vm {
                         .to_php_string();
 
                     if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.has_property) {
+                            if let Some(b) = f(self, obj, prop_name.as_bytes(), 0) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                self.write_operand(
+                                    &op.result,
+                                    if b { Value::True } else { Value::False },
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
+                            }
+                        }
                         if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
                             let set = matches!(r, Some(ref v) if !matches!(v, Value::Null | Value::Undef));
                             self.write_operand(
@@ -33111,48 +33281,33 @@ impl Vm {
                             let key = Self::value_to_array_key(key_val.clone());
                             arr.borrow_mut().remove(&key);
                         }
+                    } else if let Some(Value::Object(obj)) = arr_val.as_ref().map(|v| v.deref()).filter(|v| matches!(v, Value::Object(o) if native_handlers(o).and_then(|h| h.unset_dimension).is_some())) {
+                        let f = native_handlers(&obj).and_then(|h| h.unset_dimension).unwrap();
+                        f(self, &obj, &key_val.deref());
+                        native_exc_check!(self, exception_handlers, pending_calls_catch_depth, ip, op.line);
                     } else if let Some(Value::Object(obj)) = arr_val {
                         // ArrayAccess: unset($obj[$key]) -> offsetUnset($key)
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
+                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         // Type-check the key for ArrayObject-family: arrays and
                         // objects are not valid offset types.
-                        if matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                        ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
+                        if matches!(class_lower.as_slice(),
+                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
+                            && matches!(&key_val, Value::Array(_) | Value::Object(_))
                         {
-                            let t = if matches!(&key_val, Value::Array(_)) {
-                                "array"
-                            } else {
-                                "object"
-                            };
+                            let t = if matches!(&key_val, Value::Array(_)) { "array" } else { "object" };
                             let msg = format!("Cannot unset offset of type {} on ArrayObject", t);
                             let exc = self.create_exception(b"TypeError", &msg, op.line);
                             self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 ip = ct as usize;
                                 continue;
                             }
-                            return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", msg),
-                                line: op.line,
-                            });
+                            return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
                         }
                         let obj_val = Value::Object(obj);
                         let spl_args = vec![obj_val.clone(), key_val.clone()];
-                        if self
-                            .handle_spl_docall(&class_lower, b"offsetunset", &spl_args)
-                            .is_none()
-                        {
+                        if self.handle_spl_docall(&class_lower, b"offsetunset", &spl_args).is_none() {
                             self.call_object_method(&obj_val, b"offsetunset", &[key_val]);
                         }
                         drop(spl_args);
@@ -33162,10 +33317,7 @@ impl Vm {
                             self.run_pending_destructors();
                         }
                         if let Some(exc_val) = self.current_exception.take() {
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
                                 let ct = *catch_target;
                                 self.current_exception = Some(exc_val);
                                 ip = ct as usize;
@@ -33173,17 +33325,10 @@ impl Vm {
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
-                                ob.get_property(b"message")
-                                    .to_php_string()
-                                    .to_string_lossy()
-                            } else {
-                                "Unknown exception".to_string()
-                            };
+                                ob.get_property(b"message").to_php_string().to_string_lossy()
+                            } else { "Unknown exception".to_string() };
                             self.current_exception = Some(exc_val);
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
+                            return Err(VmError { message: msg, line: op.line });
                         }
                     }
                 }
@@ -33195,6 +33340,18 @@ impl Vm {
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
                     if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.unset_property) {
+                            if f(self, obj, prop_name.as_bytes()) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                continue;
+                            }
+                        }
                         if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 1) {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -34275,6 +34432,38 @@ impl Vm {
                 }
 
                 OpCode::ArrayGetW => {
+                    if let Value::Object(obj) = &self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .deref()
+                    {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension) {
+                            let k = if matches!(op.op2, OperandType::Unused) {
+                                None
+                            } else {
+                                Some(
+                                    self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                                        .deref(),
+                                )
+                            };
+                            if let Some(v) = f(self, obj, k.as_ref(), 1) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                self.write_operand(
+                                    &op.result,
+                                    v,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // Resolve the container array, vivifying a null/undef CV.
                     let container: Option<Rc<RefCell<PhpArray>>> = match &op.op1 {
                         OperandType::Cv(ci) => {
@@ -34682,6 +34871,27 @@ impl Vm {
                         }
                     }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    if let Value::Object(obj) = &arr_val.deref() {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
+                            if let Some(b) = f(self, obj, &key_val.deref(), 0) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                self.write_operand(
+                                    &op.result,
+                                    if b { Value::True } else { Value::False },
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         match arr.borrow().get(&key) {
@@ -40510,6 +40720,32 @@ impl Vm {
                         .to_php_string();
                     // Extension property read handlers (e.g. DateInterval's fields).
                     if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.read_property) {
+                            let mode = if matches!(op.opcode, OpCode::PropertyGet) {
+                                0
+                            } else {
+                                1
+                            };
+                            if let Some(v) = f(self, obj, prop_name.as_bytes(), mode) {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                }
+                                self.write_operand(
+                                    &op.result,
+                                    v,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
+                            }
+                        }
                         if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
                             let v = match r {
                                 Some(v) => v,
@@ -41648,6 +41884,19 @@ impl Vm {
                     }
 
                     if let Value::Object(obj) = &obj_val_raw {
+                        if let Some(f) = native_handlers(obj).and_then(|h| h.write_property) {
+                            let v = value.deref();
+                            if f(self, obj, prop_name.as_bytes(), &v) {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                continue;
+                            }
+                        }
                         if !self.native_prop_write_allowed(obj, prop_name.as_bytes(), 0) {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -44355,6 +44604,11 @@ impl Vm {
             let inner = r.borrow().clone();
             return self.value_to_string(&inner);
         }
+        if let Value::Object(o) = val {
+            if let Some(v) = crate::value::native_cast(o, 3) {
+                return v.to_php_string();
+            }
+        }
         if let Value::Object(obj) = val {
             let class_lower: Vec<u8> = obj
                 .borrow()
@@ -44659,7 +44913,11 @@ impl Vm {
             let is_phptoken = class_lower == b"phptoken";
             let is_uri = class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri";
             let is_spl_str = self.spl_has_builtin_tostring(&class_lower);
+            let is_native_str = native_handlers(obj)
+                .map(|h| h.cast.is_some())
+                .unwrap_or(false);
             if !has_tostring
+                && !is_native_str
                 && !is_throwable
                 && !is_reflection
                 && !is_gmp

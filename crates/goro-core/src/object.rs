@@ -197,6 +197,24 @@ pub struct PhpObject {
     /// `__closure_N` name, a `[name, $this?, captures...]` array, a function
     /// name, or a bound-method `["Class::m", $obj]` array).
     pub closure: Option<Box<Value>>,
+    /// Opaque extension-owned state (e.g. the XML node behind a DOM or
+    /// SimpleXML object). Objects carrying it get their native object
+    /// handlers consulted (see `Vm::native_object_handlers`).
+    pub native: Option<NativeData>,
+}
+
+/// Extension payload attached to a `PhpObject`: opaque data plus the
+/// object handlers that implement the object's behaviour.
+#[derive(Clone)]
+pub struct NativeData {
+    pub data: std::rc::Rc<dyn std::any::Any>,
+    pub handlers: &'static crate::vm::NativeObjectHandlers,
+}
+
+impl std::fmt::Debug for NativeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeData")
+    }
 }
 
 /// A flag that is *not* copied by `Clone` (a cloned object is a new,
@@ -250,6 +268,7 @@ impl PhpObject {
             object_id,
             gc_tracked: GcFlag::default(),
             closure: None,
+            native: None,
         }
     }
 
