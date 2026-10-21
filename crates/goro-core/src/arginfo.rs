@@ -688,13 +688,13 @@ impl Vm {
     ) -> bool {
         // Instance methods dispatched through internal pseudo-calls, led by $this
         let this_call: Option<(&[u8], &[u8])> = match name_lower {
-            b"__generator_send" => Some((b"generator", b"send")),
-            b"__generator_throw" => Some((b"generator", b"throw")),
             b"__closure_call" => Some((b"closure", b"call")),
             b"__closure_bindto" => Some((b"closure", b"bindto")),
             _ => {
                 if let Some(m) = name_lower.strip_prefix(b"__fiber::") {
                     Some((b"fiber", m))
+                } else if let Some(m) = name_lower.strip_prefix(b"__genm::") {
+                    Some((b"generator", m))
                 } else if let Some(m) = name_lower.strip_prefix(b"__weakmap::") {
                     Some((b"weakmap", m))
                 } else {

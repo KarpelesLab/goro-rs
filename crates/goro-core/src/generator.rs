@@ -8,6 +8,20 @@ use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
 
+type GenRc = Rc<RefCell<PhpGenerator>>;
+
+/// How the root of a `yield from` tree is continued.
+#[derive(Clone, Copy)]
+enum Kick {
+    /// Advance it (next()/send()).
+    Resume,
+    /// Throw vm.current_exception at its suspension point.
+    Throw,
+    /// A generator just started delegating to it: prime it if it has not
+    /// started, otherwise leave it at its current value.
+    Fresh,
+}
+
 /// The state of a PHP generator
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratorState {
@@ -24,7 +38,7 @@ pub enum GeneratorState {
 /// Generators are functions that use `yield` to produce values lazily.
 /// When called, a generator function returns a Generator object that
 /// implements the Iterator interface.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PhpGenerator {
     /// The compiled function body
     /// Shared with the function's definition (a generator never patches it).
@@ -114,6 +128,45 @@ pub struct PhpGenerator {
     /// frame_name(), computed on the first resume (it only depends on the
     /// function and its class, which do not change).
     frame_name_cache: Option<(String, bool)>,
+    /// Finally blocks being executed: (handler depth at entry, the exception
+    /// that led into it), as in Vm::execute_frame.
+    pub(crate) fin: Vec<(usize, Option<Value>)>,
+    /// Levels a deferred `break N` still has to leave.
+    pub(crate) pending_finally_levels: u32,
+    /// Result operand of the `yield from` delegating to a generator: receives
+    /// the inner generator's return value.
+    pub(crate) yield_from_result: OperandType,
+    /// The last resume_single() executed a `yield from` that delegates to a
+    /// generator (ZEND_YIELD_FROM returned to zend_generator_resume()).
+    pub(crate) just_delegated: bool,
+    /// Bytes charged against memory_limit for the generator and its frame.
+    pub(crate) mem_charged: usize,
+    /// Started delegating with `yield from` (ZEND_GENERATOR_DO_INIT): the
+    /// next resume of this generator does not advance a root that already
+    /// produced a value.
+    pub(crate) do_init: bool,
+    /// The last value/key yielded, kept after completion (generator->value
+    /// lives until the object is freed).
+    pub(crate) last_value: Value,
+    pub(crate) last_key: Value,
+}
+
+impl Drop for PhpGenerator {
+    /// Release a `yield from` delegation chain iteratively: a deep chain
+    /// would otherwise overflow the native stack in nested drops.
+    fn drop(&mut self) {
+        crate::value::memory_free(self.mem_charged);
+        let mut next = self.yield_from_source.take();
+        while let Some(Value::Generator(rc)) = next {
+            next = match Rc::try_unwrap(rc) {
+                Ok(cell) => {
+                    let mut g = cell.into_inner();
+                    g.yield_from_source.take()
+                }
+                Err(_) => None,
+            };
+        }
+    }
 }
 
 impl PhpGenerator {
@@ -154,6 +207,9 @@ impl PhpGenerator {
     pub fn new(op_array: impl Into<Rc<OpArray>>, cvs: Vec<Value>) -> Self {
         let op_array: Rc<OpArray> = op_array.into();
         let temp_count = op_array.temp_count as usize;
+        // zend_generator + its execute_data (call frame, CVs and TMPs).
+        let mem_charged = 256 + 16 * (cvs.len() + temp_count);
+        crate::value::memory_charge(mem_charged);
         Self {
             op_array,
             ip: 0,
@@ -192,6 +248,14 @@ impl PhpGenerator {
             current_ref: None,
             hook_key: None,
             frame_name_cache: None,
+            fin: Vec::new(),
+            pending_finally_levels: 1,
+            yield_from_result: OperandType::Unused,
+            just_delegated: false,
+            mem_charged,
+            do_init: false,
+            last_value: Value::Null,
+            last_key: Value::Null,
         }
     }
 
@@ -365,16 +429,30 @@ impl PhpGenerator {
 
         self.force_closed = true;
 
-        // If we're yielding from an inner generator, close it first so its
-        // finally blocks run before ours (matches PHP semantics).
-        if let Some(Value::Generator(inner_rc)) = self.yield_from_source.clone() {
-            // Use try_borrow_mut to avoid borrow conflicts; if it's currently
-            // borrowed we just skip (it'll be cleaned up on its own drop).
-            if let Ok(mut inner) = inner_rc.try_borrow_mut() {
-                inner.close(vm);
+        // Exceptions pending in the finally blocks we are suspended in are
+        // raised again once a finally block run by the close completes
+        // (zend_dispatch_try_catch_finally_helper() from ZEND_FAST_RET).
+        let mut resurrect: Option<Value> = None;
+        for (_, e) in self.fin.iter().rev() {
+            if let Some(e) = e {
+                match &resurrect {
+                    None => resurrect = Some(e.clone()),
+                    Some(x) => Vm::exception_set_previous(x, e.clone()),
+                }
             }
-            self.yield_from_source = None;
         }
+
+        // Leave `yield from` mode: the reference to the delegate is released
+        // first, so a delegate only we held is destroyed (running its
+        // finally blocks) before ours run (zend_generator_dtor_storage()).
+        if let Some(src) = self.yield_from_source.take() {
+            let delegate = matches!(src, Value::Generator(_));
+            drop(src);
+            if delegate {
+                vm.close_released_generators();
+            }
+        }
+        self.fin.clear();
 
         // Find finally blocks that need to be executed.
         // Scan TryBegin/TryEnd in the op_array to find finally targets
@@ -452,6 +530,12 @@ impl PhpGenerator {
             // generator"), leave the exception on the VM so the caller can
             // catch it (or surface it as a fatal error at the top level).
             let _ = self.resume(vm);
+            if let Some(r) = resurrect {
+                match &vm.current_exception {
+                    Some(cur) => Vm::exception_set_previous(cur, r),
+                    None => vm.current_exception = Some(r),
+                }
+            }
         }
 
         self.state = GeneratorState::Completed;
@@ -470,20 +554,24 @@ impl PhpGenerator {
     }
 
     /// After a resume: the value sent in now lives in the frame, and a
-    /// finished generator's frame is freed (its locals are destroyed at the
-    /// caller's next release point).
-    fn release_finished_frame(&mut self) {
+    /// finished generator's frame is freed, destroying its locals
+    /// (zend_generator_close()).
+    fn release_finished_frame(&mut self, vm: &mut Vm) {
         if !matches!(self.send_value, Value::Null) {
             self.send_value = Value::Null;
         }
         if self.state == GeneratorState::Completed {
-            for t in self.tmps.iter_mut() {
-                *t = Value::Undef;
-            }
-            for c in self.cvs.iter_mut() {
-                *c = Value::Undef;
+            let mut freed = false;
+            for v in self.tmps.iter_mut().chain(self.cvs.iter_mut()) {
+                if matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                    freed = true;
+                }
+                *v = Value::Undef;
             }
             self.current_value = Value::Null;
+            if freed {
+                vm.run_pending_destructors_pub();
+            }
         }
     }
 
@@ -517,7 +605,7 @@ impl PhpGenerator {
         (name, is_instance)
     }
 
-    pub fn resume(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+    fn resume_single(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         if self.state == GeneratorState::Completed {
             return Ok(false);
         }
@@ -589,11 +677,15 @@ impl PhpGenerator {
             Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
         };
         vm.leave_op_array_file(saved_file);
+        if let Ok(true) = result {
+            self.last_value = self.current_value.clone();
+            self.last_key = self.current_key.clone();
+        }
         if cv_frame {
             vm.cv_frames.pop();
         }
         self.is_running = false;
-        self.release_finished_frame();
+        self.release_finished_frame(vm);
 
         // Pop the call_stack entry
         vm.call_stack.pop();
@@ -609,6 +701,314 @@ impl PhpGenerator {
         vm.leave_generator_resume();
 
         result
+    }
+
+    /// The generator this one delegates to with `yield from` (node.parent).
+    fn live_delegate(&self) -> Option<GenRc> {
+        match &self.yield_from_source {
+            Some(Value::Generator(g)) => Some(g.clone()),
+            _ => None,
+        }
+    }
+
+    /// File and line of the `yield from` this generator is suspended at.
+    fn yield_from_site(&self) -> (String, u32) {
+        let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
+        let line = self
+            .ip
+            .checked_sub(1)
+            .and_then(|i| self.op_array.ops.get(i))
+            .map(|o| o.line)
+            .unwrap_or(0);
+        (file, line)
+    }
+
+    /// This generator's frame in backtraces, called from `caller`.
+    fn trace_frame(
+        &self,
+        vm: &Vm,
+        caller: &Option<(String, u32)>,
+    ) -> (String, String, u32, Vec<Value>, bool) {
+        let (name, is_instance) = self.frame_name(vm);
+        let (file, line) = caller.clone().unwrap_or_default();
+        (name, file, line, self.args.clone(), is_instance)
+    }
+
+    /// zend_generator_resume(): run the generator, or the innermost
+    /// generator of its `yield from` delegation chain, until a value is
+    /// produced. Delegation is driven iteratively (no native recursion per
+    /// `yield from` level). Returns Ok(true) if a value was yielded,
+    /// Ok(false) if the generator completed.
+    pub fn resume(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+        if self.state == GeneratorState::Completed {
+            return Ok(false);
+        }
+        if self.is_running {
+            return self.resume_single(vm);
+        }
+        if self.live_delegate().is_some() {
+            return self.drive(vm, Kick::Resume);
+        }
+        let r = self.resume_single(vm);
+        if std::mem::take(&mut self.just_delegated) && r.is_ok() {
+            return self.drive(vm, Kick::Fresh);
+        }
+        r
+    }
+
+    /// Resume with the exception in vm.current_exception thrown at the
+    /// point the generator (or the innermost generator it delegates to) is
+    /// suspended (Generator::throw(), Fiber::throw()).
+    pub fn resume_with_exception(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+        if self.state == GeneratorState::Completed {
+            return Ok(false);
+        }
+        if self.live_delegate().is_some() {
+            return self.drive(vm, Kick::Throw);
+        }
+        let r = self.resume_single_throw(vm);
+        if std::mem::take(&mut self.just_delegated) && r.is_ok() {
+            return self.drive(vm, Kick::Fresh);
+        }
+        r
+    }
+
+    /// The delegation loop of zend_generator_resume() (try_again): resume the
+    /// root of the tree; when it finishes, continue its child with the
+    /// return value (or the exception) until a value is yielded or `self`
+    /// itself finishes.
+    fn drive(&mut self, vm: &mut Vm, mut kick: Kick) -> Result<bool, VmError> {
+        let self_ptr = self as *const PhpGenerator;
+        // Path from our delegate down to the root.
+        let mut path: Vec<GenRc> = Vec::new();
+        let mut cur = self.live_delegate();
+        while let Some(g) = cur {
+            if std::ptr::eq(RefCell::as_ptr(&g) as *const PhpGenerator, self_ptr) {
+                break;
+            }
+            cur = match g.try_borrow() {
+                Ok(b) if b.state != GeneratorState::Completed => b.live_delegate(),
+                _ => None,
+            };
+            path.push(g);
+        }
+        let base_cs = vm.call_stack.len();
+        let outer_caller = vm.generator_caller.clone();
+        // The frames of the generators between us and the root appear in
+        // backtraces taken while the root runs.
+        let f = self.trace_frame(vm, &outer_caller);
+        vm.call_stack.push(f);
+        for i in 0..path.len().saturating_sub(1) {
+            let site = if i == 0 {
+                self.yield_from_site()
+            } else {
+                path[i - 1].borrow().yield_from_site()
+            };
+            let f = path[i].borrow().trace_frame(vm, &Some(site));
+            vm.call_stack.push(f);
+        }
+        let result = loop {
+            let Some(root) = path.last().cloned() else {
+                // We are the root again: continue our own body.
+                vm.call_stack.truncate(base_cs);
+                vm.generator_caller = outer_caller.clone();
+                let r = match kick {
+                    Kick::Throw => self.resume_single_throw(vm),
+                    _ => self.resume_single(vm),
+                };
+                if std::mem::take(&mut self.just_delegated) && r.is_ok() {
+                    let f = self.trace_frame(vm, &outer_caller);
+                    vm.call_stack.push(f);
+                    if let Some(d) = self.live_delegate() {
+                        path.push(d);
+                    }
+                    kick = Kick::Fresh;
+                    continue;
+                }
+                vm.generator_caller = outer_caller;
+                self.do_init = false;
+                return r;
+            };
+            let (completed, returned, retval, last) = match root.try_borrow() {
+                Ok(b) => (
+                    b.state == GeneratorState::Completed,
+                    b.has_returned,
+                    b.return_value.clone(),
+                    (b.last_value.clone(), b.last_key.clone()),
+                ),
+                Err(_) => break Err(Self::running_error(vm)),
+            };
+            if completed {
+                // zend_generator_update_current(): the child continues
+                // after its `yield from`. Its frame is pushed again when it
+                // runs.
+                path.pop();
+                vm.call_stack.pop();
+                let closed = !returned && !matches!(kick, Kick::Throw);
+                let child = path.last().cloned();
+                let mut child_ref;
+                let c: &mut PhpGenerator = match &child {
+                    Some(c) => {
+                        child_ref = match c.try_borrow_mut() {
+                            Ok(cb) => cb,
+                            Err(_) => break Err(Self::running_error(vm)),
+                        };
+                        &mut child_ref
+                    }
+                    None => self,
+                };
+                c.yield_from_source = None;
+                if returned {
+                    let res = c.yield_from_result;
+                    c.write_operand(&res, retval);
+                    c.current_value = last.0;
+                    c.current_key = last.1;
+                } else if closed {
+                    // Thrown in the context of the child.
+                    let site = if path.len() >= 2 {
+                        Some(path[path.len() - 2].borrow().yield_from_site())
+                    } else if child.is_some() {
+                        None
+                    } else {
+                        outer_caller.clone()
+                    };
+                    let f = c.trace_frame(vm, &site);
+                    vm.call_stack.push(f);
+                    let exc = vm.create_exception(
+                        b"ClosedGeneratorException",
+                        "Generator yielded from aborted, no return value available",
+                        0,
+                    );
+                    vm.call_stack.pop();
+                    vm.current_exception = Some(exc);
+                    kick = Kick::Throw;
+                }
+                if matches!(kick, Kick::Fresh) {
+                    kick = Kick::Resume;
+                }
+                continue;
+            }
+            let mut rb = match root.try_borrow_mut() {
+                Ok(rb) => rb,
+                Err(_) => break Err(Self::running_error(vm)),
+            };
+            if rb.is_running {
+                drop(rb);
+                break Err(Self::running_error(vm));
+            }
+            if self.do_init && !matches!(kick, Kick::Throw) && rb.state == GeneratorState::Suspended
+            {
+                // We started delegating to a generator that already produced
+                // a value: it is not advanced (ZEND_GENERATOR_DO_INIT).
+                self.do_init = false;
+                drop(rb);
+                break Ok(true);
+            }
+            let site = if path.len() >= 2 {
+                path[path.len() - 2].borrow().yield_from_site()
+            } else {
+                self.yield_from_site()
+            };
+            vm.generator_caller = Some(site.clone());
+            let r = match kick {
+                Kick::Throw => rb.resume_single_throw(vm),
+                Kick::Resume => {
+                    rb.write_send_value();
+                    rb.resume_single(vm)
+                }
+                Kick::Fresh => rb.resume_single(vm),
+            };
+            vm.generator_caller = outer_caller.clone();
+            if vm.exit_requested || vm.fiber_suspended {
+                drop(rb);
+                break r;
+            }
+            if crate::value::memory_exhausted() != 0 {
+                drop(rb);
+                break Err(vm.memory_limit_fatal());
+            }
+            if std::mem::take(&mut rb.just_delegated) && r.is_ok() {
+                let f = rb.trace_frame(vm, &Some(site));
+                vm.call_stack.push(f);
+                let d = rb.live_delegate();
+                drop(rb);
+                if let Some(d) = d {
+                    path.push(d);
+                }
+                kick = Kick::Fresh;
+                continue;
+            }
+            drop(rb);
+            match r {
+                Ok(true) => break Ok(true),
+                Ok(false) => {
+                    kick = if vm.current_exception.is_some() {
+                        Kick::Throw
+                    } else {
+                        Kick::Resume
+                    };
+                }
+                Err(e) => {
+                    if vm.current_exception.is_some() {
+                        kick = Kick::Throw;
+                    } else {
+                        break Err(e);
+                    }
+                }
+            }
+        };
+        vm.call_stack.truncate(base_cs);
+        vm.generator_caller = outer_caller;
+        self.do_init = false;
+        if let Ok(true) = result {
+            // The value of every generator on the path is the root's.
+            if let Some(root) = path.last() {
+                let (v, k, r) = match root.try_borrow() {
+                    Ok(b) => (
+                        b.current_value.clone(),
+                        b.current_key.clone(),
+                        b.current_ref.clone(),
+                    ),
+                    Err(_) => (Value::Null, Value::Null, None),
+                };
+                for g in &path[..path.len() - 1] {
+                    if let Ok(mut gb) = g.try_borrow_mut() {
+                        gb.current_value = v.clone();
+                        gb.current_key = k.clone();
+                        gb.current_ref = r.clone();
+                    }
+                }
+                self.current_value = v;
+                self.current_key = k;
+                self.current_ref = r;
+            }
+            self.state = GeneratorState::Suspended;
+        }
+        result
+    }
+
+    /// Pop the innermost exception handler: where an exception raised in the
+    /// body continues (its catch, or its finally block).
+    fn dispatch_exception(&mut self) -> Option<usize> {
+        let (catch_target, finally_target, _) = self.exception_handlers.pop()?;
+        if catch_target > 0 {
+            Some(catch_target as usize)
+        } else if finally_target > 0 {
+            Some(finally_target as usize)
+        } else {
+            None
+        }
+    }
+
+    /// "Cannot resume an already running generator", thrown in the caller.
+    fn running_error(vm: &mut Vm) -> VmError {
+        let err_msg = "Cannot resume an already running generator";
+        let exc = vm.create_exception(b"Error", err_msg, 0);
+        vm.current_exception = Some(exc);
+        VmError {
+            message: format!("Uncaught Error: {}", err_msg),
+            line: 0,
+        }
     }
 
     /// For `SaveReturn`/`SaveJump` followed by `Jmp <finally_start>`: pop the
@@ -808,21 +1208,31 @@ impl PhpGenerator {
                             line: op.line,
                         });
                     }
-                    // Check if we're resuming a yield-from iteration
-                    if let Some(ref source) = self.yield_from_source.clone() {
+                    // Error raised by the `yield from` itself: dispatched to
+                    // this frame's handlers.
+                    let mut error: Option<(&[u8], String)> = None;
+                    if let Some(source) = self.yield_from_source.clone() {
+                        // Resuming an array / iterator delegation
+                        // (zend_generator_get_next_delegated_value()).
                         match source {
                             Value::Array(arr) => {
-                                let arr_borrow = arr.borrow();
-                                let entries: Vec<_> = arr_borrow.iter().collect();
-                                if self.yield_from_pos < entries.len() {
-                                    let (key, val) = entries[self.yield_from_pos];
-                                    let k = match key {
-                                        crate::array::ArrayKey::Int(n) => Value::Long(*n),
-                                        crate::array::ArrayKey::String(s) => {
-                                            Value::String(s.clone())
-                                        }
-                                    };
-                                    self.current_value = val.clone();
+                                let next = {
+                                    let arr_borrow = arr.borrow();
+                                    arr_borrow
+                                        .iter()
+                                        .nth(self.yield_from_pos)
+                                        .map(|(key, val)| {
+                                            let k = match key {
+                                                crate::array::ArrayKey::Int(n) => Value::Long(*n),
+                                                crate::array::ArrayKey::String(s) => {
+                                                    Value::String(s.clone())
+                                                }
+                                            };
+                                            (k, val.clone())
+                                        })
+                                };
+                                if let Some((k, val)) = next {
+                                    self.current_value = val;
                                     self.current_key = k;
                                     self.yield_from_pos += 1;
                                     self.state = GeneratorState::Suspended;
@@ -834,69 +1244,62 @@ impl PhpGenerator {
                                 self.yield_from_pos = 0;
                                 self.write_operand(&op.result, Value::Null);
                             }
-                            Value::Generator(inner_gen) => {
-                                // If we've already yielded the inner's current value on
-                                // a previous resume, advance the inner first. Otherwise
-                                // just observe the inner's current state. This way two
-                                // generators yielding from the same shared inner see the
-                                // same sequence of values without consuming each other's.
-                                if self.yield_from_observed {
-                                    let mut inner = inner_gen.borrow_mut();
-                                    inner.write_send_value();
-                                    let prev_caller = vm.generator_caller.take();
-                                    let caller_file = if !op_array.filename.is_empty() {
-                                        String::from_utf8_lossy(&op_array.filename).to_string()
-                                    } else {
-                                        vm.current_file.clone()
-                                    };
-                                    vm.generator_caller = Some((caller_file, op.line));
-                                    let resume_outcome = inner.resume(vm);
-                                    vm.generator_caller = prev_caller;
-                                    drop(inner);
-                                    if resume_outcome.is_err() || vm.current_exception.is_some() {
-                                        // Inner threw - clear delegation and propagate
-                                        self.yield_from_source = None;
-                                        self.yield_from_observed = false;
-                                        if let Some((catch_target, finally_target, _)) =
-                                            self.exception_handlers.pop()
-                                        {
-                                            if catch_target > 0 {
-                                                ip = catch_target as usize;
-                                                continue;
-                                            } else if finally_target > 0 {
-                                                ip = finally_target as usize;
-                                                continue;
-                                            }
+                            Value::Object(_) => {
+                                let idx = self.yield_from_pos;
+                                self.yield_from_pos += 1;
+                                let had = vm.current_exception.is_some();
+                                let failed = |vm: &Vm| !had && vm.current_exception.is_some();
+                                let mut item = None;
+                                'step: {
+                                    if idx > 0 {
+                                        vm.call_object_method(&source, b"next", &[]);
+                                        if failed(vm) {
+                                            break 'step;
                                         }
-                                        self.state = GeneratorState::Completed;
-                                        self.ip = ip;
-                                        return Err(VmError {
-                                            message: "Uncaught exception in generator".to_string(),
-                                            line: op.line,
-                                        });
                                     }
+                                    let valid = vm
+                                        .call_object_method(&source, b"valid", &[])
+                                        .unwrap_or(Value::False);
+                                    if failed(vm) || !valid.is_truthy() {
+                                        break 'step;
+                                    }
+                                    let value = vm
+                                        .call_object_method(&source, b"current", &[])
+                                        .unwrap_or(Value::Null);
+                                    if failed(vm) {
+                                        break 'step;
+                                    }
+                                    let key = vm
+                                        .call_object_method(&source, b"key", &[])
+                                        .unwrap_or(Value::Null);
+                                    if failed(vm) {
+                                        break 'step;
+                                    }
+                                    item = Some((key, value));
                                 }
-                                self.yield_from_observed = false;
-                                // Read inner state without holding borrow
-                                let (is_suspended, ret) = {
-                                    let inner = inner_gen.borrow();
-                                    (
-                                        inner.state == GeneratorState::Suspended,
-                                        inner.return_value.clone(),
-                                    )
-                                };
-                                let (val, key) = Self::leaf_current(inner_gen);
-                                if is_suspended {
-                                    self.current_value = val;
+                                if let Some((key, value)) = item {
+                                    self.current_value = value;
                                     self.current_key = key;
                                     self.state = GeneratorState::Suspended;
-                                    self.ip = ip - 1; // Re-execute YieldFrom on resume
-                                    self.yield_from_observed = true;
+                                    self.ip = ip - 1;
                                     return Ok(true);
                                 }
-                                // Inner completed
                                 self.yield_from_source = None;
-                                self.write_operand(&op.result, ret);
+                                self.yield_from_pos = 0;
+                                if failed(vm) {
+                                    if let Some(t) = self.dispatch_exception() {
+                                        ip = t;
+                                        continue;
+                                    }
+                                    self.state = GeneratorState::Completed;
+                                    self.current_value = Value::Null;
+                                    self.ip = ip;
+                                    return Err(VmError {
+                                        message: "Uncaught exception in generator".to_string(),
+                                        line: op.line,
+                                    });
+                                }
+                                self.write_operand(&op.result, Value::Null);
                             }
                             _ => {
                                 self.yield_from_source = None;
@@ -904,8 +1307,46 @@ impl PhpGenerator {
                             }
                         }
                     } else {
-                        // First time: set up the yield-from source
+                        // First time: set up the yield-from source. The
+                        // operand is consumed (FREE_OP1).
                         let iterable = self.read_operand(&op.op1, &op_array.literals);
+                        if let OperandType::Tmp(t) = op.op1 {
+                            if let Some(slot) = self.tmps.get_mut(t as usize) {
+                                *slot = Value::Undef;
+                            }
+                        }
+                        let mut iterable = iterable;
+                        // IteratorAggregate: delegate to what getIterator() returns.
+                        if let Value::Object(obj) = &iterable {
+                            let class_lower: Vec<u8> = obj
+                                .borrow()
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            if !vm.class_implements_interface(&class_lower, b"iterator")
+                                && (vm
+                                    .class_implements_interface(&class_lower, b"iteratoraggregate")
+                                    || vm.class_implements_interface(&class_lower, b"traversable"))
+                            {
+                                let had = vm.current_exception.is_some();
+                                let it = vm.call_object_method(&iterable, b"getIterator", &[]);
+                                if !had && vm.current_exception.is_some() {
+                                    if let Some(t) = self.dispatch_exception() {
+                                        ip = t;
+                                        continue;
+                                    }
+                                    self.state = GeneratorState::Completed;
+                                    self.current_value = Value::Null;
+                                    self.ip = ip;
+                                    return Err(VmError {
+                                        message: "Uncaught exception in generator".to_string(),
+                                        line: op.line,
+                                    });
+                                }
+                                iterable = it.unwrap_or(Value::Null);
+                            }
+                        }
                         match &iterable {
                             Value::Array(_) => {
                                 self.yield_from_source = Some(iterable);
@@ -914,175 +1355,123 @@ impl PhpGenerator {
                                 ip -= 1; // Will re-execute this opcode
                             }
                             Value::Generator(inner_gen) => {
-                                // Initialize inner generator if needed. The "caller"
-                                // for the inner's trace is the yield-from site in
-                                // the current op_array, so set generator_caller
-                                // accordingly.
-                                let mut inner = inner_gen.borrow_mut();
-                                if inner.state == GeneratorState::Created {
-                                    let prev_caller = vm.generator_caller.take();
-                                    let caller_file = if !op_array.filename.is_empty() {
-                                        String::from_utf8_lossy(&op_array.filename).to_string()
-                                    } else {
-                                        vm.current_file.clone()
-                                    };
-                                    vm.generator_caller = Some((caller_file, op.line));
-                                    let exc_before = vm.current_exception.is_some();
-                                    let start_outcome = inner.resume(vm);
-                                    vm.generator_caller = prev_caller;
-                                    if start_outcome.is_err()
-                                        && !exc_before
-                                        && vm.current_exception.is_some()
-                                    {
-                                        // Inner threw while starting - propagate.
-                                        drop(inner);
-                                        if let Some((catch_target, finally_target, _)) =
-                                            self.exception_handlers.pop()
-                                        {
-                                            ip = if catch_target > 0 {
-                                                catch_target
-                                            } else {
-                                                finally_target
-                                            }
-                                                as usize;
-                                            continue;
-                                        }
-                                        self.state = GeneratorState::Completed;
-                                        self.ip = ip;
-                                        return Err(VmError {
-                                            message: "Uncaught exception in generator".to_string(),
-                                            line: op.line,
-                                        });
+                                // zend_generator_yield_from(): this generator
+                                // becomes a child of `inner_gen` and the
+                                // resume loop continues with the tree's root.
+                                let self_ptr = self as *const PhpGenerator;
+                                let mut impossible = false;
+                                let mut cur = Some(inner_gen.clone());
+                                while let Some(g) = cur {
+                                    if std::ptr::eq(
+                                        RefCell::as_ptr(&g) as *const PhpGenerator,
+                                        self_ptr,
+                                    ) {
+                                        impossible = true;
+                                        break;
                                     }
+                                    cur = match g.try_borrow() {
+                                        Ok(b) if b.state != GeneratorState::Completed => {
+                                            b.live_delegate()
+                                        }
+                                        Ok(_) => None,
+                                        Err(_) => {
+                                            impossible = true;
+                                            None
+                                        }
+                                    };
                                 }
-                                drop(inner);
-                                self.yield_from_source = Some(iterable);
-                                ip -= 1; // Re-execute to start yielding
+                                let completed = inner_gen
+                                    .try_borrow()
+                                    .map(|b| b.state == GeneratorState::Completed)
+                                    .unwrap_or(false);
+                                if impossible {
+                                    error = Some((
+                                        b"Error",
+                                        "Impossible to yield from the Generator being currently run"
+                                            .into(),
+                                    ));
+                                } else if completed {
+                                    error = Some((
+                                        b"Error",
+                                        "Generator passed to yield from was aborted without proper return and is unable to continue".into(),
+                                    ));
+                                } else {
+                                    self.yield_from_source = Some(iterable.clone());
+                                    self.yield_from_result = op.result;
+                                    self.write_operand(&op.result, Value::Null);
+                                    self.state = GeneratorState::Suspended;
+                                    self.ip = ip;
+                                    self.just_delegated = true;
+                                    self.do_init = true;
+                                    return Ok(true);
+                                }
                             }
                             Value::Object(obj) => {
-                                // Check if the object is iterable (Iterator or IteratorAggregate)
                                 let class_lower: Vec<u8> = obj
                                     .borrow()
                                     .class_name
                                     .iter()
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
-                                let is_iterator =
-                                    vm.class_implements_interface(&class_lower, b"iterator");
-                                let is_iterator_aggregate = !is_iterator
-                                    && vm.class_implements_interface(
-                                        &class_lower,
-                                        b"iteratoraggregate",
-                                    );
-                                let is_traversable = !is_iterator
-                                    && !is_iterator_aggregate
-                                    && vm.class_implements_interface(&class_lower, b"traversable");
-
-                                if is_iterator {
-                                    // Iterator object - convert to array for simplicity
-                                    let exc_before = vm.current_exception.is_some();
-                                    let arr = vm.iterator_to_array(&iterable);
-                                    if !exc_before && vm.current_exception.is_some() {
-                                        if let Some((catch_target, finally_target, _)) =
-                                            self.exception_handlers.pop()
-                                        {
-                                            ip = if catch_target > 0 {
-                                                catch_target
-                                            } else {
-                                                finally_target
-                                            }
-                                                as usize;
+                                if vm.class_implements_interface(&class_lower, b"iterator") {
+                                    // Iterated lazily, one element per resume.
+                                    let had = vm.current_exception.is_some();
+                                    vm.call_object_method(&iterable, b"rewind", &[]);
+                                    if !had && vm.current_exception.is_some() {
+                                        if let Some(t) = self.dispatch_exception() {
+                                            ip = t;
                                             continue;
                                         }
                                         self.state = GeneratorState::Completed;
+                                        self.current_value = Value::Null;
                                         self.ip = ip;
                                         return Err(VmError {
                                             message: "Uncaught exception in generator".to_string(),
                                             line: op.line,
                                         });
                                     }
+                                    self.yield_from_source = Some(iterable.clone());
+                                    self.yield_from_pos = 0;
+                                    ip -= 1;
+                                } else if vm
+                                    .class_implements_interface(&class_lower, b"traversable")
+                                {
+                                    let arr = vm.iterator_to_array(&iterable);
                                     self.yield_from_source =
                                         Some(Value::Array(Rc::new(RefCell::new(arr))));
                                     self.yield_from_pos = 0;
                                     ip -= 1;
-                                } else if is_iterator_aggregate || is_traversable {
-                                    // Call getIterator() to get the underlying iterator
-                                    if let Some(iter_val) =
-                                        vm.call_object_method(&iterable, b"getIterator", &[])
-                                    {
-                                        match iter_val {
-                                            Value::Generator(inner_gen) => {
-                                                let mut inner = inner_gen.borrow_mut();
-                                                if inner.state == GeneratorState::Created {
-                                                    let _ = inner.resume(vm);
-                                                }
-                                                drop(inner);
-                                                self.yield_from_source =
-                                                    Some(Value::Generator(inner_gen));
-                                                ip -= 1;
-                                            }
-                                            _ => {
-                                                // Got an iterator object - convert to array for simplicity
-                                                let arr = vm.iterator_to_array(&iter_val);
-                                                self.yield_from_source =
-                                                    Some(Value::Array(Rc::new(RefCell::new(arr))));
-                                                self.yield_from_pos = 0;
-                                                ip -= 1;
-                                            }
-                                        }
-                                    } else {
-                                        self.write_operand(&op.result, Value::Null);
-                                    }
                                 } else {
-                                    // Non-iterable object - create Error exception
-                                    let msg =
-                                        "Can use \"yield from\" only with arrays and Traversables";
-                                    let exc = vm.create_exception(b"Error", msg, op.line);
-                                    vm.current_exception = Some(exc);
-                                    if let Some((catch_target, finally_target, _)) =
-                                        self.exception_handlers.pop()
-                                    {
-                                        ip = if catch_target > 0 {
-                                            catch_target
-                                        } else {
-                                            finally_target
-                                        } as usize;
-                                        continue;
-                                    }
-                                    self.state = GeneratorState::Completed;
-                                    self.current_value = Value::Null;
-                                    self.ip = ip;
-                                    return Err(crate::vm::VmError {
-                                        message: format!("Uncaught Error: {}", msg),
-                                        line: op.line,
-                                    });
+                                    error = Some((
+                                        b"Error",
+                                        "Can use \"yield from\" only with arrays and Traversables"
+                                            .into(),
+                                    ));
                                 }
                             }
                             _ => {
-                                // Non-iterable - create Error exception
-                                let msg =
-                                    "Can use \"yield from\" only with arrays and Traversables";
-                                let exc = vm.create_exception(b"Error", msg, op.line);
-                                vm.current_exception = Some(exc);
-                                if let Some((catch_target, finally_target, _)) =
-                                    self.exception_handlers.pop()
-                                {
-                                    ip = if catch_target > 0 {
-                                        catch_target
-                                    } else {
-                                        finally_target
-                                    } as usize;
-                                    continue;
-                                }
-                                self.state = GeneratorState::Completed;
-                                self.current_value = Value::Null;
-                                self.ip = ip;
-                                return Err(crate::vm::VmError {
-                                    message: format!("Uncaught Error: {}", msg),
-                                    line: op.line,
-                                });
+                                error = Some((
+                                    b"Error",
+                                    "Can use \"yield from\" only with arrays and Traversables"
+                                        .into(),
+                                ));
                             }
                         }
+                    }
+                    if let Some((class, msg)) = error {
+                        let exc = vm.create_exception(class, &msg, op.line);
+                        vm.current_exception = Some(exc);
+                        if let Some(t) = self.dispatch_exception() {
+                            ip = t;
+                            continue;
+                        }
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(crate::vm::VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     }
                 }
 
@@ -2090,9 +2479,27 @@ impl PhpGenerator {
                     self.exception_handlers.pop();
                 }
 
-                // Generators keep the pending exception/return in the
-                // executor state while a finally block runs.
-                OpCode::FinallyEnter => {}
+                OpCode::FinallyEnter => {
+                    // Move what led here (pending exception, deferred return
+                    // or jump) into the finally's slot, kept in the frame
+                    // across yields (as Vm::execute_frame does).
+                    let depth = self.exception_handlers.len();
+                    Vm::finally_escape(&mut self.fin, depth, &vm.current_exception);
+                    let mut pending_exc = None;
+                    let slot = if let Some(exc) = vm.current_exception.take() {
+                        pending_exc = Some(exc.clone());
+                        Vm::finally_slot(1, exc)
+                    } else if let Some(v) = self.pending_return.take() {
+                        Vm::finally_slot(2, v)
+                    } else if let Some(t) = self.pending_finally_jump.take() {
+                        let levels = std::mem::replace(&mut self.pending_finally_levels, 1);
+                        Vm::finally_slot(3, Value::Long(t as i64 | ((levels as i64) << 32)))
+                    } else {
+                        Value::Null
+                    };
+                    self.fin.push((depth, pending_exc));
+                    self.write_operand(&op.op1, slot);
+                }
 
                 OpCode::CatchException => {
                     // Graceful-exit unwinding (fiber destruction) skips catch clauses.
@@ -2119,6 +2526,15 @@ impl PhpGenerator {
                             line: op.line,
                         });
                     }
+                    // The catch of a try with a finally starts with the finally
+                    // guard's TryBegin, already pushed above the caught level.
+                    let guarded = ip >= 2
+                        && matches!(op_array.ops.get(ip - 2), Some(g) if g.opcode == OpCode::TryBegin && g.op1 == g.op2);
+                    let caught_at = self
+                        .exception_handlers
+                        .len()
+                        .saturating_sub(usize::from(guarded));
+                    Vm::finally_escape(&mut self.fin, caught_at, &vm.current_exception);
                     self.pending_return = None;
                     self.pending_finally_jump = None;
                     if let Some(exc) = vm.current_exception.take() {
@@ -2133,6 +2549,15 @@ impl PhpGenerator {
                     self.pending_finally_jump = None;
                     vm.current_exception = None;
                     self.pop_handlers_for_finally_jump(op_array.ops.get(ip));
+                    // A return out of a running finally block discards what it
+                    // had pending (ZEND_DISCARD_EXCEPTION).
+                    while self
+                        .fin
+                        .last()
+                        .is_some_and(|f| f.0 > self.exception_handlers.len())
+                    {
+                        self.fin.pop();
+                    }
                 }
 
                 OpCode::SaveJump => {
@@ -2140,8 +2565,21 @@ impl PhpGenerator {
                     if let OperandType::JmpTarget(target) = op.op1 {
                         self.pending_finally_jump = Some(target);
                     }
+                    self.pending_finally_levels = match op.op2 {
+                        OperandType::Const(_) => {
+                            self.read_operand(&op.op2, &op_array.literals).to_long() as u32
+                        }
+                        _ => 1,
+                    };
                     vm.current_exception = None;
                     self.pop_handlers_for_finally_jump(op_array.ops.get(ip));
+                    while self
+                        .fin
+                        .last()
+                        .is_some_and(|f| f.0 > self.exception_handlers.len())
+                    {
+                        self.fin.pop();
+                    }
                 }
 
                 OpCode::ReturnDeferred => {
@@ -2150,9 +2588,33 @@ impl PhpGenerator {
                     } else {
                         0
                     };
-                    if vm.current_exception.is_some() {
-                        self.pending_return = None;
-                        self.pending_finally_jump = None;
+                    // ZEND_FAST_RET: resume what led into the finally block.
+                    if let OperandType::Tmp(t) = op.op2 {
+                        self.fin.pop();
+                        let slot = self
+                            .tmps
+                            .get_mut(t as usize)
+                            .map(|s| std::mem::replace(s, Value::Undef))
+                            .unwrap_or(Value::Undef);
+                        if let Value::Array(a) = slot {
+                            let (kind, payload) = {
+                                let a = a.borrow();
+                                (
+                                    a.get_int(0).map(|v| v.to_long()).unwrap_or(0),
+                                    a.get_int(1).cloned().unwrap_or(Value::Null),
+                                )
+                            };
+                            match kind {
+                                1 => vm.current_exception = Some(payload),
+                                2 => self.pending_return = Some(payload),
+                                3 => {
+                                    let v = payload.to_long();
+                                    self.pending_finally_jump = Some(v as u32);
+                                    self.pending_finally_levels = (v >> 32) as u32;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     if let Some(val) = self.pending_return.take() {
                         // Pop exception handlers for this finally block
@@ -2176,12 +2638,10 @@ impl PhpGenerator {
                         while let Some(&(_catch_target, finally_target, _)) =
                             self.exception_handlers.last()
                         {
+                            self.exception_handlers.pop();
                             if finally_target > 0 {
                                 outer_finally = Some(finally_target);
-                                self.exception_handlers.pop();
                                 break;
-                            } else {
-                                self.exception_handlers.pop();
                             }
                         }
                         if let Some(finally_ip) = outer_finally {
@@ -2199,43 +2659,56 @@ impl PhpGenerator {
                     }
                     // If there's a pending jump (deferred break/continue)
                     if let Some(target) = self.pending_finally_jump.take() {
+                        let levels = std::mem::replace(&mut self.pending_finally_levels, 1);
+                        if levels > 1 {
+                            // The jump also leaves enclosing try/finally blocks:
+                            // run the next one first.
+                            if this_finally_start > 0
+                                && self
+                                    .exception_handlers
+                                    .iter()
+                                    .any(|h| h.1 == this_finally_start)
+                            {
+                                while let Some(&(_, finally_target, _)) =
+                                    self.exception_handlers.last()
+                                {
+                                    self.exception_handlers.pop();
+                                    if finally_target == this_finally_start {
+                                        break;
+                                    }
+                                }
+                            }
+                            let mut outer_finally = None;
+                            while let Some(&(_, finally_target, _)) = self.exception_handlers.last()
+                            {
+                                self.exception_handlers.pop();
+                                if finally_target > 0 {
+                                    outer_finally = Some(finally_target);
+                                    break;
+                                }
+                            }
+                            if let Some(finally_ip) = outer_finally {
+                                self.pending_finally_jump = Some(target);
+                                self.pending_finally_levels = levels - 1;
+                                ip = finally_ip as usize;
+                                continue;
+                            }
+                        }
                         ip = target as usize;
                         continue;
                     }
                     // If there's a pending exception, re-throw it through outer handlers
                     if vm.current_exception.is_some() {
-                        if let Some((catch_target, finally_target, _)) =
-                            self.exception_handlers.pop()
-                        {
-                            if catch_target > 0 {
-                                ip = catch_target as usize;
-                                continue;
-                            } else if finally_target > 0 {
-                                ip = finally_target as usize;
-                                continue;
-                            }
+                        if let Some(t) = self.dispatch_exception() {
+                            ip = t;
+                            continue;
                         }
                         // No outer handler - uncaught exception
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
-                        #[allow(clippy::unnecessary_unwrap)]
-                        // checked just above; keeps the error path flat
-                        let exc = vm.current_exception.as_ref().unwrap();
-                        let msg = if let Value::Object(obj) = exc {
-                            let obj = obj.borrow();
-                            let class = String::from_utf8_lossy(&obj.class_name).to_string();
-                            let message = obj.get_property(b"message");
-                            format!(
-                                "Uncaught {}: {}",
-                                class,
-                                message.to_php_string().to_string_lossy()
-                            )
-                        } else {
-                            "Uncaught exception in generator".to_string()
-                        };
                         return Err(VmError {
-                            message: msg,
+                            message: "Uncaught exception in generator".to_string(),
                             line: op.line,
                         });
                     }
@@ -2644,158 +3117,17 @@ impl PhpGenerator {
                             vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
                             vm.generator_send_val(obj_val.clone());
                         }
-                    } else if let Value::Generator(inner_gen_rc) = &obj_val {
-                        // Calling a method on another generator from within this generator
-                        let method_lower: Vec<u8> = method_name
-                            .as_bytes()
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        // Check if the inner generator is already running (to prevent
-                        // "Cannot resume an already running generator" crash/panic).
-                        // If try_borrow() fails, the RefCell is mutably borrowed = generator is running.
-                        // If it succeeds, check the is_running flag for nested resume detection.
-                        let already_running = inner_gen_rc
-                            .try_borrow()
-                            .map(|b| b.is_running)
-                            .unwrap_or(true);
-                        if already_running
-                            && (method_lower == b"next"
-                                || method_lower == b"send"
-                                || method_lower == b"rewind")
-                        {
-                            // Push a Generator->X frame so the exception's recorded
-                            // backtrace includes the inner call site (matches PHP's
-                            // output for "Cannot resume an already running generator"),
-                            // build the Error exception while the frame is on the
-                            // stack, then pop and propagate as a regular thrown error.
-                            let frame_method = match method_lower.as_slice() {
-                                b"next" => "Generator->next",
-                                b"send" => "Generator->send",
-                                b"rewind" => "Generator->rewind",
-                                _ => "Generator->?",
-                            };
-                            vm.call_stack.push((
-                                frame_method.to_string(),
-                                vm.current_file.clone(),
-                                op.line,
-                                Vec::new(),
-                                true,
-                            ));
-                            let err_msg = "Cannot resume an already running generator";
-                            let exc = vm.create_exception(b"Error", err_msg, op.line);
-                            vm.call_stack.pop();
-                            vm.current_exception = Some(exc);
-                            // Propagate as a thrown exception so any inner try/catch
-                            // can intercept it (the original test does exactly this).
-                            if let Some((catch_target, finally_target, _)) =
-                                self.exception_handlers.pop()
-                            {
-                                if catch_target > 0 {
-                                    ip = catch_target as usize;
-                                    continue;
-                                } else if finally_target > 0 {
-                                    ip = finally_target as usize;
-                                    continue;
-                                }
-                            }
-                            self.state = GeneratorState::Completed;
-                            self.ip = ip;
-                            return Err(VmError {
-                                message: format!("Uncaught Error: {}", err_msg),
-                                line: op.line,
-                            });
-                        }
-                        // Push a frame for the duration of the inner method call so
-                        // backtraces and exception traces include the call site.
-                        let push_inner_frame = matches!(
-                            method_lower.as_slice(),
-                            b"current" | b"key" | b"next" | b"valid" | b"rewind"
+                    } else if let Value::Generator(_) = &obj_val {
+                        // Generator methods run at DoFCall (Vm::generator_method).
+                        let mut name = b"__genm::".to_vec();
+                        name.extend(
+                            method_name
+                                .as_bytes()
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase()),
                         );
-                        let inner_frame_method = match method_lower.as_slice() {
-                            b"current" => "Generator->current",
-                            b"key" => "Generator->key",
-                            b"next" => "Generator->next",
-                            b"valid" => "Generator->valid",
-                            b"rewind" => "Generator->rewind",
-                            _ => "",
-                        };
-                        if push_inner_frame {
-                            vm.call_stack.push((
-                                inner_frame_method.to_string(),
-                                vm.current_file.clone(),
-                                op.line,
-                                Vec::new(),
-                                true,
-                            ));
-                        }
-                        let result = match method_lower.as_slice() {
-                            b"valid" => {
-                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
-                                    if inner.state == GeneratorState::Created {
-                                        let _ = inner.resume(vm);
-                                    }
-                                    if inner.state == GeneratorState::Completed {
-                                        Value::False
-                                    } else {
-                                        Value::True
-                                    }
-                                } else {
-                                    Value::False
-                                }
-                            }
-                            b"current" => {
-                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
-                                    if inner.state == GeneratorState::Created {
-                                        let _ = inner.resume(vm);
-                                    }
-                                    inner.current_value.clone()
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            b"key" => {
-                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
-                                    if inner.state == GeneratorState::Created {
-                                        let _ = inner.resume(vm);
-                                    }
-                                    inner.current_key.clone()
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            b"next" => {
-                                if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
-                                    if inner.state == GeneratorState::Created {
-                                        let _ = inner.resume(vm);
-                                    }
-                                    inner.advanced_past_first = true;
-                                    inner.write_send_value();
-                                    let _ = inner.resume(vm);
-                                }
-                                Value::Null
-                            }
-                            b"rewind" => Value::Null, // no-op for started generators
-                            b"send" => {
-                                // send() will be handled via __generator_send in DoFCall
-                                // Set up a pending call with the generator as first arg
-                                vm.generator_init_fcall(Value::String(
-                                    crate::string::PhpString::from_bytes(b"__generator_send"),
-                                ));
-                                vm.generator_send_val(obj_val.clone());
-                                // The actual argument(s) will be added by subsequent SendVal opcodes
-                                // Don't push __builtin_return here; let DoFCall handle it
-                                continue; // skip the push_pending below
-                            }
-                            _ => Value::Null,
-                        };
-                        if push_inner_frame {
-                            vm.call_stack.pop();
-                        }
-                        vm.generator_init_fcall(Value::String(
-                            crate::string::PhpString::from_bytes(b"__builtin_return"),
-                        ));
-                        vm.generator_send_val(result);
+                        vm.generator_init_fcall(Value::String(PhpString::from_vec(name)));
+                        vm.generator_send_val(obj_val.clone());
                     } else {
                         self.state = GeneratorState::Completed;
                         self.ip = ip;
@@ -2999,55 +3331,9 @@ impl PhpGenerator {
 
     /// Resume the generator with an exception (for Fiber::throw)
     /// The exception should already be set in vm.current_exception
-    pub fn resume_with_exception(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+    fn resume_single_throw(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         if self.state == GeneratorState::Completed {
             return Ok(false);
-        }
-
-        // If we're delegating via yield-from to an inner generator, route the
-        // throw into the inner first. The inner may catch and continue (yielding
-        // a new value), in which case we just observe its new state. If the
-        // inner doesn't catch, the throw propagates up through our normal
-        // resume path. Matches PHP semantics for basic_yield_from_exception_handling.
-        if let Some(Value::Generator(inner_rc)) = self.yield_from_source.clone() {
-            let inner_state = inner_rc.try_borrow().map(|b| b.state.clone()).ok();
-            if matches!(inner_state, Some(GeneratorState::Suspended)) {
-                let inner_result = {
-                    let mut inner = inner_rc.borrow_mut();
-                    let prev_caller = vm.generator_caller.take();
-                    let r = inner.resume_with_exception(vm);
-                    vm.generator_caller = prev_caller;
-                    r
-                };
-                match inner_result {
-                    Ok(true) => {
-                        // Inner caught and yielded again. Snapshot value/key
-                        // into us and stay suspended.
-                        let (val, key) = {
-                            let inner = inner_rc.borrow();
-                            (inner.current_value.clone(), inner.current_key.clone())
-                        };
-                        self.current_value = val;
-                        self.current_key = key;
-                        // Need to clear `yield_from_observed` so the next
-                        // resume of OUR generator advances the inner first.
-                        self.yield_from_observed = true;
-                        return Ok(true);
-                    }
-                    Ok(false) => {
-                        // Inner completed; fall through to local resume so the
-                        // body continues past the yield-from.
-                        self.yield_from_source = None;
-                        self.yield_from_observed = false;
-                    }
-                    Err(_) => {
-                        // Inner threw uncaught; vm.current_exception is set.
-                        // Fall through to our resume to let our handler catch.
-                        self.yield_from_source = None;
-                        self.yield_from_observed = false;
-                    }
-                }
-            }
         }
 
         vm.enter_generator_resume(0)?;
@@ -3073,12 +3359,12 @@ impl PhpGenerator {
         // Push a call_stack entry for this generator so any exception
         // constructed/thrown inside it gets a proper trace frame.
         let (func_name, is_instance) = self.frame_name(vm);
-        // For resume_with_exception, use call_line=0 and empty file to show [internal function]
-        // (matches PHP: when an exception is thrown INTO the generator, the
-        // top frame shows the generator function was called from [internal function]
-        // which is Generator->throw itself).
+        // Without a caller context (Generator->throw()), the frame shows
+        // [internal function]; inside a `yield from` tree, the delegating
+        // generator's `yield from` site.
+        let (file, line) = vm.generator_caller.clone().unwrap_or_default();
         vm.call_stack
-            .push((func_name, String::new(), 0, self.args.clone(), is_instance));
+            .push((func_name, file, line, self.args.clone(), is_instance));
 
         // Try to find an exception handler in the generator
         let had_handler = if let Some((catch_target, finally_target, _)) =
@@ -3127,11 +3413,15 @@ impl PhpGenerator {
             Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
         };
         vm.leave_op_array_file(saved_file);
+        if let Ok(true) = result {
+            self.last_value = self.current_value.clone();
+            self.last_key = self.current_key.clone();
+        }
         if cv_frame {
             vm.cv_frames.pop();
         }
         self.is_running = false;
-        self.release_finished_frame();
+        self.release_finished_frame(vm);
 
         vm.call_stack.pop();
         if pushed_called {
@@ -3179,6 +3469,359 @@ impl PhpGenerator {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Generator methods (zend_generators.c), shared by every call path.
+impl Vm {
+    /// zend_generator_ensure_initialized(): run a fresh generator to its
+    /// first yield.
+    fn generator_ensure_initialized(&mut self, g: &GenRc) -> Result<(), VmError> {
+        let fresh = g
+            .try_borrow()
+            .map(|b| b.state == GeneratorState::Created && b.live_delegate().is_none())
+            .unwrap_or(false);
+        if fresh {
+            let mut b = g.borrow_mut();
+            let r = b.resume(self);
+            b.advanced_past_first = false;
+            r?;
+        }
+        Ok(())
+    }
+
+    /// zend_generator_get_current(): the root of the `yield from` tree `g`
+    /// is a leaf of. A root that finished meanwhile is replaced by its
+    /// child: with its return value as the result of the child's `yield
+    /// from`, or by throwing a ClosedGeneratorException into the child
+    /// (which then runs) if it was aborted.
+    pub(crate) fn generator_get_current(&mut self, g: &GenRc) -> GenRc {
+        loop {
+            let mut path: Vec<GenRc> = vec![g.clone()];
+            loop {
+                let next = match path.last().unwrap().try_borrow() {
+                    Ok(b) if b.state != GeneratorState::Completed => b.live_delegate(),
+                    _ => None,
+                };
+                match next {
+                    Some(n) if !path.iter().any(|p| Rc::ptr_eq(p, &n)) => path.push(n),
+                    _ => break,
+                }
+            }
+            let root = path.last().unwrap().clone();
+            if path.len() == 1 {
+                return root;
+            }
+            let info = root.try_borrow().ok().map(|b| {
+                (
+                    b.state == GeneratorState::Completed,
+                    b.has_returned,
+                    b.return_value.clone(),
+                    (b.last_value.clone(), b.last_key.clone()),
+                )
+            });
+            let Some((completed, returned, retval, last)) = info else {
+                return root;
+            };
+            if !completed {
+                return root;
+            }
+            if !returned {
+                // update_current() throws into the child and resumes `g`.
+                if let Ok(mut gb) = g.try_borrow_mut() {
+                    let _ = gb.resume(self);
+                    continue;
+                }
+                return root;
+            }
+            let child = path[path.len() - 2].clone();
+            match child.try_borrow_mut() {
+                Ok(mut c) => {
+                    c.yield_from_source = None;
+                    let res = c.yield_from_result;
+                    c.write_operand(&res, retval);
+                    c.current_value = last.0;
+                    c.current_key = last.1;
+                }
+                Err(_) => return root,
+            }
+        }
+    }
+
+    /// Generator::current() / key() / next() / send() / throw() / valid() /
+    /// rewind() / getReturn() / __wakeup(). An exception is left in
+    /// current_exception (with Err).
+    pub(crate) fn generator_method(
+        &mut self,
+        g: &GenRc,
+        method: &[u8],
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let display = match method {
+            b"current" => "current",
+            b"key" => "key",
+            b"next" => "next",
+            b"valid" => "valid",
+            b"rewind" => "rewind",
+            b"send" => "send",
+            b"throw" => "throw",
+            b"getreturn" => "getReturn",
+            b"__wakeup" => "__wakeup",
+            _ => {
+                let msg = format!(
+                    "Call to undefined method Generator::{}()",
+                    String::from_utf8_lossy(method)
+                );
+                let exc = self.create_exception(b"Error", &msg, line);
+                self.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", msg),
+                    line,
+                });
+            }
+        };
+        let arity = if matches!(method, b"send" | b"throw") {
+            1
+        } else {
+            0
+        };
+        if args.len() != arity {
+            let msg = format!(
+                "Generator::{}() expects exactly {} argument{}, {} given",
+                display,
+                arity,
+                if arity == 1 { "" } else { "s" },
+                args.len()
+            );
+            let exc = self.create_exception(b"ArgumentCountError", &msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught ArgumentCountError: {}", msg),
+                line,
+            });
+        }
+        if method == b"throw" {
+            let throwable = match &args[0] {
+                Value::Object(obj) => {
+                    let class_lower: Vec<u8> = obj
+                        .borrow()
+                        .class_name
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    class_lower == b"exception"
+                        || class_lower == b"error"
+                        || crate::vm::is_builtin_subclass(&class_lower, b"exception")
+                        || crate::vm::is_builtin_subclass(&class_lower, b"error")
+                        || self.class_extends(&class_lower, b"exception")
+                        || self.class_extends(&class_lower, b"error")
+                }
+                _ => false,
+            };
+            if !throwable {
+                let type_name = match &args[0] {
+                    Value::Object(obj) => {
+                        crate::value::display_class_name(&obj.borrow().class_name)
+                    }
+                    v => Vm::value_type_name(v).to_string(),
+                };
+                let msg = format!(
+                    "Generator::throw(): Argument #1 ($exception) must be of type Throwable, {} given",
+                    type_name
+                );
+                self.call_stack.push((
+                    "Generator->throw".to_string(),
+                    self.current_file.clone(),
+                    line,
+                    args.to_vec(),
+                    true,
+                ));
+                let exc = self.create_exception(b"TypeError", &msg, line);
+                self.call_stack.pop();
+                self.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught TypeError: {}", msg),
+                    line,
+                });
+            }
+        }
+        let depth = self.call_stack.len();
+        self.call_stack.push((
+            format!("Generator->{}", display),
+            self.current_file.clone(),
+            line,
+            args.to_vec(),
+            true,
+        ));
+        let prev_caller = self.generator_caller.take();
+        let r = self.generator_method_inner(g, method, args, line);
+        self.generator_caller = prev_caller;
+        self.call_stack.truncate(depth);
+        if r.is_ok() && self.current_exception.is_some() && !self.exit_requested {
+            return Err(VmError {
+                message: "Uncaught exception in generator".into(),
+                line,
+            });
+        }
+        r
+    }
+
+    fn generator_method_inner(
+        &mut self,
+        g: &GenRc,
+        method: &[u8],
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let running = g.try_borrow().map(|b| b.is_running).unwrap_or(true);
+        if method == b"__wakeup" {
+            let msg = "Unserialization of 'Generator' is not allowed";
+            let exc = self.create_exception(b"Exception", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught Exception: {}", msg),
+                line,
+            });
+        }
+        if running {
+            match method {
+                b"next" | b"send" | b"throw" | b"rewind" => {
+                    return Err(PhpGenerator::running_error(self));
+                }
+                // The value it had when it started running.
+                _ => return Ok(Value::Null),
+            }
+        }
+        self.generator_ensure_initialized(g)?;
+        if self.current_exception.is_some() {
+            return Err(VmError {
+                message: "Uncaught exception in generator".into(),
+                line,
+            });
+        }
+        let completed = |g: &GenRc| {
+            g.try_borrow()
+                .map(|b| b.state == GeneratorState::Completed)
+                .unwrap_or(false)
+        };
+        match method {
+            b"current" | b"key" => {
+                let root = self.generator_get_current(g);
+                if completed(g) {
+                    return Ok(Value::Null);
+                }
+                let b = root.try_borrow();
+                Ok(match b {
+                    Ok(b) if method == b"current" => b.current_value.clone(),
+                    Ok(b) => b.current_key.clone(),
+                    Err(_) => Value::Null,
+                })
+            }
+            b"valid" => {
+                self.generator_get_current(g);
+                Ok(if completed(g) {
+                    Value::False
+                } else {
+                    Value::True
+                })
+            }
+            b"next" | b"send" => {
+                if completed(g) {
+                    return Ok(Value::Null);
+                }
+                let root = self.generator_get_current(g);
+                if let Ok(mut rb) = root.try_borrow_mut() {
+                    rb.send_value = args.first().cloned().unwrap_or(Value::Null);
+                    rb.write_send_value();
+                }
+                {
+                    let mut gb = match g.try_borrow_mut() {
+                        Ok(gb) => gb,
+                        Err(_) => return Err(PhpGenerator::running_error(self)),
+                    };
+                    gb.advanced_past_first = true;
+                    gb.resume(self)?;
+                }
+                if method == b"next" || completed(g) {
+                    return Ok(Value::Null);
+                }
+                let root = self.generator_get_current(g);
+                let v = root
+                    .try_borrow()
+                    .map(|b| b.current_value.clone())
+                    .unwrap_or(Value::Null);
+                Ok(v)
+            }
+            b"throw" => {
+                let exc = args[0].clone();
+                if completed(g) {
+                    // Thrown in the caller's context.
+                    self.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: "Uncaught exception".into(),
+                        line,
+                    });
+                }
+                self.generator_get_current(g);
+                self.current_exception = Some(exc);
+                {
+                    let mut gb = match g.try_borrow_mut() {
+                        Ok(gb) => gb,
+                        Err(_) => return Err(PhpGenerator::running_error(self)),
+                    };
+                    gb.advanced_past_first = true;
+                    gb.resume_with_exception(self)?;
+                }
+                if completed(g) {
+                    return Ok(Value::Null);
+                }
+                let root = self.generator_get_current(g);
+                let v = root
+                    .try_borrow()
+                    .map(|b| b.current_value.clone())
+                    .unwrap_or(Value::Null);
+                Ok(v)
+            }
+            b"rewind" => {
+                let past = g
+                    .try_borrow()
+                    .map(|b| b.advanced_past_first)
+                    .unwrap_or(false);
+                if past {
+                    let msg = "Cannot rewind a generator that was already run";
+                    let exc = self.create_exception(b"Exception", msg, line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: format!("Uncaught Exception: {}", msg),
+                        line,
+                    });
+                }
+                Ok(Value::Null)
+            }
+            b"getreturn" => {
+                let (returned, v) = g
+                    .try_borrow()
+                    .map(|b| {
+                        (
+                            b.has_returned && b.state == GeneratorState::Completed,
+                            b.return_value.clone(),
+                        )
+                    })
+                    .unwrap_or((false, Value::Null));
+                if returned {
+                    return Ok(v);
+                }
+                let msg = "Cannot get return value of a generator that hasn't returned";
+                let exc = self.create_exception(b"Exception", msg, line);
+                self.current_exception = Some(exc);
+                Err(VmError {
+                    message: format!("Uncaught Exception: {}", msg),
+                    line,
+                })
+            }
+            _ => Ok(Value::Null),
         }
     }
 }
