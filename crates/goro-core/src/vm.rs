@@ -2676,85 +2676,30 @@ impl Vm {
             }
         }
 
-        // PHP 8: arithmetic ops on fully non-numeric strings throw TypeError
-        // Leading-numeric strings (like "45some") produce a Warning but NOT a TypeError
+        // PHP 8: a string operand that is not even leading-numeric makes the
+        // scalar-to-number conversion fail (zendi_try_convert_scalar_to_number /
+        // zendi_try_get_long), which raises "Unsupported operand types".
+        // string op string for &, |, ^ is a byte-wise string operation instead.
         {
-            // Helper: check if string is fully non-numeric
-            let is_fully_non_numeric_str = |v: &Value| -> bool {
+            let non_numeric = |v: &Value| -> bool {
                 if let Value::String(s) = v {
-                    let bytes = s.as_bytes();
-                    if bytes.is_empty() {
-                        return false; // empty string is treated as 0, not an error
-                    }
-                    let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
-                    if trimmed.is_empty() {
-                        return false; // whitespace-only string is treated as 0
-                    }
-                    let first = trimmed.as_bytes()[0];
-                    !(first.is_ascii_digit() || first == b'.' || ((first == b'+' || first == b'-') && trimmed.len() > 1 && (trimmed.as_bytes()[1].is_ascii_digit() || trimmed.as_bytes()[1] == b'.')))
+                    !Self::str_has_numeric_prefix(s.as_bytes())
                 } else {
                     false
                 }
             };
-            let a_non_numeric = is_fully_non_numeric_str(&a_deref);
-            let b_non_numeric = is_fully_non_numeric_str(&b_deref);
-            // int/float + non-numeric string = TypeError
-            if a_non_numeric && matches!(b_deref, Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
-                return Some(format!(
-                    "Unsupported operand types: {} {} {}",
-                    Self::value_type_name(&a_deref),
-                    op_symbol,
-                    Self::value_type_name(&b_deref)
-                ));
-            }
-            if b_non_numeric && matches!(a_deref, Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
-                return Some(format!(
-                    "Unsupported operand types: {} {} {}",
-                    Self::value_type_name(&a_deref),
-                    op_symbol,
-                    Self::value_type_name(&b_deref)
-                ));
-            }
-        }
-        if matches!(op_symbol, "&" | "|" | "^" | "%" | "<<" | ">>") {
-            // Helper: check if string is fully non-numeric (not even leading numeric)
-            let is_fully_non_numeric = |s: &crate::string::PhpString| -> bool {
-                let bytes = s.as_bytes();
-                if bytes.is_empty() {
-                    return true; // empty string is non-numeric
-                }
-                // Check if it starts with optional whitespace then a digit or sign
-                let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
-                if trimmed.is_empty() {
-                    return true;
-                }
-                let first = trimmed.as_bytes()[0];
-                !(first.is_ascii_digit() || ((first == b'+' || first == b'-') && trimmed.len() > 1 && trimmed.as_bytes()[1].is_ascii_digit()))
-            };
-
-            let a_is_non_numeric_string = if let Value::String(s) = &a_deref {
-                is_fully_non_numeric(s)
-            } else {
-                false
-            };
-            let b_is_non_numeric_string = if let Value::String(s) = &b_deref {
-                is_fully_non_numeric(s)
-            } else {
-                false
-            };
-
-            // For bitwise ops (&, |, ^): string & string is valid (bitwise on bytes)
-            // Only error when mixing non-numeric string with a non-string type
-            if matches!(op_symbol, "&" | "|" | "^") {
-                // Both strings: handled separately (bitwise on strings)
-                if matches!(a_deref, Value::String(_)) && matches!(b_deref, Value::String(_)) {
+            let a_nn = non_numeric(&a_deref);
+            let b_nn = non_numeric(&b_deref);
+            if (a_nn || b_nn)
+                && !matches!(a_deref, Value::Object(_))
+                && !matches!(b_deref, Value::Object(_))
+            {
+                if matches!(op_symbol, "&" | "|" | "^")
+                    && matches!(a_deref, Value::String(_))
+                    && matches!(b_deref, Value::String(_))
+                {
                     return None;
                 }
-            }
-
-            if (a_is_non_numeric_string && !matches!(b_deref, Value::String(_)))
-                || (b_is_non_numeric_string && !matches!(a_deref, Value::String(_)))
-            {
                 return Some(format!(
                     "Unsupported operand types: {} {} {}",
                     Self::value_type_name(&a_deref),
@@ -2764,6 +2709,22 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// True if `is_numeric_string_ex(..., allow_errors=true)` would accept the
+    /// string (optionally leading whitespace, sign, then a digit or ".digit").
+    pub fn str_has_numeric_prefix(bytes: &[u8]) -> bool {
+        let mut i = 0;
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            i += 1;
+        }
+        if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i].is_ascii_digit() {
+            return true;
+        }
+        i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit()
     }
 
     /// Create a TypeError exception object and set it as current_exception.
