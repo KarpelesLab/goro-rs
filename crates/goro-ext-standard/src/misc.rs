@@ -20350,12 +20350,32 @@ fn pfsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn register_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
         validate_callback_arg(vm, "register_tick_function", cb)?;
+        vm.tick_functions
+            .push((cb.deref(), args[1..].to_vec(), false));
     }
     Ok(Value::True)
 }
 fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
         validate_callback_arg(vm, "unregister_tick_function", cb)?;
+        // zend_llist_del_element(): the first matching entry
+        if let Some(i) = vm
+            .tick_functions
+            .iter()
+            .position(|e| goro_core::errdisplay::callables_equal(&e.0, cb))
+        {
+            if vm.tick_functions[i].2 {
+                let msg =
+                    "Registered tick function cannot be unregistered while it is being executed";
+                let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: format!("Uncaught Error: {}", msg),
+                    line: vm.current_line,
+                });
+            }
+            vm.tick_functions.remove(i);
+        }
     }
     Ok(Value::Null)
 }
@@ -20401,8 +20421,63 @@ fn ini_parse_quantity_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Long(v as i64))
 }
 
-fn dl_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_warning("dl(): Dynamically loaded extensions aren't enabled");
+fn dl_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
+    // PG(enable_dl) defaults to on
+    let enabled = vm
+        .constants
+        .get(b"enable_dl".as_slice())
+        .map(ini_parse_bool)
+        .unwrap_or(true);
+    let line = vm.current_line;
+    if !enabled {
+        vm.emit_warning_at("dl(): Dynamically loaded extensions aren't enabled", line);
+        return Ok(Value::False);
+    }
+    const MAXPATHLEN: usize = 4096;
+    if filename.len() >= MAXPATHLEN {
+        vm.emit_warning_at(
+            &format!(
+                "dl(): Filename exceeds the maximum allowed length of {} characters",
+                MAXPATHLEN
+            ),
+            line,
+        );
+        return Ok(Value::False);
+    }
+    // php_load_extension() with MODULE_TEMPORARY
+    let name = filename.to_string_lossy();
+    if name.contains('/') {
+        vm.emit_warning_at(
+            "dl(): Temporary module name should contain only filename",
+            line,
+        );
+        return Ok(Value::False);
+    }
+    // goro cannot load shared extensions.
+    let dir = vm
+        .constants
+        .get(b"extension_dir".as_slice())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let tried = |f: &str| {
+        let p = format!("{}/{}", dir, f);
+        let err = if std::path::Path::new(&p).exists() {
+            "invalid ELF header"
+        } else {
+            "cannot open shared object file: No such file or directory"
+        };
+        format!("{} ({}: {})", p, p, err)
+    };
+    vm.emit_warning_at(
+        &format!(
+            "dl(): Unable to load dynamic library '{}' (tried: {}, {})",
+            name,
+            tried(&name),
+            tried(&format!("{}.so", name))
+        ),
+        line,
+    );
     Ok(Value::False)
 }
 

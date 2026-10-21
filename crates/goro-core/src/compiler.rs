@@ -23,6 +23,9 @@ thread_local! {
     /// top-level `compile()` so none are lost.
     static COMPILE_WARNINGS: std::cell::RefCell<Vec<(String, u32)>>
         = const { std::cell::RefCell::new(Vec::new()) };
+    /// FC(declarables).ticks of the file being compiled (shared with the
+    /// nested compilers of its functions, methods and closures).
+    static TICKS: Cell<u32> = const { Cell::new(0) };
 }
 
 fn push_compile_warning_tuple(w: (String, u32)) {
@@ -1658,6 +1661,17 @@ impl Compiler {
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
     pub fn compile(
+        self,
+        program: &Program,
+    ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
+        // Each file (and eval'd string) starts without declare(ticks).
+        let saved_ticks = TICKS.with(|t| t.replace(0));
+        let r = self.compile_file(program);
+        TICKS.with(|t| t.set(saved_ticks));
+        r
+    }
+
+    fn compile_file(
         mut self,
         program: &Program,
     ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
@@ -2120,6 +2134,31 @@ impl Compiler {
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
+        self.compile_stmt_inner(stmt)?;
+        // zend_compile_stmt(): a TICKS opcode after each ticked statement.
+        let ticks = TICKS.with(|t| t.get());
+        if ticks > 0
+            && !matches!(
+                stmt.kind,
+                StmtKind::Nop
+                    | StmtKind::Label(_)
+                    | StmtKind::FunctionDecl { .. }
+                    | StmtKind::ClassDecl { .. }
+            )
+        {
+            let lit = self.op_array.add_literal(Value::Long(ticks as i64));
+            self.op_array.emit(Op {
+                opcode: OpCode::Tick,
+                op1: OperandType::Const(lit),
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line: stmt.span.line,
+            });
+        }
+        Ok(())
+    }
+
+    fn compile_stmt_inner(&mut self, stmt: &Statement) -> CompileResult<()> {
         match &stmt.kind {
             StmtKind::Nop => Ok(()),
 
@@ -3609,6 +3648,7 @@ impl Compiler {
                         .push("Cannot apply attributes to multiple constants at once".to_string());
                 }
 
+                let mut new_ticks: Option<u32> = None;
                 // Handle const declarations (parsed as Declare directives)
                 for (name, value) in directives {
                     let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -3637,6 +3677,11 @@ impl Compiler {
                                 line: stmt.span.line,
                             });
                         }
+                        // zval_get_long() of the literal
+                        let n = Self::eval_const_expr(value)
+                            .map(|v| v.to_long())
+                            .unwrap_or(0);
+                        new_ticks = Some(n.clamp(0, u32::MAX as i64) as u32);
                         continue;
                     }
                     // declare(encoding = ...): value must be a literal; non-string literals get a warning
@@ -3816,11 +3861,17 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
-                // If body exists, compile it
+                // If body exists, compile it (a declare(ticks) block only
+                // applies inside it).
                 if let Some(body_stmts) = body {
-                    for s in body_stmts {
-                        self.compile_stmt(s)?;
+                    let saved_ticks = new_ticks.map(|n| TICKS.with(|t| t.replace(n)));
+                    let r = body_stmts.iter().try_for_each(|s| self.compile_stmt(s));
+                    if let Some(t) = saved_ticks {
+                        TICKS.with(|c| c.set(t));
                     }
+                    r?;
+                } else if let Some(n) = new_ticks {
+                    TICKS.with(|t| t.set(n));
                 }
                 Ok(())
             }

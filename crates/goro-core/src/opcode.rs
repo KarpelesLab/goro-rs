@@ -374,6 +374,8 @@ pub enum OpCode {
     CompactDyn,
     /// get_defined_vars(): result = array of the current scope's variables
     GetDefinedVars,
+    /// ZEND_TICKS: op1 = declare(ticks) value (const)
+    Tick,
     /// exit/die: op1 = value. If int, set exit code; if string, echo the string.
     ExitOp,
     /// Get (creating) a reference to an object property: op1 = object,

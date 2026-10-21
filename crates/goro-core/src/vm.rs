@@ -536,6 +536,10 @@ pub struct Vm {
     pub error_handler_stack: Vec<(Option<Value>, i64)>,
     /// PG(in_error_log): php_log_err() is running (no recursion).
     pub in_error_log: bool,
+    /// EG(ticks_count)
+    pub ticks_count: u32,
+    /// BG(user_tick_functions): (callback, arguments, being called)
+    pub tick_functions: Vec<(Value, Vec<Value>, bool)>,
     /// Indices into `pending_calls` of calls dispatched through a Closure
     /// object (closures bypass method visibility checks).
     pub closure_pending_calls: Vec<usize>,
@@ -831,6 +835,8 @@ impl Vm {
             error_handler_mask: crate::errdisplay::E_ALL,
             error_handler_stack: Vec::new(),
             in_error_log: false,
+            ticks_count: 0,
+            tick_functions: Vec::new(),
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             exception_handler: None,
@@ -28773,6 +28779,17 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
+                }
+                OpCode::Tick => {
+                    let n = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    self.ticks_count += 1;
+                    if self.ticks_count as i64 >= n.to_long() {
+                        self.ticks_count = 0;
+                        self.run_tick_functions();
+                        if self.current_exception.is_some() {
+                            self.error_handler_threw = true;
+                        }
+                    }
                 }
                 OpCode::GetDefinedVars => {
                     let result = self.defined_vars(&cvs, op_array);

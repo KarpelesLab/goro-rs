@@ -53,6 +53,30 @@ pub fn end_silence(cur: i64, saved: i64) -> i64 {
     }
 }
 
+/// zend_fcc_equals()-like comparison of two callables.
+pub fn callables_equal(a: &Value, b: &Value) -> bool {
+    let (a, b) = (a.deref(), b.deref());
+    match (&a, &b) {
+        (Value::String(x), Value::String(y)) => {
+            let x = x.as_bytes();
+            let y = y.as_bytes();
+            x.strip_prefix(b"\\")
+                .unwrap_or(x)
+                .eq_ignore_ascii_case(y.strip_prefix(b"\\").unwrap_or(y))
+        }
+        (Value::Object(x), Value::Object(y)) => std::rc::Rc::ptr_eq(x, y),
+        (Value::Array(x), Value::Array(y)) => {
+            if std::rc::Rc::ptr_eq(x, y) {
+                return true;
+            }
+            let x: Vec<Value> = x.borrow().values().cloned().collect();
+            let y: Vec<Value> = y.borrow().values().cloned().collect();
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| callables_equal(p, q))
+        }
+        _ => false,
+    }
+}
+
 /// php_error_cb()'s label for an error type.
 pub fn error_type_label(ty: i64) -> &'static str {
     match ty {
@@ -279,6 +303,29 @@ impl Vm {
             ));
         }
         self.display_error(kind, msg, file, line);
+    }
+
+    /// run_user_tick_functions(): call each registered tick function (one
+    /// already running is skipped).
+    pub fn run_tick_functions(&mut self) {
+        let mut i = 0;
+        while i < self.tick_functions.len() {
+            if self.current_exception.is_some() {
+                break;
+            }
+            let (cb, args, calling) = self.tick_functions[i].clone();
+            if !calling {
+                self.tick_functions[i].2 = true;
+                let _ = self.call_callback(&cb, &args);
+                // The list may have changed while the function ran.
+                if let Some(e) = self.tick_functions.get_mut(i) {
+                    if callables_equal(&e.0, &cb) {
+                        e.2 = false;
+                    }
+                }
+            }
+            i += 1;
+        }
     }
 
     /// php_log_err(): append to the error_log file (with a timestamp), or
