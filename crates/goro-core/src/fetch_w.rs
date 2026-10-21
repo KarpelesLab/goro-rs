@@ -669,11 +669,9 @@ impl Vm {
         let key_inner = key_val.deref();
         if matches!(key_inner, Value::Array(_) | Value::Object(_)) {
             let t = Self::offset_type_name(&key_inner);
-            let msg = if mode == DimFetch::Unset {
-                format!("Cannot unset offset of type {} on array", t)
-            } else {
-                format!("Cannot access offset of type {} on array", t)
-            };
+            // zend_illegal_array_offset_access(): FETCH_DIM_UNSET of an
+            // outer dimension too (only UNSET_DIM says "Cannot unset").
+            let msg = format!("Cannot access offset of type {} on array", t);
             self.throw_error_msg(b"TypeError", &msg);
             return None;
         }

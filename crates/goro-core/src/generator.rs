@@ -2315,7 +2315,7 @@ impl PhpGenerator {
                     self.write_operand(&op.result, result);
                 }
 
-                OpCode::ArrayIsset => {
+                OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
                     // isset($arr[$key]) in generator context
                     let arr_val = self.read_operand(&op.op1, &op_array.literals);
                     let key_val = self.read_operand(&op.op2, &op_array.literals);

@@ -568,9 +568,29 @@ impl Compiler {
                 .op_array
                 .add_literal(Value::String(PhpString::from_vec(name.clone())));
             Ok(OperandType::Const(idx))
+        } else if !matches!(expr.kind, ExprKind::String(_)) && self.in_engine_silence() {
+            // isset($o->{expr}) / $o->{expr} ?? ...: the name is evaluated
+            // normally, only the property fetch is quiet.
+            self.compile_key_unsilenced(expr, true)
         } else {
             self.compile_expr(expr)
         }
+    }
+
+    /// Whether code emitted now runs inside an engine-silenced region
+    /// (isset() / empty() / `??`), as opposed to normal code or `@`.
+    fn in_engine_silence(&self) -> bool {
+        let mut stack: Vec<bool> = Vec::new();
+        for op in &self.op_array.ops {
+            match op.opcode {
+                OpCode::ErrorSuppress => stack.push(matches!(op.op1, OperandType::Unused)),
+                OpCode::ErrorRestore => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        stack.last().copied().unwrap_or(false)
     }
 
     /// Prefix a name with the current namespace. E.g. if namespace is "Foo\Bar" and name is "Baz",
@@ -10600,6 +10620,10 @@ impl Compiler {
                         line: class.span.line,
                     });
                 }
+                if self.in_engine_silence() {
+                    // isset($cls::$p): the class operand is fetched normally.
+                    return self.compile_key_unsilenced(class, true);
+                }
                 self.compile_expr(class)
             }
         }
@@ -12229,10 +12253,10 @@ impl Compiler {
                         let idx = self.compile_key_unsilenced(idx_expr, true)?;
                         // (snapshotted while unsilenced)
 
-                        // Check offsetExists first
+                        // Check offsetExists first (FETCH_DIM_IS)
                         let isset_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::ArrayIsset,
+                            opcode: OpCode::ArrayIssetFetch,
                             op1: current,
                             op2: idx,
                             result: OperandType::Tmp(isset_tmp),
@@ -13356,7 +13380,7 @@ impl Compiler {
                                     let idx = self.compile_key_unsilenced(idx_expr, false)?;
                                     let isset_tmp = self.op_array.alloc_temp();
                                     self.op_array.emit(Op {
-                                        opcode: OpCode::ArrayIsset,
+                                        opcode: OpCode::ArrayIssetFetch,
                                         op1: current,
                                         op2: idx,
                                         result: OperandType::Tmp(isset_tmp),
@@ -13579,10 +13603,14 @@ impl Compiler {
                             let is_last = i == chain.len() - 1;
                             let idx = self.compile_key_unsilenced(idx_expr, false)?;
 
-                            // Emit ArrayIsset
+                            // Emit ArrayIsset (FETCH_DIM_IS for outer dimensions)
                             let isset_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
-                                opcode: OpCode::ArrayIsset,
+                                opcode: if is_last {
+                                    OpCode::ArrayIsset
+                                } else {
+                                    OpCode::ArrayIssetFetch
+                                },
                                 op1: current,
                                 op2: idx,
                                 result: OperandType::Tmp(isset_tmp),
@@ -13765,14 +13793,19 @@ impl Compiler {
                     let mut current = base_op;
 
                     for (i, idx_expr) in chain.iter().enumerate() {
-                        let _is_last = i == chain.len() - 1;
+                        let is_last = i == chain.len() - 1;
                         let idx = self.compile_key_unsilenced(idx_expr, true)?;
                         // (snapshotted while unsilenced)
 
-                        // Check offsetExists
+                        // Check offsetExists (the outer dimensions are
+                        // FETCH_DIM_IS fetches)
                         let isset_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::ArrayIsset,
+                            opcode: if is_last {
+                                OpCode::ArrayIsset
+                            } else {
+                                OpCode::ArrayIssetFetch
+                            },
                             op1: current,
                             op2: idx,
                             result: OperandType::Tmp(isset_tmp),

@@ -830,6 +830,9 @@ pub struct Vm {
     /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
     /// The Weak is used to detect when the key object has been freed
     pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
+    /// The write-back op of a read-modify-write dimension whose key the
+    /// read already converted: (op array, op index).
+    pub rw_dim_set: Option<(usize, usize)>,
     /// Class alias mappings: alias_lower -> original_lower (from class_alias())
     pub class_aliases: HashMap<Vec<u8>, Vec<u8>>,
     /// Set of disabled function names (lowercase) from the disable_functions ini
@@ -1912,6 +1915,7 @@ impl Vm {
             weak_ref_cache: HashMap::new(),
             sensitive_cache: std::cell::Cell::new((usize::MAX, 0, false)),
             weak_map_entries: HashMap::new(),
+            rw_dim_set: None,
             class_aliases: HashMap::new(),
             disabled_functions: std::collections::HashSet::new(),
         };
@@ -15763,7 +15767,10 @@ impl Vm {
                     if let Some(g) = globals_cv {
                         let g = OperandType::Cv(g);
                         if (pop.op1 == g || pop.op2 == g || pop.result == g)
-                            && !matches!(pop.opcode, OpCode::ArrayGet | OpCode::ArrayIsset)
+                            && !matches!(
+                                pop.opcode,
+                                OpCode::ArrayGet | OpCode::ArrayIsset | OpCode::ArrayIssetFetch
+                            )
                         {
                             self.bump_globals_gen();
                         }
@@ -29926,7 +29933,13 @@ impl Vm {
                             }
                         }
                         if let Value::Array(arr) = &arr_val {
-                            let key = self.value_to_array_key_checked(&key_val, op.line);
+                            let rw_tail = self.rw_dim_set.take()
+                                == Some((op_array as *const OpArray as usize, ip - 1));
+                            let key = if rw_tail {
+                                Self::value_to_array_key(key_val.clone())
+                            } else {
+                                self.value_to_array_key_checked(&key_val, op.line)
+                            };
                             // Assigning to an element that is a reference writes through it.
                             // (Storing a Reference itself rebinds the slot.)
                             let existing_ref = if matches!(val, Value::Reference(_)) {
@@ -30025,8 +30038,23 @@ impl Vm {
                                 );
                             }
                             let mut arr = PhpArray::new();
-                            let key = self.value_to_array_key_checked(&key_val, op.line);
-                            arr.set(key, val);
+                            // The new array rejects an illegal offset type
+                            // (zend_illegal_array_offset_access); it stays empty.
+                            let illegal = match key_val.deref() {
+                                Value::Array(_) => Some("array".to_string()),
+                                Value::Object(o) => {
+                                    Some(crate::value::display_class_name(&o.borrow().class_name))
+                                }
+                                _ => None,
+                            };
+                            if let Some(t) = &illegal {
+                                let msg = format!("Cannot access offset of type {} on array", t);
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                            } else {
+                                let key = self.value_to_array_key_checked(&key_val, op.line);
+                                arr.set(key, val);
+                            }
                             let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
                             // Write back to the CV or reference
                             if let OperandType::Cv(cv_idx) = &op.op1 {
@@ -30047,6 +30075,22 @@ impl Vm {
                                 if let Some(slot) = tmps.get_mut(*t as usize) {
                                     *slot = new_arr;
                                 }
+                            }
+                            if let Some(t) = illegal {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!(
+                                        "Uncaught TypeError: Cannot access offset of type {} on array",
+                                        t
+                                    ),
+                                    line: op.line,
+                                });
                             }
                         } else if let Some(msg) = matches!(arr_val, Value::Object(_))
                             .then(|| self.dim_write_container_error(&arr_val, false))
@@ -30611,6 +30655,12 @@ impl Vm {
                     }
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
+                        // Read-modify-write (ASSIGN_DIM_OP / ++): the key is
+                        // converted once; the write-back two ops later
+                        // (ArraySet / ArraySetIncDec) does not report it again.
+                        if is_rw {
+                            self.rw_dim_set = Some((op_array as *const OpArray as usize, ip + 1));
+                        }
                         match arr.borrow().get(&key).cloned() {
                             Some(v) => {
                                 // Plain read deref: PHP's R-fetch returns the
@@ -37126,7 +37176,13 @@ impl Vm {
                         });
                     }
                     if let Some(Value::Array(arr)) = arr_val {
-                        let key = self.isset_unset_array_key(key_val.clone(), op.line);
+                        // ZEND_UNSET_DIM: a null offset is "" without a
+                        // deprecation; floats and resources still report.
+                        let key = if matches!(key_val.deref(), Value::Null | Value::Undef) {
+                            Self::value_to_array_key(key_val.clone())
+                        } else {
+                            self.value_to_array_key_checked(&key_val, op.line)
+                        };
                         let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
                         arr.borrow_mut().remove(&key);
                         crate::gc::dtor_watch_end(w);
@@ -38687,7 +38743,29 @@ impl Vm {
                             &static_cv_keys,
                         );
                     } else if let Value::Array(arr) = &arr_val {
-                        let key = Self::value_to_array_key(key_val);
+                        if let Value::Array(_) | Value::Object(_) = key_val.deref() {
+                            let t = match key_val.deref() {
+                                Value::Object(o) => {
+                                    crate::value::display_class_name(&o.borrow().class_name)
+                                }
+                                _ => "array".to_string(),
+                            };
+                            let msg = format!("Cannot access offset of type {} on array", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                        let key = self.value_to_array_key_checked(&key_val, op.line);
                         let mut arr_mut = arr.borrow_mut();
                         // Check if the element is already a Reference
                         let existing = arr_mut.get(&key).cloned();
@@ -39569,207 +39647,229 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
 
-                OpCode::ArrayIsset => match outlined(|| -> Result<Flow, VmError> {
-                    // isset($arr[$key]) - for arrays, check if key exists and value is not null
-                    // For objects implementing ArrayAccess, call offsetExists()
-                    // Only the dimension fetch is quiet: the key is read normally.
-                    self.warn_undefined_key_cv(&op.op2, &cvs, op_array, op.line);
-                    let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    // Superglobal fallback (lazy load) when CV is uninitialised.
-                    if matches!(arr_val, Value::Null | Value::Undef) {
-                        if let OperandType::Cv(idx) = &op.op1 {
-                            if let Some(name) = op_array.cv_names.get(*idx as usize) {
-                                if matches!(
-                                    name.as_slice(),
-                                    b"_SESSION"
-                                        | b"_SERVER"
-                                        | b"_GET"
-                                        | b"_POST"
-                                        | b"_COOKIE"
-                                        | b"_FILES"
-                                        | b"_REQUEST"
-                                        | b"_ENV"
-                                        | b"GLOBALS"
-                                ) {
-                                    if let Some(global_val) = self.global_lookup(name.as_slice()) {
-                                        arr_val = global_val;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    // An undefined variable used as the key warns (ZVAL_UNDEFINED_OP2),
-                    // even inside isset()/empty()/?? (compiled under suppression).
-                    if matches!(key_val, Value::Null | Value::Undef)
-                        && !matches!(arr_val, Value::Null | Value::Undef)
-                    {
-                        let saved_er = self.error_reporting;
-                        if saved_er == 0 {
-                            if let Some(outer) = self.error_reporting_stack.last() {
-                                self.error_reporting = *outer;
-                            }
-                        }
-                        self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
-                        self.error_reporting = saved_er;
-                        if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                return Ok(Flow::Continue);
-                            }
-                        }
-                    }
-                    if let Value::Object(obj) = &arr_val.deref() {
-                        if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
-                            if let Some(b) = f(self, obj, &key_val.deref(), 0) {
-                                native_exc_check!(
-                                    self,
-                                    exception_handlers,
-                                    pending_calls_catch_depth,
-                                    ip,
-                                    op.line
-                                );
-                                self.write_operand(
-                                    &op.result,
-                                    if b { Value::True } else { Value::False },
-                                    &mut cvs,
-                                    &mut tmps,
-                                    &static_cv_keys,
-                                );
-                                return Ok(Flow::Continue);
-                            }
-                        }
-                    }
-                    let result = if let Value::Array(arr) = &arr_val {
-                        let float_key = matches!(key_val.deref(), Value::Double(_));
-                        let key = self.isset_unset_array_key(key_val, op.line);
-                        // The error handler may have destroyed the array.
-                        let gone = float_key
-                            && !matches!(
-                                self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
-                                Value::Array(ref a2) if Rc::ptr_eq(a2, arr)
-                            );
-                        if gone {
-                            Value::False
-                        } else {
-                            match arr.borrow().get(&key) {
-                                Some(Value::Reference(r))
-                                    if !matches!(*r.borrow(), Value::Null | Value::Undef) =>
-                                {
-                                    Value::True
-                                }
-                                Some(Value::Reference(_)) => Value::False,
-                                Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
-                                _ => Value::False,
-                            }
-                        }
-                    } else if let Some(o) = match &arr_val {
-                        Value::Object(o)
-                            if self
-                                .spl_find_base(
-                                    &crate::spl::obj_class_lower(o),
-                                    &[b"arrayobject", b"arrayiterator"],
-                                )
-                                .is_some() =>
-                        {
-                            Some(o.clone())
-                        }
-                        _ => None,
-                    } {
-                        let r = self.ao_has_dimension(&o, &key_val);
-                        if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                return Ok(Flow::Continue);
-                            }
-                            return Err(VmError {
-                                message: "Uncaught exception".to_string(),
-                                line: op.line,
-                            });
-                        }
-                        if r { Value::True } else { Value::False }
-                    } else if let Value::Object(obj) = &arr_val {
-                        // ArrayAccess: isset($obj[$key]) -> offsetExists($key)
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        // Type-check the key for ArrayObject-family: arrays and objects
-                        // are not valid offset types.
-                        if matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                        ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
-                        {
-                            let t = if matches!(&key_val, Value::Array(_)) {
-                                "array"
-                            } else {
-                                "object"
-                            };
-                            let msg =
-                                format!("Cannot access offset of type {} in isset or empty", t);
-                            let exc = self.create_exception(b"TypeError", &msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                let ct = *catch_target;
-                                ip = ct as usize;
-                                return Ok(Flow::Continue);
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", msg),
-                                line: op.line,
-                            });
-                        }
-                        let is_spl_array = matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject"
-                                | b"arrayiterator"
-                                | b"recursivearrayiterator"
-                                | b"splfixedarray"
-                                | b"splobjectstorage"
-                                | b"spldoublylinkedlist"
-                                | b"splstack"
-                                | b"splqueue"
-                                | b"weakmap"
-                                | b"simplexmlelement"
-                        ) || {
-                            // Check parent chain for ArrayAccess support
-                            let mut found = false;
-                            let mut check = class_lower.clone();
-                            for _ in 0..10 {
-                                if let Some(parent) = get_builtin_parent(&check) {
-                                    let parent_lower: Vec<u8> =
-                                        parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
+                    match outlined(|| -> Result<Flow, VmError> {
+                        // isset($arr[$key]) - for arrays, check if key exists and value is not null
+                        // For objects implementing ArrayAccess, call offsetExists()
+                        // Only the dimension fetch is quiet: the key is read normally.
+                        self.warn_undefined_key_cv(&op.op2, &cvs, op_array, op.line);
+                        let mut arr_val =
+                            self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        // Superglobal fallback (lazy load) when CV is uninitialised.
+                        if matches!(arr_val, Value::Null | Value::Undef) {
+                            if let OperandType::Cv(idx) = &op.op1 {
+                                if let Some(name) = op_array.cv_names.get(*idx as usize) {
                                     if matches!(
-                                        parent_lower.as_slice(),
-                                        b"arrayobject"
-                                            | b"arrayiterator"
-                                            | b"recursivearrayiterator"
-                                            | b"splfixedarray"
-                                            | b"splobjectstorage"
-                                            | b"spldoublylinkedlist"
-                                            | b"splstack"
-                                            | b"splqueue"
+                                        name.as_slice(),
+                                        b"_SESSION"
+                                            | b"_SERVER"
+                                            | b"_GET"
+                                            | b"_POST"
+                                            | b"_COOKIE"
+                                            | b"_FILES"
+                                            | b"_REQUEST"
+                                            | b"_ENV"
+                                            | b"GLOBALS"
                                     ) {
-                                        found = true;
-                                        break;
+                                        if let Some(global_val) =
+                                            self.global_lookup(name.as_slice())
+                                        {
+                                            arr_val = global_val;
+                                        }
                                     }
-                                    check = parent_lower;
-                                } else if let Some(ce) = self.classes.get(&check) {
-                                    if let Some(ref p) = ce.parent {
+                                }
+                            }
+                        }
+                        let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                        // An undefined variable used as the key warns (ZVAL_UNDEFINED_OP2),
+                        // even inside isset()/empty()/?? (compiled under suppression).
+                        if matches!(key_val, Value::Null | Value::Undef)
+                            && !matches!(arr_val, Value::Null | Value::Undef)
+                        {
+                            let saved_er = self.error_reporting;
+                            if saved_er == 0 {
+                                if let Some(outer) = self.error_reporting_stack.last() {
+                                    self.error_reporting = *outer;
+                                }
+                            }
+                            self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
+                            self.error_reporting = saved_er;
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                            }
+                        }
+                        if let Value::Object(obj) = &arr_val.deref() {
+                            if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
+                                if let Some(b) = f(self, obj, &key_val.deref(), 0) {
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
+                                    self.write_operand(
+                                        &op.result,
+                                        if b { Value::True } else { Value::False },
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Continue);
+                                }
+                            }
+                        }
+                        let result = if let Value::Array(arr) = &arr_val {
+                            let kd = key_val.deref();
+                            if matches!(kd, Value::Array(_) | Value::Object(_)) {
+                                // zend_isset_dim_slow(): an illegal offset type throws.
+                                let t = match &kd {
+                                    Value::Object(o) => {
+                                        crate::value::display_class_name(&o.borrow().class_name)
+                                    }
+                                    _ => "array".to_string(),
+                                };
+                                let msg = if op.opcode == OpCode::ArrayIssetFetch {
+                                    format!("Cannot access offset of type {} on array", t)
+                                } else {
+                                    format!("Cannot access offset of type {} in isset or empty", t)
+                                };
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                            let float_key = matches!(
+                                kd,
+                                Value::Double(_) | Value::Null | Value::Undef | Value::Resource(_)
+                            );
+                            // Only the fetch itself is quiet (BP_VAR_IS): converting
+                            // the key still reports its deprecations / warnings.
+                            let saved = self.unsilence_begin();
+                            let key = self.value_to_array_key_checked(&key_val, op.line);
+                            self.unsilence_end(saved);
+                            // The error handler may have destroyed the array.
+                            let gone = float_key
+                                && !matches!(
+                                    self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
+                                    Value::Array(ref a2) if Rc::ptr_eq(a2, arr)
+                                );
+                            if gone {
+                                Value::False
+                            } else {
+                                match arr.borrow().get(&key) {
+                                    Some(Value::Reference(r))
+                                        if !matches!(*r.borrow(), Value::Null | Value::Undef) =>
+                                    {
+                                        Value::True
+                                    }
+                                    Some(Value::Reference(_)) => Value::False,
+                                    Some(v) if !matches!(v, Value::Null | Value::Undef) => {
+                                        Value::True
+                                    }
+                                    _ => Value::False,
+                                }
+                            }
+                        } else if let Some(o) = match &arr_val {
+                            Value::Object(o)
+                                if self
+                                    .spl_find_base(
+                                        &crate::spl::obj_class_lower(o),
+                                        &[b"arrayobject", b"arrayiterator"],
+                                    )
+                                    .is_some() =>
+                            {
+                                Some(o.clone())
+                            }
+                            _ => None,
+                        } {
+                            let r = self.ao_has_dimension(&o, &key_val);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                            if r { Value::True } else { Value::False }
+                        } else if let Value::Object(obj) = &arr_val {
+                            // ArrayAccess: isset($obj[$key]) -> offsetExists($key)
+                            let class_lower: Vec<u8> = obj
+                                .borrow()
+                                .class_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            // Type-check the key for ArrayObject-family: arrays and objects
+                            // are not valid offset types.
+                            if matches!(
+                                class_lower.as_slice(),
+                                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                            ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
+                            {
+                                let t = if matches!(&key_val, Value::Array(_)) {
+                                    "array"
+                                } else {
+                                    "object"
+                                };
+                                let msg =
+                                    format!("Cannot access offset of type {} in isset or empty", t);
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    let ct = *catch_target;
+                                    ip = ct as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                            let is_spl_array = matches!(
+                                class_lower.as_slice(),
+                                b"arrayobject"
+                                    | b"arrayiterator"
+                                    | b"recursivearrayiterator"
+                                    | b"splfixedarray"
+                                    | b"splobjectstorage"
+                                    | b"spldoublylinkedlist"
+                                    | b"splstack"
+                                    | b"splqueue"
+                                    | b"weakmap"
+                                    | b"simplexmlelement"
+                            ) || {
+                                // Check parent chain for ArrayAccess support
+                                let mut found = false;
+                                let mut check = class_lower.clone();
+                                for _ in 0..10 {
+                                    if let Some(parent) = get_builtin_parent(&check) {
                                         let parent_lower: Vec<u8> =
-                                            p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if matches!(
                                             parent_lower.as_slice(),
                                             b"arrayobject"
@@ -39785,32 +39885,91 @@ impl Vm {
                                             break;
                                         }
                                         check = parent_lower;
+                                    } else if let Some(ce) = self.classes.get(&check) {
+                                        if let Some(ref p) = ce.parent {
+                                            let parent_lower: Vec<u8> =
+                                                p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                            if matches!(
+                                                parent_lower.as_slice(),
+                                                b"arrayobject"
+                                                    | b"arrayiterator"
+                                                    | b"recursivearrayiterator"
+                                                    | b"splfixedarray"
+                                                    | b"splobjectstorage"
+                                                    | b"spldoublylinkedlist"
+                                                    | b"splstack"
+                                                    | b"splqueue"
+                                            ) {
+                                                found = true;
+                                                break;
+                                            }
+                                            check = parent_lower;
+                                        } else {
+                                            break;
+                                        }
                                     } else {
                                         break;
                                     }
-                                } else {
-                                    break;
                                 }
-                            }
-                            found
-                        };
-                        let has_user_offset = self
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.get_method(b"offsetexists").is_some())
-                            .unwrap_or(false);
-                        if is_spl_array
-                            || has_user_offset
-                            || self.class_implements_interface(&class_lower, b"arrayaccess")
-                        {
-                            let args = vec![arr_val.clone(), key_val.clone()];
-                            let exists_result = self
-                                .handle_spl_docall(&class_lower, b"offsetexists", &args)
-                                .unwrap_or_else(|| {
-                                    self.call_object_method(&arr_val, b"offsetexists", &[key_val])
+                                found
+                            };
+                            let has_user_offset = self
+                                .classes
+                                .get(&class_lower)
+                                .map(|c| c.get_method(b"offsetexists").is_some())
+                                .unwrap_or(false);
+                            if is_spl_array
+                                || has_user_offset
+                                || self.class_implements_interface(&class_lower, b"arrayaccess")
+                            {
+                                let args = vec![arr_val.clone(), key_val.clone()];
+                                let exists_result = self
+                                    .handle_spl_docall(&class_lower, b"offsetexists", &args)
+                                    .unwrap_or_else(|| {
+                                        self.call_object_method(
+                                            &arr_val,
+                                            b"offsetexists",
+                                            &[key_val],
+                                        )
                                         .unwrap_or(Value::False)
-                                });
-                            if self.current_exception.is_some() {
+                                    });
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    let msg = match &self.current_exception {
+                                        Some(Value::Object(o)) => {
+                                            let ob = o.borrow();
+                                            format!(
+                                                "Uncaught {}: {}",
+                                                crate::value::display_class_name(&ob.class_name),
+                                                ob.get_property(b"message")
+                                                    .to_php_string()
+                                                    .to_string_lossy()
+                                            )
+                                        }
+                                        _ => "Uncaught exception".to_string(),
+                                    };
+                                    return Err(VmError {
+                                        message: msg,
+                                        line: op.line,
+                                    });
+                                }
+                                if exists_result.is_truthy() {
+                                    Value::True
+                                } else {
+                                    Value::False
+                                }
+                            } else if let Some(msg) =
+                                self.dim_write_container_error(&arr_val, false)
+                            {
+                                // isset() on an object that is not ArrayAccess throws.
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
                                 {
@@ -39818,95 +39977,78 @@ impl Vm {
                                     ip = catch_target as usize;
                                     return Ok(Flow::Continue);
                                 }
-                                let msg = match &self.current_exception {
-                                    Some(Value::Object(o)) => {
-                                        let ob = o.borrow();
-                                        format!(
-                                            "Uncaught {}: {}",
-                                            crate::value::display_class_name(&ob.class_name),
-                                            ob.get_property(b"message")
-                                                .to_php_string()
-                                                .to_string_lossy()
-                                        )
-                                    }
-                                    _ => "Uncaught exception".to_string(),
-                                };
                                 return Err(VmError {
-                                    message: msg,
+                                    message: format!("Uncaught Error: {}", msg),
                                     line: op.line,
                                 });
-                            }
-                            if exists_result.is_truthy() {
-                                Value::True
                             } else {
                                 Value::False
                             }
-                        } else if let Some(msg) = self.dim_write_container_error(&arr_val, false) {
-                            // isset() on an object that is not ArrayAccess throws.
-                            let exc = self.create_exception(b"Error", &msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                return Ok(Flow::Continue);
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught Error: {}", msg),
-                                line: op.line,
-                            });
-                        } else {
-                            Value::False
-                        }
-                    } else if let Value::String(s) = &arr_val {
-                        // String offset: isset($str[$idx])
-                        // Non-numeric string keys should return false
-                        let is_valid_offset = match &key_val {
-                            Value::Long(_)
-                            | Value::Double(_)
-                            | Value::True
-                            | Value::False
-                            | Value::Null => true,
-                            Value::String(key_str) => {
-                                let trimmed = key_str.to_string_lossy();
-                                let trimmed = trimmed.trim();
-                                if trimmed.is_empty() {
-                                    false
-                                } else {
-                                    let start =
-                                        if trimmed.starts_with('-') || trimmed.starts_with('+') {
+                        } else if let Value::String(s) = &arr_val {
+                            // String offset: isset($str[$idx])
+                            // Non-numeric string keys should return false
+                            let is_valid_offset = match &key_val {
+                                Value::Long(_)
+                                | Value::Double(_)
+                                | Value::True
+                                | Value::False
+                                | Value::Null => true,
+                                Value::String(key_str) => {
+                                    let trimmed = key_str.to_string_lossy();
+                                    let trimmed = trimmed.trim();
+                                    if trimmed.is_empty() {
+                                        false
+                                    } else {
+                                        let start = if trimmed.starts_with('-')
+                                            || trimmed.starts_with('+')
+                                        {
                                             1
                                         } else {
                                             0
                                         };
-                                    let rest = &trimmed[start..];
-                                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                                        let rest = &trimmed[start..];
+                                        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                                    }
+                                }
+                                _ => false,
+                            };
+                            if !is_valid_offset {
+                                Value::False
+                            } else {
+                                // zval_get_long_ex(offset, strict): a fractional
+                                // float still deprecates.
+                                let idx = if let Value::Double(f) = &key_val {
+                                    let saved = self.unsilence_begin();
+                                    let n = self.double_offset_to_long(*f, op.line);
+                                    self.unsilence_end(saved);
+                                    n
+                                } else {
+                                    key_val.to_long()
+                                };
+                                let len = s.as_bytes().len() as i64;
+                                if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
+                                    Value::True
+                                } else {
+                                    Value::False
                                 }
                             }
-                            _ => false,
-                        };
-                        if !is_valid_offset {
-                            Value::False
                         } else {
-                            let idx = key_val.to_long();
-                            let len = s.as_bytes().len() as i64;
-                            if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
-                                Value::True
-                            } else {
-                                Value::False
-                            }
-                        }
-                    } else {
-                        Value::False
-                    };
-                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
-                    Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
-                },
+                            Value::False
+                        };
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
+                }
 
                 OpCode::ErrorSuppress => {
                     self.error_reporting_stack.push(self.error_reporting);
@@ -40628,7 +40770,14 @@ impl Vm {
                                     return Ok(Flow::Continue);
                                 }
                                 let parent_display = crate::value::display_class_name(parent_name);
-                                let msg = format!("Class \"{}\" not found", parent_display);
+                                // zend_fetch_class_by_name() with
+                                // ZEND_FETCH_CLASS_INTERFACE for an interface's parents.
+                                let kind = if class.is_interface {
+                                    "Interface"
+                                } else {
+                                    "Class"
+                                };
+                                let msg = format!("{} \"{}\" not found", kind, parent_display);
                                 let exc_val = self.create_exception(b"Error", &msg, op.line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -49925,10 +50074,27 @@ impl Vm {
 
     /// Array key for isset()/unset() of a dimension: like a plain key, but a
     /// float offset goes through zend_dval_to_lval_safe.
-    fn isset_unset_array_key(&mut self, key: Value, line: u32) -> ArrayKey {
-        match key.deref() {
-            Value::Double(f) => ArrayKey::Int(self.double_offset_to_long(f, line)),
-            _ => Self::value_to_array_key(key),
+    /// Inside an engine-silenced region (isset() / empty() / `??`), let
+    /// the diagnostics of a step that php-src does not run quietly through:
+    /// error_reporting goes back to the level outside the region. Returns
+    /// the level to restore with `unsilence_end`.
+    pub(crate) fn unsilence_begin(&mut self) -> Option<i64> {
+        if self.error_reporting != crate::errdisplay::ER_SILENT {
+            return None;
+        }
+        self.error_reporting = self
+            .error_reporting_stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|&e| e != crate::errdisplay::ER_SILENT)
+            .unwrap_or(crate::errdisplay::E_ALL);
+        Some(crate::errdisplay::ER_SILENT)
+    }
+
+    pub(crate) fn unsilence_end(&mut self, saved: Option<i64>) {
+        if let Some(er) = saved {
+            self.error_reporting = er;
         }
     }
 

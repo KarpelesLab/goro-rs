@@ -319,6 +319,10 @@ pub enum OpCode {
     /// isset() on array dimension: op1 = array/object, op2 = key, result = True/False
     /// For objects implementing ArrayAccess, calls offsetExists() instead of offsetGet()
     ArrayIsset,
+    /// ArrayIsset as the probe of a quiet dimension fetch (FETCH_DIM_IS:
+    /// `??` and the outer dimensions of isset()/empty()): an illegal
+    /// offset reports "Cannot access offset of type X on array".
+    ArrayIssetFetch,
     /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
     MakeRef,
     /// Record the exception-handler stack depth at a loop entry: result = tmp.
