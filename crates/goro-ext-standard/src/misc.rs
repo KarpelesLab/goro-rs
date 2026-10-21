@@ -2431,6 +2431,7 @@ fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_l
     }
 }
 
+/// PHP_FUNCTION(array_map)
 fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
         let msg = format!("array_map() expects at least 2 arguments, {} given", args.len());
@@ -2438,263 +2439,77 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Err(VmError { message: msg, line: vm.current_line });
     }
-    let callback_raw = args.first().cloned().unwrap_or(Value::Null);
-    // Treat Undef as Null for callback
-    let callback = match &callback_raw {
-        Value::Undef => Value::Null,
-        Value::Reference(r) => {
-            let inner = r.borrow().clone();
-            if matches!(inner, Value::Null) { Value::Null } else { inner }
-        }
-        _ => callback_raw,
-    };
-    let array = args.get(1);
-
-    // Validate callback
-    validate_callback_for_array_map(vm, &callback)?;
-
-    // Validate array arguments - must be arrays
-    for i in 1..args.len() {
-        let val = args[i].deref();
-        if !matches!(val, Value::Array(_)) {
-            let type_name = Vm::value_type_name(&val);
-            let msg = if i == 1 {
-                format!("array_map(): Argument #2 ($array) must be of type array, {} given", type_name)
-            } else {
-                format!("array_map(): Argument #{} must be of type array, {} given", i + 1, type_name)
-            };
+    let callback = args[0].deref();
+    let callback = if matches!(callback, Value::Undef) { Value::Null } else { callback };
+    if !matches!(callback, Value::Null) {
+        if let Some(reason) = callable_error(vm, &callback) {
+            let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, {}", reason);
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError { message: msg, line: vm.current_line });
         }
     }
-
-    // Multi-array support: array_map($callback, $arr1, $arr2, ...)
-    if args.len() > 2 {
-        let arrays: Vec<_> = args[1..]
-            .iter()
-            .filter_map(|a| {
-                if let Value::Array(arr) = a {
-                    Some(
-                        arr.borrow()
-                            .iter()
-                            .map(|(_, v)| v.clone())
-                            .collect::<Vec<_>>(),
-                    )
+    let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
+    for i in 1..args.len() {
+        match args[i].deref() {
+            Value::Array(a) => arrays.push(a),
+            other => {
+                let tn = match &other {
+                    Value::True => "true".to_string(),
+                    Value::False => "false".to_string(),
+                    Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name),
+                    _ => Vm::value_type_name(&other).to_string(),
+                };
+                let msg = if i == 1 {
+                    format!("array_map(): Argument #2 ($array) must be of type array, {} given", tn)
                 } else {
-                    None
-                }
-            })
-            .collect();
-        if arrays.is_empty() {
-            return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-        }
-        let max_len = arrays.iter().map(|a| a.len()).max().unwrap_or(0);
-        let mut result = PhpArray::new();
-
-        // Handle Object callbacks with __invoke (multi-array case)
-        if let Value::Object(obj) = &callback {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let method = vm.classes.get(&class_lower)
-                .and_then(|c| c.get_method(b"__invoke"))
-                .map(|m| m.op_array.clone());
-            if let Some(op) = method {
-                for i in 0..max_len {
-                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                    if !fn_cvs.is_empty() { fn_cvs[0] = callback.clone(); } // $this
-                    let mut arg_idx = 1;
-                    for arr in &arrays {
-                        if arg_idx < fn_cvs.len() {
-                            fn_cvs[arg_idx] = arr.get(i).cloned().unwrap_or(Value::Null);
-                            arg_idx += 1;
-                        }
-                    }
-                    let mapped = vm.execute_fn(&op, fn_cvs)?;
-                    result.push(mapped);
-                }
-                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                    format!("array_map(): Argument #{} must be of type array, {} given", i + 1, tn)
+                };
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line: vm.current_line });
             }
         }
-
+    }
+    if arrays.len() == 1 {
+        let arr = &arrays[0];
         if matches!(callback, Value::Null) {
-            // null callback with multiple arrays: create arrays of corresponding elements
-            for i in 0..max_len {
-                let mut sub = PhpArray::new();
-                for arr in &arrays {
-                    sub.push(arr.get(i).cloned().unwrap_or(Value::Null));
-                }
-                result.push(Value::Array(Rc::new(RefCell::new(sub))));
-            }
-            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+            let copy = arr.borrow().clone();
+            return Ok(Value::Array(Rc::new(RefCell::new(copy))));
         }
-
-        for i in 0..max_len {
-            let mut cb_args: Vec<Value> = Vec::new();
-            for arr in &arrays {
-                cb_args.push(arr.get(i).cloned().unwrap_or(Value::Null));
+        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut result = PhpArray::new();
+        for (k, v) in entries {
+            let r = call_user_func(vm, &[callback.clone(), v])?;
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
             }
-            let mapped = vm.call_callback(&callback, &cb_args)?;
-            result.push(mapped);
+            result.set(k, r);
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
-
-    if let Some(Value::Array(arr)) = array {
-        let arr = arr.borrow();
-        let mut result = PhpArray::new();
-
-        // Get callback function name
-        match &callback {
-            Value::Null => {
-                // null callback = identity
-                for (key, val) in arr.iter() {
-                    result.set(key.clone(), val.clone());
-                }
-                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    let lists: Vec<Vec<Value>> = arrays.iter().map(|a| a.borrow().values().cloned().collect()).collect();
+    let maxlen = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+    let mut result = PhpArray::new();
+    for i in 0..maxlen {
+        let row: Vec<Value> = lists.iter().map(|l| l.get(i).cloned().unwrap_or(Value::Null)).collect();
+        if matches!(callback, Value::Null) {
+            let mut sub = PhpArray::new();
+            for v in row {
+                sub.push(v);
             }
-            Value::Array(cb_arr) => {
-                let cb = cb_arr.borrow();
-                let vals: Vec<Value> = cb.values().cloned().collect();
-                drop(cb);
-                if vals.len() >= 2 {
-                    let method_name = vals[1].to_php_string();
-                    let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    // Get the class name from either a string or an object
-                    let (class_lower, this_val) = if let Value::String(class_name) = &vals[0] {
-                        (class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), None)
-                    } else if let Value::Object(obj) = &vals[0] {
-                        (obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), Some(vals[0].clone()))
-                    } else {
-                        (vec![], None)
-                    };
-                    if !class_lower.is_empty() {
-                        if let Some(class) = vm.classes.get(&class_lower).cloned() {
-                            if let Some(method) = class.methods.get(&method_lower) {
-                                let op = method.op_array.clone();
-                                for (key, val) in arr.iter() {
-                                    let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                                    if let Some(ref this) = this_val {
-                                        // Instance method: $this is the object, first user arg is the element
-                                        if !fn_cvs.is_empty() { fn_cvs[0] = this.clone(); }
-                                        if fn_cvs.len() > 1 { fn_cvs[1] = val.clone(); }
-                                    } else {
-                                        // Static method: first user arg is the element
-                                        if !fn_cvs.is_empty() { fn_cvs[0] = val.clone(); }
-                                    }
-                                    let mapped = vm.execute_fn(&op, fn_cvs)?;
-                                    result.set(key.clone(), mapped);
-                                }
-                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Handle Object callbacks with __invoke
-        if let Value::Object(obj) = &callback {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let has_invoke = vm.classes.get(&class_lower)
-                .map(|c| c.methods.contains_key(&b"__invoke".to_vec()))
-                .unwrap_or(false);
-            if has_invoke {
-                let method = vm.classes.get(&class_lower)
-                    .and_then(|c| c.get_method(b"__invoke"))
-                    .map(|m| m.op_array.clone());
-                if let Some(op) = method {
-                    for (key, val) in arr.iter() {
-                        let mut fn_cvs = vec![Value::Undef; op.cv_names.len()];
-                        if !fn_cvs.is_empty() { fn_cvs[0] = callback.clone(); } // $this
-                        if fn_cvs.len() > 1 { fn_cvs[1] = val.clone(); }
-                        let mapped = vm.execute_fn(&op, fn_cvs)?;
-                        result.set(key.clone(), mapped);
-                    }
-                    return Ok(Value::Array(Rc::new(RefCell::new(result))));
-                }
-            }
-        }
-
-        let (func_name, captured_args) = match &callback {
-            Value::String(s) => (s.as_bytes().to_vec(), vec![]),
-            Value::Array(cb_arr) => {
-                let cb = cb_arr.borrow();
-                let vals: Vec<Value> = cb.values().cloned().collect();
-                if vals.is_empty() {
-                    return Ok(Value::Array(Rc::new(RefCell::new(result))));
-                }
-                let name = vals[0].to_php_string().as_bytes().to_vec();
-                let captured: Vec<Value> = vals[1..].to_vec();
-                (name, captured)
-            }
-            _ => return Ok(Value::Array(Rc::new(RefCell::new(result)))),
-        };
-
-        let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-        // Check for builtin function
-        if let Some(builtin) = vm.functions.get(&func_lower).copied() {
-            for (key, val) in arr.iter() {
-                let mapped = builtin(vm, &[val.clone()])?;
-                result.set(key.clone(), mapped);
-            }
-        } else if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
-            // Check required argument count - array_map calls user function with 1 arg
-            // plus captured args. Verify the function accepts this.
-            let provided = (1 + captured_args.len()) as u32;
-            let required = user_fn.required_param_count;
-            if provided < required {
-                let display_name = String::from_utf8_lossy(user_fn.effective_name()).into_owned();
-                let total_params = user_fn.param_count;
-                let has_optional = total_params > required;
-                let qualifier = if has_optional { "at least" } else { "exactly" };
-                let plural = if required == 1 { "" } else { "s" };
-                let pass_plural = if provided == 1 { "" } else { "s" };
-                let msg = format!(
-                    "Too few arguments to function {}(), {} passed and {} {} expected",
-                    display_name, provided, qualifier, required
-                );
-                let _ = (plural, pass_plural);
-                let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
-            }
-            for (key, val) in arr.iter() {
-                if user_fn.variadic_param.is_some() {
-                    // Variadic parameters need proper argument packing.
-                    let mut call_args = captured_args.clone();
-                    call_args.push(val.clone());
-                    let mapped = vm.execute_fn_with_named_args(&user_fn, call_args, vec![], None)?;
-                    result.set(key.clone(), mapped);
-                    continue;
-                }
-                let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                // Pass captured vars first, then the element
-                let mut arg_idx = 0;
-                for cv in &captured_args {
-                    if arg_idx < fn_cvs.len() {
-                        fn_cvs[arg_idx] = cv.clone();
-                        arg_idx += 1;
-                    }
-                }
-                if arg_idx < fn_cvs.len() {
-                    fn_cvs[arg_idx] = val.clone();
-                }
-                let mapped = vm.execute_fn(&user_fn, fn_cvs)?;
-                result.set(key.clone(), mapped);
-            }
+            result.push(Value::Array(Rc::new(RefCell::new(sub))));
         } else {
-            // Function not found - return original array
-            for (key, val) in arr.iter() {
-                result.set(key.clone(), val.clone());
+            let mut cargs = vec![callback.clone()];
+            cargs.extend(row);
+            let r = call_user_func(vm, &cargs)?;
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
             }
+            result.push(r);
         }
-
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2839,7 +2654,8 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
                 return check_method(vm, &class_lower, &name[pos + 2..], true);
             }
             let l = lower.strip_prefix(b"\\").unwrap_or(&lower);
-            if vm.functions.contains_key(l) || vm.user_functions.contains_key(l) {
+            let construct = matches!(l, b"isset" | b"empty" | b"eval" | b"exit" | b"die" | b"echo" | b"print" | b"unset" | b"list" | b"array" | b"include" | b"include_once" | b"require" | b"require_once");
+            if !construct && (vm.functions.contains_key(l) || vm.user_functions.contains_key(l)) {
                 return None;
             }
             Some(format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(name)))
@@ -2856,6 +2672,9 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
                 if fl.starts_with(b"__closure_") || fl.starts_with(b"__arrow_") {
                     return None;
                 }
+            }
+            if !matches!(vals[0].deref(), Value::Object(_) | Value::String(_)) {
+                return Some("first array member is not a valid class name or object".to_string());
             }
             let method = match vals[1].deref() {
                 Value::String(m) => m.as_bytes().to_vec(),
