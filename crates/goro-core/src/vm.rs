@@ -24557,8 +24557,10 @@ impl Vm {
                         } else {
                             raw_display
                         };
-                        let is_instance =
-                            user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                        // (a static closure has no $this, even if its body uses it)
+                        let is_instance = user_fn.cv_names.first().map(|n| n.as_slice())
+                            == Some(b"this")
+                            && !user_fn.is_static_closure;
                         // Capture args for stack trace (skip $this for methods)
                         let trace_args = {
                             // Closures: captured values are not arguments.
@@ -46543,8 +46545,18 @@ impl Vm {
                                 .map(|c| c.methods.contains_key(b"__get".as_slice()))
                                 .unwrap_or(false);
                             // Don't recursively dispatch __get when access is denied from inside
-                            // __get itself (PHP raises the Error directly).
-                            if has_get && self.magic_depth == 0 {
+                            // __get itself for this property (the property guard; PHP raises
+                            // the Error directly).
+                            let get_guard = match &obj_val {
+                                Value::Object(o) => {
+                                    Some((o.borrow().object_id, prop_name.as_bytes().to_vec(), 0u8))
+                                }
+                                _ => None,
+                            };
+                            let guarded = get_guard
+                                .as_ref()
+                                .is_some_and(|g| self.magic_prop_guards.contains(g));
+                            if has_get && !guarded {
                                 if is_fetch_is
                                     && self.magic_isset_denies(&obj_val, &class_lower, &prop_name)
                                 {
@@ -46596,9 +46608,15 @@ impl Vm {
                                     frame_args,
                                     true,
                                 ));
+                                if let Some(g) = &get_guard {
+                                    self.magic_prop_guards.insert(g.clone());
+                                }
                                 let result = self
                                     .execute_op_array(&method, fn_cvs)
                                     .unwrap_or(Value::Null);
+                                if let Some(g) = &get_guard {
+                                    self.magic_prop_guards.remove(g);
+                                }
                                 let result = if is_w_fetch && self.current_exception.is_none() {
                                     self.magic_get_w_result(
                                         result,
@@ -48258,19 +48276,22 @@ impl Vm {
                                 .get(&class_lower)
                                 .map(|c| c.methods.contains_key(b"__set".as_slice()))
                                 .unwrap_or(false);
+                            // The property's __set guard: not re-dispatched from
+                            // within __set for the same property (PHP raises the
+                            // Error directly).
+                            let set_guard =
+                                (obj.borrow().object_id, prop_name.as_bytes().to_vec(), 2u8);
+                            let guarded = self.magic_prop_guards.contains(&set_guard);
                             let should_try_set = if is_avis_error {
-                                // Asymmetric visibility: fall through to __set only if:
-                                // 1. Property was unset (not on instance)
-                                // 2. Not already inside a magic method (prevents infinite recursion)
-                                has_set && !prop_exists_on_instance && self.magic_depth == 0
+                                // Asymmetric visibility: fall through to __set only if
+                                // the property was unset (not on instance)
+                                has_set && !prop_exists_on_instance && !guarded
                             } else {
-                                // Regular visibility: try __set only if not already inside one
-                                // (PHP doesn't recursively re-dispatch __set when access is
-                                // denied from within __set itself — it raises the Error directly).
-                                has_set && self.magic_depth == 0
+                                has_set && !guarded
                             };
                             if should_try_set {
                                 self.magic_depth += 1;
+                                self.magic_prop_guards.insert(set_guard.clone());
                                 let magic_method_def = self
                                     .classes
                                     .get(&class_lower)
@@ -48312,6 +48333,7 @@ impl Vm {
                                     true,
                                 ));
                                 let _ = self.execute_op_array(&method, fn_cvs);
+                                self.magic_prop_guards.remove(&set_guard);
                                 self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
