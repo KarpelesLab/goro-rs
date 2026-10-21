@@ -5647,6 +5647,26 @@ impl Compiler {
 
     /// Compile list/array destructuring assignment from a source array operand.
     /// Recursively handles nested list() and [] patterns.
+    /// Compile the object part of `isset($a->b->c)`: each intermediate
+    /// non-nullsafe property fetch is guarded by PropertyIsset (so magic
+    /// __isset runs before __get); failed checks jump to `patches`.
+    fn compile_isset_prop_chain(&mut self, expr: &Expr, line: u32, patches: &mut Vec<u32>) -> CompileResult<OperandType> {
+        if let ExprKind::PropertyAccess { object, property, nullsafe: false } = &expr.kind {
+            if matches!(&property.kind, ExprKind::Identifier(_)) {
+                let base = self.compile_isset_prop_chain(object, line, patches)?;
+                let prop_op = self.compile_property_name(property)?;
+                let isset_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op { opcode: OpCode::PropertyIsset, op1: base, op2: prop_op, result: OperandType::Tmp(isset_tmp), line });
+                let jmp = self.op_array.emit(Op { opcode: OpCode::JmpZ, op1: OperandType::Tmp(isset_tmp), op2: OperandType::JmpTarget(0), result: OperandType::Unused, line });
+                patches.push(jmp);
+                let get_tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op { opcode: OpCode::PropertyGet, op1: base, op2: prop_op, result: OperandType::Tmp(get_tmp), line });
+                return Ok(OperandType::Tmp(get_tmp));
+            }
+        }
+        self.compile_expr(expr)
+    }
+
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
         elems.iter().any(|e| e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub)))
     }
@@ -7347,7 +7367,26 @@ impl Compiler {
                     return Ok(OperandType::Tmp(result_tmp));
                 }
 
-                let left_val = self.compile_expr(left)?;
+                // $a->b->c ?? d: property fetches in the chain go through
+                // __isset before __get (FETCH_OBJ_IS semantics).
+                let mut isset_patches: Vec<u32> = Vec::new();
+                let left_val = if matches!(&left.kind, ExprKind::PropertyAccess { nullsafe: false, property, .. } if matches!(property.kind, ExprKind::Identifier(_))) {
+                    self.compile_isset_prop_chain(left, expr.span.line, &mut isset_patches)?
+                } else {
+                    self.compile_expr(left)?
+                };
+                let mut isset_fail_jmp: Option<u32> = None;
+                if !isset_patches.is_empty() {
+                    let over = self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                    let fail_label = self.op_array.current_offset();
+                    for p in &isset_patches {
+                        self.op_array.ops[*p as usize].op2 = OperandType::JmpTarget(fail_label);
+                    }
+                    self.op_array.emit(Op { opcode: OpCode::ErrorRestore, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                    isset_fail_jmp = Some(self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line }));
+                    let after = self.op_array.current_offset();
+                    self.op_array.patch_jump(over, after);
+                }
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorRestore,
                     op1: OperandType::Unused,
@@ -7393,6 +7432,9 @@ impl Compiler {
                 // Null: use right
                 let null_target = self.op_array.current_offset();
                 self.op_array.patch_jump(jmp_null, null_target);
+                if let Some(j) = isset_fail_jmp {
+                    self.op_array.patch_jump(j, null_target);
+                }
                 let right_val = self.compile_expr(right)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::Assign,
@@ -8248,7 +8290,27 @@ impl Compiler {
                                 });
                                 return Ok(OperandType::Tmp(result_tmp));
                             } else {
-                                self.compile_expr(object)?
+                                let mut patches = Vec::new();
+                                let op = self.compile_isset_prop_chain(object, expr.span.line, &mut patches)?;
+                                if !patches.is_empty() {
+                                    // isset($a->b->c): intermediate fetches go through
+                                    // __isset before __get (FETCH_OBJ_IS semantics).
+                                    let prop_operand = self.compile_property_name(property)?;
+                                    let tmp = self.op_array.alloc_temp();
+                                    self.op_array.emit(Op { opcode: OpCode::PropertyIsset, op1: op, op2: prop_operand, result: OperandType::Tmp(tmp), line: expr.span.line });
+                                    let jmp_end = self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                    let false_target = self.op_array.current_offset();
+                                    let false_lit = self.op_array.add_literal(Value::False);
+                                    self.op_array.emit(Op { opcode: OpCode::Assign, op1: OperandType::Tmp(tmp), op2: OperandType::Const(false_lit), result: OperandType::Unused, line: expr.span.line });
+                                    let end_target = self.op_array.current_offset();
+                                    for p in patches {
+                                        self.op_array.ops[p as usize].op2 = OperandType::JmpTarget(false_target);
+                                    }
+                                    self.op_array.patch_jump(jmp_end, end_target);
+                                    self.op_array.emit(Op { opcode: OpCode::ErrorRestore, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                    return Ok(OperandType::Tmp(tmp));
+                                }
+                                op
                             };
                             let prop_operand = self.compile_property_name(property)?;
                             let tmp = self.op_array.alloc_temp();
