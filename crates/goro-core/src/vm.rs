@@ -18721,17 +18721,23 @@ impl Vm {
                                         call.name.as_bytes()[..sep].to_vec()
                                     };
                                     let frame_name = format!(
-                                        "{}::{}",
+                                        "{}{}{}",
                                         self.builtin_canonical_name(&native),
+                                        if fwd_this.is_some() { "->" } else { "::" },
                                         String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..])
                                     );
-                                    self.call_stack.push((
-                                        frame_name,
-                                        self.current_file.clone(),
-                                        op.line,
-                                        call.args.clone(),
-                                        false,
-                                    ));
+                                    // A forwarded instance call gets its frame from the
+                                    // native method dispatch itself.
+                                    let own_frame = fwd_this.is_none();
+                                    if own_frame {
+                                        self.call_stack.push((
+                                            frame_name,
+                                            self.current_file.clone(),
+                                            op.line,
+                                            call.args.clone(),
+                                            false,
+                                        ));
+                                    }
                                     let mut args = call.args.clone();
                                     let result = match self.merge_native_named_args(
                                         &native,
@@ -18759,7 +18765,9 @@ impl Vm {
                                             Value::Null
                                         }
                                     };
-                                    self.call_stack.pop();
+                                    if own_frame {
+                                        self.call_stack.pop();
+                                    }
                                     if let Some(exc_val) = self.current_exception.take() {
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                             exception_handlers.last()

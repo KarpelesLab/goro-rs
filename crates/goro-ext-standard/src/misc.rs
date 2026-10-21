@@ -13238,7 +13238,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 val.clone(),
             );
         }
-        if libxml.len() > 0 {
+        if !libxml.is_empty() {
             result.set(
                 goro_core::array::ArrayKey::String(PhpString::from_bytes(b"libxml")),
                 Value::Array(Rc::new(RefCell::new(libxml))),
