@@ -832,6 +832,23 @@ impl<'a> Lexer<'a> {
             }
         };
 
+        let canonical = match lower.as_slice() {
+            b"integer" => Some(("integer", "int")),
+            b"double" => Some(("double", "float")),
+            b"binary" => Some(("binary", "string")),
+            b"boolean" => Some(("boolean", "bool")),
+            _ => None,
+        };
+        if let Some((used, canon)) = canonical {
+            crate::push_lexer_deprecated(
+                format!(
+                    "Non-canonical cast ({}) is deprecated, use the ({}) cast instead",
+                    used, canon
+                ),
+                self.line,
+            );
+        }
+
         self.advance(); // consume )
         Some(kind)
     }
