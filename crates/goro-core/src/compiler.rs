@@ -3682,6 +3682,18 @@ impl Compiler {
                                                     }
                                                     BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
                                                     BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                    BinaryOp::BitwiseXor => Value::Long(lv.to_long() ^ rv.to_long()),
+                                                    BinaryOp::ShiftLeft => {
+                                                        let n = rv.to_long();
+                                                        Value::Long(if (0..64).contains(&n) { lv.to_long().wrapping_shl(n as u32) } else { 0 })
+                                                    }
+                                                    BinaryOp::ShiftRight => {
+                                                        let (a, n) = (lv.to_long(), rv.to_long());
+                                                        Value::Long(if (0..64).contains(&n) { a >> n } else if a < 0 { -1 } else { 0 })
+                                                    }
+                                                    BinaryOp::Div => lv.div(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Mod => lv.modulo(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Pow => lv.pow(&rv),
                                                     _ => Value::Null,
                                                 }
                                             }
@@ -5523,6 +5535,18 @@ impl Compiler {
                                                     }
                                                     BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
                                                     BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
+                                                    BinaryOp::BitwiseXor => Value::Long(lv.to_long() ^ rv.to_long()),
+                                                    BinaryOp::ShiftLeft => {
+                                                        let n = rv.to_long();
+                                                        Value::Long(if (0..64).contains(&n) { lv.to_long().wrapping_shl(n as u32) } else { 0 })
+                                                    }
+                                                    BinaryOp::ShiftRight => {
+                                                        let (a, n) = (lv.to_long(), rv.to_long());
+                                                        Value::Long(if (0..64).contains(&n) { a >> n } else if a < 0 { -1 } else { 0 })
+                                                    }
+                                                    BinaryOp::Div => lv.div(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Mod => lv.modulo(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Pow => lv.pow(&rv),
                                                     _ => Value::Null,
                                                 }
                                             } else {

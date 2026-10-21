@@ -23753,7 +23753,7 @@ impl Vm {
                 }
                 OpCode::ArrayAppend => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     if let Value::Array(arr) = &arr_val {
                         if let Err(msg) = arr.borrow_mut().try_push(val) {
                             let exc = self.create_exception(b"Error", msg, op.line);
@@ -23813,8 +23813,8 @@ impl Vm {
                 }
                 OpCode::ArraySet => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    let key_val = self.read_operand_warn(&op.result, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                    let val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
                     // Array/object keys on a real array throw TypeError (matches
                     // zend_illegal_container_offset). value_to_array_key_checked
                     // silently maps both to Int(0), so check explicitly first.
