@@ -2056,12 +2056,30 @@ fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
     res
 }
 
-/// Close all user streams still open (resource list destruction at
-/// request shutdown, in reverse order of creation).
+/// Close all user streams still open (zend_close_rsrc_list() at request
+/// shutdown, in reverse order of creation). Streams opened meanwhile (by a
+/// close handler) restart the walk from the newest one.
 pub(crate) fn shutdown_streams(vm: &mut Vm) {
-    let mut ids: Vec<i64> = USER_STREAMS.with(|m| m.borrow().keys().copied().collect());
-    ids.sort();
-    for fid in ids.into_iter().rev() {
+    let mut done: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    'walk: loop {
+        let mut ids: Vec<i64> = USER_STREAMS.with(|m| m.borrow().keys().copied().collect());
+        ids.sort();
+        let top = ids.last().copied().unwrap_or(0);
+        for fid in ids.into_iter().rev() {
+            if !done.insert(fid) {
+                continue;
+            }
+            shutdown_stream(vm, fid);
+            if USER_STREAMS.with(|m| m.borrow().keys().any(|&k| k > top)) {
+                continue 'walk;
+            }
+        }
+        break;
+    }
+}
+
+fn shutdown_stream(vm: &mut Vm, fid: i64) {
+    {
         if let Some(us) = get_us(fid) {
             // A fatal error (or exception) raised by a close handler is
             // reported; the remaining resources are still destroyed.
