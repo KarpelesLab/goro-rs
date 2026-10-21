@@ -5158,10 +5158,9 @@ impl Vm {
     // ---- Accessors for reflection module ----
 
     /// Allocate and return the next object ID
+    /// Allocate an object handle (freed handles are reused, as in PHP).
     pub fn next_object_id(&mut self) -> u64 {
-        let id = self.next_object_id;
-        self.next_object_id += 1;
-        id
+        self.alloc_object_id()
     }
 
     /// Push a class scope for visibility checks
