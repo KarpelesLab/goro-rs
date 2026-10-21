@@ -29227,7 +29227,7 @@ impl Vm {
                 }
 
                 OpCode::ForeachInitRef => {
-                    let arr_val = self.read_operand_warn(
+                    let mut arr_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
                         &tmps,
@@ -29235,6 +29235,53 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // User iterators: an IteratorAggregate whose getIterator()
+                    // is a by-ref generator is iterated through it; other
+                    // iterators cannot be iterated by reference.
+                    for _ in 0..8 {
+                        let Value::Object(o) = &arr_val else { break };
+                        let cl = o.borrow().class_name.to_ascii_lowercase();
+                        if !self.classes.contains_key(&cl) {
+                            break;
+                        }
+                        if self.class_implements_interface(&cl, b"iteratoraggregate") {
+                            let it = self
+                                .call_object_method(&arr_val, b"getIterator", &[])
+                                .unwrap_or(Value::Null);
+                            if self.current_exception.is_some() {
+                                break;
+                            }
+                            arr_val = it;
+                            continue;
+                        }
+                        if self.class_implements_interface(&cl, b"iterator") {
+                            let msg = "An iterator cannot be used with foreach by reference";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                        }
+                        break;
+                    }
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        let msg = match &self.current_exception {
+                            Some(Value::Object(o)) => format!(
+                                "Uncaught Error: {}",
+                                o.borrow()
+                                    .get_property(b"message")
+                                    .to_php_string()
+                                    .to_string_lossy()
+                            ),
+                            _ => "Uncaught exception".to_string(),
+                        };
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
+                    }
 
                     // Handle Generator values - delegate to ForeachInit behavior
                     if let Value::Generator(gen_rc) = &arr_val {
