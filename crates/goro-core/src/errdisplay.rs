@@ -165,6 +165,11 @@ impl Vm {
             Some(h) => h.clone(),
             None => return false,
         };
+        // zend_call_function() does not run while an exception is pending;
+        // the error then counts as handled.
+        if self.current_exception.is_some() {
+            return true;
+        }
         if self.error_handler_mask & ty == 0
             || matches!(
                 ty,

@@ -372,6 +372,8 @@ pub enum OpCode {
     /// compact(...): op1 = tmp array of the call's arguments, result = tmp array
     /// of the named variables of the current scope (php_compact_var semantics).
     CompactDyn,
+    /// get_defined_vars(): result = array of the current scope's variables
+    GetDefinedVars,
     /// exit/die: op1 = value. If int, set exit code; if string, echo the string.
     ExitOp,
     /// Get (creating) a reference to an object property: op1 = object,

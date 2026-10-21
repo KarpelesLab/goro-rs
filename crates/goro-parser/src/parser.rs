@@ -5665,8 +5665,9 @@ impl Parser {
                             }
                         }
                         // Generate unique anonymous class name
-                        self.anon_counter += 1;
+                        // CG(rtd_key_counter) starts at 0
                         let anon_name = format!("__anonymous_class_{}", self.anon_counter);
+                        self.anon_counter += 1;
                         // Parse class body with class name on stack for error messages
                         self.class_name_stack.push(anon_name.as_bytes().to_vec());
                         let body_result = self.parse_class_body();

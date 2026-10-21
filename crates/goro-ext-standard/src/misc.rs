@@ -568,8 +568,6 @@ final class StreamBucket {
     // class_implements, class_parents, class_uses moved to goro-ext-spl
     vm.register_function(b"str_increment", str_increment_fn);
     vm.register_function(b"str_decrement", str_decrement_fn);
-    vm.register_function(b"get_error_handler", get_error_handler_fn);
-    vm.register_function(b"get_exception_handler", get_exception_handler_fn);
     vm.register_function(b"get_included_files", get_included_files_fn);
     vm.register_function(b"get_required_files", get_included_files_fn);
     // iterator_apply moved to goro-ext-spl
@@ -1519,7 +1517,7 @@ pub(crate) fn check_callable(
                 .strip_prefix(b"\\")
                 .map(|r| r.to_vec())
                 .unwrap_or_else(|| raw.clone());
-            if let Some(pos) = stripped.windows(2).position(|w| w == b"::") {
+            if let Some(pos) = stripped.windows(2).rposition(|w| w == b"::") {
                 let (cls, m) = (&stripped[..pos], &stripped[pos + 2..]);
                 let res = callable_check_class(vm, cls, false)
                     .and_then(|cl| callable_check_method(vm, &cl, m, false));
@@ -2324,7 +2322,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         }
 
         // Try "Class::method" syntax
-        if let Some(pos) = func_lower.iter().position(|&b| b == b':') {
+        if let Some(pos) = func_lower.windows(2).rposition(|w| w == b"::") {
             if pos + 1 < func_lower.len() && func_lower[pos + 1] == b':' {
                 let class_part_lower = func_lower[..pos].to_vec();
                 let method_lower = &func_lower[pos + 2..];
@@ -13907,9 +13905,47 @@ fn debug_zval_dump_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
+thread_local! {
+    /// Arrays/objects being dumped by debug_zval_dump() (GC_PROTECT_RECURSION).
+    static ZVAL_DUMP_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
 fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
     let prefix = " ".repeat(indent);
+    let ptr = match val {
+        Value::Array(a) => Some(Rc::as_ptr(a) as *const u8 as usize),
+        Value::Object(o) => Some(Rc::as_ptr(o) as *const u8 as usize),
+        _ => None,
+    };
+    if let Some(p) = ptr {
+        if ZVAL_DUMP_STACK.with(|s| s.borrow().contains(&p)) {
+            vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+            return;
+        }
+        ZVAL_DUMP_STACK.with(|s| s.borrow_mut().push(p));
+    }
+    debug_zval_dump_inner(vm, val, indent, &prefix);
+    if ptr.is_some() {
+        ZVAL_DUMP_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
+fn debug_zval_dump_inner(vm: &mut Vm, val: &Value, indent: usize, prefix: &str) {
     match val {
+        Value::Resource(id) => {
+            let t = if goro_core::value::is_open_resource(*id) {
+                goro_core::value::resource_type_of(*id)
+                    .map(|v| String::from_utf8_lossy(&v).to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            } else {
+                "Unknown".to_string()
+            };
+            vm.write_output(
+                format!("{}resource({}) of type ({}) refcount(2)\n", prefix, id, t).as_bytes(),
+            );
+        }
         Value::Null | Value::Undef => {
             vm.write_output(format!("{}NULL\n", prefix).as_bytes());
         }
@@ -17253,8 +17289,23 @@ fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn get_extension_funcs_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False) // stub
+fn get_extension_funcs_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let name = String::from_utf8_lossy(name.as_bytes()).to_ascii_lowercase();
+    let mut arr = PhpArray::new();
+    for f in goro_core::stub_sigs::FUNCTIONS {
+        if f.ext.eq_ignore_ascii_case(&name)
+            && vm
+                .functions
+                .contains_key(f.name.to_ascii_lowercase().as_bytes())
+        {
+            arr.push(Value::String(PhpString::from_bytes(f.name.as_bytes())));
+        }
+    }
+    if arr.is_empty() {
+        return Ok(Value::False);
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
 // class_implements, class_parents, class_uses moved to goro-ext-spl
@@ -17820,16 +17871,6 @@ fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
-fn get_error_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(vm.error_handler.clone().unwrap_or(Value::Null))
-}
-
-fn get_exception_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // We don't track exception handler separately yet, return null
-    let _ = vm;
-    Ok(Value::Null)
-}
-
 fn get_included_files_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
     for f in &vm.included_files_list {
@@ -18095,81 +18136,155 @@ fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let output = std::process::Command::new("sh")
+/// php_exec_ex(): zpp of exec()/system()/passthru() ($command is a path
+/// string: no NUL bytes, not empty).
+fn exec_command_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Vec<u8>, VmError> {
+    let cmd = args.first().unwrap_or(&Value::Null).to_php_string();
+    let cmd = cmd.as_bytes().to_vec();
+    if cmd.contains(&0) {
+        return Err(throw_value_error_in(
+            vm,
+            fname,
+            args,
+            &format!(
+                "{}(): Argument #1 ($command) must not contain any null bytes",
+                fname
+            ),
+        ));
+    }
+    if cmd.is_empty() {
+        return Err(throw_value_error_in(
+            vm,
+            fname,
+            args,
+            &format!("{}(): Argument #1 ($command) must not be empty", fname),
+        ));
+    }
+    Ok(cmd)
+}
+
+fn exec_strip_trailing_whitespace(line: &[u8]) -> &[u8] {
+    let mut l = line.len();
+    while l > 0 && matches!(line[l - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        l -= 1;
+    }
+    &line[..l]
+}
+
+/// php_exec(): run `cmd` through /bin/sh. Mode 1 (system) echoes each
+/// line, mode 2 (exec) collects the lines without trailing whitespace into
+/// `array`, mode 3 (passthru) copies the raw output. Returns the return
+/// value (the last line for modes 1/2) and the exit status.
+fn php_exec(
+    vm: &mut Vm,
+    fname: &str,
+    mode: u8,
+    cmd: &[u8],
+    array: Option<&Rc<RefCell<PhpArray>>>,
+) -> (Value, i64) {
+    use std::io::{BufRead, Read};
+    #[cfg(unix)]
+    let cmd_os = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(cmd).to_os_string()
+    };
+    #[cfg(not(unix))]
+    let cmd_os = std::ffi::OsString::from(String::from_utf8_lossy(cmd).into_owned());
+    let child = std::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg(&command)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let raw_lines: Vec<&str> = stdout.split('\n').collect();
-            // Remove trailing empty element from final newline
-            let lines: Vec<&str> = if raw_lines.last() == Some(&"") && raw_lines.len() > 1 {
-                raw_lines[..raw_lines.len() - 1].to_vec()
-            } else {
-                raw_lines
-            };
-            let last_line = lines.last().map(|s| s.to_string()).unwrap_or_default();
-
-            // If $output array ref is provided (args[1]), fill it
-            if let Some(output_ref) = args.get(1) {
-                if let Value::Reference(r) = output_ref {
-                    let inner = r.borrow().clone();
-                    let arr = match inner {
-                        Value::Array(a) => a,
-                        _ => {
-                            let a = Rc::new(RefCell::new(PhpArray::new()));
-                            *r.borrow_mut() = Value::Array(a.clone());
-                            a
-                        }
-                    };
-                    let mut arr_mut = arr.borrow_mut();
-                    for line in &lines {
-                        arr_mut.push(Value::String(PhpString::from_string(line.to_string())));
-                    }
-                }
-            }
-
-            // If $result_code ref is provided (args[2]), set the exit code
-            if let Some(code_ref) = args.get(2) {
-                if let Value::Reference(r) = code_ref {
-                    *r.borrow_mut() = Value::Long(out.status.code().unwrap_or(-1) as i64);
-                }
-            }
-
-            Ok(Value::String(PhpString::from_string(last_line)))
+        .arg(cmd_os)
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => {
+            let line = vm.current_line;
+            vm.emit_warning_at(
+                &format!(
+                    "{}(): Unable to fork [{}]",
+                    fname,
+                    String::from_utf8_lossy(cmd)
+                ),
+                line,
+            );
+            return (Value::False, -1);
         }
-        Err(_) => Ok(Value::False),
+    };
+    let mut ret = Value::Null;
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = std::io::BufReader::new(stdout);
+        if mode == 3 {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                vm.write_output(&buf[..n]);
+            }
+        } else {
+            let mut last: Option<Vec<u8>> = None;
+            loop {
+                let mut line = Vec::new();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if mode == 1 {
+                    vm.write_output(&line);
+                } else if let Some(arr) = array {
+                    let stripped = exec_strip_trailing_whitespace(&line).to_vec();
+                    arr.borrow_mut()
+                        .push(Value::String(PhpString::from_vec(stripped)));
+                }
+                last = Some(line);
+            }
+            let last = last.unwrap_or_default();
+            ret = Value::String(PhpString::from_vec(
+                exec_strip_trailing_whitespace(&last).to_vec(),
+            ));
+        }
+    }
+    let code = match child.wait() {
+        Ok(st) => st.code().map(i64::from).unwrap_or(-1),
+        Err(_) => -1,
+    };
+    (ret, code)
+}
+
+fn exec_assign_ref(v: Option<&Value>, val: Value) {
+    if let Some(Value::Reference(r)) = v {
+        *r.borrow_mut() = val;
     }
 }
 
-fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = &out.stdout;
-            vm.write_output(stdout);
-            let stdout_str = String::from_utf8_lossy(stdout);
-            let lines: Vec<&str> = stdout_str.trim_end_matches('\n').split('\n').collect();
-            let last_line = lines.last().map(|s| s.to_string()).unwrap_or_default();
-            Ok(Value::String(PhpString::from_string(last_line)))
+fn exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cmd = exec_command_arg(vm, "exec", args)?;
+    let array = match args.get(1) {
+        Some(Value::Reference(r)) => {
+            let cur = r.borrow().clone();
+            let a = match cur {
+                Value::Array(a) => {
+                    // SEPARATE_ARRAY
+                    let copy = a.borrow().clone();
+                    Rc::new(RefCell::new(copy))
+                }
+                _ => Rc::new(RefCell::new(PhpArray::new())),
+            };
+            *r.borrow_mut() = Value::Array(a.clone());
+            Some(a)
         }
-        Err(_) => Ok(Value::False),
-    }
+        _ => None,
+    };
+    let (ret, code) = php_exec(vm, "exec", 2, &cmd, array.as_ref());
+    exec_assign_ref(args.get(2), Value::Long(code));
+    Ok(ret)
+}
+
+fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cmd = exec_command_arg(vm, "system", args)?;
+    let (ret, code) = php_exec(vm, "system", 1, &cmd, None);
+    exec_assign_ref(args.get(1), Value::Long(code));
+    Ok(ret)
 }
 
 fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -18192,22 +18307,10 @@ fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn passthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .output();
-    match output {
-        Ok(out) => {
-            vm.write_output(&out.stdout);
-            Ok(Value::Null)
-        }
-        Err(_) => Ok(Value::False),
-    }
+    let cmd = exec_command_arg(vm, "passthru", args)?;
+    let (ret, code) = php_exec(vm, "passthru", 3, &cmd, None);
+    exec_assign_ref(args.get(1), Value::Long(code));
+    Ok(ret)
 }
 
 struct GetoptOpt {
@@ -20582,8 +20685,23 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     })
 }
 
-fn ignore_user_abort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn ignore_user_abort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let old = vm
+        .constants
+        .get(b"ignore_user_abort".as_slice())
+        .map(ini_parse_bool)
+        .unwrap_or(false);
+    if let Some(v) = args.first() {
+        if !matches!(v, Value::Null) {
+            let new = if v.is_truthy() { "1" } else { "0" };
+            ini_remember(vm, b"ignore_user_abort");
+            vm.constants.insert(
+                b"ignore_user_abort".to_vec(),
+                Value::String(PhpString::from_bytes(new.as_bytes())),
+            );
+        }
+    }
+    Ok(Value::Long(old as i64))
 }
 
 fn connection_aborted_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -20594,24 +20712,69 @@ fn connection_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
     Ok(Value::Long(0))
 }
 
-fn time_nanosleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn time_nanosleep_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let seconds = args.first().map(|v| v.to_long()).unwrap_or(0);
     let nanoseconds = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if seconds < 0 {
+        return Err(throw_value_error_in(
+            vm,
+            "time_nanosleep",
+            args,
+            "time_nanosleep(): Argument #1 ($seconds) must be greater than or equal to 0",
+        ));
+    }
+    if nanoseconds < 0 {
+        return Err(throw_value_error_in(
+            vm,
+            "time_nanosleep",
+            args,
+            "time_nanosleep(): Argument #2 ($nanoseconds) must be greater than or equal to 0",
+        ));
+    }
+    // nanosleep() fails with EINVAL
+    if nanoseconds > 999_999_999 {
+        return Err(throw_value_error_in(
+            vm,
+            "time_nanosleep",
+            args,
+            "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
+        ));
+    }
     let duration = std::time::Duration::new(seconds as u64, nanoseconds as u32);
     std::thread::sleep(duration);
     Ok(Value::True)
 }
 
-fn time_sleep_until_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let timestamp = args.first().map(|v| v.to_double()).unwrap_or(0.0);
+fn time_sleep_until_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const NS_PER_SEC: u64 = 1_000_000_000;
+    let top = (u64::MAX / NS_PER_SEC) as f64;
+    let target = args.first().map(|v| v.to_double()).unwrap_or(0.0);
+    if !(target >= 0.0 && target <= top) {
+        return Err(throw_value_error_in(
+            vm,
+            "time_sleep_until",
+            args,
+            &format!(
+                "time_sleep_until(): Argument #1 ($timestamp) must be between 0 and {}",
+                u64::MAX / NS_PER_SEC
+            ),
+        ));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    if timestamp > now {
-        let sleep_time = timestamp - now;
-        std::thread::sleep(std::time::Duration::from_secs_f64(sleep_time));
+        .unwrap_or_default();
+    // gettimeofday() resolution
+    let current_ns = now.as_secs() * NS_PER_SEC + u64::from(now.subsec_micros()) * 1000;
+    let target_ns = (target * NS_PER_SEC as f64) as u64;
+    if target_ns < current_ns {
+        let line = vm.current_line;
+        vm.emit_warning_at(
+            "time_sleep_until(): Argument #1 ($timestamp) must be greater than or equal to the current time",
+            line,
+        );
+        return Ok(Value::False);
     }
+    std::thread::sleep(std::time::Duration::from_nanos(target_ns - current_ns));
     Ok(Value::True)
 }
 

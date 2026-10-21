@@ -68,6 +68,52 @@ impl Vm {
     }
 
     /// The shared `$GLOBALS` array.
+    /// get_defined_vars(): a copy of the symbol table at global scope, else
+    /// the frame's set variables in CV order (without $this).
+    pub fn defined_vars(&self, cvs: &[Value], op_array: &crate::opcode::OpArray) -> PhpArray {
+        let copy = |v: Value| match v {
+            Value::Array(a) => {
+                let c = a.borrow().clone();
+                Value::Array(Rc::new(RefCell::new(c)))
+            }
+            v => v,
+        };
+        let mut result = PhpArray::new();
+        if self.is_global_scope {
+            for (k, v) in self.globals_array().borrow().iter() {
+                match v.deref() {
+                    Value::Undef => {}
+                    v => result.set(k.clone(), copy(v)),
+                }
+            }
+        } else {
+            // goro's CV layout is [$this][closure uses][params][locals];
+            // php-src lists params first, then uses, then locals.
+            let n = op_array.cv_names.len();
+            let nparams = (op_array.param_count as usize).min(n);
+            let hidden = nparams.saturating_sub(op_array.param_attributes.len());
+            let order = (hidden..nparams).chain(0..hidden).chain(nparams..n);
+            for i in order {
+                let name = &op_array.cv_names[i];
+                if name.as_slice() == b"this" {
+                    continue;
+                }
+                match cvs.get(i) {
+                    // zend_array_dup() keeps shared references
+                    Some(Value::Reference(r)) if Rc::strong_count(r) > 1 => {
+                        result.set(gkey(name), Value::Reference(r.clone()))
+                    }
+                    Some(v) => match v.deref() {
+                        Value::Undef => {}
+                        v => result.set(gkey(name), copy(v)),
+                    },
+                    None => {}
+                }
+            }
+        }
+        result
+    }
+
     pub fn globals_array(&self) -> Rc<RefCell<PhpArray>> {
         self.globals.clone()
     }

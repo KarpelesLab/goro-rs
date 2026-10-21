@@ -10201,6 +10201,28 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
+                        // C::$p[k] = v: an array the write created from a
+                        // null/unset C::$p is stored back into the property.
+                        if let (ExprKind::StaticPropertyAccess { .. }, OperandType::Tmp(_)) =
+                            (&array.kind, &arr_op)
+                        {
+                            let fetch = self
+                                .op_array
+                                .ops
+                                .iter()
+                                .rev()
+                                .find(|o| o.result == arr_op && o.opcode == OpCode::StaticPropFetch)
+                                .map(|o| (o.op1, o.op2));
+                            if let Some((cls, name)) = fetch {
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::StaticPropSet,
+                                    op1: cls,
+                                    op2: arr_op,
+                                    result: name,
+                                    line: expr.span.line,
+                                });
+                            }
+                        }
                         Ok(val)
                     }
                     ExprKind::PropertyAccess {
@@ -11037,6 +11059,19 @@ impl Compiler {
                 // Special case: compact() - build array from variable names
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let unqualified = func_lower.strip_prefix(b"\\").unwrap_or(&func_lower);
+                    if unqualified == b"get_defined_vars" && args.is_empty() {
+                        // Reads the calling scope's variables.
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::GetDefinedVars,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
+                    }
                     if func_lower == b"extract" && !args.is_empty() {
                         // extract($array [, $flags [, $prefix]])
                         // Compile the array argument

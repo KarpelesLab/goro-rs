@@ -2522,18 +2522,44 @@ impl Vm {
             Value::String(s) => {
                 if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
                     let lname = s.as_bytes().to_ascii_lowercase();
-                    // zpp runs first: func_get_arg() takes exactly one argument.
-                    let (cls, msg): (&[u8], String) = if lname == b"func_get_arg" && args.len() != 1
-                    {
-                        (
+                    // zpp runs first: (min, max) argument counts.
+                    let (min, max) = match lname.as_slice() {
+                        b"func_get_arg" => (1, Some(1)),
+                        b"compact" => (1, None),
+                        b"extract" => (1, Some(3)),
+                        _ => (0, Some(0)),
+                    };
+                    let n = args.len();
+                    let arity = if n < min {
+                        Some((
+                            if max == Some(min) {
+                                "exactly"
+                            } else {
+                                "at least"
+                            },
+                            min,
+                        ))
+                    } else {
+                        match max {
+                            Some(m) if n > m => {
+                                Some((if m == min { "exactly" } else { "at most" }, m))
+                            }
+                            _ => None,
+                        }
+                    };
+                    let (cls, msg): (&[u8], String) = match arity {
+                        Some((q, k)) => (
                             b"ArgumentCountError",
                             format!(
-                                "func_get_arg() expects exactly 1 argument, {} given",
-                                args.len()
+                                "{}() expects {} {} argument{}, {} given",
+                                String::from_utf8_lossy(&lname),
+                                q,
+                                k,
+                                if k == 1 { "" } else { "s" },
+                                n
                             ),
-                        )
-                    } else {
-                        (b"Error", msg)
+                        ),
+                        None => (b"Error", msg),
                     };
                     self.push_builtin_frame(&lname, args, 0);
                     let exc = self.create_exception(cls, &msg, self.current_line);
@@ -18520,6 +18546,18 @@ impl Vm {
                 // Function calls
                 OpCode::InitFCall => {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // INIT_DYNAMIC_CALL on an undefined CV warns first.
+                    if matches!(name_val, Value::Undef) {
+                        if let OperandType::Cv(idx) = &op.op1 {
+                            if let Some(name) = op_array.cv_names.get(*idx as usize) {
+                                let msg = format!(
+                                    "Undefined variable ${}",
+                                    String::from_utf8_lossy(name)
+                                );
+                                self.emit_warning_at(&msg, op.line);
+                            }
+                        }
+                    }
                     let from_closure = name_val.is_closure_obj();
                     let name_val = name_val.unwrap_closure();
                     // `$callable()` where $callable is an [obj|class, method] array
@@ -18735,8 +18773,11 @@ impl Vm {
                         _ => None,
                     };
                     if let Some((cls, msg)) = dyn_err {
-                        let exc = self.create_exception(cls, &msg, op.line);
-                        self.current_exception = Some(exc);
+                        // An exception thrown by the error handler wins.
+                        if self.current_exception.is_none() {
+                            let exc = self.create_exception(cls, &msg, op.line);
+                            self.current_exception = Some(exc);
+                        }
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                             exception_handlers.last()
                         {
@@ -22722,7 +22763,12 @@ impl Vm {
                                             fn_display, custom_msg
                                         )
                                     };
-                                    self.emit_warning_at(&msg, op.line);
+                                    // zend_nodiscard_function(): E_USER_WARNING for user functions
+                                    self.raise_error(
+                                        crate::errdisplay::E_USER_WARNING,
+                                        &msg,
+                                        op.line,
+                                    );
                                 }
                             }
                         }
@@ -28297,6 +28343,11 @@ impl Vm {
                                     }
                                 }
                             }
+                        } else if let OperandType::Tmp(t) = &op.op1 {
+                            // See ArraySet: a fetched static property.
+                            if let Some(slot) = tmps.get_mut(*t as usize) {
+                                *slot = new_arr;
+                            }
                         }
                     }
                 }
@@ -28497,6 +28548,12 @@ impl Vm {
                                         *cv_val = new_arr;
                                     }
                                 }
+                            }
+                        } else if let OperandType::Tmp(t) = &op.op1 {
+                            // A fetched static property: the compiler stores
+                            // the temporary back (StaticPropSet).
+                            if let Some(slot) = tmps.get_mut(*t as usize) {
+                                *slot = new_arr;
                             }
                         }
                     } else if let Some(msg) = matches!(arr_val, Value::Object(_))
@@ -28717,6 +28774,16 @@ impl Vm {
                         &static_cv_keys,
                     );
                 }
+                OpCode::GetDefinedVars => {
+                    let result = self.defined_vars(&cvs, op_array);
+                    self.write_operand(
+                        &op.result,
+                        Value::Array(Rc::new(RefCell::new(result))),
+                        &mut cvs,
+                        &mut tmps,
+                        &static_cv_keys,
+                    );
+                }
                 OpCode::CompactSet => {
                     // Like ArraySet but skip if the CV is Undef (emit warning)
                     let val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
@@ -28864,7 +28931,19 @@ impl Vm {
                     if matches!(arr_val, Value::Undef | Value::Null) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
-                    let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // FETCH_DIM_R reads its key operand for reading (warns).
+                    let key_val = if matches!(op.opcode, OpCode::ArrayGet) {
+                        self.read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    } else {
+                        self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                    };
                     if let Value::Object(obj) = &arr_val.deref() {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension) {
                             let k = key_val.deref();
