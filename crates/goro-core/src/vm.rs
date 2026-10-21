@@ -14809,6 +14809,26 @@ impl Vm {
         }
     }
 
+    /// Entering a function: the file it was compiled from becomes the
+    /// executing file (zend_get_executed_filename()). Returns the caller's
+    /// file to restore with [`Self::leave_op_array_file`], if it changed.
+    #[inline]
+    pub(crate) fn enter_op_array_file(&mut self, op_array: &OpArray) -> Option<String> {
+        let f = &op_array.filename;
+        if f.is_empty() || f.as_slice() == self.current_file.as_bytes() {
+            return None;
+        }
+        let file = String::from_utf8_lossy(f).into_owned();
+        Some(std::mem::replace(&mut self.current_file, file))
+    }
+
+    #[inline]
+    pub(crate) fn leave_op_array_file(&mut self, saved: Option<String>) {
+        if let Some(f) = saved {
+            self.current_file = f;
+        }
+    }
+
     fn execute_op_array_inner(
         &mut self,
         op_array: &OpArray,
@@ -14818,6 +14838,7 @@ impl Vm {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
         let mut fin = Vec::new();
+        let saved_file = self.enter_op_array_file(op_array);
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         self.gc_frames
             .push(crate::gc::GcFrame::new(&cvs, &tmps, has_this));
@@ -14833,6 +14854,7 @@ impl Vm {
         // i_free_compiled_variables: locals still shared elsewhere become
         // possible cycle roots.
         crate::gc::release_frame(&cvs);
+        self.leave_op_array_file(saved_file);
         // An exception leaving the frame escapes every finally block still
         // running: each one's pending exception becomes its previous.
         if r.is_err() {
@@ -50111,10 +50133,15 @@ impl Vm {
         ));
 
         let bases = self.fiber_stack_bases();
+        let caller_file = self.current_file.clone();
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
 
-        let fiber_susp_pos = (self.current_file.clone(), self.current_line);
+        // Back in the caller's file (the fiber may have suspended elsewhere).
+        let fiber_susp_pos = (
+            std::mem::replace(&mut self.current_file, caller_file),
+            self.current_line,
+        );
         self.call_stack.truncate(fiber_stack_base);
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);
@@ -50891,9 +50918,17 @@ impl Vm {
         ));
         let bases = self.fiber_stack_bases();
         self.fiber_enter_stacks(&mut fiber);
+        // The fiber resumes in the file it was suspended in.
+        let caller_file = match &fiber.suspended_at {
+            Some((f, _)) => std::mem::replace(&mut self.current_file, f.clone()),
+            None => self.current_file.clone(),
+        };
         let result = fiber.resume(input);
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
-        let fiber_susp_pos = (self.current_file.clone(), self.current_line);
+        let fiber_susp_pos = (
+            std::mem::replace(&mut self.current_file, caller_file),
+            self.current_line,
+        );
         self.call_stack.pop();
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);

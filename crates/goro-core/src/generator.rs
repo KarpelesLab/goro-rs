@@ -583,7 +583,9 @@ impl PhpGenerator {
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
         }
+        let saved_file = vm.enter_op_array_file(&self.op_array);
         let result = self.resume_inner(vm);
+        vm.leave_op_array_file(saved_file);
         if cv_frame {
             vm.cv_frames.pop();
         }
@@ -3107,7 +3109,9 @@ impl PhpGenerator {
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
         }
+        let saved_file = vm.enter_op_array_file(&self.op_array);
         let result = self.resume_inner(vm);
+        vm.leave_op_array_file(saved_file);
         if cv_frame {
             vm.cv_frames.pop();
         }
