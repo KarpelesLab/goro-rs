@@ -496,6 +496,9 @@ pub struct Vm {
     /// When Some, E_WARNINGs are collected here instead of being reported
     /// (emulates php-src's EH_THROW error handling for SPL constructors).
     pub warning_capture: Option<Vec<String>>,
+    /// call_stack depths (and frame names) of frames pushed for built-in
+    /// SPL methods, so user methods they call show "[internal function]".
+    pub(crate) spl_internal_frames: Vec<(usize, String)>,
     /// unserialize() one value at a byte position (set by ext/standard).
     pub unserialize_value_hook: Option<fn(&mut Vm, &[u8], &mut usize) -> Option<Value>>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
@@ -1416,6 +1419,7 @@ impl Vm {
             native_class_handlers: std::collections::HashMap::new(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
+            spl_internal_frames: Vec::new(),
             unserialize_value_hook: None,
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();

@@ -203,8 +203,11 @@ impl Vm {
                 return Value::Null;
             }
         }
-        self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
+        let frame = format!("{}->{}", decl_disp, method_disp);
+        self.call_stack.push((frame.clone(), self.current_file.clone(), line, call_args[1..].to_vec(), true));
+        self.spl_internal_frames.push((self.call_stack.len(), frame));
         let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
+        self.spl_internal_frames.pop();
         drop(call_args);
         // Values the built-in dropped from its storage are destroyed now.
         if !self.destructible_objects.is_empty() {
@@ -560,7 +563,65 @@ impl Vm {
         let base = self.spl_builtin_base(&cl).map(|b| b.to_vec()).unwrap_or(cl);
         let disp = self.builtin_canonical_name(&base);
         let line = self.current_line;
-        self.call_stack.push((format!("{}->__construct", disp), self.current_file.clone(), line, args.to_vec(), true));
+        let frame = format!("{}->__construct", disp);
+        self.call_stack.push((frame.clone(), self.current_file.clone(), line, args.to_vec(), true));
+        self.spl_internal_frames.push((self.call_stack.len(), frame));
+    }
+
+    /// Whether the innermost frame is a built-in SPL method (stale entries
+    /// of frames popped without unregistering are discarded).
+    pub(crate) fn spl_caller_is_internal(&mut self) -> bool {
+        let len = self.call_stack.len();
+        while matches!(self.spl_internal_frames.last(), Some((n, _)) if *n > len) {
+            self.spl_internal_frames.pop();
+        }
+        match (self.spl_internal_frames.last(), self.call_stack.last()) {
+            (Some((n, name)), Some(top)) => *n == len && *name == top.0,
+            _ => false,
+        }
+    }
+
+    /// Call a method from built-in SPL code. A user-defined method gets a
+    /// stack frame located at "[internal function]" when called from a
+    /// built-in method, or at the current line otherwise (e.g. foreach).
+    pub(crate) fn spl_call_method(&mut self, obj_val: &Value, method: &[u8], args: &[Value]) -> Option<Value> {
+        let internal = self.spl_caller_is_internal();
+        self.spl_call_method_at(obj_val, method, args, internal)
+    }
+
+    /// spl_call_method() with an explicit caller kind (`internal`: called
+    /// from a built-in function or method).
+    pub(crate) fn spl_call_method_at(&mut self, obj_val: &Value, method: &[u8], args: &[Value], internal: bool) -> Option<Value> {
+        let frame = match obj_val {
+            Value::Object(o) => {
+                let cl = obj_class_lower(o);
+                let ml: Vec<u8> = method.iter().map(|b| b.to_ascii_lowercase()).collect();
+                self.classes.get(&cl).and_then(|c| c.get_method(&ml)).map(|m| {
+                    let decl = self
+                        .classes
+                        .get(&m.declaring_class)
+                        .map(|dc| String::from_utf8_lossy(&dc.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&m.declaring_class).to_string());
+                    let sep = if m.is_static { "::" } else { "->" };
+                    format!("{}{}{}", decl, sep, String::from_utf8_lossy(&m.name))
+                })
+            }
+            _ => None,
+        };
+        match frame {
+            Some(name) => {
+                let (file, line) = if internal {
+                    (String::new(), 0)
+                } else {
+                    (self.current_file.clone(), self.current_line)
+                };
+                self.call_stack.push((name, file, line, args.to_vec(), true));
+                let r = self.call_object_method(obj_val, method, args);
+                self.call_stack.pop();
+                r
+            }
+            None => self.call_object_method(obj_val, method, args),
+        }
     }
 
     /// get_iterator-time checks done by foreach. Returns false with an

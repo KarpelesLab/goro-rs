@@ -137,7 +137,7 @@ impl Vm {
     pub(crate) fn it_rewind(&mut self, it: &Value) {
         match it {
             Value::Object(_) => {
-                self.call_object_method(it, b"rewind", &[]);
+                self.spl_call_method(it, b"rewind", &[]);
             }
             Value::Generator(g) => {
                 let (created, advanced) = match g.try_borrow() {
@@ -156,7 +156,7 @@ impl Vm {
 
     pub(crate) fn it_valid(&mut self, it: &Value) -> bool {
         match it {
-            Value::Object(_) => self.call_object_method(it, b"valid", &[]).map(|v| v.is_truthy()).unwrap_or(false),
+            Value::Object(_) => self.spl_call_method(it, b"valid", &[]).map(|v| v.is_truthy()).unwrap_or(false),
             Value::Generator(g) => {
                 self.gen_prime(g);
                 !matches!(g.try_borrow().map(|b| b.state.clone()), Ok(crate::generator::GeneratorState::Completed))
@@ -167,7 +167,7 @@ impl Vm {
 
     pub(crate) fn it_current(&mut self, it: &Value) -> Value {
         match it {
-            Value::Object(_) => self.call_object_method(it, b"current", &[]).unwrap_or(Value::Null),
+            Value::Object(_) => self.spl_call_method(it, b"current", &[]).unwrap_or(Value::Null),
             Value::Generator(g) => {
                 self.gen_prime(g);
                 g.try_borrow().map(|b| b.current_value.clone()).unwrap_or(Value::Null)
@@ -178,7 +178,7 @@ impl Vm {
 
     pub(crate) fn it_key(&mut self, it: &Value) -> Value {
         match it {
-            Value::Object(_) => self.call_object_method(it, b"key", &[]).unwrap_or(Value::Null),
+            Value::Object(_) => self.spl_call_method(it, b"key", &[]).unwrap_or(Value::Null),
             Value::Generator(g) => {
                 self.gen_prime(g);
                 g.try_borrow().map(|b| b.current_key.clone()).unwrap_or(Value::Null)
@@ -190,7 +190,7 @@ impl Vm {
     pub(crate) fn it_next(&mut self, it: &Value) {
         match it {
             Value::Object(_) => {
-                self.call_object_method(it, b"next", &[]);
+                self.spl_call_method(it, b"next", &[]);
             }
             Value::Generator(g) => {
                 self.gen_prime(g);
@@ -264,7 +264,7 @@ impl Vm {
                 Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
                 _ => String::new(),
             };
-            let r = self.call_object_method(&cur, b"getIterator", &[]).unwrap_or(Value::Null);
+            let r = self.spl_call_method_at(&cur, b"getIterator", &[], true).unwrap_or(Value::Null);
             if self.exc() {
                 return Value::Null;
             }
@@ -402,7 +402,7 @@ impl Vm {
     fn filter_fetch(&mut self, obj: &Rc<RefCell<PhpObject>>) {
         let this = Value::Object(obj.clone());
         while self.dit_fetch(obj, true) {
-            let r = self.call_object_method(&this, b"accept", &[]);
+            let r = self.spl_call_method(&this, b"accept", &[]);
             if let Some(r) = r {
                 if !self.exc() && r.is_truthy() {
                     return;
@@ -449,7 +449,7 @@ impl Vm {
         let cur = lprop(obj, b"__spl_pos", 0);
         if pos != cur && self.obj_instanceof(&inner, b"seekableiterator") {
             Self::dit_free(obj);
-            self.call_object_method(&inner, b"seek", &[Value::Long(pos)]);
+            self.spl_call_method(&inner, b"seek", &[Value::Long(pos)]);
             if !self.exc() {
                 set_prop(obj, b"__spl_pos", Value::Long(pos));
                 if self.limit_valid(obj) {
@@ -498,7 +498,7 @@ impl Vm {
             }
             if Self::dit_type(obj) == Some(DIT_RCACHING) {
                 let inner = Self::dit_inner(obj);
-                let r = self.call_object_method(&inner, b"hasChildren", &[]);
+                let r = self.spl_call_method(&inner, b"hasChildren", &[]);
                 if self.exc() {
                     if flags & CIT_CATCH_GET_CHILD != 0 {
                         self.current_exception = None;
@@ -506,7 +506,7 @@ impl Vm {
                         return;
                     }
                 } else if r.map(|v| v.is_truthy()).unwrap_or(false) {
-                    let ch = self.call_object_method(&inner, b"getChildren", &[]).unwrap_or(Value::Null);
+                    let ch = self.spl_call_method(&inner, b"getChildren", &[]).unwrap_or(Value::Null);
                     if self.exc() {
                         if flags & CIT_CATCH_GET_CHILD != 0 {
                             self.current_exception = None;
@@ -779,7 +779,7 @@ impl Vm {
                             Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
                             _ => String::new(),
                         };
-                        let r = self.call_object_method(&inner, b"getIterator", &[]);
+                        let r = self.spl_call_method(&inner, b"getIterator", &[]);
                         if self.exc() {
                             return false;
                         }
@@ -982,11 +982,11 @@ impl Vm {
             | (b"parentiterator", b"accept")
             | (b"recursiveregexiterator", b"haschildren") => {
                 let inner = Self::dit_inner(obj);
-                self.call_object_method(&inner, b"hasChildren", &[]).unwrap_or(Value::Null)
+                self.spl_call_method(&inner, b"hasChildren", &[]).unwrap_or(Value::Null)
             }
             (b"recursivefilteriterator", b"getchildren") => {
                 let inner = Self::dit_inner(obj);
-                let ch = self.call_object_method(&inner, b"getChildren", &[]);
+                let ch = self.spl_call_method(&inner, b"getChildren", &[]);
                 if self.exc() {
                     return Some(Value::Null);
                 }
@@ -995,7 +995,7 @@ impl Vm {
             }
             (b"recursivecallbackfilteriterator", b"getchildren") => {
                 let inner = Self::dit_inner(obj);
-                let ch = self.call_object_method(&inner, b"getChildren", &[]);
+                let ch = self.spl_call_method(&inner, b"getChildren", &[]);
                 if self.exc() {
                     return Some(Value::Null);
                 }
@@ -1005,7 +1005,7 @@ impl Vm {
             }
             (b"recursiveregexiterator", b"getchildren") => {
                 let inner = Self::dit_inner(obj);
-                let ch = self.call_object_method(&inner, b"getChildren", &[]);
+                let ch = self.spl_call_method(&inner, b"getChildren", &[]);
                 if self.exc() {
                     return Some(Value::Null);
                 }
@@ -1506,7 +1506,7 @@ impl Vm {
     }
 
     fn rii_call_hook(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Value> {
-        self.call_object_method(&Value::Object(obj.clone()), name, &[])
+        self.spl_call_method(&Value::Object(obj.clone()), name, &[])
     }
 
     fn rii_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, base: &[u8], args: &[Value]) -> bool {
@@ -1629,7 +1629,7 @@ impl Vm {
             Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
             _ => String::new(),
         };
-        let r = self.call_object_method(agg, b"getIterator", &[]);
+        let r = self.spl_call_method(agg, b"getIterator", &[]);
         if self.exc() {
             return None;
         }
@@ -1728,7 +1728,7 @@ impl Vm {
                     let r = if Self::rii_hook(obj, H_CALL_HAS) {
                         self.rii_call_hook(obj, b"callHasChildren")
                     } else {
-                        self.call_object_method(&it, b"hasChildren", &[])
+                        self.spl_call_method(&it, b"hasChildren", &[])
                     };
                     if self.exc() {
                         if !catch {
@@ -1783,7 +1783,7 @@ impl Vm {
                     let child = if Self::rii_hook(obj, H_CALL_GET) {
                         self.rii_call_hook(obj, b"callGetChildren")
                     } else {
-                        self.call_object_method(&it, b"getChildren", &[])
+                        self.spl_call_method(&it, b"getChildren", &[])
                     };
                     if self.exc() {
                         if !catch {
@@ -1855,7 +1855,7 @@ impl Vm {
         let level = Self::rii_level(obj);
         for l in 0..level {
             let it = Self::rii_it_at(obj, l);
-            let hn = self.call_object_method(&it, b"hasNext", &[]);
+            let hn = self.spl_call_method(&it, b"hasNext", &[]);
             if let Some(hn) = hn {
                 if matches!(hn, Value::True) {
                     s.extend_from_slice(&part(1));
@@ -1865,7 +1865,7 @@ impl Vm {
             }
         }
         let it = Self::rii_it_at(obj, level);
-        let hn = self.call_object_method(&it, b"hasNext", &[]);
+        let hn = self.spl_call_method(&it, b"hasNext", &[]);
         if let Some(hn) = hn {
             if matches!(hn, Value::True) {
                 s.extend_from_slice(&part(3));
@@ -1967,7 +1967,7 @@ impl Vm {
                 if matches!(it, Value::Null | Value::Undef) {
                     return Some(Value::False);
                 }
-                self.call_object_method(&it, b"hasChildren", &[]).unwrap_or(Value::False)
+                self.spl_call_method(&it, b"hasChildren", &[]).unwrap_or(Value::False)
             }
             (b"recursiveiteratoriterator", b"callgetchildren") => {
                 if !self.rii_check(obj) {
@@ -1977,7 +1977,7 @@ impl Vm {
                 if matches!(it, Value::Null | Value::Undef) {
                     return Some(Value::Null);
                 }
-                self.call_object_method(&it, b"getChildren", &[]).unwrap_or(Value::Null)
+                self.spl_call_method(&it, b"getChildren", &[]).unwrap_or(Value::Null)
             }
             (b"recursiveiteratoriterator", b"setmaxdepth") => {
                 let d = match args.first() {
