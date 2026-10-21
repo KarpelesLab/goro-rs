@@ -530,41 +530,46 @@ fn enum_builtin_props(vm: &Vm, lower: &[u8]) -> &'static [crate::object::Propert
 /// properties and those inherited from internal ancestors (which user
 /// `ClassEntry`s don't copy).
 pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::PropertyDef> {
-    let lower = lower.to_ascii_lowercase();
-    let mut out: Vec<&'a crate::object::PropertyDef> = Vec::new();
-    let ce = match rcls(vm, &lower) {
-        Some(c) => c,
-        None => return out,
-    };
-    // Enum `name`/`value` come first (declared by the engine).
-    out.extend(enum_builtin_props(vm, &lower).iter());
-    out.extend(ce.properties.iter());
-    if !vm.classes.contains_key(&lower) {
-        return out;
-    }
-    let mut cur = ce.parent.clone();
-    let mut guard = 0;
-    while let Some(p) = cur {
-        guard += 1;
-        if guard > 64 { break; }
-        let pl = p.to_ascii_lowercase();
-        let pce = match rcls(vm, &pl) {
+    fn collect<'a>(vm: &'a Vm, lower: &[u8], depth: usize) -> Vec<&'a crate::object::PropertyDef> {
+        let mut out: Vec<&'a crate::object::PropertyDef> = Vec::new();
+        if depth > 64 {
+            return out;
+        }
+        let ce = match rcls(vm, lower) {
             Some(c) => c,
-            None => break,
+            None => return out,
         };
-        if !vm.classes.contains_key(&pl) {
-            for prop in &pce.properties {
-                if prop.visibility == Visibility::Private {
-                    continue;
-                }
-                if !out.iter().any(|x| x.name == prop.name) {
-                    out.push(prop);
-                }
+        if !vm.classes.contains_key(lower) {
+            // Internal: the synthesized entry is already in Zend's order.
+            out.extend(ce.properties.iter());
+            return out;
+        }
+        // Zend's properties_info order: the engine's enum props, the
+        // class's own declarations, then inherited ones (parent's order).
+        out.extend(enum_builtin_props(vm, lower).iter());
+        for p in &ce.properties {
+            if p.declaring_class.eq_ignore_ascii_case(lower) && !out.iter().any(|x| x.name == p.name) {
+                out.push(p);
             }
         }
-        cur = pce.parent.clone();
+        if let Some(parent) = &ce.parent {
+            for pp in collect(vm, &parent.to_ascii_lowercase(), depth + 1) {
+                if out.iter().any(|x| x.name == pp.name) {
+                    continue;
+                }
+                // Prefer the child's own copy (it carries inherited state).
+                let mine = ce.properties.iter().find(|x| x.name == pp.name && x.declaring_class.eq_ignore_ascii_case(&pp.declaring_class));
+                out.push(mine.unwrap_or(pp));
+            }
+        }
+        for p in &ce.properties {
+            if !out.iter().any(|x| x.name == p.name) {
+                out.push(p);
+            }
+        }
+        out
     }
-    out
+    collect(vm, &lower.to_ascii_lowercase(), 0)
 }
 
 /// Find a declared property (see `rprops`).
