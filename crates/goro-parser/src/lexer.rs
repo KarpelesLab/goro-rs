@@ -1132,18 +1132,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Skip a leading `#!` line (the CLI does this for the primary script).
-    pub fn skip_shebang(&mut self) {
-        if self.pos == 0 && self.source.starts_with(b"#!") {
-            while let Some(c) = self.peek() {
-                self.advance();
-                if c == b'\n' {
-                    break;
-                }
-            }
-        }
-    }
-
     fn scan_scripting(&mut self) -> Token {
         self.skip_whitespace();
 
@@ -1704,7 +1692,7 @@ impl<'a> Lexer<'a> {
         }
 
         if !found_closing && label_newline {
-            crate::set_lexer_error("syntax error, unexpected end of file, expecting variable or heredoc end or \"${\" or \"{$\"".into(), self.line);
+            crate::push_lexer_error("syntax error, unexpected end of file, expecting variable or heredoc end or \"${\" or \"{$\"".into(), self.line);
         }
         // Remove trailing newline from content
         if content.last() == Some(&b'\n') {
@@ -1721,7 +1709,7 @@ impl<'a> Lexer<'a> {
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
-                crate::set_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), closing_line);
+                crate::push_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), closing_line);
             }
             let mut stripped = Vec::new();
             let lines: Vec<&[u8]> = if content.is_empty() { Vec::new() } else { content.split(|&b| b == b'\n').collect() };
@@ -1732,14 +1720,14 @@ impl<'a> Lexer<'a> {
                 while skip < indent_len && skip < body.len() {
                     let c = body[skip];
                     if c != b' ' && c != b'\t' {
-                        crate::set_lexer_error(
+                        crate::push_lexer_error(
                             format!("Invalid body indentation level (expecting an indentation level of at least {})", indent_len),
                             first_line + i as u32,
                         );
                         break;
                     }
                     if (c == b' ') != using_spaces {
-                        crate::set_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), first_line + i as u32);
+                        crate::push_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), first_line + i as u32);
                         break;
                     }
                     skip += 1;

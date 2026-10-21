@@ -61,21 +61,3 @@ pub fn take_lexer_deprecations() -> Vec<(String, u32)> {
     LEXER_DEPRECATIONS.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
-thread_local! {
-    /// First syntax error found while lexing (e.g. bad heredoc indentation);
-    /// reported by the parser as a parse error.
-    static LEXER_ERROR: RefCell<Option<(String, u32)>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn set_lexer_error(msg: String, line: u32) {
-    LEXER_ERROR.with(|e| {
-        let mut e = e.borrow_mut();
-        if e.is_none() {
-            *e = Some((msg, line));
-        }
-    });
-}
-
-pub(crate) fn take_lexer_error() -> Option<(String, u32)> {
-    LEXER_ERROR.with(|e| e.borrow_mut().take())
-}
