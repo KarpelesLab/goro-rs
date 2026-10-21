@@ -433,6 +433,9 @@ pub struct Vm {
     /// Bumped whenever an entry of the global symbol table is added,
     /// removed or rebound (see symtab.rs).
     pub(crate) globals_gen: u64,
+    /// Globals made PHP references by `global $x` (IS_REFERENCE in the
+    /// symbol table: skipped by the shutdown symbol-table pass).
+    pub(crate) global_ref_names: std::collections::HashSet<Vec<u8>>,
     /// The next executed op_array is a global-scope frame (main script,
     /// include/eval at global scope) whose CVs live in the symbol table.
     pub(crate) bind_next_frame: bool,
@@ -572,7 +575,7 @@ pub struct Vm {
     /// line to vm.output, so the top-level error handler does not re-emit it.
     pub fatal_emitted: bool,
     /// Stack of property names whose hooks are currently executing (recursion guard)
-    property_hook_stack: Vec<Vec<u8>>,
+    pub(crate) property_hook_stack: Vec<Vec<u8>>,
     /// CVs returned from the most recent include/eval execution (for scope sharing)
     #[allow(dead_code)]
     include_return_cvs: Option<Vec<(Vec<u8>, Value)>>,
@@ -725,6 +728,7 @@ impl Vm {
             ob_pending_fatal: None,
             ob_fname: None,
             globals_gen: 0,
+            global_ref_names: std::collections::HashSet::new(),
             bind_next_frame: false,
             keep_ref_depth: None,
             functions: HashMap::new(),
@@ -14071,6 +14075,13 @@ impl Vm {
                     }
                 };
                 let Some(o) = obj else { continue };
+                let name = match &k {
+                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    ArrayKey::Int(n) => n.to_string().into_bytes(),
+                };
+                if self.global_ref_names.contains(&name) {
+                    continue;
+                }
                 let pos = self
                     .destructible_objects
                     .iter()
@@ -14399,7 +14410,7 @@ impl Vm {
         // Track which foreach iterators are by-reference (stores the source array Rc)
         let mut foreach_ref_arrays: HashMap<u32, Rc<RefCell<PhpArray>>> = HashMap::new();
         // Maps CV index -> static var key (for saving back on write)
-        let mut static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
+        let static_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
         // Exception handler stack: (catch_target, finally_target, exception_tmp_idx, error_reporting_depth, pending_calls_depth)
         let mut exception_handlers: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
         // Saved pending_calls depth to restore when entering a catch block
@@ -41247,10 +41258,24 @@ impl Vm {
                         // Without a constructor the flag is cleared once the
                         // (empty) constructor call completes: `new C(f(), yield)`
                         // abandoned while evaluating arguments is never destructed.
-                        let _ = has_ctor;
-                        if let Value::Object(ref rc) = obj_value {
-                            rc.borrow_mut()
-                                .set_property(b"__ctor_pending".to_vec(), Value::True);
+                        // (Classes deriving from a builtin class construct natively.)
+                        let mut builtin_ancestor = false;
+                        let mut cur = self.classes.get(&name_lower).and_then(|c| c.parent.clone());
+                        for _ in 0..64 {
+                            let Some(p) = cur else { break };
+                            match self.classes.get(&p.to_ascii_lowercase()) {
+                                Some(pc) => cur = pc.parent.clone(),
+                                None => {
+                                    builtin_ancestor = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if has_ctor || !builtin_ancestor {
+                            if let Value::Object(ref rc) = obj_value {
+                                rc.borrow_mut()
+                                    .set_property(b"__ctor_pending".to_vec(), Value::True);
+                            }
                         }
                         self.destructible_objects.push(obj_value.clone());
                     }
@@ -41831,6 +41856,8 @@ impl Vm {
                                     crate::generator::PhpGenerator::new(method.clone(), fn_cvs);
                                 generator.called_class = Some(class_lower.clone());
                                 generator.class_scope = Some(hook_declaring.clone());
+                                // The body runs as this property's hook (backing-store access).
+                                generator.hook_key = Some(hook_key.clone());
                                 let gv = Value::Generator(Rc::new(RefCell::new(generator)));
                                 self.write_operand(
                                     &op.result,

@@ -2414,7 +2414,9 @@ pub fn reflection_class_method(
                         // Static value is stored on the declaring class
                         let val = if is_inherited {
                             rcls(vm, &decl_lower)
-                                .and_then(|d| d.static_properties.get(&prop.name).map(|v| v.deref()))
+                                .and_then(|d| {
+                                    d.static_properties.get(&prop.name).map(|v| v.deref())
+                                })
                                 .unwrap_or_else(|| prop.default.clone())
                         } else {
                             ce.static_properties

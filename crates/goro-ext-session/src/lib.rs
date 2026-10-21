@@ -1033,12 +1033,13 @@ fn session_vars_arr_mut() -> Option<Rc<RefCell<PhpArray>>> {
 
 /// php_session_track_init
 fn track_init(vm: &mut Vm) {
-    let cell = match vm.get_global(b"_SESSION") {
-        Some(Value::Reference(r)) => r,
-        _ => Rc::new(RefCell::new(Value::Null)),
-    };
-    *cell.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
-    vm.bind_superglobal(b"_SESSION", Value::Reference(cell.clone()));
+    // The global's slot is reused: the previous session array is released now.
+    let cell = vm.global_cell(b"_SESSION");
+    let old = std::mem::replace(
+        &mut *cell.borrow_mut(),
+        Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+    );
+    drop(old);
     ps(|p| p.http_session_vars = Some(cell));
 }
 

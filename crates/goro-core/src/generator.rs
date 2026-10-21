@@ -103,6 +103,8 @@ pub struct PhpGenerator {
     pub(crate) gc_tracked: std::cell::Cell<bool>,
     /// The reference yielded by a by-ref generator (bound by `foreach (... as &$v)`).
     pub(crate) current_ref: Option<Rc<RefCell<Value>>>,
+    /// Property hook this generator is the body of (`get { yield ...; }`).
+    pub(crate) hook_key: Option<Vec<u8>>,
 }
 
 impl PhpGenerator {
@@ -143,6 +145,7 @@ impl PhpGenerator {
             saved_calls: Vec::new(),
             gc_tracked: std::cell::Cell::new(false),
             current_ref: None,
+            hook_key: None,
         }
     }
 
@@ -566,7 +569,13 @@ impl PhpGenerator {
         vm.set_global_scope_flag(false);
         let depth = vm.pending_calls_depth();
         vm.restore_pending_calls(std::mem::take(&mut self.saved_calls));
+        if let Some(k) = &self.hook_key {
+            vm.property_hook_stack.push(k.clone());
+        }
         let result = self.resume_body(vm);
+        if self.hook_key.is_some() {
+            vm.property_hook_stack.pop();
+        }
         let leftover = vm.take_pending_calls_from(depth);
         if self.state != GeneratorState::Completed {
             self.saved_calls = leftover;

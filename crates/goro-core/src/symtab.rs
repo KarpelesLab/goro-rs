@@ -96,6 +96,9 @@ impl Vm {
     /// The reference cell of a global, creating the global (as NULL) when
     /// missing — what `global $x` binds to.
     pub fn global_cell(&mut self, name: &[u8]) -> Cell {
+        if !self.global_ref_names.contains(name) {
+            self.global_ref_names.insert(name.to_vec());
+        }
         let key = gkey(name);
         let mut g = self.globals.borrow_mut();
         if let Some(slot) = g.get_mut(&key) {

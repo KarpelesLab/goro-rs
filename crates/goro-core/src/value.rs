@@ -32,6 +32,8 @@ pub fn display_class_name(name: &[u8]) -> String {
 }
 
 thread_local! {
+    /// Nesting depth of Value::compare / Value::equals.
+    static COMPARE_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// PHP `precision` ini setting. Default 14. -1 means shortest roundtrip.
     static PHP_PRECISION: Cell<i32> = const { Cell::new(14) };
     /// PHP `serialize_precision` ini setting. Default -1 (shortest roundtrip).
@@ -731,6 +733,17 @@ impl Value {
 
     /// PHP == comparison
     pub fn equals(&self, other: &Value) -> bool {
+        let depth = COMPARE_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n
+        });
+        let r = depth > 1000 || self.equals_inner(other);
+        COMPARE_DEPTH.with(|d| d.set(depth));
+        r
+    }
+
+    fn equals_inner(&self, other: &Value) -> bool {
         if let Value::Reference(r) = self {
             return r.borrow().equals(other);
         }
@@ -810,6 +823,10 @@ impl Value {
                 }
             }
             (Value::Array(a), Value::Array(b)) => {
+                // Same hash table: equal (zend_hash_compare's ht1 == ht2 shortcut).
+                if std::rc::Rc::ptr_eq(a, b) {
+                    return true;
+                }
                 let a = a.borrow();
                 let b = b.borrow();
                 if a.len() != b.len() {
@@ -945,6 +962,10 @@ impl Value {
             (Value::Double(a), Value::Double(b)) => a == b,
             (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
             (Value::Array(a), Value::Array(b)) => {
+                // Same hash table: equal (zend_hash_compare's ht1 == ht2 shortcut).
+                if std::rc::Rc::ptr_eq(a, b) {
+                    return true;
+                }
                 let a = a.borrow();
                 let b = b.borrow();
                 if a.len() != b.len() {
@@ -969,6 +990,23 @@ impl Value {
 
     /// PHP <=> comparison, returns -1, 0, or 1
     pub fn compare(&self, other: &Value) -> i64 {
+        // Arrays nested into themselves through references: stop instead of
+        // overflowing the stack.
+        let depth = COMPARE_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n
+        });
+        let r = if depth > 1000 {
+            0
+        } else {
+            self.compare_inner(other)
+        };
+        COMPARE_DEPTH.with(|d| d.set(depth));
+        r
+    }
+
+    fn compare_inner(&self, other: &Value) -> i64 {
         if let Value::Reference(r) = self {
             return r.borrow().compare(other);
         }
@@ -1065,6 +1103,10 @@ impl Value {
                 }
             }
             (Value::Array(a), Value::Array(b)) => {
+                // Same hash table: equal (zend_hash_compare's ht1 == ht2 shortcut).
+                if std::rc::Rc::ptr_eq(a, b) {
+                    return 0;
+                }
                 let a = a.borrow();
                 let b = b.borrow();
                 // Compare by size first
