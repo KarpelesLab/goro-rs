@@ -204,6 +204,28 @@ pub fn report_ex(
     }
 }
 
+/// php_libxml_pretend_ctx_error_ex: an error raised by PHP glue code with
+/// a position (the HTML5 parser's tokenizer/tree errors).
+pub fn pretend_error(vm: &mut Vm, fname: &str, file: &str, line: i64, col: i64, msg: &str) {
+    let mut e = XmlError::simple(0, 1, 2, msg.to_string());
+    e.file = Some(file.to_string());
+    e.line = line as i32;
+    e.col = col as i32;
+    let internal = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.last = Some(e.clone());
+        if s.internal {
+            s.errors.push(e.clone());
+            true
+        } else {
+            false
+        }
+    });
+    if !internal && vm.current_exception.is_none() {
+        vm.emit_warning(&format!("{}(): {}", fname, msg));
+    }
+}
+
 /// php_libxml_issue_error / a "pretend" error raised by PHP glue code.
 pub fn issue_error(vm: &mut Vm, fname: &str, msg: &str) {
     let e = XmlError::simple(0, 1, 2, msg.to_string());

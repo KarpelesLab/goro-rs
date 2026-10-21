@@ -212,11 +212,30 @@ pub fn serialize_node(n: NodeId) -> String {
     })
 }
 
-pub fn parse_fragment(vm: &mut Vm, _context: NodeId, _input: &str) -> Option<NodeId> {
-    throw_error(
-        vm,
-        b"Error",
-        "Dom\\HTMLDocument fragment parsing is not supported",
-    );
-    None
+/// dom_html_fragment_parsing_algorithm: parse `input` with `context` as
+/// the context element; returns a new fragment owned by its document.
+pub fn parse_fragment(_vm: &mut Vm, context: NodeId, input: &str) -> Option<NodeId> {
+    let (name, ns, doc) = tree::with(|t| {
+        let doc = t.nodes[context].doc.unwrap_or(context);
+        (
+            t.nodes[context].name.clone(),
+            t.ns_href(t.nodes[context].ns).map(|s| s.to_string()),
+            doc,
+        )
+    });
+    let quirks = doc_props(Some(doc)).quirks_mode;
+    let p =
+        super::html_document::parse_fragment_input(&name, ns.as_deref(), quirks, input.as_bytes());
+    let root = p.fragment_root()?;
+    let (frag, templates) = tree::with(|t| {
+        let frag = t.new_fragment(Some(doc));
+        let tpl = super::html_document::convert(t, &p, root, doc, frag, true);
+        (frag, tpl)
+    });
+    with_doc_props(doc, |props| {
+        for (el, f) in templates {
+            props.templates.insert(el, f);
+        }
+    });
+    Some(frag)
 }

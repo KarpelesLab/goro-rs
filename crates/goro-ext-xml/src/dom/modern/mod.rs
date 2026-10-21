@@ -18,6 +18,7 @@ pub mod collections;
 pub mod css;
 pub mod document;
 pub mod element;
+pub mod html_document;
 pub mod html_serializer;
 pub mod inner_html;
 pub mod node;
@@ -806,10 +807,8 @@ pub fn call_static(vm: &mut Vm, b: Base, m: &str, a: &[Value]) -> R<Value> {
         (Base::MXmlDocument, "createfromstring") => document::xml_load(vm, a, false),
         (Base::MXmlDocument, "createfromfile") => document::xml_load(vm, a, true),
         (Base::MHtmlDocument, "createempty") => document::html_create_empty(vm, a),
-        (Base::MHtmlDocument, _) => {
-            throw_error(vm, b"Error", "Dom\\HTMLDocument parsing is not supported");
-            Err(())
-        }
+        (Base::MHtmlDocument, "createfromstring") => html_document::html_load(vm, a, false),
+        (Base::MHtmlDocument, "createfromfile") => html_document::html_load(vm, a, true),
         _ => Ok(Value::Null),
     }
 }

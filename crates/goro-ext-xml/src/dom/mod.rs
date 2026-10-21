@@ -529,6 +529,10 @@ pub struct DocProps {
     pub classmap: HashMap<String, Vec<u8>>,
     /// php_libxml_class_type: 0 unset, 1 legacy (DOMNode), 2 modern (Dom\Node)
     pub class_type: u8,
+    /// php_libxml_quirks_mode of an HTML document (0 none, 1 quirks, 2 limited)
+    pub quirks_mode: u8,
+    /// template element -> its template contents fragment
+    pub templates: HashMap<NodeId, NodeId>,
 }
 
 impl Default for DocProps {
@@ -543,6 +547,8 @@ impl Default for DocProps {
             recover: false,
             classmap: HashMap::new(),
             class_type: 0,
+            quirks_mode: 0,
+            templates: HashMap::new(),
         }
     }
 }
