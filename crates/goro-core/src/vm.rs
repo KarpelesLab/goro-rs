@@ -493,6 +493,9 @@ pub struct Vm {
     pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     pub(crate) destructible_objects: Vec<Value>,
+    /// Generators whose body has a `finally`: destroying one while it is
+    /// suspended runs its finally blocks (zend_generator_dtor_storage).
+    pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
     /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
     /// destructors run at shutdown, so new objects get fresh handles.
     object_store_no_reuse: bool,
@@ -777,6 +780,7 @@ impl Vm {
             magic_depth: 0,
             magic_prop_guards: std::collections::HashSet::new(),
             destructible_objects: Vec::new(),
+            finally_generators: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             call_depth: 0,
@@ -5150,6 +5154,60 @@ impl Vm {
         self.run_pending_destructors();
     }
 
+    /// Values released by the current opcode may need destruction work.
+    #[inline]
+    fn has_release_work(&self) -> bool {
+        !self.destructible_objects.is_empty() || !self.finally_generators.is_empty()
+    }
+
+    /// `gen_rc` is the last user reference to the generator.
+    fn generator_sole_owner(&self, gen_rc: &Rc<RefCell<crate::generator::PhpGenerator>>) -> bool {
+        let watched = self
+            .finally_generators
+            .iter()
+            .any(|g| Rc::ptr_eq(g, gen_rc));
+        Rc::strong_count(gen_rc) <= 1 + watched as usize
+    }
+
+    /// Remember a generator whose function has a `finally` block.
+    fn watch_generator_finally(&mut self, gen_rc: &Rc<RefCell<crate::generator::PhpGenerator>>) {
+        let has_finally = gen_rc.borrow().op_array.ops.iter().any(|o| {
+            o.opcode == OpCode::TryBegin && matches!(o.op2, OperandType::JmpTarget(t) if t > 0)
+        });
+        if has_finally {
+            self.finally_generators.push(gen_rc.clone());
+        }
+    }
+
+    /// Destroy watched generators nothing references any more: a suspended
+    /// one runs its pending finally blocks (not its catch blocks) first.
+    fn close_released_generators(&mut self) -> bool {
+        let mut any = false;
+        let mut i = 0;
+        while i < self.finally_generators.len() {
+            let rc = &self.finally_generators[i];
+            let completed = rc
+                .try_borrow()
+                .map(|g| g.state == crate::generator::GeneratorState::Completed)
+                .unwrap_or(false);
+            if Rc::strong_count(rc) > 1 && !completed {
+                i += 1;
+                continue;
+            }
+            let rc = self.finally_generators.remove(i);
+            if Rc::strong_count(&rc) == 1 && !completed {
+                if let Ok(mut g) = rc.try_borrow_mut() {
+                    let prev_caller = self.generator_caller.take();
+                    self.generator_caller = Some((self.current_file.clone(), self.current_line));
+                    g.close(self);
+                    self.generator_caller = prev_caller;
+                }
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Track an object created by an extension so that its __destruct runs
     /// once the last reference is dropped (or at shutdown).
     pub fn track_destructible(&mut self, obj: Value) {
@@ -5279,6 +5337,9 @@ impl Vm {
                 }
             }
             if batch.is_empty() {
+                if !self.finally_generators.is_empty() && self.close_released_generators() {
+                    continue;
+                }
                 break;
             }
             for obj_val in batch {
@@ -5585,6 +5646,7 @@ impl Vm {
             let generator = crate::generator::PhpGenerator::new(op_array.clone(), func_cvs);
             let gen_rc = Rc::new(RefCell::new(generator));
             crate::gc::track_generator(&gen_rc);
+            self.watch_generator_finally(&gen_rc);
             return Ok(Value::Generator(gen_rc));
         }
 
@@ -13490,6 +13552,7 @@ impl Vm {
                         generator.args = args.to_vec();
                         let gen_rc = Rc::new(RefCell::new(generator));
                         crate::gc::track_generator(&gen_rc);
+                        self.watch_generator_finally(&gen_rc);
                         return Some(Value::Generator(gen_rc));
                     }
                     self.called_class_stack.push(class_lower.clone());
@@ -14758,7 +14821,7 @@ impl Vm {
         // exception thrown by one of them unwinds from this opcode.
         macro_rules! release_point {
             ($exec:lifetime) => {
-                if !self.destructible_objects.is_empty() {
+                if self.has_release_work() {
                     let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
                     if !had_exc && self.current_exception.is_some() {
@@ -22037,7 +22100,7 @@ impl Vm {
                                 }
                                 // zend_vm_stack_free_args(): the arguments are
                                 // released when the call returns.
-                                if !self.destructible_objects.is_empty() && !call.args.is_empty() {
+                                if self.has_release_work() && !call.args.is_empty() {
                                     call.args.clear();
                                     self.current_line = op.line;
                                     release_point!('exec);
@@ -23001,6 +23064,7 @@ impl Vm {
                             }
                             let gen_rc = Rc::new(RefCell::new(generator));
                             crate::gc::track_generator(&gen_rc);
+                            self.watch_generator_finally(&gen_rc);
                             self.write_operand(
                                 &op.result,
                                 Value::Generator(gen_rc),
@@ -23420,7 +23484,7 @@ impl Vm {
                         };
 
                         // The arguments are released when the call returns.
-                        if !self.destructible_objects.is_empty() && !call.args.is_empty() {
+                        if self.has_release_work() && !call.args.is_empty() {
                             call.args.clear();
                             self.current_line = op.line;
                             release_point!('exec);
@@ -27669,7 +27733,7 @@ impl Vm {
                             }
                         };
                         // Overwriting an object/array element may release it.
-                        let may_release = !self.destructible_objects.is_empty()
+                        let may_release = self.has_release_work()
                             && match &existing_ref {
                                 Some(r) => {
                                     matches!(&*r.borrow(), Value::Object(_) | Value::Array(_))
@@ -27766,8 +27830,7 @@ impl Vm {
                         }
                         drop(spl_args);
                         // A value replaced in SPL storage is destroyed now.
-                        if self.current_exception.is_none() && !self.destructible_objects.is_empty()
-                        {
+                        if self.current_exception.is_none() && self.has_release_work() {
                             self.run_pending_destructors();
                         }
                         if let Some(exc_val) = self.current_exception.take() {
@@ -34009,9 +34072,13 @@ impl Vm {
                                 self.global_unset(name);
                             }
                         }
+                        let sole_gen = match cvs.get(idx as usize) {
+                            Some(Value::Generator(g)) => self.generator_sole_owner(g),
+                            _ => false,
+                        };
                         if let Some(slot) = cvs.get_mut(idx as usize) {
                             crate::gc::possible_root(slot);
-                            if let Value::Generator(gen_rc) = slot {
+                            if let (true, Value::Generator(gen_rc)) = (sole_gen, &*slot) {
                                 let gen_clone = gen_rc.clone();
                                 *slot = Value::Undef;
                                 {
@@ -34186,7 +34253,7 @@ impl Vm {
                         }
                         drop(spl_args);
                         // An element dropped from SPL storage is destroyed now.
-                        if self.current_exception.is_none() && !self.destructible_objects.is_empty()
+                        if self.current_exception.is_none() && self.has_release_work()
                         {
                             self.run_pending_destructors();
                         }
@@ -42340,7 +42407,9 @@ impl Vm {
                                 generator.class_scope = Some(hook_declaring.clone());
                                 // The body runs as this property's hook (backing-store access).
                                 generator.hook_key = Some(hook_key.clone());
-                                let gv = Value::Generator(Rc::new(RefCell::new(generator)));
+                                let gen_rc = Rc::new(RefCell::new(generator));
+                                self.watch_generator_finally(&gen_rc);
+                                let gv = Value::Generator(gen_rc);
                                 self.write_operand(
                                     &op.result,
                                     gv,
@@ -42997,7 +43066,7 @@ impl Vm {
                         .to_php_string();
                     // Only overwriting an object/array/reference (or a slot we
                     // cannot see, e.g. mangled or magic) can release anything.
-                    let may_release = !self.destructible_objects.is_empty()
+                    let may_release = self.has_release_work()
                         && match &obj_val_raw {
                             Value::Object(o) => match o.try_borrow() {
                                 Ok(b) => b
@@ -46818,6 +46887,7 @@ impl Vm {
                 generator.call_line = line;
                 let gen_rc = Rc::new(RefCell::new(generator));
                 crate::gc::track_generator(&gen_rc);
+                self.watch_generator_finally(&gen_rc);
                 Ok(Value::Generator(gen_rc))
             } else {
                 let was_global = self.is_global_scope;

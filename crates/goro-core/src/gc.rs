@@ -577,6 +577,13 @@ pub trait GcHost {
     fn gc_call_destructor(&mut self, obj: &Rc<RefCell<PhpObject>>);
     /// Forget VM bookkeeping for objects about to be freed.
     fn gc_forget_objects(&mut self, ptrs: &std::collections::HashSet<usize>);
+    /// A garbage generator that must run its finally blocks before it is
+    /// freed (zend_generator_dtor_storage), like an object destructor.
+    fn gc_generator_needs_close(&self, _gen: &Rc<RefCell<PhpGenerator>>) -> bool {
+        false
+    }
+    /// Run the pending finally blocks of a garbage generator.
+    fn gc_close_generator(&mut self, _gen: &Rc<RefCell<PhpGenerator>>) {}
     /// WeakMap entries as (key object ptr, value clone).
     fn gc_ephemerons(&self) -> Vec<(usize, Value)> {
         Vec::new()
@@ -613,10 +620,10 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         let mut dtor_idx: Vec<usize> = Vec::new();
         for idx in 0..len {
             if an.garbage[idx] {
-                if let Node::Obj(o) = &an.graph.nodes[idx] {
-                    if host.gc_needs_destructor(o) {
-                        dtor_idx.push(idx);
-                    }
+                match &an.graph.nodes[idx] {
+                    Node::Obj(o) if host.gc_needs_destructor(o) => dtor_idx.push(idx),
+                    Node::Gen(g) if host.gc_generator_needs_close(g) => dtor_idx.push(idx),
+                    _ => {}
                 }
             }
         }
@@ -641,6 +648,13 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             .iter()
             .filter_map(|&i| match &an.graph.nodes[i] {
                 Node::Obj(o) => Some(o.clone()),
+                _ => None,
+            })
+            .collect();
+        let close_gens: Vec<Rc<RefCell<PhpGenerator>>> = dtor_idx
+            .iter()
+            .filter_map(|&i| match &an.graph.nodes[i] {
+                Node::Gen(g) => Some(g.clone()),
                 _ => None,
             })
             .collect();
@@ -700,9 +714,13 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         drop(dead_arrays);
         drop(dead_props);
         total += count;
-        if dtor_objs.is_empty() {
+        if dtor_objs.is_empty() && close_gens.is_empty() {
             break;
         }
+        for g in &close_gens {
+            host.gc_close_generator(g);
+        }
+        drop(close_gens);
         for o in &dtor_objs {
             host.gc_call_destructor(o);
         }
@@ -730,6 +748,9 @@ impl GcHost for crate::vm::Vm {
             if let Value::Object(o) = v {
                 *m.entry(Rc::as_ptr(o) as *const u8 as usize).or_insert(0) += 1;
             }
+        }
+        for g in &self.finally_generators {
+            *m.entry(Rc::as_ptr(g) as *const u8 as usize).or_insert(0) += 1;
         }
         m
     }
@@ -760,11 +781,28 @@ impl GcHost for crate::vm::Vm {
         }
         self.gc_run_destructor(obj);
     }
+    fn gc_generator_needs_close(&self, grc: &Rc<RefCell<PhpGenerator>>) -> bool {
+        grc.try_borrow()
+            .map(|g| g.state == crate::generator::GeneratorState::Suspended)
+            .unwrap_or(false)
+            && self.finally_generators.iter().any(|g| Rc::ptr_eq(g, grc))
+    }
+    fn gc_close_generator(&mut self, grc: &Rc<RefCell<PhpGenerator>>) {
+        if self.current_exception.is_some() {
+            return;
+        }
+        self.finally_generators.retain(|g| !Rc::ptr_eq(g, grc));
+        if let Ok(mut g) = grc.try_borrow_mut() {
+            g.close(self);
+        }
+    }
     fn gc_forget_objects(&mut self, ptrs: &std::collections::HashSet<usize>) {
         self.destructible_objects.retain(|v| match v {
             Value::Object(o) => !ptrs.contains(&(Rc::as_ptr(o) as *const u8 as usize)),
             _ => true,
         });
+        self.finally_generators
+            .retain(|g| !ptrs.contains(&(Rc::as_ptr(g) as *const u8 as usize)));
         // Entries whose key dies are dropped from their WeakMap.
         let mut dropped: Vec<Value> = Vec::new();
         for entries in self.weak_map_entries.values_mut() {

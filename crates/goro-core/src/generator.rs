@@ -386,10 +386,12 @@ impl PhpGenerator {
             // Clear exception handlers and set up for finally execution
             self.exception_handlers.clear();
 
-            // Set up finally targets as exception handlers in reverse order
-            // (outermost at bottom of stack, innermost on top)
-            // so ReturnDeferred can pop the current and chain to the next
-            for ft in finally_targets.iter().rev() {
+            // Set up the enclosing finally targets as exception handlers in
+            // reverse order (outermost at bottom of stack) so ReturnDeferred
+            // chains to the next one. The finally block being entered is not
+            // a handler for itself: an exception thrown inside it must go to
+            // the enclosing finally (or out), not re-run it.
+            for ft in finally_targets.iter().skip(1).rev() {
                 self.exception_handlers.push((0, *ft, 0));
             }
 
