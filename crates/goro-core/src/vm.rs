@@ -4773,6 +4773,93 @@ impl Vm {
         ))
     }
 
+    /// Weak-mode RECV checks for a callback's arguments (`args[lead..]` map to
+    /// CVs shifted by `cv_shift`): coerces in place, or returns the TypeError
+    /// message (without "called in": the caller is an internal function).
+    fn callback_recv_types(
+        &mut self,
+        op_array: &OpArray,
+        args: &mut [Value],
+        lead: usize,
+        cv_shift: usize,
+    ) -> Option<String> {
+        let hidden =
+            (op_array.param_count as usize).saturating_sub(op_array.param_attributes.len());
+        let scope_pushed = match &op_array.scope_class {
+            Some(sc) => {
+                self.class_scope_stack.push(sc.clone());
+                true
+            }
+            None => false,
+        };
+        let mut err = None;
+        for i in lead..args.len() {
+            let cv = i + cv_shift;
+            let (ti, variadic) = match op_array.variadic_param {
+                Some(v) if cv >= v as usize => (v as usize, true),
+                _ => (cv, false),
+            };
+            let Some(Some(info)) = op_array.param_types.get(ti) else {
+                continue;
+            };
+            let v = args[i].deref();
+            if matches!(v, Value::Undef) {
+                continue;
+            }
+            if !self.value_matches_type_mode(&v, &info.param_type, false) {
+                let fname = if !op_array.display_name.is_empty() {
+                    String::from_utf8_lossy(&op_array.display_name).into_owned()
+                } else {
+                    let base = String::from_utf8_lossy(op_array.effective_name()).into_owned();
+                    match &op_array.scope_class {
+                        Some(sc) if !base.contains("::") => {
+                            let cname = self
+                                .classes
+                                .get(&sc.to_ascii_lowercase())
+                                .map(|c| crate::value::display_class_name(&c.name))
+                                .unwrap_or_else(|| crate::value::display_class_name(sc));
+                            format!("{}::{}", cname, base)
+                        }
+                        _ => base,
+                    }
+                };
+                let fname = fname.split('\0').next().unwrap_or_default().to_string();
+                let name = if variadic {
+                    String::new()
+                } else {
+                    format!(" (${})", String::from_utf8_lossy(&info.param_name))
+                };
+                err = Some(format!(
+                    "{}(): Argument #{}{} must be of type {}, {} given",
+                    fname,
+                    (cv + 1).saturating_sub(hidden),
+                    name,
+                    self.param_type_display(&info.param_type),
+                    Self::value_type_name(&v)
+                ));
+                break;
+            }
+            let line = if op_array.decl_line > 0 {
+                op_array.decl_line
+            } else {
+                self.current_line
+            };
+            self.emit_implicit_float_to_int_if_needed(&v, &info.param_type, line);
+            let mut c = v.clone();
+            Self::coerce_value_to_type(&mut c, &info.param_type, false);
+            if std::mem::discriminant(&c) != std::mem::discriminant(&v) {
+                match &mut args[i] {
+                    Value::Reference(r) => *r.borrow_mut() = c,
+                    slot => *slot = c,
+                }
+            }
+        }
+        if scope_pushed {
+            self.class_scope_stack.pop();
+        }
+        err
+    }
+
     /// Type-check (and coerce, weak mode) the arguments of a user callable
     /// invoked by an internal function (e.g. a Fiber callback). Returns
     /// `Some((message, declaration line))` on a mismatch.
@@ -4925,6 +5012,25 @@ impl Vm {
                         &format!(
                             "Implicit conversion from float {} to int loses precision",
                             crate::value::format_php_float(f)
+                        ),
+                        line,
+                    );
+                }
+            }
+        } else if let Value::String(s) = &inner {
+            // zend_verify_weak_scalar_type_hint: a float-string converted to
+            // int (the type has int but neither float nor string).
+            if let Some(Value::Double(f)) = variance::numeric_str(s.as_bytes()) {
+                let mask = variance::TypeView::from_param_type(param_type).mask;
+                if f.is_finite()
+                    && f.fract() != 0.0
+                    && mask & variance::T_LONG != 0
+                    && mask & (variance::T_DOUBLE | variance::T_STRING) == 0
+                {
+                    self.emit_deprecated_at(
+                        &format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            s.to_string_lossy()
                         ),
                         line,
                     );
@@ -5725,6 +5831,40 @@ impl Vm {
                 return Err(VmError {
                     message: format!("Uncaught ArgumentCountError: {}", err_msg),
                     line,
+                });
+            }
+        }
+
+        // RECV of a callback invoked by an internal function: weak-mode
+        // checks and coercion (the caller is internal, so no "called in").
+        if !op_array.param_types.is_empty() {
+            let had_exc = self.current_exception.is_some();
+            if let Some(msg) = self.callback_recv_types(op_array, &mut call.args, lead, cv_shift) {
+                let line = if op_array.decl_line > 0 {
+                    op_array.decl_line
+                } else {
+                    self.current_line
+                };
+                let exc_val = self.create_exception(b"TypeError", &msg, line);
+                if !op_array.filename.is_empty() {
+                    if let Value::Object(ref o) = exc_val {
+                        o.borrow_mut().set_property(
+                            b"file".to_vec(),
+                            Value::String(PhpString::from_vec(op_array.filename.clone())),
+                        );
+                    }
+                }
+                self.current_exception = Some(exc_val);
+                return Err(VmError {
+                    message: format!("Uncaught TypeError: {}", msg),
+                    line,
+                });
+            }
+            if !had_exc && self.current_exception.is_some() {
+                // An error handler threw on a conversion deprecation.
+                return Err(VmError {
+                    message: "Uncaught exception".into(),
+                    line: self.current_line,
                 });
             }
         }
