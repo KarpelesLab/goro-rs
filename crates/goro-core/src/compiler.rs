@@ -13341,7 +13341,8 @@ impl Compiler {
                     if let Some(hint) = &param.type_hint {
                         if check_static_param_type(hint) {
                             return Err(CompileError {
-                                message: "Cannot use the static modifier on a parameter".to_string(),
+                                message: "Cannot use the static modifier on a parameter"
+                                    .to_string(),
                                 line: expr.span.line,
                             });
                         }
@@ -13650,7 +13651,8 @@ impl Compiler {
                     if let Some(hint) = &param.type_hint {
                         if check_static_param_type(hint) {
                             return Err(CompileError {
-                                message: "Cannot use the static modifier on a parameter".to_string(),
+                                message: "Cannot use the static modifier on a parameter"
+                                    .to_string(),
                                 line: expr.span.line,
                             });
                         }
@@ -17111,13 +17113,12 @@ fn type_hint_to_param_type_with_ns(
     match hint {
         TypeHint::Simple(name) => {
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Check if it's a built-in type; if so, store lowercase
+            // Check if it's a built-in type; if so, store lowercase.
+            // (`integer`, `double`, `boolean` are class names, not aliases.)
             match lower.as_slice() {
-                b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-                | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
-                | b"void" | b"self" | b"parent" | b"static" | b"false" | b"true" | b"never" => {
-                    ParamType::Simple(lower)
-                }
+                b"int" | b"float" | b"string" | b"bool" | b"array" | b"object" | b"callable"
+                | b"iterable" | b"mixed" | b"null" | b"void" | b"self" | b"parent" | b"static"
+                | b"false" | b"true" | b"never" => ParamType::Simple(lower),
                 _ => {
                     // Class name: resolve through namespace
                     // Check for fully qualified (starts with \)
