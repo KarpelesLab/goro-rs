@@ -311,10 +311,15 @@ impl Easy {
             let mut req = Req::new(self.set.opt_no_body);
             self.progress.time(Timer::PreTransfer);
             if let Err(e) = self.http_do(cb, &mut conn, &target, &mut req) {
-                // state_do(): multi_done(data, result, FALSE)
+                // state_do(): multi_done(data, result, FALSE); callback
+                // errors make it premature
                 self.posttransfer();
                 self.progress.calc();
-                self.done_conn(cb, conn, false, &target);
+                let premature = matches!(
+                    e,
+                    code::ABORTED_BY_CALLBACK | code::READ_ERROR | code::WRITE_ERROR
+                );
+                self.done_conn(cb, conn, premature, &target);
                 return e;
             }
             let r = self.sendrecv(cb, &mut conn, &target, &mut req);
@@ -459,6 +464,10 @@ impl Easy {
 
     /// Curl_loadhostpairs(): CURLOPT_RESOLVE entries into the DNS cache
     fn load_hostpairs(&mut self, cb: &mut dyn Callbacks) {
+        if !self.resolve_pending {
+            return;
+        }
+        self.resolve_pending = false;
         let Some(list) = self.set.slists.get(&opt::RESOLVE).cloned() else {
             return;
         };
@@ -956,8 +965,17 @@ impl Easy {
             None => (t.host.clone(), t.port, "host"),
         };
         // resolve
-        let addrs = self.resolve_host(cb, &chost, cport, peertype, id)?;
+        let mut addrs = self.resolve_host(cb, &chost, cport, peertype, id)?;
+        match self.set.ipresolve {
+            1 => addrs.retain(|a| a.is_ipv4()),
+            2 => addrs.retain(|a| a.is_ipv6()),
+            _ => {}
+        }
         self.st.recent_conn_id = id;
+        if self.pgrs_update(cb) {
+            self.infof(cb, &format!("closing connection #{id}"));
+            return Err(code::ABORTED_BY_CALLBACK);
+        }
         // connect
         let (sock, primary) =
             self.connect_addrs(cb, id, &chost, cport, &addrs, t.proxy.is_some())?;
@@ -1023,6 +1041,13 @@ impl Easy {
             self.progress.time(Timer::AppConnect);
         }
         self.infof(cb, "using HTTP/1.x");
+        // PROTOCONNECT and DO rounds of the multi state machine
+        for _ in 0..2 {
+            if self.pgrs_update(cb) {
+                self.close_conn(cb, conn, true);
+                return Err(code::ABORTED_BY_CALLBACK);
+            }
+        }
         Ok(conn)
     }
 
@@ -1042,10 +1067,10 @@ impl Easy {
                 self.infof(cb, &format!("Hostname {host} was found in DNS cache"));
                 Ok(e.addrs)
             }
-            None => match net::resolve(host, port, self.set.ipresolve) {
+            None => match net::resolve(host, port, 0) {
                 Some(addrs) => {
+                    dns.borrow_mut().put(host, port, addrs.clone(), false);
                     if !is_ip_literal(host) {
-                        dns.borrow_mut().put(host, port, addrs.clone(), false);
                         if self.set.verbose {
                             self.infof(cb, &format!("Host {host}:{port} was resolved."));
                             let v6: Vec<String> = addrs
@@ -1151,6 +1176,10 @@ impl Easy {
             match net::tcp_connect(&addr, Some(to)) {
                 Ok(s) => {
                     self.progress.time(Timer::Connect);
+                    if self.pgrs_update(cb) {
+                        self.infof(cb, &format!("closing connection #{id}"));
+                        return Err(code::ABORTED_BY_CALLBACK);
+                    }
                     return Ok((s, addr));
                 }
                 Err(ConnectErr::Failed(errno, local)) => {
@@ -2002,6 +2031,7 @@ impl Easy {
             let mut res = Ok(());
             for (f, p) in pieces {
                 if let Err(e) = self.cw_download(cb, req, f, &p) {
+                    self.failf(cb, "Failed reading the chunked-encoded stream");
                     res = Err(e);
                     break;
                 }
@@ -3552,6 +3582,11 @@ impl Easy {
         t: &Target,
         req: &mut Req,
     ) -> Result<(), CurlCode> {
+        for _ in 0..2 {
+            if self.pgrs_update(cb) {
+                return Err(code::ABORTED_BY_CALLBACK);
+            }
+        }
         // the first round: flush the request
         if !req.upload_done {
             self.req_send_more(cb, conn, req)?;
@@ -3572,6 +3607,10 @@ impl Easy {
                 } else {
                     Some(Duration::from_millis(left.max(1) as u64))
                 };
+                if self.set.low_speed_time > 0 && self.set.low_speed_limit > 0 {
+                    let sec = Duration::from_millis(1000);
+                    wait = Some(wait.map_or(sec, |w| w.min(sec)));
+                }
                 if want_send {
                     // only poll when we also have something to send
                     let sendable = match req.exp100 {
@@ -3730,8 +3769,8 @@ impl Easy {
         let speed = self.progress.dl_speed.max(self.progress.ul_speed);
         match self.low_speed_since {
             Some(since) if speed < self.set.low_speed_limit => {
-                let howlong = now.duration_since(since).as_secs() as i64;
-                if howlong >= self.set.low_speed_time {
+                let howlong = now.duration_since(since).as_millis() as i64;
+                if howlong >= self.set.low_speed_time * 1000 {
                     self.failf(
                         cb,
                         &format!(

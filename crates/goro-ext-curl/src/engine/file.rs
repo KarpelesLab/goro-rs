@@ -63,7 +63,21 @@ impl Easy {
             }
             Err(e) => e,
         };
-        self.infof(cb, &format!("shutting down connection #{id}"));
+        let premature = matches!(
+            r,
+            code::ABORTED_BY_CALLBACK | code::READ_ERROR | code::WRITE_ERROR
+        );
+        self.infof(
+            cb,
+            &format!(
+                "{} connection #{id}",
+                if premature {
+                    "closing"
+                } else {
+                    "shutting down"
+                }
+            ),
+        );
         r
     }
 
@@ -82,8 +96,9 @@ impl Easy {
             }
             self.file_cb_write(cb, data, true)
         } else {
+            self.file_cb_write(cb, data, false)?;
             self.progress.dl_cur += data.len() as i64;
-            self.file_cb_write(cb, data, false)
+            Ok(())
         }
     }
 

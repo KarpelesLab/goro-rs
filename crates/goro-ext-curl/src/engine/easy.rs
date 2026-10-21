@@ -332,6 +332,8 @@ pub struct Easy {
     pub(crate) low_speed_since: Option<Instant>,
     /// data->req.setcookies
     pub(crate) setcookies: u8,
+    /// data->state.resolve: CURLOPT_RESOLVE entries not loaded yet
+    pub(crate) resolve_pending: bool,
     /// trace events of setopt() calls, replayed by the next perform()
     pub(crate) backlog: Rc<RefCell<Vec<super::TraceEvent>>>,
 }
@@ -376,6 +378,7 @@ impl Easy {
             pending_ntlm: Vec::new(),
             low_speed_since: None,
             setcookies: 0,
+            resolve_pending: false,
             backlog: Rc::default(),
         }
     }
@@ -396,6 +399,7 @@ impl Easy {
             e.cookie_init(&mut sink, self.set.cookiesession);
         }
         e.cookie_files = self.cookie_files.clone();
+        e.resolve_pending = e.set.slists.contains_key(&opt::RESOLVE);
         e.st.url = self.st.url.clone();
         e.st.referer = self.st.referer.clone();
         e
@@ -1139,6 +1143,9 @@ impl Easy {
     fn setopt_slist(&mut self, option: u32, l: Option<Vec<Vec<u8>>>) -> CurlCode {
         match l {
             Some(v) => {
+                if option == opt::RESOLVE {
+                    self.resolve_pending = true;
+                }
                 self.set.slists.insert(option, v);
             }
             None => {
