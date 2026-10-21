@@ -1218,8 +1218,8 @@ impl<'a, S: Sink> Parser<'a, S> {
             None if self.partial && incomplete_utf8_at_end(&self.inp().data, pos) => (0, 0),
             None => {
                 self.encoding_error();
-                // switch to latin-1 interpretation of this byte
-                (c as u32, 1)
+                // the rest of the input is now Latin-1 converted to UTF-8
+                utf8_char(&self.inp().data, pos).unwrap_or((c as u32, 1))
             }
         }
     }
