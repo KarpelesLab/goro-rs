@@ -181,8 +181,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"func_get_arg", func_get_arg);
     vm.register_function(b"function_exists", function_exists);
     vm.register_function(b"is_callable", is_callable);
-    vm.register_function(b"call_user_func", call_user_func);
-    vm.register_function(b"call_user_func_array", call_user_func_array);
+    vm.register_function(b"call_user_func", call_user_func_checked);
+    vm.register_function(b"call_user_func_array", call_user_func_array_checked);
 
     // Array functions
     vm.register_function(b"array_push", array_push);
@@ -1065,252 +1065,264 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::False)
     }
 }
-fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null).deref();
-    let mut callable_name: Option<Vec<u8>> = None;
-    let result = match &val {
-        Value::String(s) => {
-            let raw_bytes = s.as_bytes();
-            // Strip leading backslash for namespace resolution
-            let stripped = if raw_bytes.first() == Some(&b'\\') {
-                &raw_bytes[1..]
-            } else {
-                raw_bytes
-            };
-            let name_lower: Vec<u8> = stripped
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
-            callable_name = Some(stripped.to_vec());
-            // Check for "Class::method" syntax
-            if let Some(pos) = name_lower.iter().position(|&b| b == b':') {
-                if pos + 1 < name_lower.len() && name_lower[pos + 1] == b':' {
-                    let class_name = &name_lower[..pos];
-                    let method_name = &name_lower[pos + 2..];
-                    if let Some(class) = vm.classes.get(class_name) {
-                        if let Some(method) = class.get_method(method_name) {
-                            // Check visibility
-                            let caller_scope = vm.current_class_scope();
-                            let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                            let decl_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let vis = method.visibility;
-                            match vis {
-                                Visibility::Private => {
-                                    if let Some(ref scope) = caller_lower {
-                                        if *scope == decl_lower { Value::True } else { Value::False }
-                                    } else {
-                                        Value::False
-                                    }
-                                }
-                                Visibility::Protected => {
-                                    // For protected methods, the visibility
-                                    // check walks the override chain to the
-                                    // root declaring class (the highest
-                                    // non-private ancestor that declares this
-                                    // method), so callers in any class
-                                    // related to that root can see it.
-                                    let root = vm.find_root_declaring_class_for_method(
-                                        &decl_lower,
-                                        method_name,
-                                    );
-                                    if let Some(ref scope) = caller_lower {
-                                        if *scope == root
-                                            || vm.class_extends(scope, &root)
-                                            || vm.class_extends(&root, scope)
-                                        {
-                                            Value::True
-                                        } else {
-                                            Value::False
-                                        }
-                                    } else {
-                                        Value::False
-                                    }
-                                }
-                                Visibility::Public => Value::True,
-                            }
-                        } else {
-                            Value::False
-                        }
-                    } else {
-                        Value::False
-                    }
-                } else {
-                    Value::False
-                }
-            } else if vm.functions.contains_key(&name_lower)
-                || vm.user_functions.contains_key(&name_lower)
-            {
-                Value::True
-            } else {
-                Value::False
-            }
+fn is_closure_bytes(b: &[u8]) -> bool {
+    b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_")
+}
+
+/// Resolve a class name for a callable (zend_is_callable_check_class):
+/// handles self/parent/static and autoloading. Returns the lowercase name.
+fn callable_check_class(vm: &mut Vm, name: &[u8]) -> Result<Vec<u8>, String> {
+    let lower = lower_bytes(name);
+    let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
+    match lower.as_slice() {
+        b"self" => return scope.ok_or_else(|| "cannot access \"self\" when no class scope is active".to_string()),
+        b"parent" => {
+            let sc = scope.ok_or_else(|| "cannot access \"parent\" when no class scope is active".to_string())?;
+            return vm.classes.get(&sc).and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
+                .ok_or_else(|| "cannot access \"parent\" when current class scope has no parent".to_string());
         }
-        Value::Object(obj) => {
-            // Check if the object has __invoke method
-            let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if class_name_lower == b"closure" {
-                callable_name = Some(b"Closure::__invoke".to_vec());
-                Value::True
-            } else {
-                let class_orig: Vec<u8> = obj.borrow().class_name.clone();
-                if let Some(class) = vm.classes.get(&class_name_lower) {
-                    if class.methods.contains_key(&b"__invoke".to_vec()) {
-                        let mut name = class_orig;
-                        name.extend_from_slice(b"::__invoke");
-                        callable_name = Some(name);
-                        Value::True
-                    } else {
-                        callable_name = Some(b"".to_vec());
-                        Value::False
-                    }
-                } else {
-                    callable_name = Some(b"".to_vec());
-                    Value::True // default to true for built-in objects
+        b"static" => {
+            return vm.called_class_stack.last().map(|c| lower_bytes(c))
+                .ok_or_else(|| "cannot access \"static\" when no class scope is active".to_string());
+        }
+        _ => {}
+    }
+    let stripped = lower.strip_prefix(b"\\").map(|s| s.to_vec()).unwrap_or(lower);
+    if vm.classes.contains_key(&stripped) || vm.is_known_builtin_class(&stripped) {
+        return Ok(stripped);
+    }
+    vm.try_autoload_class(name.strip_prefix(b"\\").unwrap_or(name));
+    if vm.classes.contains_key(&stripped) {
+        return Ok(stripped);
+    }
+    Err(format!("class \"{}\" not found", String::from_utf8_lossy(name)))
+}
+
+/// Check a method of `class_lower` for callability (zend_is_callable_check_func).
+fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_object: bool) -> Result<(), String> {
+    let mlower = lower_bytes(method);
+    let display = vm.classes.get(class_lower).map(|c| c.name.clone())
+        .unwrap_or_else(|| vm.builtin_canonical_name(class_lower).into_bytes());
+    let disp = goro_core::value::display_class_name(&display);
+    let mname = String::from_utf8_lossy(method).to_string();
+    let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
+    let info = vm.classes.get(class_lower).and_then(|c| c.get_method(&mlower).map(|m| {
+        (m.visibility, lower_bytes(&m.declaring_class), m.is_static, m.is_abstract)
+    }));
+    let has_magic = |vm: &Vm, name: &[u8]| vm.classes.get(class_lower).map(|c| c.get_method(name).is_some()).unwrap_or(false);
+    match info {
+        Some((vis, decl, is_static, is_abstract)) => {
+            let accessible = match vis {
+                Visibility::Public => true,
+                Visibility::Private => scope.as_ref() == Some(&decl),
+                Visibility::Protected => {
+                    let root = vm.find_root_declaring_class_for_method(&decl, &mlower);
+                    scope.as_ref().map(|sc| *sc == root || vm.class_extends(sc, &root) || vm.class_extends(&root, sc)).unwrap_or(false)
                 }
+            };
+            if !accessible {
+                if has_object && has_magic(vm, b"__call") {
+                    return Ok(());
+                }
+                if !has_object && has_magic(vm, b"__callstatic") {
+                    return Ok(());
+                }
+                let v = if vis == Visibility::Private { "private" } else { "protected" };
+                return Err(format!("cannot access {} method {}::{}()", v, disp, mname));
+            }
+            if is_abstract {
+                return Err(format!("cannot call abstract method {}::{}()", disp, mname));
+            }
+            if !is_static && !has_object {
+                // Allowed only with a compatible $this in the calling scope.
+                let compatible = scope.as_ref().map(|sc| sc.as_slice() == class_lower || vm.class_extends(sc, class_lower)).unwrap_or(false);
+                if !compatible {
+                    return Err(format!("non-static method {}::{}() cannot be called statically", disp, mname));
+                }
+            }
+            Ok(())
+        }
+        None => {
+            if !vm.classes.contains_key(class_lower) {
+                // Builtin class: consult the builtin method table.
+                let exists = method_exists(vm, &[Value::String(PhpString::from_vec(display.clone())), Value::String(PhpString::from_bytes(method))])
+                    .map(|v| v.is_truthy()).unwrap_or(false);
+                if exists {
+                    let throwable = class_lower == b"exception" || class_lower == b"error"
+                        || goro_core::vm::is_builtin_subclass(class_lower, b"exception")
+                        || goro_core::vm::is_builtin_subclass(class_lower, b"error");
+                    if !has_object && throwable {
+                        return Err(format!("non-static method {}::{}() cannot be called statically", disp, mname));
+                    }
+                    return Ok(());
+                }
+            }
+            if has_object && has_magic(vm, b"__call") {
+                return Ok(());
+            }
+            if has_magic(vm, b"__callstatic") {
+                return Ok(());
+            }
+            Err(format!("class {} does not have a method \"{}\"", disp, mname))
+        }
+    }
+}
+
+/// zend_is_callable_ex(): returns (callable, callable_name, error).
+pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bool, Vec<u8>, Option<String>) {
+    let val = val.deref();
+    match &val {
+        Value::String(s) => {
+            let raw = s.as_bytes().to_vec();
+            if is_closure_bytes(&raw) {
+                return (true, b"Closure::__invoke".to_vec(), None);
+            }
+            if syntax_only {
+                return (true, raw, None);
+            }
+            let stripped: Vec<u8> = raw.strip_prefix(b"\\").map(|r| r.to_vec()).unwrap_or_else(|| raw.clone());
+            if let Some(pos) = stripped.windows(2).position(|w| w == b"::") {
+                let (cls, m) = (&stripped[..pos], &stripped[pos + 2..]);
+                let res = callable_check_class(vm, cls).and_then(|cl| callable_check_method(vm, &cl, m, false));
+                return match res {
+                    Ok(()) => (true, raw, None),
+                    Err(e) => (false, raw, Some(e)),
+                };
+            }
+            let lower = lower_bytes(&stripped);
+            if vm.functions.contains_key(&lower) || vm.user_functions.contains_key(&lower) {
+                (true, raw, None)
+            } else {
+                let e = format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(&raw));
+                (false, raw, Some(e))
             }
         }
         Value::Array(arr) => {
-            let arr = arr.borrow();
-            // Check if this is a closure array [__closure_N, use_val1, ...]
-            if let Some(first) = arr.values().next() {
-                if let Value::String(s) = first {
-                    let b = s.as_bytes();
-                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
-                        callable_name = Some(b"Closure::__invoke".to_vec());
-                        return set_callable_name_and_return(vm, args, callable_name, Value::True);
-                    }
+            let (first, second, len) = {
+                let a = arr.borrow();
+                (a.get(&ArrayKey::Int(0)).map(|v| v.deref()), a.get(&ArrayKey::Int(1)).map(|v| v.deref()), a.len())
+            };
+            // Closure-with-captures representation.
+            if let Some(Value::String(f)) = arr.borrow().values().next().map(|v| v.deref()) {
+                if is_closure_bytes(f.as_bytes()) {
+                    return (true, b"Closure::__invoke".to_vec(), None);
                 }
             }
-            if arr.len() == 2 {
-                // Validate that the callback is actually callable
-                let vals: Vec<Value> = arr.values().cloned().collect();
-                let method_name = vals[1].to_php_string();
-                let method_name_bytes = method_name.as_bytes().to_vec();
-                let method_lower: Vec<u8> = method_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-                match &vals[0] {
-                    Value::Object(obj) => {
-                        let class_orig: Vec<u8> = obj.borrow().class_name.clone();
-                        let class_lower: Vec<u8> = class_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let mut current = class_lower.clone();
-                        let mut found = false;
-                        let mut method_visibility = None;
-                        let mut declaring_class_lower: Vec<u8> = Vec::new();
-                        for _ in 0..50 {
-                            if let Some(class) = vm.classes.get(&current) {
-                                if let Some(method) = class.methods.get(&method_lower) {
-                                    found = true;
-                                    method_visibility = Some(method.visibility);
-                                    declaring_class_lower = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    break;
-                                }
-                                if let Some(ref parent) = class.parent {
-                                    current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        // Check visibility if method was found
-                        if found {
-                            if let Some(vis) = method_visibility {
-                                let caller_scope = vm.current_class_scope();
-                                let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                                match vis {
-                                    Visibility::Private => {
-                                        // Private methods are only callable from the declaring class
-                                        if let Some(ref scope) = caller_lower {
-                                            if *scope != declaring_class_lower {
-                                                found = false;
-                                            }
-                                        } else {
-                                            found = false;
-                                        }
-                                    }
-                                    Visibility::Protected => {
-                                        // Protected methods are callable from the declaring class and subclasses
-                                        if let Some(ref scope) = caller_lower {
-                                            if *scope != declaring_class_lower
-                                                && !vm.class_extends(scope, &declaring_class_lower)
-                                                && !vm.class_extends(&declaring_class_lower, scope)
-                                            {
-                                                found = false;
-                                            }
-                                        } else {
-                                            found = false;
-                                        }
-                                    }
-                                    Visibility::Public => {}
-                                }
-                            }
-                        }
-                        let mut name = class_orig;
-                        name.extend_from_slice(b"::");
-                        name.extend_from_slice(&method_name_bytes);
-                        callable_name = Some(name);
-                        if found { Value::True } else { Value::False }
-                    }
-                    Value::String(class_name) => {
-                        let class_name_bytes = class_name.as_bytes().to_vec();
-                        let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let mut name = class_name_bytes;
-                        name.extend_from_slice(b"::");
-                        name.extend_from_slice(&method_name_bytes);
-                        callable_name = Some(name);
-                        if let Some(class) = vm.classes.get(&class_lower) {
-                            if let Some(method) = class.get_method(&method_lower) {
-                                // Check visibility
-                                let caller_scope = vm.current_class_scope();
-                                let caller_lower = caller_scope.as_ref().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
-                                let decl_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                match method.visibility {
-                                    Visibility::Private => {
-                                        if let Some(ref scope) = caller_lower {
-                                            if *scope == decl_lower { Value::True } else { Value::False }
-                                        } else {
-                                            Value::False
-                                        }
-                                    }
-                                    Visibility::Protected => {
-                                        if let Some(ref scope) = caller_lower {
-                                            if *scope == decl_lower
-                                                || vm.class_extends(scope, &decl_lower)
-                                                || vm.class_extends(&decl_lower, scope)
-                                            {
-                                                Value::True
-                                            } else {
-                                                Value::False
-                                            }
-                                        } else {
-                                            Value::False
-                                        }
-                                    }
-                                    Visibility::Public => Value::True,
-                                }
-                            } else {
-                                Value::False
-                            }
-                        } else {
-                            Value::False
-                        }
-                    }
-                    _ => {
-                        callable_name = Some(b"".to_vec());
-                        Value::False
-                    }
+            if len != 2 {
+                return (false, b"Array".to_vec(), Some("array callback must have exactly two members".to_string()));
+            }
+            let (Some(first), Some(second)) = (first, second) else {
+                return (false, b"Array".to_vec(), Some("array callback has to contain indices 0 and 1".to_string()));
+            };
+            let method = match &second {
+                Value::String(m) => m.as_bytes().to_vec(),
+                _ => {
+                    let name = match &first {
+                        Value::Object(o) => { let mut n = o.borrow().class_name.clone(); n.extend_from_slice(b"::"); n }
+                        Value::String(c) => { let mut n = c.as_bytes().to_vec(); n.extend_from_slice(b"::"); n }
+                        _ => b"Array".to_vec(),
+                    };
+                    return (false, name, Some("second array member is not a valid method".to_string()));
                 }
+            };
+            let (class_bytes, has_object) = match &first {
+                Value::Object(o) => (o.borrow().class_name.clone(), true),
+                Value::String(c) => (c.as_bytes().to_vec(), false),
+                _ => return (false, b"Array".to_vec(), Some("first array member is not a valid class name or object".to_string())),
+            };
+            let mut name = goro_core::value::display_class_name(&class_bytes).into_bytes();
+            if has_object {
+                name = class_bytes.clone();
+            }
+            name.extend_from_slice(b"::");
+            name.extend_from_slice(&method);
+            if syntax_only {
+                return (true, name, None);
+            }
+            let cl = match callable_check_class(vm, &class_bytes) {
+                Ok(c) => c,
+                Err(e) => return (false, name, Some(e)),
+            };
+            // "Class::method" inside the method string (deprecated form)
+            let (cl, method) = match method.windows(2).position(|w| w == b"::") {
+                Some(pos) => match callable_check_class(vm, &method[..pos]) {
+                    Ok(c2) => (c2, method[pos + 2..].to_vec()),
+                    Err(e) => return (false, name, Some(e)),
+                },
+                None => (cl, method),
+            };
+            match callable_check_method(vm, &cl, &method, has_object) {
+                Ok(()) => (true, name, None),
+                Err(e) => (false, name, Some(e)),
+            }
+        }
+        Value::Object(obj) => {
+            let cn = obj.borrow().class_name.clone();
+            let cl = lower_bytes(&cn);
+            let mut name = cn.clone();
+            name.extend_from_slice(b"::__invoke");
+            if cl == b"closure" {
+                return (true, b"Closure::__invoke".to_vec(), None);
+            }
+            let has_invoke = vm.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false);
+            if has_invoke || syntax_only && false {
+                (true, name, None)
             } else {
-                callable_name = Some(b"".to_vec());
-                Value::False
+                (false, name, Some("no array or string given".to_string()))
             }
         }
-        _ => {
-            callable_name = Some(b"".to_vec());
-            Value::False
+        other => {
+            let name = match other {
+                Value::Null | Value::Undef => Vec::new(),
+                v => v.to_php_string().as_bytes().to_vec(),
+            };
+            (false, name, Some("no array or string given".to_string()))
         }
-    };
-    set_callable_name_and_return(vm, args, callable_name, result)
+    }
+}
+
+/// Reject callbacks that cannot possibly be resolved (zend_fcall_info_init errors).
+fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmError> {
+    let (ok, _, err) = check_callable(vm, cb, false);
+    if vm.current_exception.is_some() {
+        return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+    }
+    if !ok {
+        if let Some(e) = err {
+            let definite = e.starts_with("class \"") || e.starts_with("first array member")
+                || e.starts_with("second array member") || e.starts_with("function \"")
+                || e.starts_with("array callback");
+            if definite {
+                let msg = format!("{}(): Argument #1 ($callback) must be a valid callback, {}", func, e);
+                return Err(throw_type_error_msg(vm, msg));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(cb) = args.first() {
+        validate_callback_arg(vm, "call_user_func", cb)?;
+    }
+    call_user_func(vm, args)
+}
+
+fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(cb) = args.first() {
+        validate_callback_arg(vm, "call_user_func_array", cb)?;
+    }
+    call_user_func_array(vm, args)
+}
+
+fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let val = args.first().cloned().unwrap_or(Value::Null);
+    let syntax_only = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let (ok, name, _) = check_callable(vm, &val, syntax_only);
+    if vm.current_exception.is_some() {
+        return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+    }
+    set_callable_name_and_return(vm, args, Some(name), if ok { Value::True } else { Value::False })
 }
 
 fn set_callable_name_and_return(_vm: &mut Vm, args: &[Value], callable_name: Option<Vec<u8>>, result: Value) -> Result<Value, VmError> {
