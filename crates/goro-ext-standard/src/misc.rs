@@ -455,8 +455,8 @@ final class StreamBucket {
     vm.register_function(b"setcookie", setcookie_fn);
     vm.register_function(b"setrawcookie", setrawcookie_fn);
     // SPL object functions moved to goro-ext-spl
-    vm.register_function(b"forward_static_call", call_user_func);
-    vm.register_function(b"forward_static_call_array", call_user_func_array);
+    vm.register_function(b"forward_static_call", forward_static_call_fn);
+    vm.register_function(b"forward_static_call_array", forward_static_call_array_fn);
     vm.register_function(b"phpversion", phpversion_fn);
     vm.register_function(b"php_uname", php_uname_fn);
     vm.register_function(b"php_sapi_name", php_sapi_name_fn);
@@ -1311,35 +1311,53 @@ fn is_closure_bytes(b: &[u8]) -> bool {
 }
 
 /// Resolve a class name for a callable (zend_is_callable_check_class):
-/// handles self/parent/static and autoloading. Returns the lowercase name.
-fn callable_check_class(vm: &mut Vm, name: &[u8]) -> Result<Vec<u8>, String> {
+/// handles self/parent/static (with their deprecation unless `quiet`) and
+/// autoloading. Returns the lowercase name.
+fn callable_check_class(vm: &mut Vm, name: &[u8], quiet: bool) -> Result<Vec<u8>, String> {
     let lower = lower_bytes(name);
     let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
+    let deprecate = |vm: &mut Vm, kw: &str| {
+        if !quiet {
+            let line = vm.current_line;
+            vm.emit_deprecated_at(
+                &format!("Use of \"{}\" in callables is deprecated", kw),
+                line,
+            );
+        }
+    };
     match lower.as_slice() {
         b"self" => {
-            return scope
-                .ok_or_else(|| "cannot access \"self\" when no class scope is active".to_string());
+            let sc = scope.ok_or_else(|| {
+                "cannot access \"self\" when no class scope is active".to_string()
+            })?;
+            deprecate(vm, "self");
+            return Ok(sc);
         }
         b"parent" => {
             let sc = scope.ok_or_else(|| {
                 "cannot access \"parent\" when no class scope is active".to_string()
             })?;
-            return vm
+            let p = vm
                 .classes
                 .get(&sc)
                 .and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
                 .ok_or_else(|| {
                     "cannot access \"parent\" when current class scope has no parent".to_string()
-                });
+                })?;
+            deprecate(vm, "parent");
+            return Ok(p);
         }
         b"static" => {
-            return vm
+            let c = vm
                 .called_class_stack
                 .last()
                 .map(|c| lower_bytes(c))
+                .or(scope)
                 .ok_or_else(|| {
                     "cannot access \"static\" when no class scope is active".to_string()
-                });
+                })?;
+            deprecate(vm, "static");
+            return Ok(c);
         }
         _ => {}
     }
@@ -1503,7 +1521,7 @@ pub(crate) fn check_callable(
                 .unwrap_or_else(|| raw.clone());
             if let Some(pos) = stripped.windows(2).position(|w| w == b"::") {
                 let (cls, m) = (&stripped[..pos], &stripped[pos + 2..]);
-                let res = callable_check_class(vm, cls)
+                let res = callable_check_class(vm, cls, false)
                     .and_then(|cl| callable_check_method(vm, &cl, m, false));
                 return match res {
                     Ok(()) => (true, raw, None),
@@ -1583,14 +1601,51 @@ pub(crate) fn check_callable(
             if syntax_only {
                 return (true, name, None);
             }
-            let cl = match callable_check_class(vm, &class_bytes) {
+            let cl = match callable_check_class(vm, &class_bytes, has_object) {
                 Ok(c) => c,
                 Err(e) => return (false, name, Some(e)),
             };
             // "Class::method" inside the method string (deprecated form)
             let (cl, method) = match method.windows(2).position(|w| w == b"::") {
-                Some(pos) => match callable_check_class(vm, &method[..pos]) {
-                    Ok(c2) => (c2, method[pos + 2..].to_vec()),
+                // Relative names are resolved from the first member's class.
+                Some(pos) => match match lower_bytes(&method[..pos]).as_slice() {
+                    b"self" | b"static" => Ok(cl.clone()),
+                    b"parent" => vm
+                        .classes
+                        .get(&cl)
+                        .and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
+                        .ok_or_else(|| {
+                            "cannot access \"parent\" when current class scope has no parent"
+                                .to_string()
+                        }),
+                    _ => callable_check_class(vm, &method[..pos], true),
+                } {
+                    Ok(c2) => {
+                        let org_name = vm
+                            .classes
+                            .get(&cl)
+                            .map(|c| goro_core::value::display_class_name(&c.name))
+                            .unwrap_or_else(|| vm.builtin_canonical_name(&cl));
+                        if cl != c2 && !vm.class_extends(&cl, &c2) {
+                            let target = vm
+                                .classes
+                                .get(&c2)
+                                .map(|c| goro_core::value::display_class_name(&c.name))
+                                .unwrap_or_else(|| vm.builtin_canonical_name(&c2));
+                            let e = format!("class {} is not a subclass of {}", org_name, target);
+                            return (false, name, Some(e));
+                        }
+                        let line = vm.current_line;
+                        vm.emit_deprecated_at(
+                            &format!(
+                                "Callables of the form [\"{}\", \"{}\"] are deprecated",
+                                org_name,
+                                String::from_utf8_lossy(&method)
+                            ),
+                            line,
+                        );
+                        (c2, method[pos + 2..].to_vec())
+                    }
                     Err(e) => return (false, name, Some(e)),
                 },
                 None => (cl, method),
@@ -1647,7 +1702,8 @@ fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmEr
                 || e.starts_with("array callback")
                 || e.starts_with("non-static method ")
                 || e.starts_with("cannot call abstract method ")
-                || e.starts_with("cannot access ");
+                || e.starts_with("cannot access ")
+                || e.contains(" is not a subclass of ");
             if definite {
                 let msg = format!(
                     "{}(): Argument #1 ($callback) must be a valid callback, {}",
@@ -1658,6 +1714,104 @@ fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmEr
         }
     }
     Ok(())
+}
+
+/// forward_static_call(): like call_user_func(), but a static method of a
+/// class the called class (static::) extends keeps that called class.
+fn forward_static_call_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some(cb) = args.first() else {
+        return Ok(Value::Null);
+    };
+    validate_callback_arg(vm, "forward_static_call", cb)?;
+    if vm.current_class_scope().is_none() {
+        let msg = "Cannot call forward_static_call() when no class scope is active";
+        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: format!("Uncaught Error: {}", msg),
+            line: vm.current_line,
+        });
+    }
+    let target = match cb.deref() {
+        Value::Array(a) => {
+            let a = a.borrow();
+            match (
+                a.get(&ArrayKey::Int(0)).map(|v| v.deref()),
+                a.get(&ArrayKey::Int(1)).map(|v| v.deref()),
+            ) {
+                (Some(Value::String(c)), Some(Value::String(m))) => {
+                    Some((c.as_bytes().to_vec(), m.as_bytes().to_vec()))
+                }
+                _ => None,
+            }
+        }
+        Value::String(s) => {
+            let b = s.as_bytes();
+            b.windows(2)
+                .position(|w| w == b"::")
+                .map(|p| (b[..p].to_vec(), b[p + 2..].to_vec()))
+        }
+        _ => None,
+    };
+    let called = vm.called_class_stack.last().map(|c| lower_bytes(c));
+    if let (Some((cls, m)), Some(called)) = (target, called) {
+        if !m.windows(2).any(|w| w == b"::") {
+            if let Ok(cl) = callable_check_class(vm, &cls, true) {
+                let forwards = called == cl || vm.class_extends(&called, &cl);
+                let method = vm
+                    .classes
+                    .get(&cl)
+                    .and_then(|c| c.get_method(&lower_bytes(&m)).cloned());
+                if let (true, Some(method)) = (forwards, method) {
+                    if method.is_static {
+                        let called_name = vm.called_class_stack.last().cloned().unwrap_or_default();
+                        let named = std::mem::take(&mut vm.pending_named_args);
+                        vm.called_class_stack.push(called_name);
+                        vm.push_class_scope(method.declaring_class.clone());
+                        let r = vm.execute_fn_with_named_args(
+                            &method.op_array,
+                            args[1..].to_vec(),
+                            named,
+                            None,
+                        );
+                        vm.pop_class_scope();
+                        vm.called_class_stack.pop();
+                        return r;
+                    }
+                }
+            }
+        }
+    }
+    call_user_func(vm, args)
+}
+
+fn forward_static_call_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some(cb) = args.first() else {
+        return Ok(Value::Null);
+    };
+    let mut call_args = vec![cb.clone()];
+    if let Some(Value::Array(a)) = args.get(1).map(|v| v.deref()) {
+        let mut named = Vec::new();
+        for (k, v) in a.borrow().iter() {
+            match k {
+                ArrayKey::String(s) => named.push((s.as_bytes().to_vec(), v.clone())),
+                ArrayKey::Int(_) if !named.is_empty() => {
+                    let msg = "Cannot use positional argument after named argument";
+                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: format!("Uncaught Error: {}", msg),
+                        line: vm.current_line,
+                    });
+                }
+                ArrayKey::Int(_) => call_args.push(v.clone()),
+            }
+        }
+        if !named.is_empty() {
+            vm.pending_named_args = named;
+        }
+    }
+    forward_static_call_fn(vm, &call_args)
 }
 
 fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1708,6 +1862,50 @@ fn set_callable_name_and_return(
     }
     Ok(result)
 }
+/// call_user_func() of `[$objOrClass, "Scope::method"]`: None when the
+/// method string has no scope part (or it does not resolve).
+fn call_scoped_method_callable(
+    vm: &mut Vm,
+    first: &Value,
+    method_lower: &[u8],
+    call_args: &[Value],
+    named_args: &[(Vec<u8>, Value)],
+) -> Option<Result<Value, VmError>> {
+    let pos = method_lower.windows(2).position(|w| w == b"::")?;
+    let (org_lower, org_name, this) = match first {
+        Value::Object(o) => {
+            let cn = o.borrow().class_name.clone();
+            (lower_bytes(&cn), cn, Some(first.clone()))
+        }
+        Value::String(s) if !is_closure_bytes(s.as_bytes()) => {
+            let l = callable_check_class(vm, s.as_bytes(), true).ok()?;
+            let name = vm.classes.get(&l)?.name.clone();
+            (l, name, None)
+        }
+        _ => return None,
+    };
+    let prefix = &method_lower[..pos];
+    let target = match prefix {
+        b"parent" => lower_bytes(vm.classes.get(&org_lower)?.parent.as_ref()?),
+        b"self" | b"static" => org_lower.clone(),
+        p => lower_bytes(p.strip_prefix(b"\\").unwrap_or(p)),
+    };
+    let class = vm.classes.get(&target)?.clone();
+    let method = class.get_method(&method_lower[pos + 2..])?;
+    let mut op = method.op_array.clone();
+    if op.attributes.is_empty() && !method.attributes.is_empty() {
+        op.attributes = method.attributes.clone();
+    }
+    let this = if method.is_static { None } else { this };
+    let declaring = method.declaring_class.clone();
+    vm.called_class_stack.push(org_name);
+    vm.push_class_scope(declaring);
+    let r = vm.execute_fn_with_named_args(&op, call_args.to_vec(), named_args.to_vec(), this);
+    vm.pop_class_scope();
+    vm.called_class_stack.pop();
+    Some(r)
+}
+
 pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Null);
@@ -1742,6 +1940,14 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                 .iter()
                 .map(|b| b.to_ascii_lowercase())
                 .collect();
+
+            // [$objOrClass, "Scope::method"] (deprecated form): Scope is
+            // resolved relative to the class of the first member.
+            if let Some(r) =
+                call_scoped_method_callable(vm, &vals[0], &method_lower, &call_args, &named_args)
+            {
+                return r;
+            }
 
             // Check if first element is a class name (string) or object
             match &vals[0] {
@@ -1794,7 +2000,9 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         }
 
                         // Check for forwarding calls (parent::, self:: in array syntax)
-                        let is_forwarding = class_lower == b"parent" || class_lower == b"self";
+                        let is_forwarding = class_lower == b"parent"
+                            || class_lower == b"self"
+                            || class_lower == b"static";
                         let resolved_class_lower = if class_lower == b"parent" {
                             vm.get_current_class_name()
                                 .as_ref()
@@ -1805,6 +2013,12 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect::<Vec<u8>>()
                                 })
+                                .unwrap_or(class_lower.clone())
+                        } else if class_lower == b"static" {
+                            vm.called_class_stack
+                                .last()
+                                .map(|n| lower_bytes(n))
+                                .or_else(|| vm.get_current_class_name())
                                 .unwrap_or(class_lower.clone())
                         } else if class_lower == b"self" {
                             vm.get_current_class_name()
@@ -2116,7 +2330,9 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                 let method_lower = &func_lower[pos + 2..];
 
                 // Check for forwarding calls (parent::, self::)
-                let is_forwarding = class_part_lower == b"parent" || class_part_lower == b"self";
+                let is_forwarding = class_part_lower == b"parent"
+                    || class_part_lower == b"self"
+                    || class_part_lower == b"static";
 
                 // Resolve parent/self to actual class names
                 let resolved_class_lower = if class_part_lower == b"parent" {
@@ -2129,6 +2345,12 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect::<Vec<u8>>()
                         })
+                        .unwrap_or(class_part_lower.clone())
+                } else if class_part_lower == b"static" {
+                    vm.called_class_stack
+                        .last()
+                        .map(|n| lower_bytes(n))
+                        .or_else(|| vm.get_current_class_name())
                         .unwrap_or(class_part_lower.clone())
                 } else if class_part_lower == b"self" {
                     vm.get_current_class_name()
@@ -12590,6 +12812,27 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let header = args.first().unwrap_or(&Value::Null).to_php_string();
     let replace = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let response_code = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    // sapi_header_op(): trailing whitespace is cut off, then the line must
+    // not contain CR/LF or NUL.
+    {
+        let b = header.as_bytes();
+        let mut len = b.len();
+        while len > 0 && matches!(b[len - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            len -= 1;
+        }
+        for &c in &b[..len] {
+            let msg = match c {
+                b'\n' | b'\r' => {
+                    "Header may not contain more than a single header, new line detected"
+                }
+                0 => "Header may not contain NUL bytes",
+                _ => continue,
+            };
+            let line = _vm.current_line;
+            _vm.emit_warning_at(msg, line);
+            return Ok(Value::Null);
+        }
+    }
     let header_str = header.to_string_lossy();
     // Special case: "HTTP/1.x NNN ..." sets the status code.
     if header_str.starts_with("HTTP/") {
@@ -12608,7 +12851,7 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // status code (and the current code is still 200).
         if name.eq_ignore_ascii_case(b"WWW-Authenticate") && response_code == 0 {
             RESPONSE_CODE.with(|c| {
-                if c.get() == 200 {
+                if c.get() == 200 || c.get() == 0 {
                     c.set(401);
                 }
             });
@@ -13049,19 +13292,38 @@ fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
     }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
-fn http_response_code_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn http_response_code_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let as_result = |code: i64| {
+        if code == 0 {
+            Value::False
+        } else {
+            Value::Long(code)
+        }
+    };
     if let Some(v) = args.first() {
         if !matches!(v, Value::Null) {
+            if vm.headers_sent {
+                let msg = match vm.output_start.clone() {
+                    Some((f, l)) => format!(
+                        "http_response_code(): Cannot set response code - headers already sent (output started at {}:{})",
+                        f, l
+                    ),
+                    None => "http_response_code(): Cannot set response code - headers already sent"
+                        .to_string(),
+                };
+                vm.emit_warning(&msg);
+                return Ok(Value::False);
+            }
             let code = v.to_long();
-            let prev = RESPONSE_CODE.with(|c| {
-                let p = c.get();
-                c.set(code);
-                p
+            let prev = RESPONSE_CODE.with(|c| c.replace(code));
+            return Ok(if prev == 0 {
+                Value::True
+            } else {
+                Value::Long(prev)
             });
-            return Ok(Value::Long(prev));
         }
     }
-    Ok(Value::Long(RESPONSE_CODE.with(|c| c.get())))
+    Ok(as_result(RESPONSE_CODE.with(|c| c.get())))
 }
 
 fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

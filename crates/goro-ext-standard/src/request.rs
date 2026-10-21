@@ -1258,6 +1258,9 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
             .unwrap_or_default();
         crate::misc::sapi_add_header(format!("X-Powered-By: PHP/{}", version).as_bytes(), true);
     }
+    // SG(sapi_headers).http_response_code: 200 for a web request, none for
+    // the CLI.
+    crate::misc::RESPONSE_CODE.with(|c| c.set(if req.cgi { 200 } else { 0 }));
     let variables_order = ini("variables_order").unwrap_or_else(|| "EGPCS".to_string());
     let has = |c: char| variables_order.chars().any(|x| x.eq_ignore_ascii_case(&c));
     let max_vars = ini("max_input_vars")

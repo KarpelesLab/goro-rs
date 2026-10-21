@@ -2521,10 +2521,26 @@ impl Vm {
         match callback {
             Value::String(s) => {
                 if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
-                    let exc = self.create_exception(b"Error", &msg, self.current_line);
+                    let lname = s.as_bytes().to_ascii_lowercase();
+                    // zpp runs first: func_get_arg() takes exactly one argument.
+                    let (cls, msg): (&[u8], String) = if lname == b"func_get_arg" && args.len() != 1
+                    {
+                        (
+                            b"ArgumentCountError",
+                            format!(
+                                "func_get_arg() expects exactly 1 argument, {} given",
+                                args.len()
+                            ),
+                        )
+                    } else {
+                        (b"Error", msg)
+                    };
+                    self.push_builtin_frame(&lname, args, 0);
+                    let exc = self.create_exception(cls, &msg, self.current_line);
+                    self.pop_builtin_frame();
                     self.current_exception = Some(exc);
                     return Err(VmError {
-                        message: format!("Uncaught Error: {}", msg),
+                        message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
                         line: self.current_line,
                     });
                 }
@@ -5735,13 +5751,14 @@ impl Vm {
         let mut func_cvs = vec![Value::Undef; op_array.cv_names.len()];
         if let Some(variadic_idx) = op_array.variadic_param {
             let vi = variadic_idx as usize;
+            // Arguments map to CVs after a missing $this (cv_shift).
             for (i, arg) in call.args.iter().enumerate() {
-                if i < vi && i < func_cvs.len() {
-                    func_cvs[i] = arg.clone();
+                if i + cv_shift < vi && i + cv_shift < func_cvs.len() {
+                    func_cvs[i + cv_shift] = arg.clone();
                 }
             }
             let mut variadic_arr = crate::array::PhpArray::new();
-            for arg in call.args.iter().skip(vi) {
+            for arg in call.args.iter().skip(vi.saturating_sub(cv_shift)) {
                 variadic_arr.push(arg.clone());
             }
             // Add extra named args with string keys
@@ -5754,9 +5771,12 @@ impl Vm {
         } else {
             // Extra arguments are only reachable through func_get_args(),
             // never through the function's local variables.
-            let nparams = (op_array.param_count as usize + cv_shift).min(func_cvs.len());
-            for (i, arg) in call.args.iter().enumerate().take(nparams) {
-                func_cvs[i] = arg.clone();
+            let nparams = (op_array.param_count as usize).min(func_cvs.len());
+            for (i, arg) in call.args.iter().enumerate() {
+                if i + cv_shift >= nparams {
+                    break;
+                }
+                func_cvs[i + cv_shift] = arg.clone();
             }
         }
 
@@ -14323,7 +14343,26 @@ impl Vm {
                 if self.exit_requested {
                     break 'shutdown;
                 }
+                // A builtin registered directly runs with no executing user
+                // code: zend_get_executed_filename() is "[no active file]".
+                let builtin_cb = match &callback {
+                    Value::String(s) => {
+                        let l = s.as_bytes().to_ascii_lowercase();
+                        !self.user_functions.contains_key(&l) && self.functions.contains_key(&l)
+                    }
+                    _ => false,
+                };
+                let saved_loc = builtin_cb.then(|| {
+                    (
+                        std::mem::replace(&mut self.current_file, "[no active file]".into()),
+                        std::mem::replace(&mut self.current_line, 0),
+                    )
+                });
                 let shutdown_result = self.call_callback(&callback, &extra_args);
+                if let Some((f, l)) = saved_loc {
+                    self.current_file = f;
+                    self.current_line = l;
+                }
                 if self.current_exception.is_some() {
                     if self.exception_handler.is_some() {
                         let handler = self.exception_handler.take().unwrap();

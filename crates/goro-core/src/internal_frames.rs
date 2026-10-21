@@ -179,6 +179,31 @@ impl Vm {
     ) -> Result<Value, crate::vm::VmError> {
         // Located at the call site when called through a direct call_user_func()
         let at = self.ucf_call_line.take().unwrap_or(0);
+        // zend_call_function(): a by-reference parameter given a plain value
+        // warns (zend_param_must_be_ref) and gets a temporary reference.
+        if let Some(info) = crate::arginfo::lookup(lname) {
+            for (i, a) in args.iter().enumerate() {
+                let Some(p) = info
+                    .params
+                    .get(i)
+                    .or_else(|| info.params.last().filter(|p| p.variadic))
+                else {
+                    break;
+                };
+                if p.by_ref == 1 && !matches!(a, Value::Reference(_)) {
+                    let line = self.current_line;
+                    self.emit_warning_at(
+                        &format!(
+                            "{}(): Argument #{} (${}) must be passed by reference, value given",
+                            info.name,
+                            i + 1,
+                            p.name
+                        ),
+                        line,
+                    );
+                }
+            }
+        }
         let Some((info, flags)) = self.zpp_info(lname) else {
             self.push_builtin_frame(lname, args, at);
             let r = f(self, args);
