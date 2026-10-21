@@ -22,8 +22,9 @@ fn set_content(n: NodeId, v: &str) {
     tree::with(|t| t.node_set_content(n, v));
 }
 
+/// ZEND_LONG_INT_OVFL (only the upper bound is checked)
 fn int_ovfl(v: i64) -> bool {
-    v > i32::MAX as i64 || v < i32::MIN as i64
+    v > i32::MAX as i64
 }
 
 /// dom_convert_number_unsigned (modern: negative numbers wrap around)

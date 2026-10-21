@@ -523,7 +523,8 @@ fn set_attribute_node_common(vm: &mut Vm, o: &Obj, a: &[Value], use_ns: bool) ->
 }
 
 fn m_set_attribute_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
-    set_attribute_node_common(vm, o, a, false)
+    // Dom\Element::setAttributeNode is an alias of setAttributeNodeNS
+    set_attribute_node_common(vm, o, a, true)
 }
 
 fn m_set_attribute_node_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {

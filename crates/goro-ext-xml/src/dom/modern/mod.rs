@@ -677,6 +677,9 @@ pub fn method_table(b: Base) -> Vec<(&'static str, MethodFn)> {
             if b == Base::MXmlDocument {
                 v.extend(document::xml_document_methods());
             }
+            if b == Base::MHtmlDocument {
+                v.extend(document::html_document_methods());
+            }
             v.extend(document::document_methods());
             v.extend(node::parent_methods());
             v.extend(nm());
@@ -736,6 +739,7 @@ pub fn declaring_class(b: Base, m: &str) -> &'static str {
         |tbl: Vec<(&'static str, MethodFn)>| tbl.iter().any(|(n, _)| n.eq_ignore_ascii_case(&lm));
     match b {
         Base::MXmlDocument if in_tbl(document::xml_document_methods()) => "Dom\\XMLDocument",
+        Base::MHtmlDocument if in_tbl(document::html_document_methods()) => "Dom\\HTMLDocument",
         Base::MDocument | Base::MXmlDocument | Base::MHtmlDocument
             if in_tbl(document::document_methods()) || in_tbl(node::parent_methods()) =>
         {

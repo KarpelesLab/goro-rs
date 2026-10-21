@@ -1103,6 +1103,21 @@ fn m_register_node_class(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
             return Err(());
         }
         let _ = msg;
+        // zpp "C" with DOMNode as base class
+        let canon = vm
+            .classes
+            .get(bl.as_bytes())
+            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+            .unwrap_or(base.clone());
+        throw_error(
+            vm,
+            b"TypeError",
+            &format!(
+                "{}(): Argument #1 ($baseClass) must be a class name derived from DOMNode, {} given",
+                a.f, canon
+            ),
+        );
+        return Err(());
     }
     let base_canon = vm
         .classes

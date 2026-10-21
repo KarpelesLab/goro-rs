@@ -485,6 +485,8 @@ pub fn html_create_empty(vm: &mut Vm, a: &[Value]) -> R<Value> {
     let d = tree::with(|t| {
         let d = t.new_html_doc();
         if let Some(di) = t.doc_info_mut(d) {
+            // htmlNewDocNoDtD marks the document standalone
+            di.standalone = 1;
             di.encoding = Some(encoding.clone());
         }
         d
@@ -1184,6 +1186,61 @@ pub fn xml_document_methods() -> Vec<(&'static str, MethodFn)> {
     ]
 }
 
+fn m_save_html(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
+    let a = args(a);
+    a.count(vm, 0, 1)?;
+    let node = a.obj_of(vm, 0, "node", "Dom\\Node", true)?;
+    let d = doc_node(vm, o)?;
+    let n = match node {
+        Some(no) => {
+            let n = need_node(vm, &no)?;
+            if tree::with(|t| t.nodes[n].doc) != Some(d) {
+                dom_err(vm, WRONG_DOCUMENT_ERR);
+                return Err(());
+            }
+            n
+        }
+        None => d,
+    };
+    let out = super::html_serializer::serialize_node(n);
+    let enc = tree::with(|t| t.doc_info(d).and_then(|i| i.encoding.clone()));
+    Ok(Value::String(PhpString::from_vec(
+        crate::serialize::encode_output(&out, enc.as_deref()),
+    )))
+}
+
+fn m_save_html_file(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
+    let a = args(a);
+    a.count(vm, 1, 1)?;
+    let file = a.path_str(vm, 0, "filename")?;
+    if file.is_empty() {
+        throw_error(
+            vm,
+            b"ValueError",
+            &format!("{}(): Argument #1 ($filename) must not be empty", a.f),
+        );
+        return Err(());
+    }
+    let d = doc_node(vm, o)?;
+    let out = super::html_serializer::serialize_node(d);
+    let enc = tree::with(|t| t.doc_info(d).and_then(|i| i.encoding.clone()));
+    let bytes = crate::serialize::encode_output(&out, enc.as_deref());
+    let n = crate::io::write_resource_len(vm, &file, &bytes);
+    if n < 0 {
+        return Ok(Value::False);
+    }
+    Ok(Value::Long(n))
+}
+
+pub fn html_document_methods() -> Vec<(&'static str, MethodFn)> {
+    vec![
+        ("saveXml", m_save_xml as MethodFn),
+        ("saveXmlFile", m_save_xml_file),
+        ("saveHtml", m_save_html),
+        ("saveHtmlFile", m_save_html_file),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Dom\Implementation
 
@@ -1272,6 +1329,8 @@ fn m_create_html_document(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {
     let d = tree::with(|t| {
         let d = t.new_html_doc();
         if let Some(di) = t.doc_info_mut(d) {
+            // htmlNewDocNoDtD marks the document standalone
+            di.standalone = 1;
             di.encoding = Some("UTF-8".to_string());
         }
         d
