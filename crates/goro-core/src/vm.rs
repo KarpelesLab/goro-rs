@@ -28271,6 +28271,7 @@ impl Vm {
                                     let known = is_instance_call
                                         || self.classes.contains_key(cl.as_bytes())
                                         || self.class_aliases.contains_key(cl.as_bytes())
+                                        || self.is_known_builtin_class(cl.as_bytes())
                                         || {
                                             // built-in classes implemented natively
                                             let ce = self
@@ -29783,7 +29784,10 @@ impl Vm {
                             .get(&class_lower)
                             .map(|c| c.get_method(b"offsetget").is_some())
                             .unwrap_or(false);
-                        if !is_spl_array && !has_user_offset {
+                        if !is_spl_array
+                            && !has_user_offset
+                            && !self.class_implements_interface(&class_lower, b"arrayaccess")
+                        {
                             let msg =
                                 format!("Cannot use object of type {} as array", class_name_orig);
                             let exc = self.create_exception(b"Error", &msg, op.line);
@@ -30025,7 +30029,10 @@ impl Vm {
                             .get(&class_lower)
                             .map(|c| c.get_method(b"offsetget").is_some())
                             .unwrap_or(false);
-                        if !is_spl_array && !has_user_offset {
+                        if !is_spl_array
+                            && !has_user_offset
+                            && !self.class_implements_interface(&class_lower, b"arrayaccess")
+                        {
                             let msg =
                                 format!("Cannot use object of type {} as array", class_name_orig);
                             let exc = self.create_exception(b"Error", &msg, op.line);
@@ -38503,7 +38510,10 @@ impl Vm {
                             .get(&class_lower)
                             .map(|c| c.get_method(b"offsetexists").is_some())
                             .unwrap_or(false);
-                        if is_spl_array || has_user_offset {
+                        if is_spl_array
+                            || has_user_offset
+                            || self.class_implements_interface(&class_lower, b"arrayaccess")
+                        {
                             let args = vec![arr_val.clone(), key_val.clone()];
                             let exists_result = self
                                 .handle_spl_docall(&class_lower, b"offsetexists", &args)
@@ -47210,6 +47220,32 @@ impl Vm {
                             });
                         }
 
+                        // spl_recursive_it_get_method(): no iterator stack yet.
+                        if method_name_lower != b"__construct"
+                            && !obj.borrow().has_property(b"__spl_rii_its")
+                            && self
+                                .spl_find_base(&class_name_lower, &[b"recursiveiteratoriterator"])
+                                .is_some()
+                        {
+                            let msg = format!(
+                                "The {} instance wasn't initialized properly",
+                                crate::value::display_class_name(&class_name_orig)
+                            );
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+
                         // Handle Fiber methods before the main dispatch
                         if class_name_lower == b"fiber" && !has_user_method {
                             match method_name_lower.as_slice() {
@@ -48742,7 +48778,26 @@ impl Vm {
             }
             // Built-in SPL __toString (SplFileInfo family, CachingIterator)
             if self.spl_has_builtin_tostring(&class_lower) {
+                // The internal __toString() runs in its own frame.
+                let frame = self.spl_builtin_base(&class_lower).map(|b| {
+                    let decl = crate::stubs::find_method(b, b"__tostring")
+                        .map(|(c, _)| c.name.to_string())
+                        .unwrap_or_else(|| self.builtin_canonical_name(b));
+                    format!("{}->__toString", decl)
+                });
+                if let Some(f) = &frame {
+                    self.call_stack.push((
+                        f.clone(),
+                        self.current_file.clone(),
+                        self.current_line,
+                        Vec::new(),
+                        true,
+                    ));
+                }
                 let r = self.call_object_method(val, b"__tostring", &[]);
+                if frame.is_some() {
+                    self.call_stack.pop();
+                }
                 return match r {
                     Some(v) if self.current_exception.is_none() => v.to_php_string(),
                     _ => PhpString::empty(),

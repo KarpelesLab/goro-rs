@@ -434,7 +434,14 @@ impl Vm {
             .map(|b| self.spl_stub_lookup(b, &mlower).is_some())
             .unwrap_or(false);
         if !user_has && !builtin_has {
-            return None;
+            // An outer iterator wrapping another one: its get_method
+            // handler forwards in turn (spl_dual_it_get_method).
+            let mut fwd = tcl.clone();
+            fwd.extend_from_slice(b"::");
+            fwd.extend_from_slice(method);
+            let mut fargs = vec![target.clone()];
+            fargs.extend_from_slice(&args[1..]);
+            return self.spl_forward_unknown_method(&fwd, &fargs);
         }
         let r = self.call_object_method(&target, method, &args[1..]);
         Some(r.unwrap_or(Value::Null))

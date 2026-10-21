@@ -661,6 +661,13 @@ impl Vm {
         let ai = Self::append_it(obj);
         if self.it_valid(&ai) {
             let it = self.it_current(&ai);
+            // zend_generator_get_iterator()
+            if let Value::Generator(g) = it.deref() {
+                if g.borrow().state == crate::generator::GeneratorState::Completed {
+                    self.spl_throw(b"Exception", "Cannot traverse an already closed generator");
+                    return false;
+                }
+            }
             set_prop(obj, b"__spl_inner", it);
             self.dit_rewind(obj);
             true
@@ -1355,10 +1362,31 @@ impl Vm {
                 self.it_key(&inner)
             }
             (b"norewinditerator", b"current") => {
+                // The inner zend_object_iterator of a userland iterator
+                // caches current() until it is moved (zend_user_it).
+                if obj.borrow().has_property(b"__spl_nr_cur") {
+                    return Some(prop(obj, b"__spl_nr_cur"));
+                }
                 let inner = Self::dit_inner(obj);
-                self.it_current(&inner).deref()
+                let v = self.it_current(&inner).deref();
+                let user_current = match &inner {
+                    Value::Object(io) => self
+                        .classes
+                        .get(&obj_class_lower(io))
+                        .and_then(|c| c.get_method(b"current"))
+                        .is_some_and(|m| m.op_array.internal_sig.is_none()),
+                    _ => false,
+                };
+                if user_current && !self.exc() {
+                    obj.borrow_mut()
+                        .set_property(b"__spl_nr_cur".to_vec(), v.clone());
+                }
+                v
             }
             (b"norewinditerator", b"next") => {
+                obj.borrow_mut()
+                    .properties
+                    .retain(|(k, _)| k != b"__spl_nr_cur");
                 let inner = Self::dit_inner(obj);
                 self.it_next(&inner);
                 Value::Null

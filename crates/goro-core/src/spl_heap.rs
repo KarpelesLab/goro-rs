@@ -117,7 +117,7 @@ impl Vm {
         };
         if user_cmp {
             let this = Value::Object(obj.clone());
-            let r = self.call_object_method(&this, b"compare", &[x.clone(), y.clone()]);
+            let r = self.spl_call_method_at(&this, b"compare", &[x.clone(), y.clone()], true);
             if self.current_exception.is_some() {
                 return 0;
             }
