@@ -34177,10 +34177,7 @@ impl Vm {
                                 Err(e) => {
                                     // A syntax error in the included file throws ParseError;
                                     // uncaught, it is reported as "Parse error" (E_PARSE).
-                                    let msg = if e.message.contains("unexpected")
-                                        || e.message.contains("syntax error")
-                                        || e.message.starts_with("Invalid ")
-                                    {
+                                    let msg = if is_php_parse_message(&e.message) {
                                         e.message.clone()
                                     } else {
                                         "syntax error".to_string()
@@ -34431,10 +34428,7 @@ impl Vm {
                             }
                             Err(e) => {
                                 // PHP 7+: parse errors in eval throw ParseError exception
-                                let msg = if e.message.contains("unexpected")
-                                    || e.message.contains("syntax error")
-                                    || e.message.starts_with("Invalid ")
-                                {
+                                let msg = if is_php_parse_message(&e.message) {
                                     e.message.clone()
                                 } else {
                                     format!("syntax error in eval()'d code on line {}", e.span.line)
@@ -34463,10 +34457,7 @@ impl Vm {
                                     continue;
                                 }
                                 // No exception handler - output as parse error
-                                let err_msg = if e.message.contains("unexpected")
-                                    || e.message.contains("syntax error")
-                                    || e.message.starts_with("Invalid ")
-                                {
+                                let err_msg = if is_php_parse_message(&e.message) {
                                     e.message.clone()
                                 } else {
                                     "syntax error".to_string()
@@ -51700,6 +51691,17 @@ fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Whether a parser message is one php-src's scanner/parser produces (others
+/// are reported as a bare "syntax error").
+fn is_php_parse_message(msg: &str) -> bool {
+    msg.contains("unexpected")
+        || msg.contains("syntax error")
+        || msg.starts_with("Invalid ")
+        || msg.starts_with("Unclosed '")
+        || msg.starts_with("Unmatched '")
+        || msg.starts_with("Unterminated comment")
 }
 
 /// Emit deprecation/warning for inc/dec on non-numeric strings and booleans

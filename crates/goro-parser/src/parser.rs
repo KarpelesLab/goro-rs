@@ -340,8 +340,91 @@ impl Parser {
         matches!(self.peek(), TokenKind::Eof)
     }
 
+    /// The first bracket nesting error the scanner would raise
+    /// (enter_nesting / exit_nesting / check_nesting_at_end in
+    /// zend_language_scanner.l): (token index, message, line).
+    fn first_nesting_error(&self) -> Option<(usize, String, u32)> {
+        let mut stack: Vec<(u8, u32)> = Vec::new();
+        for (i, tok) in self.tokens.iter().enumerate() {
+            let line = tok.span.line;
+            let close = match &tok.kind {
+                TokenKind::OpenParen => {
+                    stack.push((b'(', line));
+                    continue;
+                }
+                TokenKind::OpenBracket | TokenKind::AttributeOpen => {
+                    stack.push((b'[', line));
+                    continue;
+                }
+                TokenKind::OpenBrace | TokenKind::DollarOpenBrace => {
+                    stack.push((b'{', line));
+                    continue;
+                }
+                TokenKind::CloseParen => b')',
+                TokenKind::CloseBracket => b']',
+                TokenKind::CloseBrace => b'}',
+                TokenKind::Eof => {
+                    let (open, oline) = stack.last().copied()?;
+                    let msg = if oline == line {
+                        format!("Unclosed '{}'", open as char)
+                    } else {
+                        format!("Unclosed '{}' on line {}", open as char, oline)
+                    };
+                    return Some((i, msg, line));
+                }
+                _ => continue,
+            };
+            let Some((open, oline)) = stack.pop() else {
+                return Some((i, format!("Unmatched '{}'", close as char), line));
+            };
+            let expected = match open {
+                b'(' => b')',
+                b'[' => b']',
+                _ => b'}',
+            };
+            if close != expected {
+                let msg = if oline == line {
+                    format!(
+                        "Unclosed '{}' does not match '{}'",
+                        open as char, close as char
+                    )
+                } else {
+                    format!(
+                        "Unclosed '{}' on line {} does not match '{}'",
+                        open as char, oline, close as char
+                    )
+                };
+                return Some((i, msg, line));
+            }
+        }
+        None
+    }
+
     /// Parse a complete PHP program
     pub fn parse(&mut self) -> ParseResult<Program> {
+        let nesting = self.first_nesting_error();
+        let result = self.parse_program();
+        match (result, nesting) {
+            // The scanner raises its error when the parser fetches that token:
+            // it wins over a syntax error found at or after it.
+            (Err(e), Some((idx, message, line))) if idx <= self.pos => {
+                let mut span = e.span;
+                span.line = line;
+                Err(ParseError { message, span })
+            }
+            (Ok(_), Some((idx, message, line))) => {
+                let span = crate::token::Span {
+                    start: self.tokens.get(idx).map(|t| t.span.start).unwrap_or(0),
+                    end: self.tokens.get(idx).map(|t| t.span.end).unwrap_or(0),
+                    line,
+                };
+                Err(ParseError { message, span })
+            }
+            (r, _) => r,
+        }
+    }
+
+    fn parse_program(&mut self) -> ParseResult<Program> {
         if let Some((message, line)) = crate::take_lexer_error() {
             let mut span = self
                 .tokens
