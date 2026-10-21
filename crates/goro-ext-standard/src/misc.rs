@@ -9311,6 +9311,27 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             std::str::from_utf8(alias.as_bytes()).unwrap_or(""));
         return Err(VmError { message: msg, line });
     }
+    let autoload = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
+    if autoload && !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
+        vm.try_autoload_class(original.as_bytes());
+    }
+    if !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
+        vm.emit_warning(&format!("Class \"{}\" not found", original.to_string_lossy()));
+        return Ok(Value::False);
+    }
+    if let Some(existing) = vm.classes.get(&alias_lower) {
+        // The message names the kind of the class being aliased.
+        let kind = match vm.classes.get(&original_lower) {
+            Some(o) if o.is_interface => "interface",
+            Some(o) if o.is_trait => "trait",
+            Some(o) if o.is_enum => "enum",
+            _ => "class",
+        };
+        let msg = format!("Cannot redeclare {} {} (previously declared in {}:{})", kind, alias.to_string_lossy(),
+            existing.filename.clone().unwrap_or_default(), existing.start_line);
+        vm.emit_warning(&msg);
+        return Ok(Value::False);
+    }
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
         // Use the original class name (not alias) for the class entry
         let mut aliased_class = class;
