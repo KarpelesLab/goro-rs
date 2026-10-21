@@ -4558,64 +4558,25 @@ fn ksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn krsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     php_builtin_sort(vm, args, "krsort", true, true, false)
 }
-fn shuffle_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let mut values: Vec<Value> = {
-            let arr_borrow = arr.borrow();
-            arr_borrow.values().cloned().collect()
-        };
-        // Fisher-Yates shuffle using simple time-based random
-        let n = values.len();
-        if n > 1 {
-            use std::time::SystemTime;
-            let mut seed = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            for i in (1..n).rev() {
-                // xorshift64 for better randomness
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                let j = (seed as usize) % (i + 1);
-                values.swap(i, j);
-            }
-        }
-        // Rebuild array with sequential integer keys
-        let mut new_arr = PhpArray::new();
-        for v in values {
-            new_arr.push(v);
-        }
-        *arr.borrow_mut() = new_arr;
-    } else if let Some(Value::Reference(r)) = args.first() {
-        let val = r.borrow().clone();
-        if let Value::Array(arr) = val {
-            let mut values: Vec<Value> = {
-                let arr_borrow = arr.borrow();
-                arr_borrow.values().cloned().collect()
-            };
-            let n = values.len();
-            if n > 1 {
-                use std::time::SystemTime;
-                let mut seed = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                for i in (1..n).rev() {
-                    seed ^= seed << 13;
-                    seed ^= seed >> 7;
-                    seed ^= seed << 17;
-                    let j = (seed as usize) % (i + 1);
-                    values.swap(i, j);
-                }
-            }
-            let mut new_arr = PhpArray::new();
-            for v in values {
-                new_arr.push(v);
-            }
-            *arr.borrow_mut() = new_arr;
-        }
+fn shuffle_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arr = match args.first() {
+        Some(Value::Array(arr)) => arr.clone(),
+        Some(Value::Reference(r)) => match &*r.borrow() {
+            Value::Array(arr) => arr.clone(),
+            _ => return Ok(Value::True),
+        },
+        _ => return Ok(Value::True),
+    };
+    // php_array_data_shuffle(): the values are shuffled in place and the
+    // array becomes a list.
+    let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
+    let engine = goro_core::random::default_engine();
+    goro_core::random::shuffle_items(vm, &engine, &mut values);
+    let mut new_arr = PhpArray::with_capacity(values.len());
+    for v in values {
+        new_arr.push(v);
     }
+    *arr.borrow_mut() = new_arr;
     Ok(Value::True)
 }
 
@@ -6205,72 +6166,24 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::Null),
     };
     let num = args.get(1).map(|v| v.to_long()).unwrap_or(1);
-    let arr_borrow = arr.borrow();
-    let len = arr_borrow.len();
-    if len == 0 {
-        let msg = "array_rand(): Argument #1 ($array) must not be empty".to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+    let keys: Vec<goro_core::array::ArrayKey> = arr.borrow().keys().cloned().collect();
+    let engine = goro_core::random::default_engine();
+    match goro_core::random::pick_keys(vm, &engine, &keys, num, "array_rand") {
+        Some(v) => Ok(v),
+        None => {
+            let message = match &vm.current_exception {
+                Some(Value::Object(o)) => o
+                    .borrow()
+                    .get_property(b"message")
+                    .to_php_string()
+                    .to_string_lossy(),
+                _ => String::new(),
+            };
+            Err(VmError {
+                message,
+                line: vm.current_line,
+            })
         }
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: format!("Uncaught ValueError: {}", msg),
-            line: vm.current_line,
-        });
-    }
-    if num < 1 || num as usize > len {
-        let msg = "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)".to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
-        }
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: format!("Uncaught ValueError: {}", msg),
-            line: vm.current_line,
-        });
-    }
-    let keys: Vec<goro_core::array::ArrayKey> = arr_borrow.iter().map(|(k, _)| k.clone()).collect();
-    drop(arr_borrow);
-
-    use std::time::SystemTime;
-    let mut seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-
-    if num == 1 {
-        // xorshift64
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        let idx = (seed as usize) % len;
-        match &keys[idx] {
-            goro_core::array::ArrayKey::Int(n) => Ok(Value::Long(*n)),
-            goro_core::array::ArrayKey::String(s) => Ok(Value::String(s.clone())),
-        }
-    } else {
-        // Return an array of random keys (sorted by their position in original array)
-        let num = num as usize;
-        let mut indices: Vec<usize> = (0..len).collect();
-        for i in (1..len).rev() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            let j = (seed as usize) % (i + 1);
-            indices.swap(i, j);
-        }
-        let mut selected: Vec<usize> = indices[..num].to_vec();
-        selected.sort();
-        let mut result = PhpArray::new();
-        for idx in selected {
-            match &keys[idx] {
-                goro_core::array::ArrayKey::Int(n) => result.push(Value::Long(*n)),
-                goro_core::array::ArrayKey::String(s) => result.push(Value::String(s.clone())),
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
     }
 }
 

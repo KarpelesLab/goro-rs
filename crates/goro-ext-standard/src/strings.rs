@@ -3085,28 +3085,12 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn str_shuffle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn str_shuffle(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let mut bytes = s.as_bytes().to_vec();
-    let len = bytes.len();
-    if len > 1 {
-        // Fisher-Yates shuffle using xorshift64 for better randomness.
-        use std::time::SystemTime;
-        let mut seed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        // Avoid zero seed (xorshift64 fixed point).
-        if seed == 0 {
-            seed = 0x9E3779B97F4A7C15;
-        }
-        for i in (1..len).rev() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            let j = (seed as usize) % (i + 1);
-            bytes.swap(i, j);
-        }
+    if bytes.len() > 1 {
+        let engine = goro_core::random::default_engine();
+        goro_core::random::shuffle_items(vm, &engine, &mut bytes);
     }
     Ok(Value::String(PhpString::from_vec(bytes)))
 }

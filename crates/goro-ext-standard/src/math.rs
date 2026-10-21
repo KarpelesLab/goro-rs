@@ -843,12 +843,40 @@ fn fmod_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(a % b))
 }
 
-fn rand_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let min = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let max = args.get(1).map(|v| v.to_long()).unwrap_or(i32::MAX as i64);
-    // Simple pseudo-random (not cryptographic)
-    let val = simple_random(min, max);
-    Ok(Value::Long(val))
+/// Throw `class` with `msg` from a builtin.
+fn throw_err(vm: &mut Vm, class: &[u8], msg: String) -> Result<Value, VmError> {
+    let exc = vm.create_exception(class, &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
+/// mt_rand()/rand(): no arguments or exactly two.
+fn rand_args(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(i64, i64)>, VmError> {
+    match args.len() {
+        0 => Ok(None),
+        1 => throw_err(
+            vm,
+            b"ArgumentCountError",
+            format!("{}() expects exactly 2 arguments, 1 given", fname),
+        )
+        .map(|_| None),
+        _ => Ok(Some((args[0].to_long(), args[1].to_long()))),
+    }
+}
+
+fn rand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some((min, max)) = rand_args(vm, "rand", args)? else {
+        return Ok(Value::Long((goro_core::random::mt_rand_u32() >> 1) as i64));
+    };
+    let v = if max < min {
+        goro_core::random::mt_rand_common(vm, max, min)
+    } else {
+        goro_core::random::mt_rand_common(vm, min, max)
+    };
+    Ok(Value::Long(v))
 }
 
 fn clamp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -914,24 +942,19 @@ fn clamp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(value.clone())
 }
 
-fn mt_rand(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let min = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let max = args.get(1).map(|v| v.to_long()).unwrap_or(i32::MAX as i64);
-    let val = simple_random(min, max);
-    Ok(Value::Long(val))
-}
-
-fn simple_random(min: i64, max: i64) -> i64 {
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let range = (max - min + 1) as u64;
-    if range == 0 {
-        return min;
+fn mt_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let Some((min, max)) = rand_args(vm, "mt_rand", args)? else {
+        return Ok(Value::Long((goro_core::random::mt_rand_u32() >> 1) as i64));
+    };
+    if max < min {
+        return throw_err(
+            vm,
+            b"ValueError",
+            "mt_rand(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)"
+                .to_string(),
+        );
     }
-    min + (seed % range) as i64
+    Ok(Value::Long(goro_core::random::mt_rand_common(vm, min, max)))
 }
 
 fn array_sum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1438,23 +1461,30 @@ fn array_product(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Long(0))
     }
 }
-fn random_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn random_int(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let min = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let max = args.get(1).map(|v| v.to_long()).unwrap_or(i64::MAX);
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let range = (max - min + 1) as u64;
-    if range == 0 {
-        return Ok(Value::Long(min));
+    let max = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if min > max {
+        return throw_err(
+            vm,
+            b"ValueError",
+            "random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)"
+                .to_string(),
+        );
     }
-    Ok(Value::Long(min + (seed % range) as i64))
+    Ok(Value::Long(goro_core::random::csprng_int(min, max)))
 }
-fn random_bytes_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let len = args.first().map(|v| v.to_long()).unwrap_or(16) as usize;
-    let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 13) as u8).collect(); // Not cryptographic!
+fn random_bytes_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let len = args.first().map(|v| v.to_long()).unwrap_or(0);
+    if len < 1 {
+        return throw_err(
+            vm,
+            b"ValueError",
+            "random_bytes(): Argument #1 ($length) must be greater than 0".to_string(),
+        );
+    }
+    let mut bytes = vec![0u8; len as usize];
+    goro_core::random::csprng_bytes(&mut bytes);
     Ok(Value::String(goro_core::string::PhpString::from_vec(bytes)))
 }
 fn sinh_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1809,25 +1839,25 @@ fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn srand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Check for MT_RAND_PHP mode deprecation (second argument = 1)
-    if let Some(mode) = args.get(1) {
-        if mode.to_long() == 1 {
-            vm.emit_deprecated_at(
-                "The MT_RAND_PHP variant of Mt19937 is deprecated",
-                vm.current_line,
-            );
-        }
+    let seed = match args.first().map(|v| v.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => None,
+        Some(v) => Some(v.to_long()),
+    };
+    let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    if mode == 1 {
+        vm.emit_deprecated_at(
+            "The MT_RAND_PHP variant of Mt19937 is deprecated",
+            vm.current_line,
+        );
     }
-    // srand/mt_srand is a no-op in our implementation since we use the system RNG
+    goro_core::random::mt_srand(seed, mode);
     Ok(Value::Null)
 }
 
-fn lcg_value_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // lcg_value() returns a pseudo-random float between 0 and 1
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as f64;
-    Ok(Value::Double(seed / 1_000_000_000.0))
+fn lcg_value_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated_at(
+        "Function lcg_value() is deprecated since 8.4, use \\Random\\Randomizer::getFloat() instead",
+        vm.current_line,
+    );
+    Ok(Value::Double(goro_core::random::combined_lcg()))
 }
