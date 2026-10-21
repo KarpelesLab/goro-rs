@@ -2,6 +2,7 @@ pub mod mbfl;
 pub mod arginfo;
 pub mod entities;
 pub mod gpc;
+pub mod mail;
 pub mod mbregex;
 pub mod mbstring;
 pub mod mime;

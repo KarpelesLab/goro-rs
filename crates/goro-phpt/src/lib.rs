@@ -136,7 +136,26 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
 
 pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
-    let ini_settings = parse_ini_settings(test.ini_section());
+    let mut ini_settings = parse_ini_settings(test.ini_section());
+    // run-tests.php placeholders: {PWD}, {TMP}, {MAIL:path}
+    for (_, v) in ini_settings.iter_mut() {
+        if v.contains("{PWD}") {
+            let pwd = test_dir.map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+            *v = v.replace("{PWD}", &pwd);
+        }
+        if v.contains("{TMP}") {
+            *v = v.replace("{TMP}", &std::env::temp_dir().to_string_lossy());
+        }
+        while let Some(start) = v.find("{MAIL:") {
+            let rest = &v[start + 6..];
+            let end = rest.find(|c: char| c == '}' || c.is_whitespace()).unwrap_or(rest.len());
+            if !rest[end..].starts_with('}') {
+                break;
+            }
+            let path = rest[..end].to_string();
+            *v = format!("{}tee {} >/dev/null{}", &v[..start], path, &rest[end + 1..]);
+        }
+    }
 
     // Check goro skip-list: tests that depend on infrastructure goro doesn't have
     // (JIT, phpdbg, CLI server, real MySQL, external php spawn, real network, live curl).

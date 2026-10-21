@@ -557,6 +557,10 @@ fn strtol_full(v: &[u8]) -> Option<i64> {
 /// Make sure the globals reflect the current INI settings. The first call
 /// performs MINIT/RINIT; later calls pick up settings changed by ini_set().
 pub fn sync(vm: &mut Vm) {
+    // After initialization, INI changes arrive through the ini_set() hooks
+    if MBSTRG.with(|s| s.borrow().initialized) && !vm.ini_set_hooks.is_empty() {
+        return;
+    }
     let mut st = MBSTRG.with(|s| std::mem::replace(&mut *s.borrow_mut(), MbState::new()));
     if !st.initialized {
         st.initialized = true;
