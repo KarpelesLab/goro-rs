@@ -30327,22 +30327,24 @@ impl Vm {
                                         continue; // Private properties are not subject to invariance
                                     }
                                     if let Some(child_prop) = class.properties.iter().find(|p| p.name == parent_prop.name) {
-                                        if Self::param_types_are_equal(&parent_prop.property_type, &child_prop.property_type) {
-                                            continue;
-                                        }
                                         // Relaxed type check: read-only / write-only props.
                                         // Only relax when the parent property is virtual (no backing
                                         // storage). Backed properties remain invariant.
                                         let parent_read_only = parent_prop.has_get_hook && !parent_prop.has_set_hook && parent_prop.is_virtual;
                                         let parent_write_only = !parent_prop.has_get_hook && parent_prop.has_set_hook && parent_prop.is_virtual;
+                                        let prop_variance: u8 = if parent_read_only { 1 } else if parent_write_only { 2 } else { 0 };
+                                        let (prop_status, parent_type_str, parent_decl_name) = self.variance_property_types(
+                                            &class, &parent_prop.declaring_class,
+                                            &parent_prop.property_type, &child_prop.property_type, prop_variance,
+                                        );
+                                        if prop_status == variance::Status::Success {
+                                            continue;
+                                        }
+                                        if prop_status == variance::Status::Unresolved && is_early_attempt {
+                                            variance::defer(&class.name);
+                                            continue 'exec;
+                                        }
                                         if parent_read_only {
-                                            // Read-only: child's type must be a subtype (covariant).
-                                            // We allow Some<T> ⊆ Some<T> when:
-                                            //   - they're equal, OR
-                                            //   - child type alternatives are a subset of parent's.
-                                            if Self::is_type_covariant(&child_prop.property_type, &parent_prop.property_type) {
-                                                continue;
-                                            }
                                             // Otherwise emit a hook-style declaration mismatch error.
                                             let child_display = String::from_utf8_lossy(&class.name).to_string();
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
@@ -30357,10 +30359,6 @@ impl Vm {
                                             });
                                         }
                                         if parent_write_only {
-                                            // Write-only: child's type must be a supertype (contravariant).
-                                            if Self::is_type_covariant(&parent_prop.property_type, &child_prop.property_type) {
-                                                continue;
-                                            }
                                             let child_display = String::from_utf8_lossy(&class.name).to_string();
                                             let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                             let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
@@ -30376,11 +30374,7 @@ impl Vm {
                                         let child_display = String::from_utf8_lossy(&class.name).to_string();
                                         let parent_display = String::from_utf8_lossy(parent_name).to_string();
                                         let prop_display = String::from_utf8_lossy(&parent_prop.name).to_string();
-                                        let expected_type = if let Some(ref pt) = parent_prop.property_type {
-                                            self.param_type_display(pt)
-                                        } else {
-                                            "omitted to match the parent definition".to_string()
-                                        };
+                                        let expected_type = parent_type_str;
                                         if parent_prop.property_type.is_none() {
                                             return Err(VmError {
                                                 message: format!("Type of {}::${} must be omitted to match the parent definition in class {}",
@@ -30388,6 +30382,7 @@ impl Vm {
                                                 line: op.line,
                                             });
                                         } else {
+                                            let parent_display = String::from_utf8_lossy(&parent_decl_name).to_string();
                                             return Err(VmError {
                                                 message: format!("Type of {}::${} must be {} (as in class {})",
                                                     child_display, prop_display, expected_type, parent_display),

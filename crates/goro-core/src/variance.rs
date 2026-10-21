@@ -959,3 +959,41 @@ impl Vm {
         cur.name.clone()
     }
 }
+
+impl Vm {
+    /// full_property_types_compatible: `variance` 0 = invariant, 1 = covariant,
+    /// 2 = contravariant. Returns the status, the parent type rendered as
+    /// PHP does in "Type of X::$p must be ..." errors, and the parent's class name.
+    pub(crate) fn variance_property_types(
+        &self,
+        cur: &ClassEntry,
+        parent_decl_class: &[u8],
+        parent_type: &Option<ParamType>,
+        child_type: &Option<ParamType>,
+        variance: u8,
+    ) -> (Status, String, Vec<u8>) {
+        let cur_lc = LinkClass::from_entry(cur);
+        let ctx = Ctx::new(self, &cur_lc);
+        let parent_lc = self.variance_scope_for(&ctx, parent_decl_class, parent_decl_class);
+        let parent_str = parent_type
+            .as_ref()
+            .map(|t| type_to_string(&TypeView::from_param_type(t), Some(&parent_lc)))
+            .unwrap_or_default();
+        let parent_name = parent_lc.name.clone();
+        let (pt, ct) = match (parent_type, child_type) {
+            (None, None) => return (Status::Success, parent_str, parent_name),
+            (Some(p), Some(c)) => (TypeView::from_param_type(p), TypeView::from_param_type(c)),
+            _ => return (Status::Error, parent_str, parent_name),
+        };
+        let s1 = if variance == 2 { Status::Success } else { ctx.covariant(&cur_lc, &ct, &parent_lc, &pt) };
+        let s2 = if variance == 1 { Status::Success } else { ctx.covariant(&parent_lc, &pt, &cur_lc, &ct) };
+        let st = if s1 == Status::Success && s2 == Status::Success {
+            Status::Success
+        } else if s1 == Status::Error || s2 == Status::Error {
+            Status::Error
+        } else {
+            Status::Unresolved
+        };
+        (st, parent_str, parent_name)
+    }
+}

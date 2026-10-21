@@ -4813,6 +4813,7 @@ impl Compiler {
                                 }
                                 method_compiler.current_class = Some(qualified_name.clone());
                                 method_compiler.current_parent_class = class.parent.clone();
+                                method_compiler.op_array.returns_by_ref = *method_returns_by_ref;
                                 method_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
                                 method_compiler.anon_class_name_map = self.anon_class_name_map.clone();
 
@@ -5061,6 +5062,7 @@ impl Compiler {
                                 let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let mut abstract_op_array = OpArray::new();
                                 abstract_op_array.decl_line = *method_line;
+                                abstract_op_array.returns_by_ref = *method_returns_by_ref;
                                 abstract_op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
                                 abstract_op_array.filename = self.source_file.clone();
                                 abstract_op_array.name = method_name.clone();
@@ -5116,6 +5118,52 @@ impl Compiler {
                                         abstract_op_array.param_types.push(None);
                                     }
                                     abstract_op_array.param_types[cv as usize] = type_info;
+                                }
+                                // Compile default-value preludes (not executed) so the
+                                // defaults are known for signatures and reflection.
+                                if params.iter().any(|p| p.default.is_some()) {
+                                    let mut dc = Compiler::new();
+                                    dc.current_namespace = self.current_namespace.clone();
+                                    dc.use_map = self.use_map.clone();
+                                    dc.use_function_map = self.use_function_map.clone();
+                                    dc.use_const_map = self.use_const_map.clone();
+                                    dc.current_class = Some(qualified_name.clone());
+                                    dc.current_parent_class = class.parent.clone();
+                                    dc.source_file = self.source_file.clone();
+                                    dc.op_array = std::mem::take(&mut abstract_op_array);
+                                    for param in params {
+                                        if let Some(default_expr) = &param.default {
+                                            let cv = dc.op_array.get_or_create_cv(&param.name);
+                                            if let Ok(default_val) = dc.compile_expr(default_expr) {
+                                                let undef_idx = dc.op_array.add_literal(Value::Undef);
+                                                let check_tmp = dc.op_array.alloc_temp();
+                                                dc.op_array.emit(Op {
+                                                    opcode: OpCode::Identical,
+                                                    op1: OperandType::Cv(cv),
+                                                    op2: OperandType::Const(undef_idx),
+                                                    result: OperandType::Tmp(check_tmp),
+                                                    line: 0,
+                                                });
+                                                let jmp_skip = dc.op_array.emit(Op {
+                                                    opcode: OpCode::JmpZ,
+                                                    op1: OperandType::Tmp(check_tmp),
+                                                    op2: OperandType::JmpTarget(0),
+                                                    result: OperandType::Unused,
+                                                    line: 0,
+                                                });
+                                                dc.op_array.emit(Op {
+                                                    opcode: OpCode::Assign,
+                                                    op1: OperandType::Cv(cv),
+                                                    op2: default_val,
+                                                    result: OperandType::Unused,
+                                                    line: 0,
+                                                });
+                                                let after = dc.op_array.current_offset();
+                                                dc.op_array.patch_jump(jmp_skip, after);
+                                            }
+                                        }
+                                    }
+                                    abstract_op_array = dc.op_array;
                                 }
                                 // Set return type
                                 if let Some(hint) = method_return_type {
