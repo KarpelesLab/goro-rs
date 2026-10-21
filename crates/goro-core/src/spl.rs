@@ -230,6 +230,31 @@ impl Vm {
         }
     }
 
+    /// Whether argument `arg_index` (counting $this) of a deferred SPL call
+    /// is a by-reference parameter of the built-in method.
+    pub(crate) fn spl_deferred_arg_by_ref(&self, call: &crate::vm::PendingCall, arg_index: usize) -> bool {
+        let name = call.name.as_bytes();
+        if !name.starts_with(b"__splx::") || arg_index == 0 {
+            return false;
+        }
+        let obj = match call.args.first() {
+            Some(Value::Object(o)) => o,
+            _ => return false,
+        };
+        let method: Vec<u8> = name[8..].iter().map(|b| b.to_ascii_lowercase()).collect();
+        let base = match self.spl_builtin_base(&obj_class_lower(obj)) {
+            Some(b) => b,
+            None => return false,
+        };
+        let stub = match self.spl_stub_lookup(base, &method) {
+            Some(s) => s,
+            None => return false,
+        };
+        let p = arg_index - 1;
+        let last = stub.params.len().saturating_sub(1);
+        stub.byref.contains(&p) || (stub.variadic && p >= last && stub.byref.contains(&last))
+    }
+
     /// Run a built-in SPL method over the class chain. With user arguments
     /// the argument-taking implementation is preferred.
     fn spl_invoke_builtin(

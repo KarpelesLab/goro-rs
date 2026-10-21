@@ -377,6 +377,23 @@ impl Vm {
         self.ao_offset_exists(obj, offset, 0)
     }
 
+    /// has_property(ZEND_PROPERTY_EXISTS) for property_exists(): Some(result)
+    /// when ARRAY_AS_PROPS routes the name to the storage.
+    pub fn spl_property_exists_hook(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<bool> {
+        if !self.ao_prop_as_dim(obj, name) {
+            return None;
+        }
+        let key = Value::String(PhpString::from_bytes(name));
+        if self.ao_user_has(obj, b"offsetexists") {
+            let ov = Value::Object(obj.clone());
+            let r = self.call_object_method(&ov, b"offsetExists", &[key.clone()]).unwrap_or(Value::False);
+            if self.current_exception.is_some() || !r.is_truthy() {
+                return Some(false);
+            }
+        }
+        Some(self.ao_offset_exists(obj, &key, 2))
+    }
+
     /// spl_array_unset_dimension_ex(check_inherited=true).
     pub(crate) fn ao_unset_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) {
         if self.ao_user_has(obj, b"offsetunset") {

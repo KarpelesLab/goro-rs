@@ -15040,6 +15040,12 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj_or_class = args.first().unwrap_or(&Value::Null);
     let prop_name = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
     let prop_bytes = prop_name.as_bytes();
+    // ArrayObject ARRAY_AS_PROPS: has_property(ZEND_PROPERTY_EXISTS) checks the storage.
+    if let Value::Object(o) = obj_or_class {
+        if let Some(r) = vm.spl_property_exists_hook(o, prop_bytes) {
+            return Ok(if r { Value::True } else { Value::False });
+        }
+    }
 
     // Helper: a property is "visible" on `class_lower` if declared on it OR
     // declared on an ancestor with non-private visibility.

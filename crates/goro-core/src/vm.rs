@@ -149,9 +149,9 @@ impl std::fmt::Display for VmError {
 impl std::error::Error for VmError {}
 
 /// Pending function call being assembled
-struct PendingCall {
-    name: PhpString,
-    args: Vec<Value>,
+pub(crate) struct PendingCall {
+    pub(crate) name: PhpString,
+    pub(crate) args: Vec<Value>,
     /// Named arguments: (param_name, value) pairs to be reordered at call time
     named_args: Vec<(Vec<u8>, Value)>,
 }
@@ -13915,7 +13915,8 @@ impl Vm {
                         let name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                         self.user_functions.get(&name_lower)
                             .and_then(|f| f.by_ref_params.get(arg_index).copied())
-                    }).unwrap_or(false);
+                    }).unwrap_or(false)
+                        || self.pending_calls.last().map(|call| self.spl_deferred_arg_by_ref(call, arg_index)).unwrap_or(false);
 
                     if callee_expects_ref {
                         // Pass by reference: create a shared reference between caller CV and callee CV
