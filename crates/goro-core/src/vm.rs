@@ -14350,7 +14350,7 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
-        self.execute_frame(op_array, &mut cvs, &mut tmps, None)
+        self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame)
     }
 
     /// Execute the single opcode at `ip` on a suspended frame's variables
@@ -14365,7 +14365,7 @@ impl Vm {
     ) -> Result<usize, VmError> {
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
-        let r = self.execute_frame(op_array, cvs, tmps, Some(ip));
+        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false);
         self.is_global_scope = was_global;
         // A write to $GLOBALS[...] may have changed the symbol table's shape.
         if let Some(op) = op_array.ops.get(ip) {
@@ -14394,6 +14394,7 @@ impl Vm {
         cvs: &mut Vec<Value>,
         tmps: &mut Vec<Value>,
         single_step: Option<usize>,
+        cv_frame: bool,
     ) -> Result<Value, VmError> {
         let mut ip: usize = single_step.unwrap_or(0);
         let temp_count = op_array.temp_count as usize;
@@ -14453,7 +14454,7 @@ impl Vm {
         let mut prev_op: Option<usize> = None;
 
         if cv_frame {
-            self.set_cv_frame_vars(&cvs);
+            self.set_cv_frame_vars(cvs);
         }
         'exec: loop {
             if single_step.is_some() {
