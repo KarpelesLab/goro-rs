@@ -1636,7 +1636,10 @@ fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmEr
                 || e.starts_with("first array member")
                 || e.starts_with("second array member")
                 || e.starts_with("function \"")
-                || e.starts_with("array callback");
+                || e.starts_with("array callback")
+                || e.starts_with("non-static method ")
+                || e.starts_with("cannot call abstract method ")
+                || e.starts_with("cannot access ");
             if definite {
                 let msg = format!(
                     "{}(): Argument #1 ($callback) must be a valid callback, {}",
@@ -9388,6 +9391,25 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if class_props_order.iter().any(|(n, _, _, _, _, _)| n == name) {
                 continue;
             }
+            // A property declared by an internal ancestor keeps its visibility.
+            if let Some((vis, internal)) = vm.internal_prop_visibility(&class_name_lower, name) {
+                let ok = match vis {
+                    goro_core::object::Visibility::Public => true,
+                    goro_core::object::Visibility::Protected => {
+                        calling_class_lower.as_ref().is_some_and(|cc| {
+                            cc == &internal
+                                || vm.is_subclass_of(cc, &internal)
+                                || vm.is_subclass_of(&internal, cc)
+                        })
+                    }
+                    goro_core::object::Visibility::Private => {
+                        calling_class_lower.as_deref() == Some(internal.as_slice())
+                    }
+                };
+                if !ok {
+                    continue;
+                }
+            }
             let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
             if !arr.contains_key(&key) {
                 arr.set(key, val.clone());
@@ -14020,6 +14042,10 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.current_exception = Some(exc);
         return Ok(Value::Null);
     }
+    // Constant-expression defaults are evaluated first (zend_update_class_constants).
+    if !vm.update_class_constants_ok(&name_lower) {
+        return Ok(Value::Null);
+    }
     // Caller-scope visibility filter: only return properties the calling
     // class would be allowed to see. Mirrors what PHP's get_class_vars
     // does at the engine level. Compare scopes in lowercase form because
@@ -14100,6 +14126,26 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     val,
                 );
             }
+            // An internal ancestor: its (stub-declared) properties.
+            if !vm.classes.contains_key(cls_lower) {
+                if let Some(se) = goro_core::stubs::class_entry(vm, cls_lower) {
+                    for prop in &se.properties {
+                        if prop.is_static || prop.is_virtual || !can_see(prop) {
+                            continue;
+                        }
+                        let key = goro_core::array::ArrayKey::String(PhpString::from_vec(
+                            prop.name.clone(),
+                        ));
+                        if result.get(&key).is_none() {
+                            let val = match &prop.default {
+                                Value::Undef => Value::Null,
+                                other => other.clone(),
+                            };
+                            result.set(key, val);
+                        }
+                    }
+                }
+            }
         }
         // Static, walking child → parent
         for cls_lower in &chain {
@@ -14118,10 +14164,8 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if !can_see(prop) {
                     continue;
                 }
-                let val = class
-                    .static_properties
-                    .get(&prop.name)
-                    .map(|v| v.deref())
+                let val = vm
+                    .static_prop_raw(&name_lower, &prop.name)
                     .unwrap_or_else(|| prop.default.clone());
                 let val = match val {
                     Value::Undef => Value::Null,

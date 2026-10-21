@@ -1359,7 +1359,7 @@ fn execute_php_inner_impl(
     let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens).with_source(source);
     let program = match parser.parse() {
         Ok(p) => p,
         Err(e) => {

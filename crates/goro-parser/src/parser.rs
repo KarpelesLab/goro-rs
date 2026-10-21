@@ -39,6 +39,9 @@ pub struct Parser {
     first_class_callable_flag: bool,
     /// Pending extra constants from comma-separated const declarations
     pending_extra_constants: Vec<ClassMember>,
+    /// The source text (when given with `with_source`): keywords used as
+    /// identifiers keep their spelling (`A::Case`, `$o->Default`).
+    source: Vec<u8>,
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
     /// Explicit parameter type of the last parsed `set(Type $v)` hook.
@@ -178,6 +181,7 @@ impl Parser {
             anon_counter: 0,
             first_class_callable_flag: false,
             pending_extra_constants: Vec::new(),
+            source: Vec::new(),
             pending_extra_properties: Vec::new(),
             last_set_hook_type: None,
             pending_closure_doc: None,
@@ -3600,10 +3604,24 @@ impl Parser {
         let left = self.parse_null_coalesce()?;
 
         match self.peek().clone() {
+            // A class constant is not writable: `C::X = v` is a syntax error.
+            TokenKind::Assign if matches!(left.kind, ExprKind::ClassConstAccess { .. }) => {
+                Err(ParseError {
+                    message: "syntax error, unexpected token \"=\"".into(),
+                    span: self.span(),
+                })
+            }
             TokenKind::Assign => {
                 self.advance();
                 if self.eat(&TokenKind::Ampersand) {
                     let right = self.parse_assignment()?;
+                    // Nor can a reference to one be taken (`$a = &C::X`).
+                    if matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
+                        return Err(ParseError {
+                            message: "syntax error, unexpected token \";\", expecting \"->\" or \"?->\" or \"{\" or \"[\"".into(),
+                            span: self.span(),
+                        });
+                    }
                     Ok(Expr {
                         span: left.span.merge(right.span),
                         kind: ExprKind::AssignRef {
@@ -6714,7 +6732,27 @@ impl Parser {
     }
 
     /// Convert a keyword token to its identifier bytes
+    /// Attach the source the tokens were lexed from (see `source`).
+    pub fn with_source(mut self, source: &[u8]) -> Self {
+        self.source = source.to_vec();
+        self
+    }
+
     fn keyword_to_identifier(&self) -> Vec<u8> {
+        let kw = self.keyword_to_identifier_lower();
+        // Keep the spelling as written when the source is known.
+        if !kw.is_empty() {
+            let span = self.span();
+            if let Some(text) = self.source.get(span.start as usize..span.end as usize) {
+                if text.eq_ignore_ascii_case(&kw) {
+                    return text.to_vec();
+                }
+            }
+        }
+        kw
+    }
+
+    fn keyword_to_identifier_lower(&self) -> Vec<u8> {
         // For tokens that have aliases (die/exit, include/include_once, require/require_once),
         // use span length to determine which keyword was actually written
         let span = self.span();

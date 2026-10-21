@@ -700,7 +700,7 @@ fn execute_php_request(
     let filename = target_path.to_string_lossy().to_string();
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens).with_source(source);
     let program = match parser.parse() {
         Ok(p) => p,
         Err(e) => {

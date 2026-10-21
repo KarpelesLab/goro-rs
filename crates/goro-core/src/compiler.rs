@@ -49,6 +49,23 @@ fn push_pending_compile_deprecated(msg: String, line: u32) {
 }
 
 /// Get the next globally unique closure ID
+/// Does a folded constant value still contain a runtime-resolved marker
+/// (deferred constant / enum case placeholder)?
+fn value_has_marker(v: &Value) -> bool {
+    match v {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            b.starts_with(b"__deferred_") || b.starts_with(b"__enum_case__::")
+        }
+        Value::Array(a) => a.borrow().values().any(value_has_marker),
+        _ => false,
+    }
+}
+
+/// Name prefix of the op arrays compiled for lazily evaluated class
+/// constant expressions (see Compiler::compile_const_thunk).
+pub const CONST_THUNK_PREFIX: &str = "__const_thunk_";
+
 fn next_closure_id() -> u64 {
     CLOSURE_COUNTER.with(|c| {
         let id = c.get();
@@ -170,6 +187,18 @@ pub struct Compiler {
     /// closure). Used to enforce "Class declarations may not be nested" for non-anonymous
     /// class declarations.
     pub is_in_class_method: bool,
+    /// True in a non-static method body, where `$this` is always bound;
+    /// elsewhere uses of `$this` are checked at runtime (ZEND_FETCH_THIS).
+    this_always_bound: bool,
+    /// Set while compiling the operand of isset($this) / empty($this).
+    quiet_this: bool,
+    /// Compiling a constant-expression thunk: `self::X` / `parent::X` stay
+    /// relative (resolved at run time, reported as written).
+    keep_relative_class_names: bool,
+    /// Compiling a constant expression (global constant, parameter default,
+    /// class constant / property default thunk): property fetches are only
+    /// allowed on enums.
+    in_const_expr: bool,
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
     pub deferred_fatal_errors: Vec<String>,
@@ -358,6 +387,10 @@ impl Compiler {
             assign_result_discarded: false,
             is_in_function_body: false,
             is_in_class_method: false,
+            this_always_bound: false,
+            quiet_this: false,
+            keep_relative_class_names: false,
+            in_const_expr: false,
             is_top_level: false,
             in_hoisting_pass: false,
             hoisted_class_idx: HashMap::new(),
@@ -801,6 +834,10 @@ impl Compiler {
                 }
                 // Attribute argument expressions must be constant expressions.
                 for arg in &attr.args {
+                    if let Some(msg) = Self::const_expr_compile_error(&arg.value, true) {
+                        self.deferred_fatal_errors.push(msg);
+                        break;
+                    }
                     if !Self::is_const_attr_expr(&arg.value) {
                         self.deferred_fatal_errors
                             .push("Constant expression contains invalid operations".to_string());
@@ -878,6 +915,61 @@ impl Compiler {
                 }
             })
             .collect()
+    }
+
+    /// Compile a class-level constant expression (class constant or
+    /// property default) that cannot be folded at compile time into a thunk
+    /// evaluated with the class scope on first use, like
+    /// zend_update_class_constants(). The thunk is stored with the class's
+    /// constant closures; the returned marker takes the value's place.
+    fn compile_const_thunk(
+        &mut self,
+        expr: &Expr,
+        closures: &mut Vec<OpArray>,
+        qualified_name: &[u8],
+        extends: Option<&[u8]>,
+    ) -> CompileResult<Value> {
+        let mut tc = Compiler::new();
+        tc.current_namespace = self.current_namespace.clone();
+        tc.use_map = self.use_map.clone();
+        tc.use_function_map = self.use_function_map.clone();
+        tc.use_const_map = self.use_const_map.clone();
+        tc.source_file = self.source_file.clone();
+        tc.op_array.filename = self.source_file.clone();
+        tc.op_array.strict_types = self.op_array.strict_types;
+        tc.current_class = Some(qualified_name.to_vec());
+        tc.current_parent_class = extends.map(|p| self.resolve_class_name(p));
+        tc.op_array.scope_class = Some(qualified_name.to_ascii_lowercase());
+        let name = format!("{}{}", CONST_THUNK_PREFIX, next_closure_id()).into_bytes();
+        tc.op_array.name = name.clone();
+        // The expression's source: thunks of trait / class constants are
+        // compared by it.
+        tc.op_array.display_name = expr_to_source_string(expr).into_bytes();
+        tc.keep_relative_class_names = true;
+        tc.in_const_expr = true;
+        // A bare global constant is looked up directly (no AST evaluation,
+        // so no "[constant expression]" frame and errors at the access
+        // line): decl_line 0 marks it.
+        tc.op_array.decl_line = if matches!(
+            expr.kind,
+            ExprKind::ConstantAccess(_) | ExprKind::Identifier(_)
+        ) {
+            0
+        } else {
+            expr.span.line
+        };
+        let v = tc.compile_expr(expr)?;
+        tc.op_array.emit(Op {
+            opcode: OpCode::Return,
+            op1: v,
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line: expr.span.line,
+        });
+        closures.push(tc.op_array);
+        let mut marker = b"__deferred_thunk__::".to_vec();
+        marker.extend_from_slice(&name);
+        Ok(Value::String(PhpString::from_vec(marker)))
     }
 
     fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
@@ -1116,14 +1208,18 @@ impl Compiler {
                 // "Undefined array key" warning).
                 // Unknown callee at compile time: an array element or property
                 // argument may need to be passed by reference. Decide at runtime.
-                let dim_or_prop = matches!(&arg.value.kind, ExprKind::ArrayAccess { .. })
-                    || matches!(
-                        &arg.value.kind,
-                        ExprKind::PropertyAccess {
-                            nullsafe: false,
-                            ..
-                        }
-                    );
+                let dim_or_prop = matches!(
+                    &arg.value.kind,
+                    ExprKind::ArrayAccess { .. }
+                        | ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. }
+                ) || matches!(
+                    &arg.value.kind,
+                    ExprKind::PropertyAccess {
+                        nullsafe: false,
+                        ..
+                    }
+                );
                 let is_append = {
                     let mut e = &arg.value;
                     let mut found = false;
@@ -1230,6 +1326,10 @@ impl Compiler {
                         ExprKind::PropertyAccess {
                             object, property, ..
                         } => self.compile_property_ref(object, property, line)?,
+                        ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. } => {
+                            self.emit_static_prop_fetch(OpCode::StaticPropGetRef, &arg.value)?
+                        }
                         _ => unreachable!(),
                     };
                     self.op_array.emit(Op {
@@ -1318,6 +1418,14 @@ impl Compiler {
                         } else {
                             self.compile_expr(&arg.value)?
                         }
+                    } else if matches!(
+                        &arg.value.kind,
+                        ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                    ) {
+                        OperandType::Tmp(
+                            self.emit_static_prop_fetch(OpCode::StaticPropGetRef, &arg.value)?,
+                        )
                     } else {
                         self.compile_expr(&arg.value)?
                     }
@@ -2533,6 +2641,9 @@ impl Compiler {
                             OperandType::Tmp(val_tmp),
                             stmt.span.line,
                         )?;
+                    } else {
+                        // foreach ($a as $o->p) / ($a as C::$p) / ($a as $b[k])
+                        self.compile_assign_tmp_to_target(value, val_tmp, stmt.span.line)?;
                     }
                 }
 
@@ -3211,7 +3322,7 @@ impl Compiler {
                             .op_array
                             .set_param_default_repr(cv, self.default_value_repr(default_expr));
                         // Emit: if param is Undef, set to default
-                        let default_val = func_compiler.compile_expr(default_expr)?;
+                        let default_val = func_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
                             if let Some(Some(pti)) =
@@ -3389,6 +3500,12 @@ impl Compiler {
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
+                    if let Some(msg) = Self::const_expr_compile_error(value, true) {
+                        return Err(CompileError {
+                            message: msg,
+                            line: value.span.line,
+                        });
+                    }
                     // Check for invalid spreads BEFORE emitting the define() call.
                     // PHP only allows arrays (or constant arrays) to be spread in constant expressions.
                     // A non-constant spread (e.g. `[...new ArrayObject()]`) is compiled as a runtime
@@ -3505,7 +3622,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                     // Send value as second arg
-                    let val_op = self.compile_expr(value)?;
+                    let val_op = self.compile_const_expr_value(value)?;
                     let pos1 = self.op_array.add_literal(Value::Long(1));
                     self.op_array.emit(Op {
                         opcode: OpCode::SendVal,
@@ -3704,6 +3821,18 @@ impl Compiler {
                         ExprKind::Variable(name) if name == b"GLOBALS" => {
                             return Err(CompileError {
                                 message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
+                                line: stmt.span.line,
+                            });
+                        }
+                        ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. } => {
+                            // unset(C::$p) throws at runtime (ZEND_UNSET_STATIC_PROP)
+                            let (class_op, name_op) = self.compile_static_prop_operands(expr)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::StaticPropUnset,
+                                op1: class_op,
+                                op2: name_op,
+                                result: OperandType::Unused,
                                 line: stmt.span.line,
                             });
                         }
@@ -4252,6 +4381,17 @@ impl Compiler {
                                     });
                                 }
                             }
+                            ClassMember::Method {
+                                name: mn,
+                                visibility: Visibility::Private,
+                                is_final: true,
+                                line,
+                                ..
+                            } if !mn.eq_ignore_ascii_case(b"__construct") => {
+                                let msg = "Private methods cannot be final as they are never overridden by other classes".to_string();
+                                push_compile_warning(msg.clone(), *line);
+                                push_pending_compile_warning(msg, *line);
+                            }
                             _ => {}
                         }
                     }
@@ -4649,6 +4789,15 @@ impl Compiler {
                                     Ok(None) => {}
                                 }
                             }
+                            if let Some(msg) = default
+                                .as_ref()
+                                .and_then(|e| Self::const_expr_compile_error(e, false))
+                            {
+                                return Err(CompileError {
+                                    message: msg,
+                                    line: default.as_ref().map(|e| e.span.line).unwrap_or(0),
+                                });
+                            }
                             let default_val = if let Some(expr) = default {
                                 // Compile the default value expression (constants only)
                                 match &expr.kind {
@@ -4802,12 +4951,18 @@ impl Compiler {
                                                 break;
                                             }
                                         }
-                                        if all_const {
-                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                                                arr,
-                                            )))
+                                        let arr = Value::Array(std::rc::Rc::new(
+                                            std::cell::RefCell::new(arr),
+                                        ));
+                                        if all_const && !value_has_marker(&arr) {
+                                            arr
                                         } else {
-                                            Value::Null
+                                            self.compile_const_thunk(
+                                                expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
                                     ExprKind::UnaryOp {
@@ -4817,11 +4972,19 @@ impl Compiler {
                                     } => match Self::eval_const_expr(operand) {
                                         Some(Value::Long(n)) => Value::Long(-n),
                                         Some(Value::Double(f)) => Value::Double(-f),
-                                        _ => Value::Null,
+                                        _ => self.compile_const_thunk(
+                                            expr,
+                                            &mut class.const_closures,
+                                            &qualified_name,
+                                            extends.as_deref(),
+                                        )?,
                                     },
-                                    ExprKind::ClassConstAccess { class, constant } => {
+                                    ExprKind::ClassConstAccess {
+                                        class: cc_class,
+                                        constant,
+                                    } => {
                                         // Handle self::CONST, ClassName::CONST in property defaults
-                                        let class_name = match &class.kind {
+                                        let class_name = match &cc_class.kind {
                                             ExprKind::Identifier(name) => {
                                                 let resolved = self.resolve_class_name(name);
                                                 if resolved.eq_ignore_ascii_case(b"self") {
@@ -4837,12 +5000,20 @@ impl Compiler {
                                             }
                                             _ => qualified_name.clone(),
                                         };
-                                        let mut marker = b"__deferred_const__::".to_vec();
-                                        marker.extend_from_slice(&class_name);
-                                        marker.push(b':');
-                                        marker.push(b':');
-                                        marker.extend_from_slice(constant);
-                                        Value::String(PhpString::from_vec(marker))
+                                        if constant.eq_ignore_ascii_case(b"class")
+                                            && !class_name.eq_ignore_ascii_case(b"static")
+                                        {
+                                            // C::class / self::class: compile-time name.
+                                            Value::String(PhpString::from_vec(class_name))
+                                        } else {
+                                            // Resolved on first use (zend_update_class_constants).
+                                            self.compile_const_thunk(
+                                                expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
+                                        }
                                     }
                                     ExprKind::BinaryOp {
                                         op, left, right, ..
@@ -4896,27 +5067,19 @@ impl Compiler {
                                         let lv = resolve_or_defer_prop(left, l);
                                         let rv = resolve_or_defer_prop(right, r);
                                         if let (Some(lv), Some(rv)) = (lv, rv) {
-                                            let l_deferred = matches!(&lv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
-                                            let r_deferred = matches!(&rv, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
-                                            if l_deferred || r_deferred {
-                                                let op_code: u8 = match op {
-                                                    BinaryOp::Concat => 1,
-                                                    BinaryOp::Add => 2,
-                                                    BinaryOp::Sub => 3,
-                                                    BinaryOp::Mul => 4,
-                                                    BinaryOp::BitwiseOr => 5,
-                                                    BinaryOp::BitwiseAnd => 6,
-                                                    _ => 0,
-                                                };
-                                                let l_str = lv.to_php_string();
-                                                let r_str = rv.to_php_string();
-                                                let mut marker = b"__deferred_binop__::".to_vec();
-                                                marker.push(op_code);
-                                                marker.push(b':');
-                                                marker.extend_from_slice(l_str.as_bytes());
-                                                marker.push(0);
-                                                marker.extend_from_slice(r_str.as_bytes());
-                                                Value::String(PhpString::from_vec(marker))
+                                            // Anything not foldable here (deferred operands,
+                                            // runtime errors like division by zero) is
+                                            // evaluated lazily.
+                                            if value_has_marker(&lv)
+                                                || value_has_marker(&rv)
+                                                || matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                                            {
+                                                self.compile_const_thunk(
+                                                    expr,
+                                                    &mut class.const_closures,
+                                                    &qualified_name,
+                                                    extends.as_deref(),
+                                                )?
                                             } else {
                                                 match op {
                                                     BinaryOp::Add => lv.add(&rv),
@@ -4964,11 +5127,21 @@ impl Compiler {
                                                         lv.modulo(&rv).unwrap_or(Value::Null)
                                                     }
                                                     BinaryOp::Pow => lv.pow(&rv),
-                                                    _ => Value::Null,
+                                                    _ => self.compile_const_thunk(
+                                                        expr,
+                                                        &mut class.const_closures,
+                                                        &qualified_name,
+                                                        extends.as_deref(),
+                                                    )?,
                                                 }
                                             }
                                         } else {
-                                            Value::Null
+                                            self.compile_const_thunk(
+                                                expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
                                     ExprKind::Identifier(cname) => {
@@ -5229,7 +5402,12 @@ impl Compiler {
                                         marker.extend_from_slice(&closure_name);
                                         Value::String(PhpString::from_vec(marker))
                                     }
-                                    _ => Value::Null,
+                                    _ => self.compile_const_thunk(
+                                        expr,
+                                        &mut class.const_closures,
+                                        &qualified_name,
+                                        extends.as_deref(),
+                                    )?,
                                 }
                             } else {
                                 // No default value: typed properties should be Undef (uninitialized),
@@ -6612,6 +6790,7 @@ impl Compiler {
                                 method_compiler.op_array.is_generator = method_is_generator;
                                 method_compiler.is_in_trait = modifiers.is_trait;
                                 method_compiler.is_in_class_method = true;
+                                method_compiler.this_always_bound = !*is_static;
                                 method_compiler.op_array.decl_line = *method_line;
                                 method_compiler.op_array.returns_by_ref = *method_returns_by_ref;
                                 method_compiler.op_array.end_line = if *method_end_line > 0 {
@@ -6830,8 +7009,8 @@ impl Compiler {
                                         method_compiler
                                             .op_array
                                             .set_param_default_repr(cv, default_repr);
-                                        let default_val =
-                                            method_compiler.compile_expr(default_expr)?;
+                                        let default_val = method_compiler
+                                            .compile_const_expr_value(default_expr)?;
                                         if !matches!(default_expr.kind, ExprKind::Null) {
                                             let pcv = method_compiler
                                                 .op_array
@@ -7117,7 +7296,9 @@ impl Compiler {
                                     for param in params {
                                         if let Some(default_expr) = &param.default {
                                             let cv = dc.op_array.get_or_create_cv(&param.name);
-                                            if let Ok(default_val) = dc.compile_expr(default_expr) {
+                                            if let Ok(default_val) =
+                                                dc.compile_const_expr_value(default_expr)
+                                            {
                                                 let undef_idx =
                                                     dc.op_array.add_literal(Value::Undef);
                                                 let check_tmp = dc.op_array.alloc_temp();
@@ -7187,6 +7368,12 @@ impl Compiler {
                             type_hint: const_type_hint,
                             doc_comment: const_doc_comment,
                         } => {
+                            if let Some(msg) = Self::const_expr_compile_error(const_expr, false) {
+                                return Err(CompileError {
+                                    message: msg,
+                                    line: const_expr.span.line,
+                                });
+                            }
                             let val = if let Some(v) = Self::eval_const_expr(const_expr) {
                                 v
                             } else {
@@ -7203,8 +7390,22 @@ impl Compiler {
                                             &qualified_name,
                                             extends.as_deref(),
                                             self,
-                                        ) {
+                                        )
+                                        .filter(|v| !value_has_marker(v))
+                                        {
                                             val
+                                        } else if !matches!(
+                                            class_expr.kind,
+                                            ExprKind::Identifier(_)
+                                        ) || !constant.eq_ignore_ascii_case(b"class")
+                                        {
+                                            // Resolved lazily on first access.
+                                            self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         } else {
                                             // Store as a deferred constant reference marker
                                             // Format: __deferred_const__::ClassName::CONSTANT_NAME
@@ -7238,13 +7439,22 @@ impl Compiler {
                                         // Recursive helper handles nested binops, ConstantAccess,
                                         // ClassConstAccess, and produces a __deferred_binop__ marker
                                         // when any subexpression must be resolved at runtime.
-                                        self.eval_or_defer_in_class_const(
+                                        // A fully folded value is kept; anything that has
+                                        // to be resolved at runtime becomes a thunk.
+                                        match self.eval_or_defer_in_class_const(
                                             const_expr,
                                             &class,
                                             &qualified_name,
                                             extends.as_deref(),
-                                        )
-                                        .unwrap_or(Value::Null)
+                                        ) {
+                                            Some(v) if !value_has_marker(&v) => v,
+                                            _ => self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?,
+                                        }
                                     }
                                     ExprKind::ConstantAccess(parts) => {
                                         // Handle magic constants and known constants in class constant context
@@ -7262,18 +7472,13 @@ impl Compiler {
                                         if !matches!(magic_val, Value::Null) {
                                             magic_val
                                         } else {
-                                            // Build the full constant name from parts
-                                            let mut full_name = Vec::new();
-                                            for (i, part) in parts.iter().enumerate() {
-                                                if i > 0 {
-                                                    full_name.push(b'\\');
-                                                }
-                                                full_name.extend_from_slice(part);
-                                            }
-                                            let mut marker =
-                                                b"__deferred_global_const__::".to_vec();
-                                            marker.extend_from_slice(&full_name);
-                                            Value::String(PhpString::from_vec(marker))
+                                            // A global constant: resolved on first access.
+                                            self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
                                     ExprKind::Identifier(name) => {
@@ -7287,20 +7492,13 @@ impl Compiler {
                                         if !matches!(magic_val, Value::Null) {
                                             magic_val
                                         } else {
-                                            // Unknown identifier - create a deferred global constant lookup marker
-                                            let resolved_name = if self.current_namespace.is_empty()
-                                            {
-                                                name.clone()
-                                            } else {
-                                                let mut fqn = self.current_namespace.clone();
-                                                fqn.push(b'\\');
-                                                fqn.extend_from_slice(name);
-                                                fqn
-                                            };
-                                            let mut marker =
-                                                b"__deferred_global_const__::".to_vec();
-                                            marker.extend_from_slice(&resolved_name);
-                                            Value::String(PhpString::from_vec(marker))
+                                            // A global constant: resolved on first access.
+                                            self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
                                     ExprKind::Array(elements) => {
@@ -7480,12 +7678,18 @@ impl Compiler {
                                                 break;
                                             }
                                         }
-                                        if ok {
-                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                                                arr,
-                                            )))
+                                        let arr = Value::Array(std::rc::Rc::new(
+                                            std::cell::RefCell::new(arr),
+                                        ));
+                                        if ok && !value_has_marker(&arr) {
+                                            arr
                                         } else {
-                                            Value::Null
+                                            self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
                                     ExprKind::UnaryOp {
@@ -7505,7 +7709,12 @@ impl Compiler {
                                         match inner {
                                             Some(Value::Long(n)) => Value::Long(-n),
                                             Some(Value::Double(f)) => Value::Double(-f),
-                                            _ => Value::Null,
+                                            _ => self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?,
                                         }
                                     }
                                     ExprKind::Closure {
@@ -7753,10 +7962,20 @@ impl Compiler {
                                             marker.extend_from_slice(&resolved);
                                             Value::String(PhpString::from_vec(marker))
                                         } else {
-                                            Value::Null
+                                            self.compile_const_thunk(
+                                                const_expr,
+                                                &mut class.const_closures,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                            )?
                                         }
                                     }
-                                    _ => Value::Null,
+                                    _ => self.compile_const_thunk(
+                                        const_expr,
+                                        &mut class.const_closures,
+                                        &qualified_name,
+                                        extends.as_deref(),
+                                    )?,
                                 }
                             };
                             let mut val = val;
@@ -8039,13 +8258,29 @@ impl Compiler {
                                                         lv.modulo(&rv).unwrap_or(Value::Null)
                                                     }
                                                     BinaryOp::Pow => lv.pow(&rv),
-                                                    _ => Value::Null,
+                                                    _ => self.compile_const_thunk(
+                                                        val_expr,
+                                                        &mut class.const_closures,
+                                                        &qualified_name,
+                                                        extends.as_deref(),
+                                                    )?,
                                                 }
                                             } else {
-                                                Value::Null
+                                                self.compile_const_thunk(
+                                                    val_expr,
+                                                    &mut class.const_closures,
+                                                    &qualified_name,
+                                                    extends.as_deref(),
+                                                )?
                                             }
                                         }
-                                        _ => Value::Null,
+                                        // Anything else is evaluated on first use.
+                                        _ => self.compile_const_thunk(
+                                            val_expr,
+                                            &mut class.const_closures,
+                                            &qualified_name,
+                                            extends.as_deref(),
+                                        )?,
                                     }
                                 }
                             } else {
@@ -8811,140 +9046,92 @@ impl Compiler {
                         line,
                     });
                     // Compile the assignment to the complex target
-                    match &elem.value.kind {
-                        ExprKind::ArrayAccess { array, index } => {
-                            // $arr[idx] = value or $arr[] = value
-                            let arr_target = self.compile_expr(array)?;
-                            if let Some(idx_expr) = index {
-                                let key_op = self.compile_expr(idx_expr)?;
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ArraySet,
-                                    op1: arr_target,
-                                    op2: OperandType::Tmp(tmp),
-                                    result: key_op,
-                                    line,
-                                });
-                            } else {
-                                // $arr[] = value (append)
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ArrayAppend,
-                                    op1: arr_target,
-                                    op2: OperandType::Tmp(tmp),
-                                    result: OperandType::Unused,
-                                    line,
-                                });
-                            }
-                        }
-                        ExprKind::PropertyAccess {
-                            object, property, ..
-                        } => {
-                            // $obj->prop = value
-                            let obj_op = self.compile_expr(object)?;
-                            let prop_op = match &property.kind {
-                                ExprKind::Identifier(name) => {
-                                    let name_idx = self.op_array.add_literal(Value::String(
-                                        PhpString::from_vec(name.clone()),
-                                    ));
-                                    OperandType::Const(name_idx)
-                                }
-                                _ => self.compile_expr(property)?,
-                            };
-                            self.op_array.emit(Op {
-                                opcode: OpCode::PropertySet,
-                                op1: obj_op,
-                                op2: OperandType::Tmp(tmp),
-                                result: prop_op,
-                                line,
-                            });
-                        }
-                        ExprKind::StaticPropertyAccess { class, property } => {
-                            // ClassName::$prop = value
-                            let class_name = match &class.kind {
-                                ExprKind::Identifier(name) => {
-                                    let resolved = self.resolve_class_name(name);
-                                    if resolved.eq_ignore_ascii_case(b"self") {
-                                        self.current_class.clone().unwrap_or(resolved)
-                                    } else if resolved.eq_ignore_ascii_case(b"static") {
-                                        b"static".to_vec()
-                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                        self.current_parent_class.clone().unwrap_or(resolved)
-                                    } else {
-                                        resolved
-                                    }
-                                }
-                                _ => {
-                                    return Err(CompileError {
-                                        message: "Cannot use dynamic class in list destructuring"
-                                            .into(),
-                                        line,
-                                    });
-                                }
-                            };
-                            let class_idx = self
-                                .op_array
-                                .add_literal(Value::String(PhpString::from_vec(class_name)));
-                            let prop_idx = self
-                                .op_array
-                                .add_literal(Value::String(PhpString::from_vec(property.clone())));
-                            self.op_array.emit(Op {
-                                opcode: OpCode::StaticPropSet,
-                                op1: OperandType::Const(class_idx),
-                                op2: OperandType::Tmp(tmp),
-                                result: OperandType::Const(prop_idx),
-                                line,
-                            });
-                        }
-                        ExprKind::DynamicStaticPropertyAccess { class, property } => {
-                            // Test::$$bar = value (list destructuring)
-                            let class_name = match &class.kind {
-                                ExprKind::Identifier(name) => {
-                                    let resolved = self.resolve_class_name(name);
-                                    if resolved.eq_ignore_ascii_case(b"self") {
-                                        self.current_class.clone().unwrap_or(resolved)
-                                    } else if resolved.eq_ignore_ascii_case(b"static") {
-                                        b"static".to_vec()
-                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                        self.current_parent_class.clone().unwrap_or(resolved)
-                                    } else {
-                                        resolved
-                                    }
-                                }
-                                _ => {
-                                    return Err(CompileError {
-                                        message: "Cannot use dynamic class in list destructuring"
-                                            .into(),
-                                        line,
-                                    });
-                                }
-                            };
-                            let class_idx = self
-                                .op_array
-                                .add_literal(Value::String(PhpString::from_vec(class_name)));
-                            let prop_op = self.compile_expr(property)?;
-                            self.op_array.emit(Op {
-                                opcode: OpCode::StaticPropSet,
-                                op1: OperandType::Const(class_idx),
-                                op2: OperandType::Tmp(tmp),
-                                result: prop_op,
-                                line,
-                            });
-                        }
-                        ExprKind::DynamicVariable(inner) => {
-                            // $$var = value
-                            let name_op = self.compile_expr(inner)?;
-                            self.op_array.emit(Op {
-                                opcode: OpCode::VarVarSet,
-                                op1: name_op,
-                                op2: OperandType::Tmp(tmp),
-                                result: OperandType::Unused,
-                                line,
-                            });
-                        }
-                        _ => {
-                            // Unsupported target - silently skip for now
-                        }
-                    }
+                    self.compile_assign_tmp_to_target(&elem.value, tmp, line)?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Assign the value in `tmp` to a non-variable target expression
+    /// (`$a[k]`, `$o->p`, `C::$p`, `$$v`): list elements, foreach targets.
+    fn compile_assign_tmp_to_target(
+        &mut self,
+        target: &Expr,
+        tmp: u32,
+        line: u32,
+    ) -> CompileResult<()> {
+        match &target.kind {
+            ExprKind::ArrayAccess { array, index } => {
+                // $arr[idx] = value or $arr[] = value
+                let arr_target = self.compile_dim_write_base(array)?;
+                if let Some(idx_expr) = index {
+                    let key_op = self.compile_expr(idx_expr)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArraySet,
+                        op1: arr_target,
+                        op2: OperandType::Tmp(tmp),
+                        result: key_op,
+                        line,
+                    });
+                } else {
+                    // $arr[] = value (append)
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ArrayAppend,
+                        op1: arr_target,
+                        op2: OperandType::Tmp(tmp),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                }
+            }
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => {
+                // $obj->prop = value
+                let obj_op = self.compile_expr(object)?;
+                let prop_op = match &property.kind {
+                    ExprKind::Identifier(name) => {
+                        let name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                        OperandType::Const(name_idx)
+                    }
+                    _ => self.compile_expr(property)?,
+                };
+                self.op_array.emit(Op {
+                    opcode: OpCode::PropertySet,
+                    op1: obj_op,
+                    op2: OperandType::Tmp(tmp),
+                    result: prop_op,
+                    line,
+                });
+            }
+            ExprKind::StaticPropertyAccess { .. }
+            | ExprKind::DynamicStaticPropertyAccess { .. } => {
+                // [C::$p] = ... destructuring target
+                let (class_op, name_op) = self.compile_static_prop_operands(target)?;
+                self.op_array.emit(Op {
+                    opcode: OpCode::StaticPropSet,
+                    op1: class_op,
+                    op2: OperandType::Tmp(tmp),
+                    result: name_op,
+                    line,
+                });
+            }
+            ExprKind::DynamicVariable(inner) => {
+                // $$var = value
+                let name_op = self.compile_expr(inner)?;
+                self.op_array.emit(Op {
+                    opcode: OpCode::VarVarSet,
+                    op1: name_op,
+                    op2: OperandType::Tmp(tmp),
+                    result: OperandType::Unused,
+                    line,
+                });
+            }
+            _ => {
+                // Unsupported target - silently skip for now
             }
         }
         Ok(())
@@ -9071,6 +9258,13 @@ impl Compiler {
     /// Compile the container of a dimension write. A property container
     /// (`$obj->p[...] = v`) is fetched for writing (FETCH_OBJ_W semantics).
     fn compile_dim_write_base(&mut self, array: &Expr) -> CompileResult<OperandType> {
+        if matches!(
+            array.kind,
+            ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
+        ) {
+            let tmp = self.emit_static_prop_fetch(OpCode::StaticPropFetchW, array)?;
+            return Ok(OperandType::Tmp(tmp));
+        }
         if let ExprKind::PropertyAccess {
             object,
             property,
@@ -9278,6 +9472,104 @@ impl Compiler {
         }
     }
 
+    /// Class and property-name operands of a `C::$p` / `C::$$p` expression.
+    fn compile_static_prop_operands(
+        &mut self,
+        expr: &Expr,
+    ) -> CompileResult<(OperandType, OperandType)> {
+        match &expr.kind {
+            ExprKind::StaticPropertyAccess { class, property } => {
+                let class_op = self.compile_static_class_operand(class)?;
+                let idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                Ok((class_op, OperandType::Const(idx)))
+            }
+            ExprKind::DynamicStaticPropertyAccess { class, property } => {
+                let class_op = self.compile_static_class_operand(class)?;
+                let name_op = self.compile_expr(property)?;
+                Ok((class_op, name_op))
+            }
+            _ => Err(CompileError {
+                message: "Expected a static property".into(),
+                line: expr.span.line,
+            }),
+        }
+    }
+
+    /// Operand of isset() / empty(): `$this` itself is checked quietly
+    /// (ZEND_ISSET_ISEMPTY_THIS).
+    fn compile_isset_operand(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        if matches!(&e.kind, ExprKind::Variable(n) if n == b"this") {
+            self.quiet_this = true;
+            let r = self.compile_expr(e);
+            self.quiet_this = false;
+            return r;
+        }
+        self.compile_expr(e)
+    }
+
+    /// Compile a constant expression's value (see `in_const_expr`).
+    fn compile_const_expr_value(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        let prev = std::mem::replace(&mut self.in_const_expr, true);
+        let r = self.compile_expr(e);
+        self.in_const_expr = prev;
+        r
+    }
+
+    fn is_static_prop_expr(e: &Expr) -> bool {
+        matches!(
+            e.kind,
+            ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
+        )
+    }
+
+    /// `C::$p` in an isset-like context (`??`): StaticPropIsset, a JmpZ to
+    /// be patched to the "not set" path, then the fetch. Returns the temp
+    /// holding the value and the index of the JmpZ.
+    fn compile_static_prop_quiet(&mut self, e: &Expr) -> CompileResult<(u32, u32)> {
+        let (class_op, name_op) = self.compile_static_prop_operands(e)?;
+        let set_tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::StaticPropIsset,
+            op1: class_op,
+            op2: name_op,
+            result: OperandType::Tmp(set_tmp),
+            line: e.span.line,
+        });
+        let jmp = self.op_array.emit(Op {
+            opcode: OpCode::JmpZ,
+            op1: OperandType::Tmp(set_tmp),
+            op2: OperandType::JmpTarget(0),
+            result: OperandType::Unused,
+            line: e.span.line,
+        });
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::StaticPropFetch,
+            op1: class_op,
+            op2: name_op,
+            result: OperandType::Tmp(tmp),
+            line: e.span.line,
+        });
+        Ok((tmp, jmp))
+    }
+
+    /// Emit a static property fetch (`opcode` selects the fetch mode) into
+    /// a fresh temp and return it.
+    fn emit_static_prop_fetch(&mut self, opcode: OpCode, expr: &Expr) -> CompileResult<u32> {
+        let (class_op, name_op) = self.compile_static_prop_operands(expr)?;
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode,
+            op1: class_op,
+            op2: name_op,
+            result: OperandType::Tmp(tmp),
+            line: expr.span.line,
+        });
+        Ok(tmp)
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         if self.memoize_mode != 0
             && Self::is_memoizable(expr)
@@ -9315,6 +9607,16 @@ impl Compiler {
 
             ExprKind::Variable(name) => {
                 let cv = self.op_array.get_or_create_cv(name);
+                if name == b"this" && !self.this_always_bound && !self.quiet_this {
+                    // "Using $this when not in object context" unless bound.
+                    self.op_array.emit(Op {
+                        opcode: OpCode::CheckThis,
+                        op1: OperandType::Cv(cv),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
                 Ok(OperandType::Cv(cv))
             }
 
@@ -9498,65 +9800,30 @@ impl Compiler {
                         });
                         Ok(val)
                     }
-                    ExprKind::StaticPropertyAccess { class, property } => {
-                        let class_name = match &class.kind {
-                            ExprKind::Identifier(name) => {
-                                let resolved = self.resolve_class_name(name);
-                                if resolved.eq_ignore_ascii_case(b"self") {
-                                    self.current_class.clone().unwrap_or(resolved)
-                                } else if resolved.eq_ignore_ascii_case(b"static") {
-                                    // Late static binding: resolve at runtime
-                                    b"static".to_vec()
-                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                    self.current_parent_class.clone().unwrap_or(resolved)
-                                } else {
-                                    resolved
-                                }
-                            }
-                            _ => return Ok(val),
+                    ExprKind::StaticPropertyAccess { .. }
+                    | ExprKind::DynamicStaticPropertyAccess { .. } => {
+                        // C::$p = value. The value goes through a temp: StaticPropSet
+                        // stores the (type-coerced) assigned value back into it, which
+                        // is the expression's result.
+                        let val = if matches!(val, OperandType::Tmp(_)) {
+                            val
+                        } else {
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Assign,
+                                op1: OperandType::Tmp(t),
+                                op2: val,
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                            OperandType::Tmp(t)
                         };
-                        let class_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(class_name)));
-                        let prop_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
+                        let (class_op, name_op) = self.compile_static_prop_operands(target)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropSet,
-                            op1: OperandType::Const(class_idx),
+                            op1: class_op,
                             op2: val,
-                            result: OperandType::Const(prop_idx),
-                            line: expr.span.line,
-                        });
-                        Ok(val)
-                    }
-                    ExprKind::DynamicStaticPropertyAccess { class, property } => {
-                        // Test::$$bar = value
-                        let class_operand = match &class.kind {
-                            ExprKind::Identifier(name) => {
-                                let resolved = self.resolve_class_name(name);
-                                let class_name = if resolved.eq_ignore_ascii_case(b"self") {
-                                    self.current_class.clone().unwrap_or(resolved)
-                                } else if resolved.eq_ignore_ascii_case(b"static") {
-                                    b"static".to_vec()
-                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                    self.current_parent_class.clone().unwrap_or(resolved)
-                                } else {
-                                    resolved
-                                };
-                                let idx = self
-                                    .op_array
-                                    .add_literal(Value::String(PhpString::from_vec(class_name)));
-                                OperandType::Const(idx)
-                            }
-                            _ => self.compile_expr(class)?,
-                        };
-                        let prop_op = self.compile_expr(property)?;
-                        self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropSet,
-                            op1: class_operand,
-                            op2: val,
-                            result: prop_op,
+                            result: name_op,
                             line: expr.span.line,
                         });
                         Ok(val)
@@ -9810,7 +10077,7 @@ impl Compiler {
                             .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropFetch,
+                            opcode: OpCode::StaticPropFetchRW,
                             op1: class_operand,
                             op2: OperandType::Const(prop_idx),
                             result: OperandType::Tmp(read_tmp),
@@ -9840,7 +10107,7 @@ impl Compiler {
                         let prop_op = self.compile_expr(property)?;
                         let read_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropFetch,
+                            opcode: OpCode::StaticPropFetchRW,
                             op1: class_operand,
                             op2: prop_op,
                             result: OperandType::Tmp(read_tmp),
@@ -10217,7 +10484,7 @@ impl Compiler {
                             .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         let old_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropFetch,
+                            opcode: OpCode::StaticPropFetchRW,
                             op1: class_operand,
                             op2: OperandType::Const(prop_idx),
                             result: OperandType::Tmp(old_tmp),
@@ -10258,7 +10525,7 @@ impl Compiler {
                         let prop_op = self.compile_expr(property)?;
                         let old_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropFetch,
+                            opcode: OpCode::StaticPropFetchRW,
                             op1: class_operand,
                             op2: prop_op,
                             result: OperandType::Tmp(old_tmp),
@@ -10714,9 +10981,15 @@ impl Compiler {
                     }
                     chain.reverse();
 
-                    let base_op = self.compile_expr(base_expr)?;
-                    let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let mut jmp_to_right: Vec<usize> = Vec::new();
+                    let base_op = if Self::is_static_prop_expr(base_expr) {
+                        let (t, j) = self.compile_static_prop_quiet(base_expr)?;
+                        jmp_to_right.push(j as usize);
+                        OperandType::Tmp(t)
+                    } else {
+                        self.compile_expr(base_expr)?
+                    };
+                    let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let mut current = base_op;
 
                     for idx_expr in chain.iter() {
@@ -10835,6 +11108,10 @@ impl Compiler {
                     }
                 ) {
                     self.compile_isset_prop_chain(left, expr.span.line, &mut isset_patches)?
+                } else if Self::is_static_prop_expr(left) {
+                    let (t, j) = self.compile_static_prop_quiet(left)?;
+                    isset_patches.push(j);
+                    OperandType::Tmp(t)
                 } else {
                     self.compile_expr(left)?
                 };
@@ -11078,6 +11355,17 @@ impl Compiler {
                 let arr = self.compile_expr(array)?;
                 if let Some(idx_expr) = index {
                     let idx = self.compile_expr(idx_expr)?;
+                    if self.in_const_expr {
+                        // No ArrayAccess::offsetGet() in a constant expression.
+                        let dim = self.op_array.add_literal(Value::True);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ConstExprPropCheck,
+                            op1: arr,
+                            op2: OperandType::Const(dim),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::ArrayGet,
@@ -12143,7 +12431,7 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    let val = self.compile_expr(&exprs[0])?;
+                    let val = self.compile_isset_operand(&exprs[0])?;
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::IssetCheck,
@@ -12187,10 +12475,16 @@ impl Compiler {
                     }
                     chain.reverse();
 
-                    let base_op = self.compile_expr(base_expr)?;
+                    let mut jmp_to_true: Vec<usize> = Vec::new(); // jumps when exists=false -> empty=true
+                    let base_op = if Self::is_static_prop_expr(base_expr) {
+                        let (t, j) = self.compile_static_prop_quiet(base_expr)?;
+                        jmp_to_true.push(j as usize);
+                        OperandType::Tmp(t)
+                    } else {
+                        self.compile_expr(base_expr)?
+                    };
                     let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let result_tmp = self.op_array.alloc_temp();
-                    let mut jmp_to_true: Vec<usize> = Vec::new(); // jumps when exists=false -> empty=true
                     let mut current = base_op;
 
                     for (i, idx_expr) in chain.iter().enumerate() {
@@ -12345,7 +12639,54 @@ impl Compiler {
                     self.op_array.patch_jump(jmp_end, end);
                     return Ok(OperandType::Tmp(tmp));
                 }
-                let val = self.compile_expr(inner)?;
+                if Self::is_static_prop_expr(inner) {
+                    // empty(C::$p): an undeclared / inaccessible property is empty.
+                    let (val_tmp, jmp_unset) = self.compile_static_prop_quiet(inner)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let result_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::BooleanNot,
+                        op1: OperandType::Tmp(val_tmp),
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(result_tmp),
+                        line: expr.span.line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let true_target = self.op_array.current_offset();
+                    self.op_array.ops[jmp_unset as usize].op2 = OperandType::JmpTarget(true_target);
+                    let true_lit = self.op_array.add_literal(Value::True);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: OperandType::Const(true_lit),
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+                    return Ok(OperandType::Tmp(result_tmp));
+                }
+
+                let val = self.compile_isset_operand(inner)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorRestore,
                     op1: OperandType::Unused,
@@ -12388,6 +12729,9 @@ impl Compiler {
                 let is_generator = stmts_contain_yield(body);
 
                 let mut closure_compiler = Compiler::new();
+                // A closure can be rebound to another scope: self::/parent::
+                // constants resolve at run time.
+                closure_compiler.keep_relative_class_names = true;
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.is_generator = is_generator;
@@ -12590,7 +12934,8 @@ impl Compiler {
                         closure_compiler
                             .op_array
                             .set_param_default_repr(cv, self.default_value_repr(default_expr));
-                        let default_val = closure_compiler.compile_expr(default_expr)?;
+                        let default_val =
+                            closure_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv =
                                 closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
@@ -12802,6 +13147,7 @@ impl Compiler {
                 let display_name = self.closure_display_name(expr.span.line);
 
                 let mut closure_compiler = Compiler::new();
+                closure_compiler.keep_relative_class_names = true;
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.filename = self.source_file.clone();
@@ -12920,7 +13266,8 @@ impl Compiler {
 
                     // Compile default value
                     if let Some(default_expr) = &param.default {
-                        let default_val = closure_compiler.compile_expr(default_expr)?;
+                        let default_val =
+                            closure_compiler.compile_const_expr_value(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv =
                                 closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
@@ -13339,7 +13686,11 @@ impl Compiler {
 
                 // Try to find the constant at compile time in already-compiled classes
                 let is_self_const = class_name.eq_ignore_ascii_case(b"self");
-                let resolved_class = if is_self_const {
+                let resolved_class = if self.keep_relative_class_names
+                    && (is_self_const || class_name.eq_ignore_ascii_case(b"parent"))
+                {
+                    class_name.to_ascii_lowercase()
+                } else if is_self_const {
                     self.current_class.clone().unwrap_or(class_name.clone())
                 } else if class_name.eq_ignore_ascii_case(b"static") {
                     // Late static binding: resolve at runtime
@@ -13827,6 +14178,15 @@ impl Compiler {
                     None
                 };
 
+                if self.in_const_expr {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ConstExprPropCheck,
+                        op1: obj,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyGet,
                     op1: obj,
@@ -14168,6 +14528,10 @@ impl Compiler {
                                 vp,
                                 expr.span.line,
                             )?),
+                            ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. } => OperandType::Tmp(
+                                self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?,
+                            ),
                             _ => {
                                 let v = self.compile_expr(value)?;
                                 self.emit_assign_ref_call_notice(value, expr.span.line);
@@ -14185,19 +14549,45 @@ impl Compiler {
                         });
                         Ok(value_op)
                     }
-                    (ExprKind::Variable(target_name), ExprKind::StaticPropertyAccess { .. }) => {
-                        // $var = &C::$p
-                        let v = self.compile_expr(value)?;
-                        self.ref_static_prop(&v);
+                    (
+                        ExprKind::Variable(target_name),
+                        ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. },
+                    ) => {
+                        // $var = &C::$p — bind the variable to the static slot
+                        let ref_tmp =
+                            self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?;
                         let target_cv = self.op_array.get_or_create_cv(target_name);
                         self.op_array.emit(Op {
                             opcode: OpCode::AssignRef,
                             op1: OperandType::Cv(target_cv),
-                            op2: v,
+                            op2: OperandType::Tmp(ref_tmp),
                             result: OperandType::Unused,
                             line: expr.span.line,
                         });
                         Ok(OperandType::Cv(target_cv))
+                    }
+                    (
+                        ExprKind::ArrayAccess {
+                            array,
+                            index: Some(index),
+                        },
+                        ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. },
+                    ) => {
+                        // $arr[k] = &C::$p
+                        let ref_tmp =
+                            self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?;
+                        let arr = self.compile_dim_write_base(array)?;
+                        let idx = self.compile_expr(index)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArraySetRef,
+                            op1: arr,
+                            op2: OperandType::Tmp(ref_tmp),
+                            result: idx,
+                            line: expr.span.line,
+                        });
+                        Ok(arr)
                     }
                     (ExprKind::Variable(target_name), _) => {
                         // $target = &<expr> — evaluate expr, assign to target, then make both reference
@@ -14358,82 +14748,68 @@ impl Compiler {
                         }
                         Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
                     }
-                    (ExprKind::StaticPropertyAccess { class, property }, _) => {
-                        // ClassName::$prop =& value
-                        // The undeclared-static-property check lives in
-                        // StaticPropSet; mirror the regular static-prop assign
-                        // path so that the runtime error fires consistently.
-                        let class_name = match &class.kind {
-                            ExprKind::Identifier(name) => {
-                                let resolved = self.resolve_class_name(name);
-                                if resolved.eq_ignore_ascii_case(b"self") {
-                                    self.current_class.clone().unwrap_or(resolved)
-                                } else if resolved.eq_ignore_ascii_case(b"static") {
-                                    b"static".to_vec()
-                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                    self.current_parent_class.clone().unwrap_or(resolved)
-                                } else {
-                                    resolved
-                                }
-                            }
-                            _ => {
-                                return Err(CompileError {
-                                    message: "Cannot use dynamic class in static property reference assignment".into(),
+                    (
+                        ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. },
+                        _,
+                    ) => {
+                        // C::$p = &<expr>
+                        let value_op = match &value.kind {
+                            ExprKind::Variable(value_name) => {
+                                let value_cv = self.op_array.get_or_create_cv(value_name);
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::MakeRef,
+                                    op1: OperandType::Cv(value_cv),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
                                     line: expr.span.line,
                                 });
+                                OperandType::Cv(value_cv)
                             }
-                        };
-                        let val = self.compile_expr(value)?;
-                        let class_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(class_name)));
-                        let prop_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
-                        self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropSet,
-                            op1: OperandType::Const(class_idx),
-                            op2: val,
-                            result: OperandType::Const(prop_idx),
-                            line: expr.span.line,
-                        });
-                        Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
-                    }
-                    (ExprKind::DynamicStaticPropertyAccess { class, property }, _) => {
-                        // ClassName::$$prop =& value
-                        let class_name = match &class.kind {
-                            ExprKind::Identifier(name) => {
-                                let resolved = self.resolve_class_name(name);
-                                if resolved.eq_ignore_ascii_case(b"self") {
-                                    self.current_class.clone().unwrap_or(resolved)
-                                } else if resolved.eq_ignore_ascii_case(b"static") {
-                                    b"static".to_vec()
-                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                    self.current_parent_class.clone().unwrap_or(resolved)
-                                } else {
-                                    resolved
-                                }
-                            }
-                            _ => {
-                                return Err(CompileError {
-                                    message: "Cannot use dynamic class in static property reference assignment".into(),
+                            ExprKind::ArrayAccess {
+                                array: value_arr,
+                                index: Some(value_idx),
+                            } => {
+                                let src_arr = self.compile_dim_write_base(value_arr)?;
+                                let src_idx = self.compile_expr(value_idx)?;
+                                let ref_tmp = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayGetRef,
+                                    op1: src_arr,
+                                    op2: src_idx,
+                                    result: OperandType::Tmp(ref_tmp),
                                     line: expr.span.line,
                                 });
+                                OperandType::Tmp(ref_tmp)
+                            }
+                            ExprKind::PropertyAccess {
+                                object: vo,
+                                property: vp,
+                                nullsafe: false,
+                            } => OperandType::Tmp(self.compile_property_ref(
+                                vo,
+                                vp,
+                                expr.span.line,
+                            )?),
+                            ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. } => OperandType::Tmp(
+                                self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?,
+                            ),
+                            _ => {
+                                let v = self.compile_expr(value)?;
+                                self.emit_assign_ref_call_notice(value, expr.span.line);
+                                v
                             }
                         };
-                        let val = self.compile_expr(value)?;
-                        let prop_op = self.compile_expr(property)?;
-                        let class_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let (class_op, name_op) = self.compile_static_prop_operands(target)?;
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropSet,
-                            op1: OperandType::Const(class_idx),
-                            op2: val,
-                            result: prop_op,
+                            opcode: OpCode::StaticPropSetRef,
+                            op1: class_op,
+                            op2: value_op,
+                            result: name_op,
                             line: expr.span.line,
                         });
-                        Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
+                        Ok(self.ref_assign_result(value_op, result_discarded, expr.span.line))
                     }
                     _ => {
                         let idx = self.op_array.add_literal(Value::Null);
@@ -14886,6 +15262,82 @@ impl Compiler {
     /// method calls, dynamic ops, and similar runtime constructs are
     /// rejected at compile time with "Constant expression contains
     /// invalid operations".
+    /// Compile errors zend_compile_const_expr() raises for constant
+    /// expressions. `new_ok`: `new` is allowed (it is not in class constants
+    /// and property defaults). Only the specific diagnostics are reported;
+    /// other invalid operations are left to the existing checks.
+    fn const_expr_compile_error(expr: &Expr, new_ok: bool) -> Option<String> {
+        use goro_parser::ast::ExprKind as E;
+        let rec = |e: &Expr| Self::const_expr_compile_error(e, new_ok);
+        match &expr.kind {
+            E::New { class, args } => {
+                if !new_ok {
+                    return Some("New expressions are not supported in this context".into());
+                }
+                if !matches!(class.kind, E::Identifier(_)) {
+                    return Some("Cannot use dynamic class name in constant expression".into());
+                }
+                args.iter().find_map(|a| rec(&a.value))
+            }
+            E::Cast(goro_parser::ast::CastType::Object, _) => {
+                Some("Object casts are not supported in this context".into())
+            }
+            E::Cast(_, inner) => rec(inner),
+            E::ClassConstAccess { class, constant } => match &class.kind {
+                E::Identifier(n) if n.eq_ignore_ascii_case(b"static") => {
+                    if constant.eq_ignore_ascii_case(b"class") {
+                        Some(
+                            "static::class cannot be used for compile-time class name resolution"
+                                .into(),
+                        )
+                    } else {
+                        Some("\"static::\" is not allowed in compile-time constants".into())
+                    }
+                }
+                E::Identifier(_) => None,
+                _ if constant.eq_ignore_ascii_case(b"class") => {
+                    Some("(expression)::class cannot be used in constant expressions".into())
+                }
+                _ => Some(
+                    "Dynamic class names are not allowed in compile-time class constant references"
+                        .into(),
+                ),
+            },
+            E::DynamicClassConstAccess { class, constant } => match &class.kind {
+                E::Identifier(n) if n.eq_ignore_ascii_case(b"static") => {
+                    Some("\"static::\" is not allowed in compile-time constants".into())
+                }
+                E::Identifier(_) => rec(constant),
+                _ => Some(
+                    "Dynamic class names are not allowed in compile-time class constant references"
+                        .into(),
+                ),
+            },
+            E::ArrayAccess { index: None, .. } => Some("Cannot use [] for reading".into()),
+            E::ArrayAccess {
+                array,
+                index: Some(i),
+            } => rec(array).or_else(|| rec(i)),
+            E::PropertyAccess {
+                object, property, ..
+            } => rec(object).or_else(|| rec(property)),
+            E::Array(elems) => elems
+                .iter()
+                .find_map(|el| el.key.as_ref().and_then(rec).or_else(|| rec(&el.value))),
+            E::BinaryOp { left, right, .. } => rec(left).or_else(|| rec(right)),
+            E::UnaryOp { operand, .. } => rec(operand),
+            E::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => rec(condition)
+                .or_else(|| if_true.as_ref().and_then(|e| rec(e)))
+                .or_else(|| rec(if_false)),
+            E::NullCoalesce { left, right } => rec(left).or_else(|| rec(right)),
+            _ => None,
+        }
+    }
+
     fn is_const_attr_expr(expr: &Expr) -> bool {
         use goro_parser::ast::ExprKind as E;
         match &expr.kind {
@@ -14935,25 +15387,41 @@ impl Compiler {
                 // Object literal new C(...) is allowed as long as args are const
                 args.iter().all(|a| Self::is_const_attr_expr(&a.value))
             }
+            // Property / dimension fetches and casts on constant operands
+            // (PHP 8.2+ const expressions); specific errors are raised by
+            // const_expr_compile_error.
+            E::PropertyAccess {
+                object, property, ..
+            } => {
+                Self::is_const_attr_expr(object)
+                    && (matches!(property.kind, E::Identifier(_))
+                        || Self::is_const_attr_expr(property))
+            }
+            E::ArrayAccess { array, index } => {
+                Self::is_const_attr_expr(array)
+                    && index
+                        .as_ref()
+                        .map(|i| Self::is_const_attr_expr(i))
+                        .unwrap_or(true)
+            }
+            E::Cast(_, inner) => Self::is_const_attr_expr(inner),
+            E::DynamicClassConstAccess { constant, .. } => Self::is_const_attr_expr(constant),
             // These are non-const:
             E::Variable(_)
             | E::DynamicVariable(_)
             | E::Assign { .. }
             | E::CompoundAssign { .. }
             | E::AssignRef { .. }
-            | E::PropertyAccess { .. }
             | E::DynamicStaticPropertyAccess { .. }
             | E::StaticPropertyAccess { .. }
             | E::MethodCall { .. }
             | E::StaticMethodCall { .. }
             | E::DynamicStaticMethodCall { .. }
-            | E::ArrayAccess { .. }
             | E::FunctionCall { .. }
             | E::Match { .. }
             | E::Closure { .. }
             | E::ArrowFunction { .. }
             | E::Instanceof { .. }
-            | E::Cast(_, _)
             | E::Print(_)
             | E::Exit(_)
             | E::Empty(_)
@@ -14966,7 +15434,6 @@ impl Compiler {
             | E::CloneWith { .. }
             | E::Spread(_)
             | E::Pipe { .. }
-            | E::DynamicClassConstAccess { .. }
             | E::ThrowExpr(_)
             | E::Suppress(_)
             | E::FirstClassCallable(_) => false,

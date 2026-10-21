@@ -197,7 +197,7 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
     let tokens = lexer.tokenize();
 
     // Parse
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens).with_source(source);
     let program = match parser.parse() {
         Ok(p) => p,
         Err(e) => {

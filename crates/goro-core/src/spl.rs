@@ -504,7 +504,7 @@ impl Vm {
         self.included_files.insert(abs_path.to_string());
         let mut lexer = goro_parser::Lexer::new(&source);
         let tokens = lexer.tokenize();
-        let mut parser = goro_parser::Parser::new(tokens);
+        let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
         let program = match parser.parse() {
             Ok(p) => p,
             Err(_) => return false,

@@ -2299,6 +2299,9 @@ pub fn reflection_class_method(
             Some(Value::Long(mods))
         }
         b"getdefaultproperties" => {
+            if vm.update_class_constants(&class_lower).is_err() {
+                return Some(Value::Null);
+            }
             // Order: this class's statics (own + inherited non-private), then
             // this class's instance properties (own + inherited non-private).
             let mut result = PhpArray::new();
@@ -2342,10 +2345,8 @@ pub fn reflection_class_method(
                         if result.get(&key).is_none() {
                             // Lookup resolved value (static_properties is the
                             // source of truth at runtime).
-                            let val = lce
-                                .static_properties
-                                .get(&prop.name)
-                                .map(|v| v.deref())
+                            let val = vm
+                                .static_prop_raw(link, &prop.name)
                                 .unwrap_or_else(|| prop.default.clone());
                             result.set(key, val);
                         }
@@ -2390,6 +2391,9 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getstaticproperties" => {
+            if vm.update_class_constants(&class_lower).is_err() {
+                return Some(Value::Null);
+            }
             // Include own static props (including own private) and inherited
             // non-private statics. Properties stored on this class with
             // declaring_class != self are inherited; private inherited ones
@@ -2412,18 +2416,9 @@ pub fn reflection_class_method(
                     let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
                     if result.get(&key).is_none() {
                         // Static value is stored on the declaring class
-                        let val = if is_inherited {
-                            rcls(vm, &decl_lower)
-                                .and_then(|d| {
-                                    d.static_properties.get(&prop.name).map(|v| v.deref())
-                                })
-                                .unwrap_or_else(|| prop.default.clone())
-                        } else {
-                            ce.static_properties
-                                .get(&prop.name)
-                                .map(|v| v.deref())
-                                .unwrap_or_else(|| prop.default.clone())
-                        };
+                        let val = vm
+                            .static_prop_raw(&class_lower, &prop.name)
+                            .unwrap_or_else(|| prop.default.clone());
                         result.set(key, val);
                     }
                 }
@@ -2494,6 +2489,11 @@ pub fn reflection_class_method(
                     canonical
                 );
                 let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
+            }
+            if let Some(err_msg) = instantiation_error(vm, &class_lower) {
+                let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -3525,25 +3525,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
 
-                // Validate abstract/interface
-                let (is_abstract, is_interface, is_trait) = rcls(vm, &class_lower)
-                    .map(|c| (c.is_abstract, c.is_interface, c.is_trait))
-                    .unwrap_or((false, false, false));
-                if is_interface || is_abstract || is_trait {
-                    let canonical_name = String::from_utf8_lossy(&canonical).to_string();
-                    let err_msg = format!(
-                        "Cannot instantiate {} {}",
-                        if is_interface {
-                            "interface"
-                        } else if is_trait {
-                            "trait"
-                        } else {
-                            "abstract class"
-                        },
-                        canonical_name
-                    );
-                    let exc =
-                        vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                // object_init_ex: interfaces, traits, enums and abstract classes
+                if let Some(err_msg) = instantiation_error(vm, &class_lower) {
+                    let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -3699,25 +3683,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| vm.builtin_canonical_name(&class_lower).into_bytes());
 
-                // Validate abstract/interface
-                let (is_abstract, is_interface, is_trait) = rcls(vm, &class_lower)
-                    .map(|c| (c.is_abstract, c.is_interface, c.is_trait))
-                    .unwrap_or((false, false, false));
-                if is_interface || is_abstract || is_trait {
-                    let canonical_name = String::from_utf8_lossy(&canonical).to_string();
-                    let err_msg = format!(
-                        "Cannot instantiate {} {}",
-                        if is_interface {
-                            "interface"
-                        } else if is_trait {
-                            "trait"
-                        } else {
-                            "abstract class"
-                        },
-                        canonical_name
-                    );
-                    let exc =
-                        vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                // object_init_ex: interfaces, traits, enums and abstract classes
+                if let Some(err_msg) = instantiation_error(vm, &class_lower) {
+                    let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
@@ -4352,13 +4320,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         return Some(Value::Null);
                     }
                 }
-                if let Some(ce) = vm.classes.get_mut(&class_lower) {
-                    crate::vm::set_static_slot(
-                        &mut ce.static_properties,
-                        prop_name.as_bytes(),
-                        coerced,
-                    );
-                }
+                vm.static_prop_put_raw(&class_lower, prop_name.as_bytes(), coerced);
                 Some(Value::Null)
             }
             b"getreflectionconstant" | b"getreflectionconstants" => {
@@ -7346,13 +7308,7 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         }
                         value = coerced;
                     }
-                    if let Some(ce) = vm.classes.get_mut(declaring.as_slice()) {
-                        crate::vm::set_static_slot(
-                            &mut ce.static_properties,
-                            prop_name.as_bytes(),
-                            value,
-                        );
-                    }
+                    vm.static_prop_put_raw(declaring.as_slice(), prop_name.as_bytes(), value);
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
                     let value = args[2].clone();
@@ -7540,9 +7496,9 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 // assigned a value (or has a default) on the object.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 if is_static {
-                    let initialized = rcls(vm, &class_lower)
-                        .map(|c| c.static_properties.contains_key(prop_name.as_bytes()))
-                        .unwrap_or(false);
+                    let initialized = vm
+                        .static_prop_raw(&class_lower, prop_name.as_bytes())
+                        .is_some_and(|v| !matches!(v, Value::Undef));
                     Some(if initialized {
                         Value::True
                     } else {
@@ -7575,13 +7531,7 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     }
                 }
                 if is_static {
-                    if let Some(ce) = vm.classes.get_mut(&class_lower) {
-                        crate::vm::set_static_slot(
-                            &mut ce.static_properties,
-                            prop_name.as_bytes(),
-                            value,
-                        );
-                    }
+                    vm.static_prop_put_raw(&class_lower, prop_name.as_bytes(), value);
                 } else if let Value::Object(target_obj) = &target {
                     let mut ob = target_obj.borrow_mut();
                     ob.set_property(prop_name.as_bytes().to_vec(), value);
@@ -9636,9 +9586,9 @@ pub fn reflection_class_constant_method(
                     .as_ref()
                     .map(|m| m.declaring_class.clone())
                     .unwrap_or_else(|| class_lower.clone());
-                match resolve_class_constant(vm, &decl, name.as_bytes()) {
-                    Some(v) => v,
-                    None => return Some(Value::Null),
+                match vm.class_constant_value(&decl.to_ascii_lowercase(), name.as_bytes()) {
+                    Some(Ok(v)) => v,
+                    _ => return Some(Value::Null),
                 }
             } else {
                 cached
@@ -10355,6 +10305,27 @@ pub fn create_reflection_class_constant(
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
+/// "Cannot instantiate ..." for classes object_init_ex() refuses.
+fn instantiation_error(vm: &Vm, class_lower: &[u8]) -> Option<String> {
+    let c = rcls(vm, class_lower)?;
+    let kind = if c.is_interface {
+        "interface"
+    } else if c.is_trait {
+        "trait"
+    } else if c.is_enum {
+        "enum"
+    } else if c.is_abstract {
+        "abstract class"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "Cannot instantiate {} {}",
+        kind,
+        crate::value::display_class_name(&c.name)
+    ))
+}
+
 /// Walk a class's parent chain to find the class that declares a given
 /// static property. Static properties are stored on the declaring class,
 /// even when accessed via a subclass.
@@ -10394,8 +10365,7 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
 
 /// Walk a class's parent chain to find a static property's current value.
 fn find_static_property_value(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> Option<Value> {
-    let owner = find_static_property_owner(vm, class_lower, prop_name)?;
-    rcls(vm, owner.as_slice()).and_then(|c| c.static_properties.get(prop_name).map(|v| v.deref()))
+    vm.static_prop_raw(class_lower, prop_name)
 }
 
 /// Walk a class's parent chain (and interfaces) to find the deepest ancestor

@@ -11,8 +11,11 @@ use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
 
+#[path = "static_props.rs"]
+mod static_props;
 #[path = "variance.rs"]
 pub(crate) mod variance;
+use static_props::SpFetch;
 /// Internal class name of the graceful-exit unwinding object thrown into a
 /// fiber that is destroyed while suspended (not a user-visible class).
 pub const GRACEFUL_EXIT_CLASS: &[u8] = b"\0GracefulExit";
@@ -235,18 +238,6 @@ impl Vm {
         true
     }
 }
-/// Store a static property value, writing through a slot shared with a
-/// parent / child class or bound by reference.
-pub(crate) fn set_static_slot(map: &mut IndexMap<Vec<u8>, Value>, name: &[u8], value: Value) {
-    if let Some(Value::Reference(r)) = map.get(name) {
-        if !matches!(value, Value::Reference(_)) {
-            *r.borrow_mut() = value;
-            return;
-        }
-    }
-    map.insert(name.to_vec(), value);
-}
-
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
 
@@ -504,6 +495,17 @@ pub struct Vm {
     /// Stack of "defining class" names for visibility checks (lowercase)
     /// This tracks the class where the currently executing method was defined/declared.
     class_scope_stack: Vec<Vec<u8>>,
+    /// Names of all declared static properties, keyed by the class count it
+    /// was built for (see static_props::static_as_instance_check).
+    static_name_cache: (usize, std::collections::HashSet<Vec<u8>>, u64),
+    /// Constant-expression thunks being evaluated (self-reference detection).
+    const_thunks_active: Vec<Vec<u8>>,
+    /// Classes whose constant expressions were all evaluated
+    /// (ZEND_ACC_CONSTANTS_UPDATED).
+    consts_updated: std::collections::HashSet<Vec<u8>>,
+    /// Typed properties a reference is bound to (ZEND_REF_HAS_TYPE_SOURCES),
+    /// keyed by the reference cell's address.
+    pub(crate) typed_refs: static_props::TypedRefs,
     /// Current call depth (to prevent stack overflow from infinite recursion)
     call_depth: u32,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
@@ -783,6 +785,10 @@ impl Vm {
             finally_generators: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
+            static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
+            const_thunks_active: Vec::new(),
+            consts_updated: std::collections::HashSet::new(),
+            typed_refs: Default::default(),
             call_depth: 0,
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
@@ -3865,7 +3871,12 @@ impl Vm {
                 if message == format!("Class \"{}\" not found", kw)
                     || message.starts_with(&format!("Call to undefined method {}::", kw))
                 {
-                    message = format!("Cannot access \"{}\" when no class scope is active", kw);
+                    message = if kw == "parent" && !self.class_scope_stack.is_empty() {
+                        "Cannot access \"parent\" when current class scope has no parent"
+                            .to_string()
+                    } else {
+                        format!("Cannot access \"{}\" when no class scope is active", kw)
+                    };
                     break;
                 }
             }
@@ -13814,6 +13825,10 @@ impl Vm {
     pub fn resolve_deferred_value(&mut self, val: &Value) -> Value {
         if let Value::String(s) = val {
             let s_bytes = s.as_bytes();
+            if let Some(name) = s_bytes.strip_prefix(b"__deferred_thunk__::") {
+                // An exception thrown by the expression stays pending.
+                return self.eval_const_thunk(name, None, "").unwrap_or(Value::Null);
+            }
             if s_bytes.starts_with(b"__deferred_closure__::") {
                 let closure_name = &s_bytes[b"__deferred_closure__::".len()..];
                 // Find the closure in any class's const_closures and register it
@@ -14924,6 +14939,35 @@ impl Vm {
                 prev_op = Some(ip - 1);
             }
 
+            // In-place modification of a CV holding a reference bound to typed
+            // properties is verified after the op.
+            let typed_ref_watch = if self.typed_refs.is_empty() {
+                None
+            } else {
+                match (op.opcode, op.op1) {
+                    (
+                        OpCode::AssignAdd
+                        | OpCode::AssignSub
+                        | OpCode::AssignMul
+                        | OpCode::AssignDiv
+                        | OpCode::AssignMod
+                        | OpCode::AssignPow
+                        | OpCode::AssignConcat
+                        | OpCode::AssignBitwiseAnd
+                        | OpCode::AssignBitwiseOr
+                        | OpCode::AssignBitwiseXor
+                        | OpCode::AssignShiftLeft
+                        | OpCode::AssignShiftRight
+                        | OpCode::PreIncrement
+                        | OpCode::PreDecrement
+                        | OpCode::PostIncrement
+                        | OpCode::PostDecrement,
+                        OperandType::Cv(ci),
+                    ) => self.typed_ref_watch(cvs.get(ci as usize)),
+                    _ => None,
+                }
+            };
+
             match op.opcode {
                 OpCode::Nop => {}
 
@@ -15110,7 +15154,7 @@ impl Vm {
                 }
 
                 OpCode::Assign => {
-                    let val = self.read_operand_warn(
+                    let mut val = self.read_operand_warn(
                         &op.op2,
                         &cvs,
                         &tmps,
@@ -15123,6 +15167,31 @@ impl Vm {
                         OperandType::Cv(i) => cvs.get(i as usize).and_then(crate::gc::dtor_watch),
                         _ => None,
                     };
+                    // A reference bound to typed properties checks the value.
+                    if !self.typed_refs.is_empty() && !matches!(val, Value::Reference(_)) {
+                        if let OperandType::Cv(ci) = op.op1 {
+                            if let Some(Value::Reference(r)) = cvs.get(ci as usize) {
+                                let r = r.clone();
+                                if let Err(msg) =
+                                    self.typed_ref_check(&r, &mut val, op_array.strict_types, None)
+                                {
+                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     // The previous CV slot's object id (if any) is recycled
                     // via PhpObject::drop when Rc<...> hits zero. Pushing here
                     // as well caused duplicates in the free pool and silent
@@ -18575,6 +18644,19 @@ impl Vm {
                             && !self.classes.contains_key(&cl)
                         {
                             self.try_autoload_class(&class_name);
+                            if self.current_exception.is_some() && !self.classes.contains_key(&cl) {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: op.line,
+                                });
+                            }
                             if !self.classes.contains_key(&cl)
                                 && !self.is_known_builtin_class(&cl)
                                 && !self.class_aliases.contains_key(&cl)
@@ -26601,6 +26683,40 @@ impl Vm {
                                                 handled = true;
                                             }
                                         }
+                                        // An abstract __callStatic() (interface / abstract
+                                        // class) cannot serve as trampoline (GH-17718).
+                                        if !handled
+                                            && self
+                                                .classes
+                                                .get(&class_lower)
+                                                .and_then(|cd| cd.get_method(b"__callstatic"))
+                                                .is_some_and(|m| m.is_abstract)
+                                        {
+                                            let cname = self
+                                                .classes
+                                                .get(&class_lower)
+                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .unwrap_or_default();
+                                            let err_msg = format!(
+                                                "Cannot call abstract method {}::{}()",
+                                                cname,
+                                                String::from_utf8_lossy(method_part)
+                                            );
+                                            let exc =
+                                                self.create_exception(b"Error", &err_msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                                exception_handlers.last()
+                                            {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError {
+                                                message: format!("Uncaught Error: {}", err_msg),
+                                                line: op.line,
+                                            });
+                                        }
                                         if !handled {
                                             if let Some((call_static_op, declaring_class)) =
                                                 magic_callstatic
@@ -27262,6 +27378,23 @@ impl Vm {
                                 } else {
                                     format!("Call to undefined function {}()", func_display)
                                 };
+                                // An exception thrown by the autoloader while looking
+                                // up the class propagates instead.
+                                if err_msg.starts_with("Class \"")
+                                    && self.current_exception.is_some()
+                                {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
                                 // Throw as Error exception
                                 {
                                     let exc = self.create_exception(b"Error", &err_msg, op.line);
@@ -27823,6 +27956,39 @@ impl Vm {
                         };
                         match existing_ref {
                             Some(r) => {
+                                // An element bound to typed properties checks the value.
+                                let mut val = val;
+                                if !self.typed_refs.is_empty() {
+                                    let overflow =
+                                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &val);
+                                    if let Err(msg) = self.typed_ref_check(
+                                        &r,
+                                        &mut val,
+                                        op_array.strict_types || overflow.is_some(),
+                                        None,
+                                    ) {
+                                        let msg = match overflow {
+                                            Some(inc) => {
+                                                static_props::typed_ref_incdec_msg(&msg, inc)
+                                            }
+                                            None => msg,
+                                        };
+                                        let exc =
+                                            self.create_exception(b"TypeError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                            exception_handlers.last()
+                                        {
+                                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                                 *r.borrow_mut() = val;
                             }
                             None => arr.borrow_mut().set(key, val),
@@ -31055,11 +31221,34 @@ impl Vm {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
 
-                        let val = if let Some(class) = self.classes.get(&class_lower) {
+                        // Unknown class: give the autoloader a chance (an exception
+                        // it throws propagates, zend_fetch_class).
+                        let mut class_idx = self.classes.get_index_of(&class_lower);
+                        if class_idx.is_none()
+                            && !self.is_known_builtin_class(&class_lower)
+                            && !matches!(class_lower.as_slice(), b"static" | b"self" | b"parent")
+                        {
+                            self.try_autoload_class(&resolved_class);
+                            class_idx = self.classes.get_index_of(&class_lower);
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        let val = if let Some((_, class)) =
+                            class_idx.and_then(|i| self.classes.get_index(i))
+                        {
                             // Cannot access trait constants directly
-                            if class.is_trait
-                                && !class.static_properties.contains_key(prop_name.as_bytes())
-                            {
+                            if class.is_trait {
                                 let class_display = crate::value::display_class_name(&class.name);
                                 let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
                                 let msg = format!(
@@ -31081,16 +31270,10 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
-                            // Check static properties first, then constants
-                            let mut raw_val_opt = class
-                                .static_properties
-                                .get(prop_name.as_bytes())
-                                .map(|v| v.deref())
-                                .or_else(|| class.constants.get(prop_name.as_bytes()).cloned());
+                            let mut raw_val_opt =
+                                class.constants.get(prop_name.as_bytes()).cloned();
                             // zend_get_class_constant_ex: visibility of the constant
-                            if raw_val_opt.is_some()
-                                && !class.static_properties.contains_key(prop_name.as_bytes())
-                            {
+                            if raw_val_opt.is_some() {
                                 if let Some(meta) = class.constants_meta.get(prop_name.as_bytes()) {
                                     use crate::object::Visibility;
                                     if meta.visibility != Visibility::Public {
@@ -31173,10 +31356,7 @@ impl Vm {
                                             true
                                         };
                                         if const_visible {
-                                            if let Some(v) = pc
-                                                .static_properties
-                                                .get(prop_name.as_bytes())
-                                                .or_else(|| pc.constants.get(prop_name.as_bytes()))
+                                            if let Some(v) = pc.constants.get(prop_name.as_bytes())
                                             {
                                                 raw_val_opt = Some(v.deref());
                                                 found = true;
@@ -31217,8 +31397,16 @@ impl Vm {
                                     ) {
                                         raw_val_opt = Some(bv);
                                     } else {
-                                        let class_display =
-                                            String::from_utf8_lossy(&resolved_class).to_string();
+                                        // self/parent/static are reported as written.
+                                        let raw = class_name_raw.as_bytes();
+                                        let class_display = if matches!(
+                                            raw.to_ascii_lowercase().as_slice(),
+                                            b"self" | b"parent" | b"static"
+                                        ) {
+                                            String::from_utf8_lossy(raw).to_string()
+                                        } else {
+                                            String::from_utf8_lossy(&resolved_class).to_string()
+                                        };
                                         let prop_display = prop_name.to_string_lossy();
                                         let err_msg = format!(
                                             "Undefined constant {}::{}",
@@ -31242,6 +31430,59 @@ impl Vm {
                                 }
                             }
                             let mut raw_val = raw_val_opt.unwrap_or(Value::Null);
+                            // A constant expression compiled to a thunk: evaluate it
+                            // with its class scope on first access and cache it.
+                            let thunk_name = match &raw_val {
+                                Value::String(s) => s
+                                    .as_bytes()
+                                    .strip_prefix(b"__deferred_thunk__::")
+                                    .map(|n| n.to_vec()),
+                                _ => None,
+                            };
+                            if let Some(tn) = thunk_name {
+                                let decl = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
+                                    .map(|m| m.declaring_class.to_ascii_lowercase())
+                                    .unwrap_or_else(|| class_lower.clone());
+                                // The reference as written, for the self-reference error.
+                                let what = format!(
+                                    "{}::{}",
+                                    class_name_raw.to_string_lossy(),
+                                    prop_name.to_string_lossy()
+                                );
+                                match self.eval_const_thunk(&tn, Some(&decl), &what) {
+                                    Ok(v) => {
+                                        for k in [&decl, &class_lower] {
+                                            if let Some(c) = self.classes.get_mut(k) {
+                                                if let Some(slot) =
+                                                    c.constants.get_mut(prop_name.as_bytes())
+                                                {
+                                                    if matches!(slot, Value::String(s) if s.as_bytes().starts_with(b"__deferred_thunk__::"))
+                                                    {
+                                                        *slot = v.clone();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        raw_val = v;
+                                    }
+                                    Err(()) => {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                            exception_handlers.last()
+                                        {
+                                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError {
+                                            message: "Uncaught exception".into(),
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                            }
                             // Check if this is a deferred global constant marker
                             if let Value::String(ref s) = raw_val {
                                 if s.as_bytes().starts_with(b"__deferred_global_const__::") {
@@ -31600,7 +31841,6 @@ impl Vm {
                             let tinfo = self
                                 .classes
                                 .get(&class_lower)
-                                .filter(|c| !c.static_properties.contains_key(prop_name.as_bytes()))
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
                                 .and_then(|m| {
                                     m.declared_type
@@ -31885,408 +32125,227 @@ impl Vm {
                     }
                 }
 
-                OpCode::StaticPropSet => {
-                    let class_name_raw = self
-                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let value = self.dup_stored_array(&op.op2, value);
+                OpCode::StaticPropSet | OpCode::StaticPropSetRef => {
+                    let class_v = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let by_ref = matches!(op.opcode, OpCode::StaticPropSetRef);
+                    let value = if by_ref {
+                        match &op.op2 {
+                            OperandType::Cv(i) => {
+                                cvs.get(*i as usize).cloned().unwrap_or(Value::Null)
+                            }
+                            OperandType::Tmp(i) => {
+                                tmps.get(*i as usize).cloned().unwrap_or(Value::Null)
+                            }
+                            other => self.read_operand(other, &cvs, &tmps, &op_array.literals),
+                        }
+                    } else {
+                        let v = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                        self.dup_stored_array(&op.op2, v)
+                    };
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
-
-                    // Resolve "static" for late static binding
-                    let resolved_class = self
-                        .resolve_static_class(class_name_raw.as_bytes())
-                        .to_vec();
-                    let class_lower: Vec<u8> = resolved_class
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-
-                    if self
-                        .classes
-                        .get(&class_lower)
-                        .map(|c| c.is_trait)
-                        .unwrap_or(false)
-                    {
-                        let tn = self
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.name.clone())
-                            .unwrap_or_default();
-                        self.emit_deprecated_at(&format!(
-                            "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
-                            String::from_utf8_lossy(&tn), prop_name.to_string_lossy()), op.line);
-                    }
-                    // Check the property is declared on the class or its
-                    // ancestors. Writing to an undeclared static raises
-                    // an Error in PHP.
-                    let declared = if let Some(class) = self.classes.get(&class_lower) {
-                        if class.static_properties.contains_key(prop_name.as_bytes()) {
-                            true
-                        } else {
-                            let mut walker = class.parent.clone();
-                            let mut found = false;
-                            while let Some(p) = walker {
-                                let p_lower: Vec<u8> =
-                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if let Some(pc) = self.classes.get(&p_lower) {
-                                    if pc.static_properties.contains_key(prop_name.as_bytes()) {
-                                        found = true;
-                                        break;
-                                    }
-                                    walker = pc.parent.clone();
-                                } else {
-                                    break;
-                                }
-                            }
-                            found
-                        }
+                    let overflow = if by_ref {
+                        None
                     } else {
-                        // Unknown class - let it fall through (existing
-                        // behaviour for non-user classes).
-                        true
+                        Self::incdec_overflow_kind(op_array, ip, &op.op2, &value)
                     };
-
-                    if !declared {
-                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
-                        let prop_display = prop_name.to_string_lossy();
-                        let err_msg = format!(
-                            "Access to undeclared static property {}::${}",
-                            class_display, prop_display
-                        );
-                        let exc = self.create_exception(b"Error", &err_msg, op.line);
-                        self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
-                        {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            ip = *catch_target as usize;
-                            continue;
-                        }
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", err_msg),
-                            line: op.line,
-                        });
-                    }
-
-                    // Typed static property: coerce / verify like instance properties.
-                    let mut value = value;
-                    let typed = {
-                        let mut found: Option<(ParamType, Vec<u8>)> = None;
-                        let mut cur = Some(class_lower.clone());
-                        let mut guard = 0;
-                        while let Some(cl) = cur {
-                            guard += 1;
-                            if guard > 64 {
-                                break;
-                            }
-                            let c = match self.classes.get(&cl) {
-                                Some(c) => c,
-                                None => break,
-                            };
-                            if let Some(pd) = c.properties.iter().find(|pd| {
-                                pd.is_static && pd.name.as_slice() == prop_name.as_bytes()
-                            }) {
-                                if let Some(t) = &pd.property_type {
-                                    found = Some((t.clone(), c.name.clone()));
-                                }
-                                break;
-                            }
-                            cur = c
-                                .parent
-                                .as_ref()
-                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                        }
-                        found
-                    };
-                    if let Some((pt, decl_name)) = typed {
-                        if !matches!(value, Value::Reference(_)) {
-                            if !op_array.strict_types {
-                                self.emit_implicit_float_to_int_if_needed(&value, &pt, op.line);
-                            }
-                            Self::coerce_value_to_type(&mut value, &pt, op_array.strict_types);
-                            if !self.value_matches_type_mode(&value, &pt, true) {
-                                let cd = crate::value::display_class_name(&decl_name);
-                                let pd = prop_name.to_string_lossy();
-                                let td = self.param_type_name(&pt);
-                                let err_msg = match Self::incdec_overflow_kind(
-                                    op_array, ip, &op.op2, &value,
-                                ) {
-                                    Some(true) => format!(
-                                        "Cannot increment property {}::${} of type {} past its maximal value",
-                                        cd, pd, td
-                                    ),
-                                    Some(false) => format!(
-                                        "Cannot decrement property {}::${} of type {} past its minimal value",
-                                        cd, pd, td
-                                    ),
-                                    None => format!(
-                                        "Cannot assign {} to property {}::${} of type {}",
-                                        Self::value_type_name(&value),
-                                        cd,
-                                        pd,
-                                        td
-                                    ),
-                                };
-                                let exc = self.create_exception(b"TypeError", &err_msg, op.line);
-                                self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                    exception_handlers.last()
-                                {
-                                    pending_calls_catch_depth = Some(*eh_pc_depth);
-                                    ip = *catch_target as usize;
-                                    continue;
-                                }
-                                return Err(VmError {
-                                    message: format!("Uncaught TypeError: {}", err_msg),
-                                    line: op.line,
-                                });
-                            }
-                        }
-                    }
-                    if let Some(class) = self.classes.get_mut(&class_lower) {
-                        // Assigning writes through a shared (inherited or
-                        // referenced) slot; `C::$p = &$x` rebinds it.
-                        match (class.static_properties.get(prop_name.as_bytes()), value) {
-                            (Some(Value::Reference(r)), v) if !matches!(v, Value::Reference(_)) => {
-                                let r = r.clone();
-                                let old = std::mem::replace(&mut *r.borrow_mut(), v);
-                                drop(old);
-                            }
-                            (_, v) => {
-                                class
-                                    .static_properties
-                                    .insert(prop_name.as_bytes().to_vec(), v);
-                            }
-                        }
-                    }
-                    release_point!('exec);
-                }
-
-                OpCode::StaticPropFetch | OpCode::StaticPropGetRef => {
-                    // Fetch a static property only (no constant fallback).
-                    // Used for `C::$p` reads.
-                    let class_name_raw = self
-                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-
-                    let resolved_class = self
-                        .resolve_static_class(class_name_raw.as_bytes())
-                        .to_vec();
-                    let class_lower: Vec<u8> = resolved_class
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-
-                    // First: class must exist.
-                    if !self.classes.contains_key(&class_lower) {
-                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
-                        let err_msg = format!("Class \"{}\" not found", class_display);
-                        let exc = self.create_exception(b"Error", &err_msg, op.line);
-                        self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
-                        {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            ip = *catch_target as usize;
-                            continue;
-                        }
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", err_msg),
-                            line: op.line,
-                        });
-                    }
-
-                    if self
-                        .classes
-                        .get(&class_lower)
-                        .map(|c| c.is_trait)
-                        .unwrap_or(false)
-                    {
-                        let tn = self
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.name.clone())
-                            .unwrap_or_default();
-                        self.emit_deprecated_at(&format!(
-                            "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
-                            String::from_utf8_lossy(&tn), prop_name.to_string_lossy()), op.line);
-                    }
-                    let mut value_opt: Option<Value> = None;
-                    if let Some(class) = self.classes.get(&class_lower) {
-                        if let Some(v) = class.static_properties.get(prop_name.as_bytes()) {
-                            value_opt = Some(v.clone());
-                        } else {
-                            // Walk parent chain
-                            let mut walker = class.parent.clone();
-                            while let Some(p) = walker {
-                                let p_lower: Vec<u8> =
-                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if let Some(pc) = self.classes.get(&p_lower) {
-                                    if let Some(v) = pc.static_properties.get(prop_name.as_bytes())
-                                    {
-                                        value_opt = Some(v.clone());
-                                        break;
-                                    }
-                                    walker = pc.parent.clone();
-                                } else {
-                                    break;
+                    match self.static_prop_assign(
+                        &class_v,
+                        prop_name.as_bytes(),
+                        value,
+                        by_ref,
+                        op_array,
+                        overflow,
+                        op.line,
+                    ) {
+                        Ok(stored) => {
+                            // The assignment's result is the (coerced) stored value.
+                            if let (false, OperandType::Tmp(t)) = (by_ref, op.op2) {
+                                if let Some(slot) = tmps.get_mut(t as usize) {
+                                    *slot = stored;
                                 }
                             }
                         }
-                    }
-
-                    if let (Some(_), OpCode::StaticPropGetRef) = (&value_opt, op.opcode) {
-                        // Bind to the slot itself (in the class that holds it).
-                        let mut owner = Some(class_lower.clone());
-                        let mut cell: Option<Value> = None;
-                        while let Some(cl) = owner {
-                            let Some(c) = self.classes.get_mut(&cl) else {
-                                break;
-                            };
-                            if let Some(slot) = c.static_properties.get_mut(prop_name.as_bytes()) {
-                                if !matches!(slot, Value::Reference(_)) {
-                                    let v = std::mem::replace(slot, Value::Null);
-                                    let v = if matches!(v, Value::Undef) {
-                                        Value::Null
-                                    } else {
-                                        v
-                                    };
-                                    *slot = Value::Reference(Rc::new(RefCell::new(v)));
-                                }
-                                cell = Some(slot.clone());
-                                break;
-                            }
-                            owner = c.parent.as_ref().map(|p| p.to_ascii_lowercase());
-                        }
-                        if let Some(c) = cell {
-                            self.write_operand(&op.result, c, &mut cvs, &mut tmps, &static_cv_keys);
-                            continue;
-                        }
-                    }
-                    if let Some(v) = value_opt {
-                        self.write_operand(
-                            &op.result,
-                            v.deref(),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else {
-                        let class_display = String::from_utf8_lossy(&resolved_class).to_string();
-                        let prop_display = prop_name.to_string_lossy();
-                        let err_msg = format!(
-                            "Access to undeclared static property {}::${}",
-                            class_display, prop_display
-                        );
-                        let exc = self.create_exception(b"Error", &err_msg, op.line);
-                        self.current_exception = Some(exc);
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
-                        {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            ip = *catch_target as usize;
-                            continue;
-                        }
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", err_msg),
-                            line: op.line,
-                        });
-                    }
-                }
-
-                OpCode::StaticPropIsset => {
-                    // isset(C::$p) — returns bool without raising errors.
-                    let class_name_raw = self
-                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-
-                    let resolved_class = self
-                        .resolve_static_class(class_name_raw.as_bytes())
-                        .to_vec();
-                    let class_lower: Vec<u8> = resolved_class
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-
-                    let mut found_val: Option<Value> = None;
-                    if let Some(class) = self.classes.get(&class_lower) {
-                        if let Some(v) = class.static_properties.get(prop_name.as_bytes()) {
-                            found_val = Some(v.clone());
-                        } else {
-                            let mut walker = class.parent.clone();
-                            while let Some(p) = walker {
-                                let p_lower: Vec<u8> =
-                                    p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if let Some(pc) = self.classes.get(&p_lower) {
-                                    if let Some(v) = pc.static_properties.get(prop_name.as_bytes())
-                                    {
-                                        found_val = Some(v.clone());
-                                        break;
-                                    }
-                                    walker = pc.parent.clone();
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // Inaccessible (private/protected) static properties are not set.
-                    if found_val.is_some() {
-                        let mut walker = Some(class_lower.clone());
-                        let mut def: Option<(Visibility, Vec<u8>)> = None;
-                        while let Some(cl) = walker {
-                            match self.classes.get(&cl) {
-                                Some(c) => {
-                                    if let Some(p) = c
-                                        .properties
-                                        .iter()
-                                        .find(|p| p.is_static && p.name == prop_name.as_bytes())
-                                    {
-                                        def = Some((p.visibility, p.declaring_class.clone()));
-                                        break;
-                                    }
-                                    walker = c.parent.as_ref().map(|p| {
-                                        p.iter().map(|b| b.to_ascii_lowercase()).collect()
-                                    });
-                                }
-                                None => break,
-                            }
-                        }
-                        if let Some((vis, decl)) = def {
-                            let scope = op_array
-                                .scope_class
-                                .clone()
-                                .or_else(|| self.class_scope_stack.last().cloned());
-                            if self
-                                .check_visibility(
-                                    vis,
-                                    &decl,
-                                    &resolved_class,
-                                    &prop_name.to_string_lossy(),
-                                    true,
-                                    scope.as_deref(),
-                                )
-                                .is_some()
+                        Err(e) => {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
                             {
-                                found_val = None;
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
                             }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
                         }
                     }
-                    let result = match found_val.map(|v| v.deref()) {
-                        Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
-                        _ => Value::False,
+                }
+
+                OpCode::StaticPropFetch
+                | OpCode::StaticPropFetchRW
+                | OpCode::StaticPropFetchW
+                | OpCode::StaticPropGetRef => {
+                    // `C::$p` reads (no class-constant fallback), read-modify-write,
+                    // dimension-write container and reference fetches.
+                    let class_v = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let mode = match op.opcode {
+                        OpCode::StaticPropFetchRW => SpFetch::RW,
+                        OpCode::StaticPropFetchW => SpFetch::W,
+                        OpCode::StaticPropGetRef => SpFetch::Ref,
+                        _ => SpFetch::R,
                     };
-                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    match self.static_prop_fetch(
+                        &class_v,
+                        prop_name.as_bytes(),
+                        mode,
+                        op_array,
+                        op.line,
+                    ) {
+                        Ok(v) => {
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys)
+                        }
+                        Err(e) => {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
+                }
+
+                OpCode::ConstExprPropCheck => {
+                    let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // op2 set: a dimension fetch, refused on any object.
+                    let is_dim = !matches!(op.op2, OperandType::Unused);
+                    let non_enum = match &v {
+                        Value::Object(o) => {
+                            let cl = o.borrow().class_name.to_ascii_lowercase();
+                            is_dim || !self.classes.get(&cl).is_some_and(|c| c.is_enum)
+                        }
+                        _ => false,
+                    };
+                    if non_enum {
+                        let msg = if is_dim {
+                            "Cannot use [] on objects in constant expression"
+                        } else {
+                            "Fetching properties on non-enums in constant expressions is not allowed"
+                        };
+                        let exc = self.create_exception(b"Error", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
+                }
+
+                OpCode::CheckThis => {
+                    let bound = match &op.op1 {
+                        OperandType::Cv(i) => match cvs.get(*i as usize) {
+                            Some(Value::Object(_)) => true,
+                            Some(Value::Reference(r)) => matches!(&*r.borrow(), Value::Object(_)),
+                            _ => false,
+                        },
+                        _ => true,
+                    };
+                    if !bound {
+                        let msg = "Using $this when not in object context";
+                        let exc = self.create_exception(b"Error", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
+                }
+
+                OpCode::StaticPropIsset | OpCode::StaticPropUnset => {
+                    // isset(C::$p) — bool, never throws for a missing or
+                    // inaccessible property. unset(C::$p) always throws.
+                    let class_v = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let res = if matches!(op.opcode, OpCode::StaticPropUnset) {
+                        Err(self.static_prop_unset(&class_v, prop_name.as_bytes()))
+                    } else {
+                        self.static_prop_isset(&class_v, prop_name.as_bytes(), op_array)
+                    };
+                    match res {
+                        Ok(set) => {
+                            let result = if set { Value::True } else { Value::False };
+                            self.write_operand(
+                                &op.result,
+                                result,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                        }
+                        Err(e) => {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
                 }
 
                 OpCode::ConstLookup => {
@@ -32589,7 +32648,7 @@ impl Vm {
                             // Compile and execute
                             let mut lexer = goro_parser::Lexer::new(&source);
                             let tokens = lexer.tokenize();
-                            let mut parser = goro_parser::Parser::new(tokens);
+                            let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
                             match parser.parse() {
                                 Ok(program) => {
                                     let mut compiler = crate::compiler::Compiler::new();
@@ -32782,7 +32841,7 @@ impl Vm {
                     let result = {
                         let mut lexer = goro_parser::Lexer::new(&source);
                         let tokens = lexer.tokenize();
-                        let mut parser = goro_parser::Parser::new(tokens);
+                        let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
                         match parser.parse() {
                             Ok(program) => {
                                 let mut compiler = crate::compiler::Compiler::new();
@@ -34352,6 +34411,49 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // $obj->p naming a static property (zend_get_property_offset).
+                    if let Value::Object(o) = &obj_val_raw {
+                        if let Err(e) = self.static_as_instance_check(
+                            o,
+                            prop_name.as_bytes(),
+                            b"__unset",
+                            op_array,
+                            op.line,
+                        ) {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // The unset property no longer holds its reference.
+                    if !self.typed_refs.is_empty() {
+                        if let Value::Object(o) = &obj_val_raw {
+                            let slot_ref =
+                                o.borrow().properties.iter().find_map(|(k, v)| match v {
+                                    Value::Reference(r) if k.as_slice() == prop_name.as_bytes() => {
+                                        Some(r.clone())
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(r) = slot_ref {
+                                let cl = o.borrow().class_name.to_ascii_lowercase();
+                                if let Some((_, decl, _, Some(_), _)) =
+                                    self.find_property_def(&cl, prop_name.as_bytes())
+                                {
+                                    self.typed_ref_unregister(&r, &decl, prop_name.as_bytes());
+                                }
+                            }
+                        }
+                    }
                     if let Value::Object(obj) = &obj_val_raw {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.unset_property) {
                             if f(self, obj, prop_name.as_bytes()) {
@@ -35713,6 +35815,29 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // $obj->p naming a static property (zend_get_property_offset).
+                    if let Value::Object(o) = &obj_val {
+                        if let Err(e) = self.static_as_instance_check(
+                            o,
+                            prop_name.as_bytes(),
+                            b"__get",
+                            op_array,
+                            op.line,
+                        ) {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
                     let mut ref_error: Option<String> = None;
                     let result = if let Value::Object(obj) = &obj_val {
                         let class_name_orig = obj.borrow().class_name.clone();
@@ -35837,7 +35962,21 @@ impl Vm {
                                 Value::Null
                             }
                         } else if let Ok(mut ob) = obj.try_borrow_mut() {
-                            Value::Reference(ob.get_property_ref(prop_name.as_bytes()))
+                            let r = ob.get_property_ref(prop_name.as_bytes());
+                            drop(ob);
+                            // A reference to a typed property carries its type.
+                            if let Some((_, decl, _, Some(pt), _)) =
+                                self.find_property_def(&class_lower, prop_name.as_bytes())
+                            {
+                                self.typed_ref_register_owned(
+                                    &r,
+                                    &decl,
+                                    prop_name.as_bytes(),
+                                    pt,
+                                    Some(obj),
+                                );
+                            }
+                            Value::Reference(r)
                         } else {
                             // The object is being inspected (e.g. var_dump calling
                             // __debugInfo): fall back to the value.
@@ -35867,6 +36006,29 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // $obj->p naming a static property (zend_get_property_offset).
+                    if let Value::Object(o) = &obj_val {
+                        if let Err(e) = self.static_as_instance_check(
+                            o,
+                            prop_name.as_bytes(),
+                            b"__get",
+                            op_array,
+                            op.line,
+                        ) {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
                     let value = match &op.op2 {
                         OperandType::Cv(i) => cvs.get(*i as usize).cloned().unwrap_or(Value::Null),
                         OperandType::Tmp(i) => {
@@ -35877,6 +36039,80 @@ impl Vm {
                     if let Value::Object(obj) = &obj_val {
                         match value {
                             Value::Reference(r) => {
+                                // Binding a typed property: the referenced value must
+                                // fit (coerced in weak mode); the reference then
+                                // carries the property's type.
+                                let cl = obj.borrow().class_name.to_ascii_lowercase();
+                                if let Some((_, decl, _, Some(pt), _)) =
+                                    self.find_property_def(&cl, prop_name.as_bytes())
+                                {
+                                    let bind_err = self
+                                        .typed_ref_bind_error(&r, &decl, prop_name.as_bytes(), &pt)
+                                        .or_else(|| {
+                                            let mut v = r.borrow().clone();
+                                            Self::coerce_value_to_type(
+                                                &mut v,
+                                                &pt,
+                                                op_array.strict_types,
+                                            );
+                                            if self.value_matches_type_mode(&v, &pt, true) {
+                                                *r.borrow_mut() = v;
+                                                None
+                                            } else {
+                                                Some(format!(
+                                                    "Cannot assign {} to property {}::${} of type {}",
+                                                    Self::value_type_name(&r.borrow()),
+                                                    self.classes
+                                                        .get(&decl.to_ascii_lowercase())
+                                                        .map(|c| crate::value::display_class_name(&c.name))
+                                                        .unwrap_or_default(),
+                                                    prop_name.to_string_lossy(),
+                                                    self.param_type_name(&pt)
+                                                ))
+                                            }
+                                        });
+                                    if let Some(msg) = bind_err {
+                                        let exc =
+                                            self.create_exception(b"TypeError", &msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                            exception_handlers.last()
+                                        {
+                                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                                            ip = *catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError {
+                                            message: format!("Uncaught TypeError: {}", msg),
+                                            line: op.line,
+                                        });
+                                    }
+                                    // The previous reference is no longer this property's.
+                                    let old =
+                                        obj.borrow().properties.iter().find_map(|(k, v)| match v {
+                                            Value::Reference(o)
+                                                if k.as_slice() == prop_name.as_bytes()
+                                                    && !Rc::ptr_eq(o, &r) =>
+                                            {
+                                                Some(o.clone())
+                                            }
+                                            _ => None,
+                                        });
+                                    if let Some(old) = old {
+                                        self.typed_ref_unregister(
+                                            &old,
+                                            &decl,
+                                            prop_name.as_bytes(),
+                                        );
+                                    }
+                                    self.typed_ref_register_owned(
+                                        &r,
+                                        &decl,
+                                        prop_name.as_bytes(),
+                                        pt,
+                                        Some(obj),
+                                    );
+                                }
                                 obj.borrow_mut()
                                     .set_property_ref(prop_name.as_bytes().to_vec(), r);
                             }
@@ -36881,8 +37117,13 @@ impl Vm {
                                     });
                                 }
                             }
+                            // An interface may extend any internal interface.
+                            let internal_iface_parent = class.is_interface
+                                && crate::stubs::find_class(&parent_lower)
+                                    .is_some_and(|c| c.kind == crate::stubs::K_INTERFACE);
                             if !self.classes.contains_key(&parent_lower)
                                 && !self.is_known_builtin_class(&parent_lower)
+                                && !internal_iface_parent
                                 && variance::linking_entry(&parent_lower).is_none()
                             {
                                 // Parent class still missing after autoload attempt:
@@ -37034,7 +37275,12 @@ impl Vm {
                                     // Check if parent method is final and child overrides it
                                     if let Some(child_method) = class.methods.get(method_name) {
                                         let _ = child_method;
-                                        if method.is_final {
+                                        // A private method is not overridden (only a
+                                        // private constructor keeps its final-ness).
+                                        if method.is_final
+                                            && (method.visibility != Visibility::Private
+                                                || method_name.as_slice() == b"__construct")
+                                        {
                                             let parent_display =
                                                 String::from_utf8_lossy(parent_name).to_string();
                                             // Property hooks have special name/error format
@@ -38005,30 +38251,22 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // Inherit static properties: a child that does not
-                                // redeclare one shares the parent's slot.
-                                for (prop_name, prop_val) in &parent.static_properties {
-                                    if !class.static_properties.contains_key(prop_name) {
-                                        let cell = match prop_val {
-                                            Value::Reference(r) => r.clone(),
-                                            v => {
-                                                let r = Rc::new(RefCell::new(v.clone()));
-                                                if let Some(pc) =
-                                                    self.classes.get_mut(&parent_lower)
-                                                {
-                                                    if let Some(slot) =
-                                                        pc.static_properties.get_mut(prop_name)
-                                                    {
-                                                        *slot = Value::Reference(r.clone());
-                                                    }
-                                                }
-                                                r
-                                            }
-                                        };
-                                        class
-                                            .static_properties
-                                            .insert(prop_name.clone(), Value::Reference(cell));
+                                // Static properties are not copied: a child shares the
+                                // parent's slot unless it redeclares the property
+                                // (see static_props::locate_static_prop).
+                            } else if let Some(stub_parent) =
+                                crate::stubs::class_entry(self, &parent_lower)
+                            {
+                                // Internal parent: check overriding methods against
+                                // its stub signatures.
+                                if let Err((msg, line, unresolved)) =
+                                    self.internal_parent_method_checks(&class, stub_parent, op.line)
+                                {
+                                    if unresolved && is_early_attempt {
+                                        variance::defer(&class.name);
+                                        continue 'exec;
                                     }
+                                    return Err(VmError { message: msg, line });
                                 }
                             }
                         }
@@ -38113,6 +38351,74 @@ impl Vm {
                                 // Inherit interface constants
                                 for (const_name, const_val) in &iface.constants {
                                     if class.constants.contains_key(const_name) {
+                                        // do_inherit_constant_check(): the same constant
+                                        // reached twice is fine; a different one is final
+                                        // or ambiguous unless the class declares its own.
+                                        let iface_decl = iface
+                                            .constants_meta
+                                            .get(const_name)
+                                            .map(|m| m.declaring_class.to_ascii_lowercase())
+                                            .unwrap_or_else(|| iface_name.to_ascii_lowercase());
+                                        let cls_lower = class.name.to_ascii_lowercase();
+                                        let child_decl = class
+                                            .constants_meta
+                                            .get(const_name)
+                                            .map(|m| m.declaring_class.to_ascii_lowercase())
+                                            .unwrap_or_else(|| cls_lower.clone());
+                                        if iface_decl == child_decl {
+                                            continue;
+                                        }
+                                        let decl_display = |vm: &Self, d: &[u8]| -> String {
+                                            if d == cls_lower.as_slice() {
+                                                String::from_utf8_lossy(&class.name).to_string()
+                                            } else {
+                                                vm.classes
+                                                    .get(d)
+                                                    .map(|c| {
+                                                        String::from_utf8_lossy(&c.name).to_string()
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        String::from_utf8_lossy(d).to_string()
+                                                    })
+                                            }
+                                        };
+                                        let iface_final = iface
+                                            .constants_meta
+                                            .get(const_name)
+                                            .is_some_and(|m| m.is_final);
+                                        if iface_final {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "{}::{} cannot override final constant {}::{}",
+                                                    decl_display(self, &child_decl),
+                                                    String::from_utf8_lossy(const_name),
+                                                    decl_display(self, &iface_decl),
+                                                    String::from_utf8_lossy(const_name)
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if child_decl != cls_lower {
+                                            let kind = if class.is_interface {
+                                                "Interface"
+                                            } else if class.is_enum {
+                                                "Enum"
+                                            } else {
+                                                "Class"
+                                            };
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "{} {} inherits both {}::{} and {}::{}, which is ambiguous",
+                                                    kind,
+                                                    String::from_utf8_lossy(&class.name),
+                                                    decl_display(self, &child_decl),
+                                                    String::from_utf8_lossy(const_name),
+                                                    decl_display(self, &iface_decl),
+                                                    String::from_utf8_lossy(const_name)
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
                                         // Child overrides interface constant - check if interface's is final
                                         if let Some(meta) = iface.constants_meta.get(const_name) {
                                             if let Some(pt) = &meta.declared_type {
@@ -38272,6 +38578,25 @@ impl Vm {
                                         message: format!("Uncaught Error: {}", msg),
                                         line: op.line,
                                     });
+                                }
+                                // Implementing methods are checked against the internal
+                                // interface's stub signatures.
+                                if !class.is_enum {
+                                    if let Some(stub_iface) =
+                                        crate::stubs::class_entry(self, &iface_lower)
+                                    {
+                                        if let Err((msg, line, unresolved)) = self
+                                            .internal_parent_method_checks(
+                                                &class, stub_iface, op.line,
+                                            )
+                                        {
+                                            if unresolved && is_early_attempt {
+                                                variance::defer(&class.name);
+                                                continue 'exec;
+                                            }
+                                            return Err(VmError { message: msg, line });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -39232,25 +39557,77 @@ impl Vm {
                                             }
                                             None
                                         };
-                                        let v1 = match resolve_binop(
-                                            self,
-                                            const_val,
-                                            &trait_lower,
-                                            &trait_def,
-                                        ) {
-                                            Some(v) => v,
-                                            None => self.resolve_deferred_value(const_val),
+                                        // Constant expressions are evaluated (in the
+                                        // composing class's scope) and their values
+                                        // compared; if that fails, their sources are.
+                                        let thunk_op = |v: &Value, c: &ClassEntry| {
+                                            static_props::thunk_marker_name(v).and_then(|n| {
+                                                c.const_closures
+                                                    .iter()
+                                                    .find(|op| op.name == n)
+                                                    .cloned()
+                                            })
                                         };
-                                        let v2 = match resolve_binop(
-                                            self,
-                                            &ev,
-                                            &class_name_lower,
-                                            &class,
-                                        ) {
-                                            Some(v) => v,
-                                            None => self.resolve_deferred_value(&ev),
+                                        let t1 = thunk_op(const_val, &trait_def);
+                                        let t2 = thunk_op(&ev, &class);
+                                        let thunks_same = if t1.is_none() && t2.is_none() {
+                                            None
+                                        } else {
+                                            let eval = |vm: &mut Self,
+                                                            op: &Option<OpArray>,
+                                                            v: &Value|
+                                             -> Option<Value> {
+                                                match op {
+                                                    Some(op) => {
+                                                        let r = vm.eval_const_thunk_op(
+                                                            op,
+                                                            &class_name_lower,
+                                                            &class.name,
+                                                            "",
+                                                        );
+                                                        if r.is_err() {
+                                                            vm.current_exception = None;
+                                                        }
+                                                        r.ok()
+                                                    }
+                                                    None => Some(vm.resolve_deferred_value(v)),
+                                                }
+                                            };
+                                            let e1 = eval(self, &t1, const_val);
+                                            let e2 = eval(self, &t2, &ev);
+                                            Some(match (e1, e2) {
+                                                (Some(a), Some(b)) => a.identical(&b),
+                                                _ => {
+                                                    t1.map(|o| o.display_name)
+                                                        == t2.map(|o| o.display_name)
+                                                }
+                                            })
                                         };
-                                        if flags_differ || types_differ || !v1.identical(&v2) {
+                                        let values_differ = match thunks_same {
+                                            Some(same) => !same,
+                                            None => {
+                                                let v1 = match resolve_binop(
+                                                    self,
+                                                    const_val,
+                                                    &trait_lower,
+                                                    &trait_def,
+                                                ) {
+                                                    Some(v) => v,
+                                                    None => self.resolve_deferred_value(const_val),
+                                                };
+                                                let v2 = match resolve_binop(
+                                                    self,
+                                                    &ev,
+                                                    &class_name_lower,
+                                                    &class,
+                                                ) {
+                                                    Some(v) => v,
+                                                    None => self.resolve_deferred_value(&ev),
+                                                };
+                                                !v1.identical(&v2)
+                                            }
+                                        };
+                                        if flags_differ || types_differ || values_differ {
                                             // First definition: an earlier trait declaring it, else the class.
                                             let first_def = trait_names[..cur_trait_idx]
                                                 .iter()
@@ -39310,14 +39687,7 @@ impl Vm {
                                 }
                                 // Copy trait static properties (class's own take precedence)
                                 for (prop_name, prop_val) in &trait_def.static_properties {
-                                    // A trait's static is the class's own (separate from
-                                    // an inherited slot shared with the parent).
-                                    let inherited = matches!(
-                                        class.static_properties.get(prop_name),
-                                        Some(Value::Reference(_))
-                                    );
-                                    if inherited || !class.static_properties.contains_key(prop_name)
-                                    {
+                                    if !class.static_properties.contains_key(prop_name) {
                                         // Patch __CLASS__ in static property defaults
                                         let patched_val = if let Value::String(s) = prop_val {
                                             if s.as_bytes() == trait_name_original.as_slice() {
@@ -41340,14 +41710,17 @@ impl Vm {
                             } else if class.is_interface {
                                 format!(
                                     "Cannot instantiate interface {}",
-                                    class_name.to_string_lossy()
+                                    crate::value::display_class_name(&class.name)
                                 )
                             } else if class.is_enum {
-                                format!("Cannot instantiate enum {}", class_name.to_string_lossy())
+                                format!(
+                                    "Cannot instantiate enum {}",
+                                    crate::value::display_class_name(&class.name)
+                                )
                             } else {
                                 format!(
                                     "Cannot instantiate abstract class {}",
-                                    class_name.to_string_lossy()
+                                    crate::value::display_class_name(&class.name)
                                 )
                             };
                             let exc = self.create_exception(b"Error", &err_msg, op.line);
@@ -41627,6 +42000,20 @@ impl Vm {
                         _ => {}
                     }
 
+                    // Constant-expression defaults are evaluated on first use.
+                    if self.update_class_constants(&name_lower).is_err() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: "Uncaught exception".into(),
+                            line: op.line,
+                        });
+                    }
                     // Initialize properties from class definition
                     if let Some(class) = self.classes.get(&name_lower) {
                         // Detect names declared more than once across the hierarchy
@@ -41919,6 +42306,29 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // $obj->p naming a static property (zend_get_property_offset).
+                    if let Value::Object(o) = &obj_val_raw {
+                        if let Err(e) = self.static_as_instance_check(
+                            o,
+                            prop_name.as_bytes(),
+                            b"__get",
+                            op_array,
+                            op.line,
+                        ) {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
                     // `$o->magic[...] = v` with `function &__get()`: write through
                     // the reference __get returns.
                     if let (OpCode::PropertyGetW, Value::Object(obj)) = (op.opcode, &obj_val_raw) {
@@ -42902,9 +43312,18 @@ impl Vm {
                                     }
                                     result
                                 } else {
-                                    // No __get - throw the uninitialized error
-                                    let class_display =
-                                        crate::value::display_class_name(&class_name_orig);
+                                    // No __get - throw the uninitialized error (named
+                                    // after the declaring class, prop_info->ce).
+                                    let class_display = self
+                                        .find_property_def(&class_lower, prop_name.as_bytes())
+                                        .and_then(|d| {
+                                            self.classes
+                                                .get(&d.1.to_ascii_lowercase())
+                                                .map(|c| crate::value::display_class_name(&c.name))
+                                        })
+                                        .unwrap_or_else(|| {
+                                            crate::value::display_class_name(&class_name_orig)
+                                        });
                                     let prop_display =
                                         String::from_utf8_lossy(prop_name.as_bytes());
                                     let msg = format!(
@@ -43043,8 +43462,13 @@ impl Vm {
                                     });
                                     if let Some(tp) = typed_prop {
                                         // Typed property was unset — throw Error
-                                        let class_display =
-                                            crate::value::display_class_name(&class_name_orig);
+                                        let class_display = self
+                                            .classes
+                                            .get(&tp.declaring_class.to_ascii_lowercase())
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| {
+                                                crate::value::display_class_name(&class_name_orig)
+                                            });
                                         let prop_display =
                                             String::from_utf8_lossy(prop_name.as_bytes());
                                         let _type_name = self
@@ -43134,6 +43558,69 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    // $obj->p naming a static property (zend_get_property_offset).
+                    if let Value::Object(o) = &obj_val_raw {
+                        if let Err(e) = self.static_as_instance_check(
+                            o,
+                            prop_name.as_bytes(),
+                            b"__set",
+                            op_array,
+                            op.line,
+                        ) {
+                            let msg = self.sp_raise(e, op.line);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // Writing through a reference bound to other typed properties.
+                    if !self.typed_refs.is_empty() {
+                        if let Value::Object(o) = &obj_val_raw {
+                            let slot_ref =
+                                o.borrow().properties.iter().find_map(|(k, v)| match v {
+                                    Value::Reference(r) if k.as_slice() == prop_name.as_bytes() => {
+                                        Some(r.clone())
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(r) = slot_ref {
+                                let overflow =
+                                    Self::incdec_overflow_kind(op_array, ip, &op.op2, &value);
+                                if let Err(msg) = self.typed_ref_check(
+                                    &r,
+                                    &mut value,
+                                    op_array.strict_types || overflow.is_some(),
+                                    Some(prop_name.as_bytes()),
+                                ) {
+                                    let msg = match overflow {
+                                        Some(inc) => static_props::typed_ref_incdec_msg(&msg, inc),
+                                        None => msg,
+                                    };
+                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", msg),
+                                        line: op.line,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     // Only overwriting an object/array/reference (or a slot we
                     // cannot see, e.g. mangled or magic) can release anything.
                     let may_release = self.has_release_work()
@@ -45814,6 +46301,15 @@ impl Vm {
                         }
                     }
                 }
+            }
+
+            if let Some((r, old)) = typed_ref_watch {
+                let incdec = match op.opcode {
+                    OpCode::PreIncrement | OpCode::PostIncrement => Some(true),
+                    OpCode::PreDecrement | OpCode::PostDecrement => Some(false),
+                    _ => None,
+                };
+                self.typed_ref_after_op(&r, old, incdec, op_array.strict_types, op.line);
             }
 
             // After each opcode: check if a user error handler threw an exception

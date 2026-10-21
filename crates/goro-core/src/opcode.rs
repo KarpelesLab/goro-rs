@@ -244,6 +244,25 @@ pub enum OpCode {
     /// Isset check for static property: op1 = class name, op2 = prop name,
     /// result = bool (Value::True/Value::False). Never throws.
     StaticPropIsset,
+    /// StaticPropFetch for a read-modify-write (compound assignment, ++/--).
+    StaticPropFetchRW,
+    /// Fetch a static property as the container of a dimension write
+    /// (null / unset is promoted to an array): op1 = class, op2 = name.
+    StaticPropFetchW,
+    /// Fetch a reference to a static property slot: op1 = class,
+    /// op2 = name, result = tmp holding the Reference.
+    StaticPropGetRef,
+    /// Bind a static property to a reference: op1 = class, op2 = value
+    /// (a Reference binds, anything else assigns), result = name.
+    StaticPropSetRef,
+    /// unset(C::$p): op1 = class, op2 = name. Always throws.
+    StaticPropUnset,
+    /// Throw "Using $this when not in object context" unless the `$this`
+    /// CV (op1) holds an object.
+    CheckThis,
+    /// In a constant expression, a property fetch on an object (op1) that
+    /// is not an enum throws; with op2 set, a dimension fetch on any object.
+    ConstExprPropCheck,
 
     // ---- Exceptions ----
     /// Throw: op1 = exception value. Sets VM exception state.
@@ -382,9 +401,6 @@ pub enum OpCode {
     /// the result tmp: snapshots an operand that a magic method could change
     /// between two uses (`$o->$name ?? x` calls __isset then __get).
     QmAssign,
-    /// `C::$p` fetched by reference (`$x = &C::$p`, `return C::$p;` from a
-    /// by-ref function): like StaticPropFetch, result = Reference to the slot.
-    StaticPropGetRef,
 }
 
 /// A compiled function / script

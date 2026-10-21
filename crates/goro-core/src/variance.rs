@@ -923,6 +923,17 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
 
 /// Display of a parameter default value, as zend_get_function_declaration does.
 fn default_display(oa: &OpArray, cv: u32) -> String {
+    // Internal functions: the default as written in the stub.
+    if let Some(f) = oa.internal_sig {
+        let off = u32::from(oa.cv_names.first().is_some_and(|n| n == b"this"));
+        if let Some(d) = cv
+            .checked_sub(off)
+            .and_then(|i| f.args.get(i as usize))
+            .and_then(|a| a.default)
+        {
+            return d.to_string();
+        }
+    }
     // Default prelude: <default expr ops>; Identical(Cv(cv), Undef); JmpZ; Assign(Cv(cv), val)
     let ops = &oa.ops;
     for (i, op) in ops.iter().enumerate() {
@@ -1141,12 +1152,22 @@ impl Vm {
     }
 
     fn variance_scope_for(&self, ctx: &Ctx, declaring_lower: &[u8], fallback: &[u8]) -> LinkClass {
+        // Internal classes are displayed with their canonical name.
+        let canon = |mut c: LinkClass| {
+            if c.builtin {
+                c.name = match crate::stubs::find_class(&c.name) {
+                    Some(sc) => sc.name.as_bytes().to_vec(),
+                    None => self.builtin_canonical_name(&lower(&c.name)).into_bytes(),
+                };
+            }
+            c
+        };
         if !declaring_lower.is_empty() {
             if let Some(c) = ctx.lookup(declaring_lower) {
-                return c;
+                return canon(c);
             }
         }
-        ctx.lookup(fallback).unwrap_or(LinkClass {
+        ctx.lookup(fallback).map(canon).unwrap_or(LinkClass {
             name: fallback.to_vec(),
             parent: None,
             interfaces: Vec::new(),
