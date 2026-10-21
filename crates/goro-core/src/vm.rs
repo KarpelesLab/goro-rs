@@ -121,6 +121,11 @@ impl Vm {
         true
     }
 }
+/// Pointer to the CV name table of the op_array whose CVs are stashed in
+/// `Vm::global_cv_stash`. The op_array outlives the stash (it is only set for
+/// the duration of a call made from that op_array's frame).
+#[derive(Clone, Copy)]
+pub struct CvNamesPtr(pub *const Vec<Vec<u8>>);
 
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
@@ -307,6 +312,10 @@ pub struct Vm {
     pub ob_deactivated: bool,
     pub ob_pending_fatal: Option<VmError>,
     pub ob_fname: Option<String>,
+    /// The global frame's CVs while it is suspended in a builtin call (so
+    /// user callbacks invoked by the builtin see and update the live values
+    /// through `global $x`).
+    pub global_cv_stash: Option<(Vec<Value>, CvNamesPtr)>,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -516,6 +525,7 @@ impl Vm {
                 ob_deactivated: false,
                 ob_pending_fatal: None,
                 ob_fname: None,
+                global_cv_stash: None,
             functions: HashMap::new(),
             builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
@@ -2709,6 +2719,31 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// Value of a global variable held in the suspended global frame (if any).
+    fn global_stash_get(&self, name: &[u8]) -> Option<Value> {
+        let (cvs, names) = self.global_cv_stash.as_ref()?;
+        // SAFETY: the pointed-to op_array outlives the stash (see CvNamesPtr).
+        let names = unsafe { &*names.0 };
+        let i = names.iter().position(|n| n.as_slice() == name)?;
+        match cvs.get(i) {
+            Some(Value::Undef) | None => None,
+            Some(v) => Some(v.clone()),
+        }
+    }
+
+    /// Write a global variable back into the suspended global frame (if any).
+    fn global_stash_set(&mut self, name: &[u8], val: &Value) {
+        if let Some((cvs, names)) = self.global_cv_stash.as_mut() {
+            // SAFETY: see global_stash_get.
+            let names = unsafe { &*names.0 };
+            if let Some(i) = names.iter().position(|n| n.as_slice() == name) {
+                if let Some(slot) = cvs.get_mut(i) {
+                    *slot = val.clone();
+                }
+            }
+        }
     }
 
     /// zendi_try_get_long() for an already type-checked operand: floats are
@@ -15559,7 +15594,15 @@ impl Vm {
                     }
                     match self.value_to_string_checked(&val) {
                         Ok(s) => {
-                            self.write_output(s.as_bytes());
+                            if !self.ob_stack.is_empty() && self.is_global_scope && self.global_cv_stash.is_none() {
+                                self.global_cv_stash = Some((std::mem::take(&mut cvs), CvNamesPtr(&op_array.cv_names)));
+                                self.write_output(s.as_bytes());
+                                if let Some((saved, _)) = self.global_cv_stash.take() {
+                                    cvs = saved;
+                                }
+                            } else {
+                                self.write_output(s.as_bytes());
+                            }
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
                             }
@@ -15588,7 +15631,15 @@ impl Vm {
                     }
                     match self.value_to_string_checked(&val) {
                         Ok(s) => {
-                            self.write_output(s.as_bytes());
+                            if !self.ob_stack.is_empty() && self.is_global_scope && self.global_cv_stash.is_none() {
+                                self.global_cv_stash = Some((std::mem::take(&mut cvs), CvNamesPtr(&op_array.cv_names)));
+                                self.write_output(s.as_bytes());
+                                if let Some((saved, _)) = self.global_cv_stash.take() {
+                                    cvs = saved;
+                                }
+                            } else {
+                                self.write_output(s.as_bytes());
+                            }
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
                             }
@@ -19748,7 +19799,19 @@ impl Vm {
                             ));
                         }
 
-                        match func(self, &call.args) {
+                        let stashed_globals = if self.is_global_scope && self.global_cv_stash.is_none() {
+                            self.global_cv_stash = Some((std::mem::take(&mut cvs), CvNamesPtr(&op_array.cv_names)));
+                            true
+                        } else {
+                            false
+                        };
+                        let builtin_result = func(self, &call.args);
+                        if stashed_globals {
+                            if let Some((saved, _)) = self.global_cv_stash.take() {
+                                cvs = saved;
+                            }
+                        }
+                        match builtin_result {
                             Ok(result) => {
                                 if is_assert_call {
                                     self.call_stack.pop();
@@ -22812,6 +22875,7 @@ impl Vm {
                     // Save global-bound CVs back to globals
                     for (cv_idx, name) in &global_cv_keys {
                         if let Some(cv_val) = cvs.get(*cv_idx as usize) {
+                            self.global_stash_set(name, cv_val);
                             self.globals.insert(name.clone(), cv_val.clone());
                         }
                     }
@@ -24806,8 +24870,10 @@ impl Vm {
                 OpCode::BindGlobal => {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
-                    // Load the current global value into the CV
-                    if let Some(val) = self.globals.get(&name) {
+                    // Load the current global value into the CV (from the suspended
+                    // global frame when a builtin called us from it)
+                    let stashed_val = self.global_stash_get(&name);
+                    if let Some(val) = stashed_val.as_ref().or_else(|| self.globals.get(&name)) {
                         self.write_operand(
                             &op.op1,
                             val.clone(),
