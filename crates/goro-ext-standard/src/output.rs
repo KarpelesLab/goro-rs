@@ -1408,33 +1408,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             seen.remove(&oid);
         }
         Value::Generator(generator) => {
-            let gen_ref = generator.borrow();
-            let raw_name = String::from_utf8_lossy(&gen_ref.op_array.name).to_string();
-            // Format the function name for display:
-            // - Closures: __closure_N -> {closure:file:line}
-            // - Class methods: prepend declaring class (with anonymous classes rendered as 'class@anonymous...')
-            // - Plain functions: keep as-is
-            let name_str = if !gen_ref.op_array.display_name.is_empty() {
-                String::from_utf8_lossy(&gen_ref.op_array.display_name).to_string()
-            } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
-                && !raw_name.starts_with("__closure_fcc_")
-            {
-                let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
-                format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
-            } else if let Some(ref scope) = gen_ref.class_scope {
-                // Use the declaring class as the scope prefix. For anonymous
-                // classes, keep the full internal name (including the NUL-byte
-                // separator and file:line suffix) so that the debug output matches
-                // PHP's "class@anonymous<NUL>/file.php:line$counter::method" layout.
-                // The scope may be stored lowercased: show the declared name.
-                let class_display = match vm.classes.get(&scope.to_ascii_lowercase()) {
-                    Some(ce) => String::from_utf8_lossy(&ce.name).to_string(),
-                    None => String::from_utf8_lossy(scope).to_string(),
-                };
-                format!("{}::{}", class_display, raw_name)
-            } else {
-                raw_name
-            };
+            let name_str = vm.generator_function_name(generator);
             let prop_count = 1; // function property
             // Use a hash-based ID since generators don't have object_id
             let gen_ptr = generator.as_ptr() as u64;

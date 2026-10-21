@@ -426,6 +426,21 @@ impl PhpGenerator {
         if self.is_running {
             return;
         }
+        // The root of our `yield from` tree is running (suspended in a
+        // fiber): we are unwound with it instead.
+        let mut cur = self.live_delegate();
+        while let Some(g) = cur {
+            match g.try_borrow() {
+                Ok(b) if !b.is_running && b.state != GeneratorState::Completed => {
+                    cur = b.live_delegate();
+                }
+                Ok(b) if !b.is_running => break,
+                _ => {
+                    self.force_closed = true;
+                    return;
+                }
+            }
+        }
 
         self.force_closed = true;
 
@@ -508,6 +523,21 @@ impl PhpGenerator {
 
         // Jump to the innermost finally block
         if let Some(&first_finally) = finally_targets.first() {
+            // zend_generator_cleanup_unfinished_execution(): the live
+            // temporaries (foreach loop variables, arguments of calls in
+            // progress) are freed before the finally block runs.
+            let mut freed = !self.saved_calls.is_empty();
+            self.saved_calls.clear();
+            for t in self.tmps.iter_mut() {
+                if matches!(t, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                    freed = true;
+                }
+                *t = Value::Undef;
+            }
+            self.foreach_positions.clear();
+            if freed {
+                vm.run_pending_destructors_pub();
+            }
             self.ip = first_finally as usize;
             // Clear exception handlers and set up for finally execution
             self.exception_handlers.clear();
@@ -667,6 +697,9 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        let fname = vm.generator_function_name_of(self);
+        vm.running_generators
+            .push((self as *const PhpGenerator as usize, fname));
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -685,6 +718,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        vm.running_generators.pop();
         self.release_finished_frame(vm);
 
         // Pop the call_stack entry
@@ -1038,6 +1072,15 @@ impl PhpGenerator {
             if let Some(i) = self.op_array.cv_names.iter().position(|n| n == b"GLOBALS") {
                 if let Some(slot) = self.cvs.get_mut(i) {
                     *slot = Value::Array(vm.globals_array());
+                }
+            }
+            // Auto-globals ($_GET, $_SERVER, ...) are the global slots.
+            for (i, cv_name) in self.op_array.cv_names.iter().enumerate() {
+                if crate::vm::is_auto_global_name(cv_name)
+                    && matches!(self.cvs.get(i), Some(Value::Undef))
+                    && vm.global_exists(cv_name)
+                {
+                    self.cvs[i] = Value::Reference(vm.global_cell(cv_name));
                 }
             }
         }
@@ -3403,6 +3446,9 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        let fname = vm.generator_function_name_of(self);
+        vm.running_generators
+            .push((self as *const PhpGenerator as usize, fname));
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -3421,6 +3467,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        vm.running_generators.pop();
         self.release_finished_frame(vm);
 
         vm.call_stack.pop();
@@ -3475,6 +3522,48 @@ impl PhpGenerator {
 
 /// Generator methods (zend_generators.c), shared by every call path.
 impl Vm {
+    /// The "function" shown by var_dump() of a Generator.
+    pub fn generator_function_name(&self, g: &GenRc) -> String {
+        match g.try_borrow() {
+            Ok(b) => self.generator_function_name_of(&b),
+            Err(_) => {
+                let addr = RefCell::as_ptr(g) as usize;
+                self.running_generators
+                    .iter()
+                    .rev()
+                    .find(|(a, _)| *a == addr)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    fn generator_function_name_of(&self, gen_ref: &PhpGenerator) -> String {
+        let raw_name = String::from_utf8_lossy(&gen_ref.op_array.name).to_string();
+        // - Closures: __closure_N -> {closure:file:line}
+        // - Class methods: prepend declaring class (with anonymous classes
+        //   rendered as 'class@anonymous...')
+        // - Plain functions: keep as-is
+        if !gen_ref.op_array.display_name.is_empty() {
+            String::from_utf8_lossy(&gen_ref.op_array.display_name).to_string()
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
+            && !raw_name.starts_with("__closure_fcc_")
+        {
+            let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
+            format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
+        } else if let Some(ref scope) = gen_ref.class_scope {
+            // The scope may be stored lowercased: show the declared name
+            // (anonymous classes keep their full internal name).
+            let class_display = match self.classes.get(&scope.to_ascii_lowercase()) {
+                Some(ce) => String::from_utf8_lossy(&ce.name).to_string(),
+                None => String::from_utf8_lossy(scope).to_string(),
+            };
+            format!("{}::{}", class_display, raw_name)
+        } else {
+            raw_name
+        }
+    }
+
     /// zend_generator_ensure_initialized(): run a fresh generator to its
     /// first yield.
     fn generator_ensure_initialized(&mut self, g: &GenRc) -> Result<(), VmError> {

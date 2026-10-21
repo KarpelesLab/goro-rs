@@ -538,6 +538,8 @@ pub struct Vm {
     /// Generators whose body has a `finally`: destroying one while it is
     /// suspended runs its finally blocks (zend_generator_dtor_storage).
     pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
+    /// Generators executing now (address, function name for var_dump()).
+    pub(crate) running_generators: Vec<(usize, String)>,
     /// EG_FLAGS_OBJECT_STORE_NO_REUSE: set while the object store's
     /// destructors run at shutdown, so new objects get fresh handles.
     object_store_no_reuse: bool,
@@ -901,6 +903,7 @@ impl Vm {
             magic_prop_guards: std::collections::HashSet::new(),
             destructible_objects: Vec::new(),
             finally_generators: Vec::new(),
+            running_generators: Vec::new(),
             called_class_stack: Vec::new(),
             class_scope_stack: Vec::new(),
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
@@ -13483,6 +13486,9 @@ impl Vm {
     pub fn memory_limit_fatal(&mut self) -> VmError {
         let tried = crate::value::take_memory_exhausted();
         let limit = crate::value::memory_get_limit();
+        // zend_mm_safe_error(): the heap overflows the limit from now on, so
+        // the error can be reported.
+        crate::value::set_memory_limit(0);
         let msg = format!(
             "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
             limit, tried
@@ -14556,6 +14562,18 @@ impl Vm {
     /// a smaller handle than the current one are skipped, as php-src's single
     /// pass over the store does.
     fn shutdown_object_store_destructors(&mut self) {
+        // Suspended generators still referenced run their finally blocks
+        // (zend_generator_dtor_storage()).
+        let gens = std::mem::take(&mut self.finally_generators);
+        for g in &gens {
+            if let Ok(mut gb) = g.try_borrow_mut() {
+                gb.close(self);
+            }
+            if self.shutdown_exception_check() {
+                return;
+            }
+        }
+        drop(gens);
         self.destructible_objects
             .sort_by_key(|v| std::cmp::Reverse(Self::dtor_list_id(v)));
         self.object_store_no_reuse = true;
