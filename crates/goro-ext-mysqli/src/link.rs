@@ -173,7 +173,7 @@ pub fn sync_globals(vm: &Vm) {
 pub fn flush(vm: &mut Vm, f: &Func) {
     for w in crate::mysqlnd::take_warnings() {
         let msg = if w.docref {
-            format!("{}(): {}", f.name, w.msg)
+            format!("{}({}): {}", f.name, w.param.unwrap_or_default(), w.msg)
         } else {
             w.msg
         };

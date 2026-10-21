@@ -317,6 +317,8 @@ pub const E_DEPRECATED: i64 = 8192;
 #[derive(Clone, Debug)]
 pub struct Warning {
     pub docref: bool,
+    /// php_error_docref1's parameter, shown as "func(param): "
+    pub param: Option<String>,
     pub level: i64,
     pub msg: String,
 }
@@ -330,6 +332,19 @@ pub fn php_error_docref(level: i64, msg: impl Into<String>) {
     WARNINGS.with(|w| {
         w.borrow_mut().push(Warning {
             docref: true,
+            param: None,
+            level,
+            msg: msg.into(),
+        })
+    });
+}
+
+/// php_error_docref1(NULL, param, level, ...)
+pub fn php_error_docref1(param: impl Into<String>, level: i64, msg: impl Into<String>) {
+    WARNINGS.with(|w| {
+        w.borrow_mut().push(Warning {
+            docref: true,
+            param: Some(param.into()),
             level,
             msg: msg.into(),
         })
@@ -341,6 +356,7 @@ pub fn php_error(level: i64, msg: impl Into<String>) {
     WARNINGS.with(|w| {
         w.borrow_mut().push(Warning {
             docref: false,
+            param: None,
             level,
             msg: msg.into(),
         })

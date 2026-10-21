@@ -487,13 +487,10 @@ fn read_key_file(fname: &str) -> Option<purecrypto::rsa::BoxedRsaPublicKey> {
     match std::fs::read(fname) {
         Ok(b) => parse_pem_key(&b),
         Err(e) => {
-            php_error_docref(
+            php_error_docref1(
+                fname,
                 E_WARNING,
-                format!(
-                    "{}: Failed to open stream: {}",
-                    fname,
-                    super::vio::strerror(&e)
-                ),
+                format!("Failed to open stream: {}", super::vio::strerror(&e)),
             );
             None
         }
