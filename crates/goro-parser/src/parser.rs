@@ -41,6 +41,8 @@ pub struct Parser {
     pending_extra_constants: Vec<ClassMember>,
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
+    /// Explicit parameter type of the last parsed `set(Type $v)` hook.
+    last_set_hook_type: Option<TypeHint>,
     /// A doc-comment captured at the start of an assignment statement that
     /// should be applied to a closure/arrow function on the right-hand side.
     /// Set in parse_statement() when we see `/** doc */ $x = function/fn/static
@@ -144,6 +146,7 @@ impl Parser {
             first_class_callable_flag: false,
             pending_extra_constants: Vec::new(),
             pending_extra_properties: Vec::new(),
+            last_set_hook_type: None,
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
@@ -1529,6 +1532,7 @@ impl Parser {
 
             // Parse property hooks for promoted properties: public int $x { get => ...; set => ...; }
             // Hooks can appear even without explicit visibility modifier (implicit promotion in PHP 8.4)
+            self.last_set_hook_type = None;
             let (param_get_hook, param_set_hook, param_get_hook_final, param_set_hook_final, param_get_hook_abstract, param_set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
                 self.parse_property_hooks(&name, type_hint.as_ref())?
             } else {
@@ -1553,6 +1557,7 @@ impl Parser {
                 get_hook_abstract: param_get_hook_abstract,
                 set_hook_abstract: param_set_hook_abstract,
                 doc_comment: param_doc_comment,
+                set_hook_type: self.last_set_hook_type.take(),
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -2475,6 +2480,7 @@ impl Parser {
                     None
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
+                self.last_set_hook_type = None;
                 let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name, None)?
                 } else {
@@ -2512,6 +2518,7 @@ impl Parser {
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
+                                set_hook_type: None,
                             });
                         } else {
                             break;
@@ -2587,6 +2594,7 @@ impl Parser {
                     set_hook_abstract,
                     attributes: member_attributes.clone(),
                     doc_comment: member_doc_comment,
+                    set_hook_type: self.last_set_hook_type.take(),
                 })
             }
             _ => {
@@ -2610,6 +2618,7 @@ impl Parser {
                     None
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
+                self.last_set_hook_type = None;
                 let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name, Some(&type_hint))?
                 } else {
@@ -2644,6 +2653,7 @@ impl Parser {
                                 set_hook_abstract: false,
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
+                                set_hook_type: None,
                             });
                         } else {
                             break;
@@ -2719,6 +2729,7 @@ impl Parser {
                     set_hook_abstract,
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,
+                    set_hook_type: self.last_set_hook_type.take(),
                 })
             }
         }
@@ -2945,6 +2956,7 @@ impl Parser {
                         });
                     }
                 }
+                self.last_set_hook_type = param_type_hint.clone();
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     // set { ... } or set($value) { ... }
                     let body = self.parse_block()?;

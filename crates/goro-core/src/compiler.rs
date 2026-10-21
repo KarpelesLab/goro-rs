@@ -3592,6 +3592,7 @@ impl Compiler {
                             set_hook_abstract,
                             attributes,
                             doc_comment: prop_doc_comment,
+                            set_hook_type,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -4389,6 +4390,16 @@ impl Compiler {
                                 hook_compiler.op_array.get_or_create_cv(b"this");
                                 // $value (or custom param name) is CV 1
                                 hook_compiler.op_array.get_or_create_cv(param_name);
+                                // Explicit `set(Type $value)` parameter type (used by
+                                // inheritance/variance checks).
+                                if let Some(th) = set_hook_type {
+                                    let pt = type_hint_to_param_type_with_ns(th, &self.current_namespace, &self.use_map);
+                                    hook_compiler.op_array.param_types = vec![None, Some(ParamTypeInfo {
+                                        param_name: param_name.clone(),
+                                        param_type: pt,
+                                        implicitly_nullable: false,
+                                    })];
+                                }
                                 hook_compiler.op_array.param_count = 2; // $this + $value
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
 

@@ -5643,19 +5643,37 @@ impl Vm {
         if incompatible || return_type_incompatible || param_type_incompatible {
             let child_class_str = String::from_utf8_lossy(child_class);
             let parent_class_str = String::from_utf8_lossy(parent_class);
-            let method_name = String::from_utf8_lossy(&child_method.name);
-            let parent_method_name = String::from_utf8_lossy(&parent_method.name);
+            // Property hooks are shown as `$prop::get` / `$prop::set`, and set
+            // hooks have an implicit `void` return type.
+            let hook_display = |name: &[u8]| -> Option<(String, bool)> {
+                if let Some(p) = name.strip_prefix(b"__property_get_".as_slice()) {
+                    Some((format!("${}::get", String::from_utf8_lossy(p)), false))
+                } else {
+                    name.strip_prefix(b"__property_set_".as_slice())
+                        .map(|p| (format!("${}::set", String::from_utf8_lossy(p)), true))
+                }
+            };
+            let child_hook = hook_display(&child_method.name);
+            let parent_hook = hook_display(&parent_method.name);
+            let method_name = child_hook.as_ref().map(|h| h.0.clone())
+                .unwrap_or_else(|| String::from_utf8_lossy(&child_method.name).to_string());
+            let parent_method_name = parent_hook.as_ref().map(|h| h.0.clone())
+                .unwrap_or_else(|| String::from_utf8_lossy(&parent_method.name).to_string());
 
             let child_sig = format_param_sig(child_op, child_class);
             let parent_sig = format_param_sig(parent_op, parent_class);
 
             // Format return types
-            let child_ret = child_op.return_type.as_ref()
-                .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, child_class)))
-                .unwrap_or_default();
-            let parent_ret = parent_op.return_type.as_ref()
-                .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, parent_class)))
-                .unwrap_or_default();
+            let child_ret = if child_hook.as_ref().is_some_and(|h| h.1) { ": void".to_string() } else {
+                child_op.return_type.as_ref()
+                    .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, child_class)))
+                    .unwrap_or_default()
+            };
+            let parent_ret = if parent_hook.as_ref().is_some_and(|h| h.1) { ": void".to_string() } else {
+                parent_op.return_type.as_ref()
+                    .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, parent_class)))
+                    .unwrap_or_default()
+            };
 
             Some(format!(
                 "Declaration of {}::{}({}){} must be compatible with {}::{}({}){}",
