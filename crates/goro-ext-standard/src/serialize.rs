@@ -1486,6 +1486,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        if goro_core::spl::spl_class_needs_storage(class_lower)
+            && !matches!(obj.get_property(b"__spl_array"), Value::Array(_))
+        {
+            obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+        }
         Some(Rc::new(RefCell::new(obj)))
     }
 

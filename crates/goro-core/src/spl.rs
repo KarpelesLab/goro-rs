@@ -192,6 +192,17 @@ impl Vm {
             self.call_stack.pop();
             return Value::Null;
         }
+        if let Some((since, message)) = stub.deprecated {
+            let msg = if message.is_empty() {
+                format!("Method {}::{}() is deprecated since {}", decl_disp, stub.name, since)
+            } else {
+                format!("Method {}::{}() is deprecated since {}, {}", decl_disp, stub.name, since, message)
+            };
+            self.emit_deprecated_at(&msg, line);
+            if self.current_exception.is_some() {
+                return Value::Null;
+            }
+        }
         self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
         let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
         self.call_stack.pop();
@@ -494,7 +505,7 @@ impl Vm {
 
     /// Allocate a new object of `class` (user or built-in) with property
     /// defaults applied; the constructor is not called.
-    pub(crate) fn spl_instantiate(&mut self, class: &[u8]) -> Rc<RefCell<PhpObject>> {
+    pub fn spl_instantiate(&mut self, class: &[u8]) -> Rc<RefCell<PhpObject>> {
         let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
         let canonical = self
             .classes
@@ -696,6 +707,16 @@ pub(crate) fn autoload_leave(class_lower: &[u8]) {
             a.remove(p);
         }
     });
+}
+
+/// Whether a freshly instantiated object of this class needs an empty
+/// `__spl_array` storage (classes whose older code paths require it).
+pub fn spl_class_needs_storage(class_lower: &[u8]) -> bool {
+    matches!(
+        class_lower,
+        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" | b"splobjectstorage"
+            | b"spldoublylinkedlist" | b"splqueue" | b"splstack"
+    )
 }
 
 pub(crate) fn mangle_private(class: &[u8], name: &[u8]) -> Vec<u8> {
