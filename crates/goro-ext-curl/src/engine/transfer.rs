@@ -15,7 +15,7 @@ use super::mime::MimeReader;
 use super::net::{self, Conn, ConnectErr};
 use super::options::HttpReq;
 use super::proxy::{self, ProxyInfo};
-use super::tls::{TlsConfig, TlsSession};
+use super::tls::{TlsConfig, TlsLog, TlsSession};
 use super::urlapi::{self, FollowParams, FollowType, TransferOptions, TransferUrl};
 use super::{Callbacks, CurlCode, Mime, ReadResult, WRITEFUNC_ERROR, WRITEFUNC_PAUSE};
 
@@ -344,6 +344,18 @@ impl Easy {
                 self.progress.calc();
                 self.done_conn(cb, conn, true, &target);
                 return e;
+            }
+            // Curl_http_done(): nothing at all received
+            if !retry
+                && self.set.connect_only == 0
+                && req.bytecount + req.headerbytecount - req.deductheadercount <= 0
+            {
+                self.failf(cb, "Empty reply from server");
+                conn.close = true;
+                self.posttransfer();
+                self.progress.calc();
+                self.done_conn(cb, conn, false, &target);
+                return code::GOT_NOTHING;
             }
             self.posttransfer();
             let next = if retry {
@@ -820,6 +832,8 @@ impl Easy {
             .map(|v| lossy(&v)),
             ssl_options: ssl.ssl_options,
             certinfo: s.certinfo,
+            trace: s.verbose && s.callbacks.contains(&opt::DEBUGFUNCTION),
+            proxy,
             alpn: if s.ssl_enable_alpn {
                 vec!["http/1.1".to_string()]
             } else {
@@ -1008,6 +1022,7 @@ impl Easy {
             ntlm: Default::default(),
             proxy_ntlm: Default::default(),
             reused: false,
+            tls_err: None,
         };
         let disp = if t.proxy.is_some() {
             chost.clone()
@@ -1021,6 +1036,13 @@ impl Easy {
                 return Err(e);
             }
         }
+        if t.scheme == "https" {
+            if let Err(e) = self.tls_handshake(cb, &mut conn, t) {
+                self.close_conn(cb, conn, true);
+                return Err(e);
+            }
+            self.progress.time(Timer::AppConnect);
+        }
         self.info.primary_ip = conn.primary.ip().to_string();
         self.info.primary_port = conn.primary.port() as i64;
         self.info.local_ip = conn.local.ip().to_string();
@@ -1033,13 +1055,6 @@ impl Easy {
                 primary.port()
             ),
         );
-        if t.scheme == "https" {
-            if let Err(e) = self.tls_handshake(cb, &mut conn, t) {
-                self.close_conn(cb, conn, true);
-                return Err(e);
-            }
-            self.progress.time(Timer::AppConnect);
-        }
         self.infof(cb, "using HTTP/1.x");
         // PROTOCONNECT and DO rounds of the multi state machine
         for _ in 0..2 {
@@ -1254,6 +1269,18 @@ impl Easy {
         cleft.min(timeleft)
     }
 
+    /// Hand the TLS layer's verbose events to the trace
+    pub(crate) fn drain_tls_log(&self, cb: &mut dyn Callbacks, sess: &mut TlsSession) {
+        let tr = self.tracer();
+        for e in sess.take_log() {
+            match e {
+                TlsLog::Info(l) | TlsLog::Trace(l) => tr.infof(cb, &l),
+                TlsLog::DataIn(d) => tr.debug(cb, info::SSL_DATA_IN, &d),
+                TlsLog::DataOut(d) => tr.debug(cb, info::SSL_DATA_OUT, &d),
+            }
+        }
+    }
+
     /// TLS handshake on a fresh connection
     fn tls_handshake(
         &mut self,
@@ -1263,38 +1290,47 @@ impl Easy {
     ) -> Result<(), CurlCode> {
         use std::io::{Read, Write};
         let cfg = self.tls_config(false);
-        let tr = self.tracer();
-        let mut sess = match TlsSession::new(&cfg, &t.host, t.port) {
+        self.info.ssl_verifyresult = 1;
+        let pool = self.conn_pool();
+        let key = (t.host.to_ascii_lowercase(), t.port);
+        let resume = if self.set.ssl.cache_session {
+            pool.0.borrow().tls_sessions.get(&key).cloned()
+        } else {
+            None
+        };
+        let mut sess = match TlsSession::new_with_resumption(&cfg, &t.host, t.port, resume.as_ref())
+        {
             Ok(s) => s,
             Err((c, m)) => {
-                self.failf(cb, &m);
+                if !m.is_empty() {
+                    self.failf(cb, &m);
+                }
                 return Err(c);
             }
         };
-        let flush_info = |sess: &mut TlsSession, cb: &mut dyn Callbacks| {
-            for l in sess.take_info_lines() {
-                tr.infof(cb, &l);
-            }
-        };
         loop {
-            let done = match sess.handshake() {
-                Ok(d) => d,
-                Err((c, m)) => {
-                    flush_info(&mut sess, cb);
-                    self.info.ssl_verifyresult = sess.verify_result();
-                    self.failf(cb, &m);
-                    return Err(c);
-                }
-            };
+            let r = sess.handshake();
             let out = sess.take_outgoing();
             if !out.is_empty() && conn.sock.write_all(&out).is_err() {
-                flush_info(&mut sess, cb);
+                self.drain_tls_log(cb, &mut sess);
                 self.failf(cb, "Send failure: Broken pipe");
-                return Err(code::SSL_CONNECT_ERROR);
+                return Err(code::SEND_ERROR);
             }
-            flush_info(&mut sess, cb);
-            if done {
-                break;
+            self.drain_tls_log(cb, &mut sess);
+            match r {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err((c, m)) => {
+                    self.info.ssl_verifyresult = sess.verify_result();
+                    if !m.is_empty() {
+                        self.failf(cb, &m);
+                        if m.starts_with("error setting certificate") {
+                            // Curl_ssl_setup_x509_store() runs twice
+                            self.failf(cb, &m);
+                        }
+                    }
+                    return Err(c);
+                }
             }
             let left = self.timeleft(true);
             if left < 0
@@ -1306,33 +1342,21 @@ impl Easy {
                 return Err(code::OPERATION_TIMEDOUT);
             }
             let mut buf = [0u8; 16384];
-            let n = match conn.sock.read(&mut buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    self.failf(
-                        cb,
-                        &format!(
-                            "Recv failure: {}",
-                            net::os_strerror(e.raw_os_error().unwrap_or(0))
-                        ),
-                    );
-                    return Err(code::SSL_CONNECT_ERROR);
+            match conn.sock.read(&mut buf) {
+                Ok(0) => sess.feed_eof(),
+                Ok(n) => {
+                    if let Err((c, m)) = sess.feed(&buf[..n]) {
+                        self.drain_tls_log(cb, &mut sess);
+                        self.failf(cb, &m);
+                        return Err(c);
+                    }
                 }
-            };
-            if n == 0 {
-                let host = &t.host;
-                let port = t.port;
-                self.failf(
-                    cb,
-                    "TLS connect error: error:0A000126:SSL routines::unexpected eof while reading",
-                );
-                let _ = (host, port);
-                return Err(code::SSL_CONNECT_ERROR);
-            }
-            if let Err((c, m)) = sess.feed(&buf[..n]) {
-                flush_info(&mut sess, cb);
-                self.failf(cb, &m);
-                return Err(c);
+                Err(e) => {
+                    let errno = e.raw_os_error().unwrap_or(libc::ECONNRESET);
+                    self.info.os_errno = errno as i64;
+                    self.failf(cb, &format!("Recv failure: {}", net::os_strerror(errno)));
+                    return Err(code::RECV_ERROR);
+                }
             }
         }
         conn.ssl_verifyresult = sess.verify_result();
@@ -1340,6 +1364,11 @@ impl Easy {
         if self.set.certinfo {
             conn.certinfo = sess.certinfo();
             self.info.certinfo = conn.certinfo.clone();
+        }
+        if self.set.ssl.cache_session
+            && let Some(r) = sess.take_resumption()
+        {
+            pool.0.borrow_mut().tls_sessions.insert(key, r);
         }
         conn.tls = Some(Box::new(sess));
         Ok(())
@@ -1640,7 +1669,21 @@ impl Easy {
     }
 
     /// Close (not pool) a connection
+    /// Store a TLS session ticket the connection got for later resumption
+    fn keep_tls_session(&mut self, conn: &mut Conn) {
+        if !self.set.ssl.cache_session {
+            return;
+        }
+        if let Some(t) = conn.tls.as_mut()
+            && let Some(r) = t.take_resumption()
+        {
+            let key = (conn.host.to_ascii_lowercase(), conn.port);
+            self.conn_pool().0.borrow_mut().tls_sessions.insert(key, r);
+        }
+    }
+
     pub(crate) fn close_conn(&mut self, cb: &mut dyn Callbacks, mut conn: Conn, aborted: bool) {
+        self.keep_tls_session(&mut conn);
         self.infof(
             cb,
             &format!(
@@ -1655,6 +1698,7 @@ impl Easy {
     /// multi_done_locked(): keep the connection in the pool or close it
     fn done_conn(&mut self, cb: &mut dyn Callbacks, mut conn: Conn, premature: bool, t: &Target) {
         self.st.recent_conn_id = conn.id;
+        self.keep_tls_session(&mut conn);
         if self.set.reuse_forbid || conn.close || premature {
             self.st.lastconnect_id = -1;
             self.close_conn(cb, conn, premature);
@@ -2091,6 +2135,8 @@ impl Easy {
             return self.cw_content(cb, req, flags, buf);
         }
         if req.no_body && !buf.is_empty() {
+            // streamclose(conn, "ignoring body")
+            req.close_conn = true;
             req.download_done = true;
             if self.info.header_size > 0 {
                 return Ok(());
@@ -3587,7 +3633,8 @@ impl Easy {
                 return Err(code::ABORTED_BY_CALLBACK);
             }
         }
-        // the first round: flush the request
+        // the first round: flush the request (libcurl gets there before any
+        // response byte is read on plain connections)
         if !req.upload_done {
             self.req_send_more(cb, conn, req)?;
         }
@@ -3635,7 +3682,9 @@ impl Easy {
                         Ok(0) => {
                             // EOF
                             req.keep_recv = false;
-                            self.req_abort_sending_if_needed(req);
+                            // Curl_req_stop_send_recv()
+                            req.keep_send = false;
+                            self.req_abort_sending(cb, req);
                             if !req.eos_written {
                                 self.xfer_write_resp(cb, conn, t, req, &[], true)?;
                             }
@@ -3647,16 +3696,18 @@ impl Easy {
                             }
                         }
                         Err(e) => {
+                            if let Some(t) = conn.tls.as_mut() {
+                                self.drain_tls_log(cb, t);
+                            }
+                            if let Some((c, m)) = conn.tls_err.take() {
+                                if !m.is_empty() {
+                                    self.failf(cb, &m);
+                                }
+                                return Err(c);
+                            }
                             let errno = e.raw_os_error().unwrap_or(libc::ECONNRESET);
                             self.info.os_errno = errno as i64;
-                            if conn.tls.is_some() && e.raw_os_error().is_none() {
-                                self.failf(cb, &format!("Recv failure: {e}"));
-                            } else {
-                                self.failf(
-                                    cb,
-                                    &format!("Recv failure: {}", net::os_strerror(errno)),
-                                );
-                            }
+                            self.failf(cb, &format!("Recv failure: {}", net::os_strerror(errno)));
                             return Err(code::RECV_ERROR);
                         }
                     }
@@ -3682,6 +3733,9 @@ impl Easy {
                     }
                 } else if req.download_done {
                     req.keep_recv = false;
+                }
+                if let Some(tls) = conn.tls.as_mut() {
+                    self.drain_tls_log(cb, tls);
                 }
                 if req.done {
                     return Ok(());
@@ -3824,11 +3878,6 @@ impl Easy {
         if is_eos {
             req.eos_written = true;
             req.download_done = true;
-            if req.header && req.headerline == 0 && req.httpcode == 0 {
-                // the connection closed before any response
-                self.failf(cb, "Empty reply from server");
-                return Err(code::GOT_NOTHING);
-            }
         }
         Ok(true)
     }

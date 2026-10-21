@@ -293,6 +293,8 @@ pub(crate) struct Conn {
     pub proxy_ntlm: super::httpauth::NtlmData,
     /// conn->bits.reuse for the current request
     pub reused: bool,
+    /// the CURLcode and message of the last TLS read error
+    pub tls_err: Option<(u32, String)>,
 }
 
 impl Conn {
@@ -326,7 +328,17 @@ impl Conn {
         }
         loop {
             if let Some(t) = &mut self.tls {
-                let plain = t.recv().map_err(|(_, m)| std::io::Error::other(m))?;
+                let plain = match t.recv() {
+                    Ok(p) => p,
+                    Err((c, m)) => {
+                        self.tls_err = Some((c, m.clone()));
+                        return Err(std::io::Error::other(m));
+                    }
+                };
+                let out = t.take_outgoing();
+                if !out.is_empty() {
+                    let _ = self.sock.write_all(&out);
+                }
                 if !plain.is_empty() {
                     self.rbuf.extend_from_slice(&plain);
                     return Ok(plain.len());
@@ -351,15 +363,17 @@ impl Conn {
             };
             if n == 0 {
                 self.eof = true;
+                if let Some(t) = &mut self.tls {
+                    t.feed_eof();
+                    continue;
+                }
                 return Ok(0);
             }
             match &mut self.tls {
                 Some(t) => {
-                    t.feed(&buf[..n])
-                        .map_err(|(_, m)| std::io::Error::other(m))?;
-                    let out = t.take_outgoing();
-                    if !out.is_empty() {
-                        let _ = self.sock.write_all(&out);
+                    if let Err((c, m)) = t.feed(&buf[..n]) {
+                        self.tls_err = Some((c, m.clone()));
+                        return Err(std::io::Error::other(m));
                     }
                 }
                 None => {
@@ -411,6 +425,8 @@ impl Conn {
 /// A connection cache plus the id counters of a multi handle
 #[derive(Default)]
 pub(crate) struct Pool {
+    /// TLS session cache: (host, port) -> resumption data
+    pub tls_sessions: HashMap<(String, u16), super::tls::TlsResumption>,
     pub idle: Vec<Conn>,
     pub next_conn_id: i64,
     pub next_xfer_id: i64,
