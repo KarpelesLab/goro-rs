@@ -4434,21 +4434,40 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if s.as_bytes().starts_with(b"__closure") && method_lower == b"__invoke" {
                 return Ok(Value::True);
             }
-            s.as_bytes()
+            let lower: Vec<u8> = s.as_bytes()
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
-                .collect()
+                .collect();
+            if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
+                let name = s.as_bytes().to_vec();
+                vm.try_autoload_class(&name);
+                if vm.current_exception.is_some() {
+                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                }
+            }
+            lower
         }
-        _ => return Ok(Value::False),
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            let mut a = args.to_vec();
+            a[0] = inner;
+            return method_exists(vm, &a);
+        }
+        other => {
+            return Err(throw_type_error_msg(vm, format!("method_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", Vm::value_type_name(other))));
+        }
     };
+    let is_object = matches!(class_or_obj, Value::Object(_));
 
     // Walk parent chain to check for method
     let mut current = class_lower.clone();
     for _ in 0..50 {
         if let Some(class) = vm.classes.get(&current) {
-            if class.methods.contains_key(&method_lower) {
-                // method_exists() returns true regardless of visibility
-                return Ok(Value::True);
+            if let Some(m) = class.methods.get(&method_lower) {
+                // Ignores visibility, except inherited private methods looked up by class name.
+                let private_inherited = m.visibility == Visibility::Private
+                    && lower_bytes(&m.declaring_class) != class_lower;
+                return Ok(if is_object || !private_inherited { Value::True } else { Value::False });
             }
             if let Some(ref parent) = class.parent {
                 current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -8219,7 +8238,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     // get_class() with no argument (or null) uses the current class scope
-    if args.is_empty() || matches!(val, Value::Null | Value::Undef) {
+    if args.is_empty() {
         // Deprecated: Calling get_class() without arguments is deprecated
         _vm.emit_deprecated("Calling get_class() without arguments is deprecated");
         // Return the current class scope (the declaring class)
@@ -8248,8 +8267,7 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             // PHP 8: TypeError for non-object
             let type_name = Vm::value_type_name(val);
-            _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
-            Ok(Value::Null)
+            Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
         }
     } else if let Value::Array(arr) = val {
         let arr = arr.borrow();
@@ -8263,13 +8281,11 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // PHP 8: TypeError for non-object
         let type_name = Vm::value_type_name(val);
-        _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
-        Ok(Value::Null)
+        Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
     } else {
         // PHP 8: TypeError for non-object
         let type_name = Vm::value_type_name(val);
-        _vm.throw_type_error(format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name));
-        Ok(Value::Null)
+        Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
     }
 }
 fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -8434,6 +8450,9 @@ fn is_a_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // is_a with string class name + allow_string=true (3rd arg)
             let allow = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
             if allow {
+                if !class_known_or_autoload(vm, obj_class.as_bytes()) {
+                    return Ok(Value::False);
+                }
                 (obj_class.as_bytes().to_vec(), s.as_bytes().to_vec())
             } else {
                 return Ok(Value::False);
@@ -8454,6 +8473,9 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // is_subclass_of with string class name + allow_string=true (3rd arg, default true)
             let allow = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
             if allow {
+                if !class_known_or_autoload(vm, obj_class.as_bytes()) {
+                    return Ok(Value::False);
+                }
                 (obj_class.as_bytes().to_vec(), s.as_bytes().to_vec())
             } else {
                 return Ok(Value::False);
@@ -8469,6 +8491,16 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let result = class_is_a(vm, &class_name, &check_name);
     Ok(if result { Value::True } else { Value::False })
+}
+
+/// zend_lookup_class(): true if the class exists, autoloading it if needed.
+fn class_known_or_autoload(vm: &mut Vm, name: &[u8]) -> bool {
+    let lower = lower_bytes(name);
+    if vm.classes.contains_key(&lower) || vm.is_known_builtin_class(&lower) {
+        return true;
+    }
+    vm.try_autoload_class(name);
+    vm.classes.contains_key(&lower)
 }
 
 /// Check if class_name is the same as or inherits from check_name
@@ -8545,17 +8577,31 @@ fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
     false
 }
 fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first() {
+    let class_name = match args.first().map(|v| v.deref()) {
         Some(Value::Object(obj)) => obj.borrow().class_name.clone(),
-        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        Some(Value::String(s)) => {
+            let lower = lower_bytes(s.as_bytes());
+            if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
+                vm.try_autoload_class(s.as_bytes());
+                if vm.current_exception.is_some() {
+                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                }
+                if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
+                    return Err(throw_type_error_msg(vm, format!("get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given")));
+                }
+            }
+            s.as_bytes().to_vec()
+        }
         None => {
             vm.emit_deprecated("Calling get_parent_class() without arguments is deprecated");
             match vm.current_class_scope() {
-                Some(scope) => scope,
+                Some(c) => c.to_vec(),
                 None => return Ok(Value::False),
             }
         }
-        _ => return Ok(Value::False),
+        Some(other) => {
+            return Err(throw_type_error_msg(vm, format!("get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&other))));
+        }
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     if let Some(class) = vm.classes.get(&class_lower)
@@ -11071,69 +11117,68 @@ fn var_dump_direct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
+/// Throw a TypeError from a builtin (sets the pending exception).
+fn throw_type_error_msg(vm: &mut Vm, msg: String) -> VmError {
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    VmError { message: format!("Uncaught TypeError: {}", msg), line: vm.current_line }
+}
+
 fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let class_name = match val {
+    let val = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    let class_name = match &val {
         Value::String(s) => {
             let name = s.as_bytes().to_vec();
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Trigger autoloading for a not-yet-loaded class name, like PHP does.
             if !vm.classes.contains_key(&lower) {
                 vm.try_autoload_class(&name);
+                if vm.current_exception.is_some() {
+                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                }
             }
-            // Check if class exists - if not, emit TypeError
             if !vm.classes.contains_key(&lower) {
-                let type_name = Vm::value_type_name(val);
-                vm.throw_type_error(format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", type_name));
-                return Ok(Value::Null);
+                return Err(throw_type_error_msg(vm, format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&val))));
             }
             name
         }
         Value::Object(obj) => obj.borrow().class_name.clone(),
         _ => {
-            let type_name = Vm::value_type_name(val);
-            vm.throw_type_error(format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", type_name));
-            return Ok(Value::Null);
+            return Err(throw_type_error_msg(vm, format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&val))));
         }
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-    let mut result = PhpArray::new();
-    // Get the current scope class for visibility checks (lowercase)
-    let scope_class: Option<Vec<u8>> = vm.current_class_scope()
+    let scope: Option<Vec<u8>> = vm.current_class_scope()
         .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
-    if let Some(class) = vm.classes.get(&class_lower) {
-        // Collect methods with original names, filter by visibility from current scope
-        let mut methods: Vec<_> = class
-            .methods
-            .values()
-            .filter(|m| {
-                match m.visibility {
-                    goro_core::object::Visibility::Public => true,
-                    goro_core::object::Visibility::Protected => {
-                        // Accessible if calling class is same or a subclass
-                        if let Some(ref scope) = scope_class {
-                            scope.as_slice() == class_lower.as_slice()
-                                || vm.class_extends(scope, &class_lower)
-                                || vm.class_extends(&class_lower, scope)
-                        } else { false }
-                    }
-                    goro_core::object::Visibility::Private => {
-                        // Accessible only from same class
-                        if let Some(ref scope) = scope_class {
-                            scope.as_slice() == class_lower.as_slice()
-                        } else { false }
-                    }
-                }
-            })
-            .collect();
-        // Sort by name for consistent output
-        methods.sort_by(|a, b| a.name.cmp(&b.name));
-        for m in methods {
-            result.push(Value::String(PhpString::from_vec(m.name.clone())));
+    let mut result = PhpArray::new();
+    let methods: Vec<(Vec<u8>, Visibility, Vec<u8>)> = match vm.classes.get(&class_lower) {
+        Some(class) => {
+            // Own methods first (declaration order), then inherited ones.
+            let own = class.methods.values().filter(|m| lower_bytes(&m.declaring_class) == class_lower);
+            let inherited = class.methods.values().filter(|m| lower_bytes(&m.declaring_class) != class_lower);
+            own.chain(inherited)
+                .filter(|m| !m.name.starts_with(b"__property_"))
+                .map(|m| (m.name.clone(), m.visibility, lower_bytes(&m.declaring_class)))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    for (name, vis, decl) in methods {
+        let visible = match vis {
+            Visibility::Public => true,
+            Visibility::Protected => scope.as_ref().map(|sc| {
+                *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
+            }).unwrap_or(false),
+            Visibility::Private => scope.as_ref().map(|sc| *sc == decl).unwrap_or(false),
+        };
+        if visible {
+            result.push(Value::String(PhpString::from_vec(name)));
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn lower_bytes(b: &[u8]) -> Vec<u8> {
+    b.iter().map(|c| c.to_ascii_lowercase()).collect()
 }
 
 #[allow(dead_code)]
@@ -15031,9 +15076,20 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Value::String(s) => {
             let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
+                vm.try_autoload_class(s.as_bytes());
+                if vm.current_exception.is_some() {
+                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                }
+            }
             Ok(if class_has_visible_prop(vm, &class_lower, prop_bytes) { Value::True } else { Value::False })
         }
-        _ => Ok(Value::Null),
+        Value::Reference(r) => {
+            let mut a = args.to_vec();
+            a[0] = r.borrow().clone();
+            property_exists_fn(vm, &a)
+        }
+        other => Err(throw_type_error_msg(vm, format!("property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", Vm::value_type_name(other)))),
     }
 }
 

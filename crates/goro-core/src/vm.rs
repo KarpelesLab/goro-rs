@@ -31300,7 +31300,17 @@ impl Vm {
                                     if let Some(nn) = new_name {
                                         let nn_lower: Vec<u8> = nn.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         m.name = nn.clone();
-                                        class.methods.insert(nn_lower, m);
+                                        // zend_add_trait_method() adds aliases before the
+                                        // original name, which matters for get_class_methods().
+                                        match class.methods.get_index_of(&method_lower) {
+                                            Some(idx) if !class.methods.contains_key(&nn_lower)
+                                                && !own_method_names.contains(&method_lower) => {
+                                                class.methods.shift_insert(idx, nn_lower, m);
+                                            }
+                                            _ => {
+                                                class.methods.insert(nn_lower, m);
+                                            }
+                                        }
                                     } else {
                                         // Just change visibility on existing method
                                         if let Some(existing) = class.methods.get_mut(&method_lower) {
