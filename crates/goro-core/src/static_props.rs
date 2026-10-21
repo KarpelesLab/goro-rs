@@ -546,30 +546,33 @@ impl Vm {
             None
         };
         let typed = slot.typed;
+        // A default referring to something declared later is resolved on
+        // first use, whatever the fetch mode (zend_update_class_constants).
+        let deferred = match self.sp_cell(&slot, name) {
+            None => return Ok(Value::Null),
+            Some(Value::Reference(r)) => r.borrow().clone(),
+            Some(v) => v.clone(),
+        };
+        if matches!(&deferred, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
+            let resolved = self.resolve_deferred_value(&deferred);
+            if !matches!(&resolved, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
+                if let Some(cell) = self.sp_cell(&slot, name) {
+                    match cell {
+                        Value::Reference(r) => *r.borrow_mut() = resolved,
+                        c => *c = resolved,
+                    }
+                }
+            }
+        }
         let Some(cell) = self.sp_cell(&slot, name) else {
             return Ok(Value::Null);
         };
         match mode {
             SpFetch::R | SpFetch::RW => {
-                let mut v = match cell {
+                let v = match cell {
                     Value::Reference(r) => r.borrow().clone(),
                     v => v.clone(),
                 };
-                // A default referring to something declared later is
-                // resolved on first use (zend_update_class_constants).
-                if matches!(&v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
-                    let resolved = self.resolve_deferred_value(&v);
-                    if !matches!(&resolved, Value::String(s) if s.as_bytes().starts_with(b"__deferred_"))
-                    {
-                        if let Some(cell) = self.sp_cell(&slot, name) {
-                            match cell {
-                                Value::Reference(r) => *r.borrow_mut() = resolved.clone(),
-                                c => *c = resolved.clone(),
-                            }
-                        }
-                        v = resolved;
-                    }
-                }
                 if matches!(v, Value::Undef) {
                     if typed {
                         return Err(self.sp_uninit_error(&slot, name));
