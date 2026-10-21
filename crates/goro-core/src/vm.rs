@@ -29828,8 +29828,11 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    {
                         // Real array with array/object key -> TypeError, before
-                        // value_to_array_key_checked silently coerces to Int(0).
+                        // value_to_array_key_checked silently coerces to Int(0)
+                        // (zend_illegal_container_offset), for reads too.
                         if matches!(&arr_val, Value::Array(_)) {
                             let key_inner = match &key_val {
                                 Value::Reference(r) => r.borrow().clone(),
@@ -29860,6 +29863,8 @@ impl Vm {
                                 });
                             }
                         }
+                    }
+                    if is_rw {
                         // `$a[] op= v` reads the (new) element as null; on
                         // objects it is offsetGet(null).
                         let append = matches!(op.op2, OperandType::Unused);
