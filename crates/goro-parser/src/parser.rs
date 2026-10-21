@@ -379,16 +379,22 @@ impl Parser {
             self.advance();
             loop {
                 let mut parts = Vec::new();
-                if matches!(self.peek(), TokenKind::Backslash) {
-                    self.advance();
-                }
+                // A fully qualified name keeps its leading backslash.
+                let fq = self.eat(&TokenKind::Backslash);
+                let fq_prefix = |n: Vec<u8>| {
+                    if fq {
+                        [b"\\".as_slice(), &n].concat()
+                    } else {
+                        n
+                    }
+                };
                 match self.peek().clone() {
                     TokenKind::Identifier(n) => {
-                        parts.push(n);
+                        parts.push(fq_prefix(n));
                         self.advance();
                     }
                     _ if self.is_semi_reserved_keyword() => {
-                        parts.push(self.keyword_to_identifier());
+                        parts.push(fq_prefix(self.keyword_to_identifier()));
                         self.advance();
                     }
                     TokenKind::Variable(v) => {

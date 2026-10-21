@@ -6,6 +6,7 @@ use crate::array::ArrayKey;
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
+use std::rc::Rc;
 
 impl Vm {
     /// Format an exception's "trace" property like Exception::getTraceAsString().
@@ -75,15 +76,77 @@ impl Vm {
         let stack_trace = self.format_stack_trace();
         let max_len = self.exception_string_param_max_len;
         if let Some(exc) = self.current_exception.take() {
+            // zend_exception_error(): the report is what the exception's
+            // (possibly user-defined) __toString() returns.
+            if let Value::Object(obj) = &exc {
+                let cl = obj.borrow().class_name.to_ascii_lowercase();
+                let user_tostring = self.classes.get(&cl).is_some_and(|c| {
+                    c.get_method(b"__tostring").is_some_and(|m| {
+                        !m.op_array.ops.is_empty()
+                            && !m.declaring_class.eq_ignore_ascii_case(b"exception")
+                            && !m.declaring_class.eq_ignore_ascii_case(b"error")
+                    })
+                });
+                if user_tostring {
+                    let r = self.call_object_method(&exc, b"__tostring", &[]);
+                    if self.current_exception.is_none() {
+                        if let Some(s) = r.map(|v| v.deref()).and_then(|v| match v {
+                            Value::String(s) => Some(s.to_string_lossy()),
+                            _ => None,
+                        }) {
+                            let (file, line) = {
+                                let o = obj.borrow();
+                                (
+                                    o.get_property(b"file").to_php_string().to_string_lossy(),
+                                    o.get_property(b"line").to_long() as u32,
+                                )
+                            };
+                            let fatal = format!("Uncaught {}\n  thrown", s);
+                            self.display_error("Fatal error", &fatal, &file, line);
+                            self.fatal_emitted = true;
+                            return;
+                        }
+                    }
+                    self.current_exception = None;
+                }
+            }
+            // Messages may be objects with __toString().
+            let mut msg_strings: Vec<(usize, String)> = Vec::new();
+            {
+                let mut cur = exc.clone();
+                for _ in 0..100 {
+                    let Value::Object(o) = &cur else { break };
+                    let msg = o.borrow().get_property(b"message");
+                    if matches!(msg.deref(), Value::Object(_)) {
+                        if let Ok(s) = self.value_to_string_checked(&msg.deref()) {
+                            msg_strings.push((Rc::as_ptr(o) as usize, s.to_string_lossy()));
+                        }
+                        self.current_exception = None;
+                    }
+                    let next = o.borrow().get_property(b"previous");
+                    cur = next;
+                }
+            }
+            let msg_of = |o: &std::rc::Rc<std::cell::RefCell<crate::object::PhpObject>>| {
+                msg_strings
+                    .iter()
+                    .find(|(p, _)| *p == Rc::as_ptr(o) as usize)
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_else(|| {
+                        o.borrow()
+                            .get_property(b"message")
+                            .to_php_string()
+                            .to_string_lossy()
+                    })
+            };
             if let Value::Object(obj) = &exc {
                 let mut chain = Vec::new();
                 {
                     let obj_ref = obj.borrow();
                     let class = crate::value::display_class_name(&obj_ref.class_name);
-                    let msg_str = obj_ref
-                        .get_property(b"message")
-                        .to_php_string()
-                        .to_string_lossy();
+                    drop(obj_ref);
+                    let msg_str = msg_of(obj);
+                    let obj_ref = obj.borrow();
                     let has_file = obj_ref.has_property(b"file");
                     let has_line = obj_ref.has_property(b"line");
                     let exc_file = obj_ref
@@ -111,10 +174,9 @@ impl Vm {
                         if let Value::Object(prev_obj) = &prev {
                             let prev_ref = prev_obj.borrow();
                             let pc = crate::value::display_class_name(&prev_ref.class_name);
-                            let pm = prev_ref
-                                .get_property(b"message")
-                                .to_php_string()
-                                .to_string_lossy();
+                            drop(prev_ref);
+                            let pm = msg_of(prev_obj);
+                            let prev_ref = prev_obj.borrow();
                             let pf = prev_ref
                                 .get_property(b"file")
                                 .to_php_string()

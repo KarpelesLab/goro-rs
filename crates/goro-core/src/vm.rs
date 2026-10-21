@@ -23499,8 +23499,17 @@ impl Vm {
                             } else {
                                 0
                             };
-                            let provided =
-                                (call.args.len() as u32).saturating_sub(implicit_args as u32);
+                            // A closure's captured (use) values precede its arguments.
+                            let captures = if crate::closure::is_closure_fn_name(&user_fn.name) {
+                                user_fn.closure_capture_names.len().min(call.args.len()) as u32
+                            } else {
+                                0
+                            };
+                            // (a captured $this is one of them)
+                            let implicit_args = if captures > 0 { 0 } else { implicit_args };
+                            let provided = (call.args.len() as u32)
+                                .saturating_sub(implicit_args as u32)
+                                .saturating_sub(captures);
                             let required = user_fn.required_param_count;
                             // Don't check for __call/__callStatic/constructors
                             let is_special = func_name_lower.ends_with(b"::__call")
@@ -23520,7 +23529,10 @@ impl Vm {
                                 } else {
                                     &display_name
                                 };
-                                let total_params = user_fn.param_count - implicit_args as u32;
+                                let total_params = user_fn
+                                    .param_count
+                                    .saturating_sub(implicit_args as u32)
+                                    .saturating_sub(captures);
                                 let has_optional = total_params > required;
                                 let qualifier = if has_optional { "at least" } else { "exactly" };
                                 // Get filename

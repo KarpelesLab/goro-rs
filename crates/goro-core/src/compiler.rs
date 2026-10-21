@@ -801,7 +801,9 @@ impl Compiler {
         // validation for built-in attributes (PHP 8.5).
         let has_delayed = attrs.iter().any(|a| {
             let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
-            last.eq_ignore_ascii_case(b"DelayedTargetValidation")
+            last.strip_prefix(b"\\")
+                .unwrap_or(last)
+                .eq_ignore_ascii_case(b"DelayedTargetValidation")
         });
         let effective_target = if has_delayed { "" } else { target };
         // Check for repeated internal/non-repeatable attributes at compile time.
