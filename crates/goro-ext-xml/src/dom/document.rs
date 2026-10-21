@@ -1215,27 +1215,72 @@ pub fn c14n(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     let off = if file { 1 } else { 0 };
     a.count(vm, off, 4 + off)?;
     let uri = if file {
-        a.str(vm, 0, "uri")?
+        let u = a.str_bytes(vm, 0, "uri")?;
+        if u.contains(&0) {
+            throw_error(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($uri) must not contain any null bytes",
+                    a.f
+                ),
+            );
+            return Err(());
+        }
+        String::from_utf8_lossy(&u).into_owned()
     } else {
         String::new()
     };
     let exclusive = a.bool(vm, off, "exclusive", false)?;
     let with_comments = a.bool(vm, off + 1, "withComments", false)?;
-    let xpath = a.raw(off + 2);
-    let prefixes = a.raw(off + 3);
+    // "a!": ?array
+    let mut arr = |i: usize, name: &str| -> R<Option<Value>> {
+        match a.raw(i) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v @ Value::Array(_)) => Ok(Some(v)),
+            Some(v) => {
+                a.type_err(vm, i, name, "?array", &v);
+                Err(())
+            }
+        }
+    };
+    let xpath = arr(off + 2, "xpath")?;
+    let prefixes = arr(off + 3, "nsPrefixes")?;
     let n = need_node(vm, o)?;
-    let doc = doc_of_node(n);
-    if doc.is_none() {
-        throw_error(vm, b"ValueError", "Node must be associated with a document");
-        return Err(());
-    }
+    let doc = match doc_of_node(n) {
+        Some(d) => d,
+        None => {
+            throw_error(vm, b"Error", "Node must be associated with a document");
+            return Err(());
+        }
+    };
     let r = crate::c14n::canonicalize(
         vm,
+        &a.f,
         n,
+        doc,
         exclusive,
         with_comments,
         xpath.as_ref(),
         prefixes.as_ref(),
+        off + 3,
+        &mut |vm: &mut Vm| {
+            // xmlOutputBufferCreateFilename happens before the canonicalization
+            if !file || uri.contains("://") {
+                return true;
+            }
+            match std::fs::File::create(&uri) {
+                Ok(_) => true,
+                Err(e) => {
+                    let mut msg = e.to_string();
+                    if let Some(i) = msg.find(" (os error") {
+                        msg.truncate(i);
+                    }
+                    vm.emit_warning(&format!("{}({}): Failed to open stream: {}", a.f, uri, msg));
+                    false
+                }
+            }
+        },
     )?;
     match r {
         None => Ok(Value::False),
