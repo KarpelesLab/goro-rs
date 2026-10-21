@@ -168,14 +168,19 @@ impl Vm {
                     }
                 }
                 fatal.push_str("\n  thrown");
-                self.display_error("Fatal error", &fatal, &thrown_file, thrown_line);
+                self.fatal_error_cb(
+                    crate::errdisplay::E_ERROR,
+                    &fatal,
+                    &thrown_file,
+                    thrown_line,
+                );
                 self.fatal_emitted = true;
                 return;
             }
         }
         if !self.fatal_emitted {
             let file = self.current_file.clone();
-            self.display_error("Fatal error", &e.message, &file, e.line);
+            self.fatal_error_cb(crate::errdisplay::E_ERROR, &e.message, &file, e.line);
             self.fatal_emitted = true;
         }
     }

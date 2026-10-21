@@ -1204,7 +1204,7 @@ fn save_html_to_stream(vm: &mut Vm, d: NodeId, file: &str, enc: Option<&str>) ->
         fargs.truncate(2);
     }
     let saved = vm.error_reporting;
-    vm.error_reporting = 0;
+    vm.error_reporting = goro_core::errdisplay::ER_SILENT;
     let opened = fopen(vm, &fargs);
     vm.error_reporting = saved;
     let h = match opened {

@@ -1,7 +1,70 @@
 //! Error display (php_error_cb / php_verror presentation): display_errors,
 //! html_errors, docref links, error_prepend_string / error_append_string.
 
+use crate::string::PhpString;
+use crate::value::Value;
 use crate::vm::Vm;
+
+pub const E_ERROR: i64 = 1;
+pub const E_WARNING: i64 = 2;
+pub const E_PARSE: i64 = 4;
+pub const E_NOTICE: i64 = 8;
+pub const E_CORE_ERROR: i64 = 16;
+pub const E_CORE_WARNING: i64 = 32;
+pub const E_COMPILE_ERROR: i64 = 64;
+pub const E_COMPILE_WARNING: i64 = 128;
+pub const E_USER_ERROR: i64 = 256;
+pub const E_USER_WARNING: i64 = 512;
+pub const E_USER_NOTICE: i64 = 1024;
+pub const E_RECOVERABLE_ERROR: i64 = 4096;
+pub const E_DEPRECATED: i64 = 8192;
+pub const E_USER_DEPRECATED: i64 = 16384;
+pub const E_ALL: i64 = 30719;
+pub const E_CORE: i64 = E_CORE_ERROR | E_CORE_WARNING;
+/// Errors the `@` operator does not silence.
+pub const E_FATAL_ERRORS: i64 =
+    E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_RECOVERABLE_ERROR | E_PARSE;
+/// `error_reporting` marker for regions where the engine itself emits no
+/// diagnostics at all (isset(), empty(), `??`, internal probing): errors
+/// raised there are dropped without reaching a user error handler, unlike
+/// `@`-silenced ones. Compared by value (a user level of -1 sets every bit).
+pub const ER_SILENT: i64 = 1 << 40;
+
+/// ZEND_BEGIN_SILENCE: the error_reporting level inside `@` (`user`) or an
+/// engine-internal silent region.
+pub fn begin_silence(cur: i64, user: bool) -> i64 {
+    if !user {
+        ER_SILENT
+    } else if cur & !E_FATAL_ERRORS != 0 {
+        // Fatal errors are not silenced.
+        cur & E_FATAL_ERRORS
+    } else {
+        cur
+    }
+}
+
+/// ZEND_END_SILENCE: restore `saved` unless the silenced code changed
+/// error_reporting to something that is not only-fatal.
+pub fn end_silence(cur: i64, saved: i64) -> i64 {
+    if cur == ER_SILENT || (cur & !E_FATAL_ERRORS == 0 && saved & !E_FATAL_ERRORS != 0) {
+        saved
+    } else {
+        cur
+    }
+}
+
+/// php_error_cb()'s label for an error type.
+pub fn error_type_label(ty: i64) -> &'static str {
+    match ty {
+        E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR => "Fatal error",
+        E_RECOVERABLE_ERROR => "Recoverable fatal error",
+        E_WARNING | E_CORE_WARNING | E_COMPILE_WARNING | E_USER_WARNING => "Warning",
+        E_PARSE => "Parse error",
+        E_NOTICE | E_USER_NOTICE => "Notice",
+        E_DEPRECATED | E_USER_DEPRECATED => "Deprecated",
+        _ => "Unknown error",
+    }
+}
 
 fn ini_str(vm: &Vm, key: &[u8]) -> Option<String> {
     vm.constants
@@ -76,6 +139,226 @@ impl Vm {
         }
     }
 
+    /// zend_error(): hand a non-fatal error raised at `line` of the current
+    /// file to the user error handler, or to php_error_cb().
+    pub fn raise_error(&mut self, ty: i64, msg: &str, line: u32) {
+        if self.error_reporting == ER_SILENT {
+            return;
+        }
+        if self.call_user_error_handler(ty, msg, line) {
+            return;
+        }
+        let file = self.current_file.clone();
+        self.error_cb(ty, msg, &file, line);
+    }
+
+    /// The user-space half of zend_error_zstr_at(): call the handler
+    /// installed by set_error_handler() if its `$error_levels` mask covers
+    /// `ty` (error_reporting() does not matter). Returns true when the
+    /// error was handled, false when php_error_cb() must still process it
+    /// (no handler, or the handler returned false).
+    pub fn call_user_error_handler(&mut self, ty: i64, msg: &str, line: u32) -> bool {
+        if self.error_reporting == ER_SILENT {
+            return true;
+        }
+        let handler = match &self.error_handler {
+            Some(h) => h.clone(),
+            None => return false,
+        };
+        if self.error_handler_mask & ty == 0
+            || matches!(
+                ty,
+                E_ERROR
+                    | E_PARSE
+                    | E_CORE_ERROR
+                    | E_CORE_WARNING
+                    | E_COMPILE_ERROR
+                    | E_COMPILE_WARNING
+            )
+            || self.warning_capture.is_some()
+        {
+            return false;
+        }
+        // The handler is detached while it runs, so errors raised inside it
+        // get the standard handling; it is restored afterwards unless the
+        // handler installed another one.
+        let saved = self.error_handler.take();
+        let file = self.current_file.clone();
+        // A #[\Deprecated] handler reports its own deprecation first.
+        self.emit_deprecation_for_callback_at(&handler, &file, line);
+        let args = vec![
+            Value::Long(ty),
+            Value::String(PhpString::from_string(msg.to_string())),
+            Value::String(PhpString::from_string(file)),
+            Value::Long(line as i64),
+        ];
+        // Called from user code, the handler's frame is located at the
+        // error; called from a builtin, it is an "[internal function]" one.
+        let saved_ucf = self.ucf_call_line.take();
+        if self.in_builtin_frame() {
+            self.materialize_builtin_frames(false);
+        } else {
+            self.ucf_call_line = Some(line);
+        }
+        let r = self.call_callback(&handler, &args);
+        self.ucf_call_line = saved_ucf;
+        if self.error_handler.is_none() {
+            self.error_handler = saved;
+        }
+        match r {
+            Ok(v) => {
+                if self.current_exception.is_some() {
+                    self.error_handler_threw = true;
+                    return true;
+                }
+                !matches!(v.deref(), Value::False)
+            }
+            Err(_) => {
+                self.error_handler_threw = true;
+                true
+            }
+        }
+    }
+
+    /// php_error_cb() for a non-fatal error: remember it for
+    /// error_get_last(), then log and display it as error_reporting allows.
+    pub fn error_cb(&mut self, ty: i64, msg: &str, file: &str, line: u32) {
+        if self.error_reporting == ER_SILENT {
+            return;
+        }
+        let display = if ini_bool(self, b"ignore_repeated_errors") {
+            match &self.last_error {
+                Some((_, m, f, l)) => {
+                    m != msg
+                        || (!ini_bool(self, b"ignore_repeated_source") && (*l != line || f != file))
+                }
+                None => true,
+            }
+        } else {
+            true
+        };
+        if !display {
+            return;
+        }
+        self.last_error = Some((ty, msg.to_string(), file.to_string(), line));
+        if self.error_reporting & ty == 0 && ty & E_CORE == 0 {
+            return;
+        }
+        let kind = error_type_label(ty);
+        if ini_bool(self, b"log_errors") {
+            self.log_err(&format!(
+                "PHP {}:  {} in {} on line {}",
+                kind, msg, file, line
+            ));
+        }
+        self.display_error(kind, msg, file, line);
+    }
+
+    /// php_error_cb() for a fatal error (the caller bails out afterwards).
+    pub fn fatal_error_cb(&mut self, ty: i64, msg: &str, file: &str, line: u32) {
+        self.last_error = Some((ty, msg.to_string(), file.to_string(), line));
+        // Engine-internal silencing never hides fatal errors.
+        let er = if self.error_reporting == ER_SILENT {
+            E_FATAL_ERRORS
+        } else {
+            self.error_reporting
+        };
+        if er & ty == 0 {
+            return;
+        }
+        let kind = error_type_label(ty);
+        if ini_bool(self, b"log_errors") {
+            self.log_err(&format!(
+                "PHP {}:  {} in {} on line {}",
+                kind, msg, file, line
+            ));
+        }
+        self.display_error(kind, msg, file, line);
+    }
+
+    /// php_log_err(): append to the error_log file (with a timestamp), or
+    /// hand the message to the SAPI logger (stderr for the CLI).
+    pub fn log_err(&mut self, msg: &str) {
+        if self.in_error_log {
+            return;
+        }
+        self.in_error_log = true;
+        let dest = ini_str(self, b"error_log").unwrap_or_default();
+        if !dest.is_empty() && dest != "syslog" {
+            use std::io::Write;
+            let mode = ini_str(self, b"error_log_mode")
+                .and_then(|m| {
+                    let m = m.trim();
+                    let m = m.strip_prefix("0o").unwrap_or(m);
+                    u32::from_str_radix(m, 8).ok()
+                })
+                .filter(|m| *m > 0 && *m <= 0o777)
+                .unwrap_or(0o644);
+            let mut opts = std::fs::OpenOptions::new();
+            opts.append(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(mode);
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+            if let Ok(mut f) = opts.open(&dest) {
+                let stamp = self.log_timestamp();
+                let _ = f.write_all(format!("[{}] {}\n", stamp, msg).as_bytes());
+                self.in_error_log = false;
+                return;
+            }
+        }
+        {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(format!("{}\n", msg).as_bytes());
+        }
+        self.in_error_log = false;
+    }
+
+    /// php_format_date("d-M-Y H:i:s e", now, local) through ext/date's date().
+    fn log_timestamp(&mut self) -> String {
+        let fmt = Value::String(PhpString::from_bytes(b"d-M-Y H:i:s e"));
+        if let Some(f) = self.functions.get(b"date".as_slice()).copied() {
+            let saved = self.error_reporting;
+            self.error_reporting = ER_SILENT;
+            let r = f(self, &[fmt]);
+            self.error_reporting = saved;
+            if let Ok(Value::String(s)) = r {
+                return s.to_string_lossy();
+            }
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let days = secs.div_euclid(86400);
+        let rem = secs.rem_euclid(86400);
+        // civil_from_days
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + (m <= 2) as i64;
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        format!(
+            "{:02}-{}-{:04} {:02}:{:02}:{:02} UTC",
+            d,
+            MONTHS[(m - 1) as usize],
+            y,
+            rem / 3600,
+            rem % 3600 / 60,
+            rem % 60
+        )
+    }
+
     /// Format and output one error message the way php_error_cb displays it.
     pub fn display_error(&mut self, kind: &str, msg: &str, file: &str, line: u32) {
         // log_errors without an error_log: the CLI SAPI logs to stderr
@@ -103,6 +386,17 @@ impl Vm {
         } else {
             String::new()
         };
+        if ini_bool(self, b"xmlrpc_errors") {
+            let num = ini_str(self, b"xmlrpc_error_number")
+                .and_then(|n| n.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            let text = format!(
+                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{}:{} in {} on line {}{}</string></value></member></struct></value></fault></methodResponse>",
+                num, kind, msg, file, line, trace
+            );
+            self.write_output(text.as_bytes());
+            return;
+        }
         let prepend = ini_str(self, b"error_prepend_string").unwrap_or_default();
         let append = ini_str(self, b"error_append_string").unwrap_or_default();
         let text = if ini_bool(self, b"html_errors") {

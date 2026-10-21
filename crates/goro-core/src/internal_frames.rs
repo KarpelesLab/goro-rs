@@ -124,6 +124,15 @@ impl Vm {
         }
     }
 
+    /// Whether the innermost running frame is a builtin (as opposed to user
+    /// code, possibly a callback the builtin invoked).
+    pub fn in_builtin_frame(&self) -> bool {
+        match self.builtin_frames.last() {
+            None => false,
+            Some(f) => !f.materialized || f.depth + 1 >= self.call_stack.len(),
+        }
+    }
+
     /// Materialize pending builtin frames if there are any (cheap check).
     #[inline]
     pub fn sync_builtin_frames(&mut self) {

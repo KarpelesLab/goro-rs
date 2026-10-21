@@ -728,25 +728,60 @@ final class StreamBucket {
 // === Error handling ===
 
 fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let old = vm.error_reporting;
+    let old = match vm.error_reporting {
+        goro_core::errdisplay::ER_SILENT => 0,
+        er => er,
+    };
     if let Some(level) = args.first() {
-        vm.error_reporting = level.to_long();
+        if !matches!(level, Value::Null) {
+            vm.error_reporting = level.to_long();
+        }
     }
     Ok(Value::Long(old))
 }
 
 fn set_error_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let prev = vm.error_handler.take();
-    if let Some(handler) = args.first() {
-        if !matches!(handler, Value::Null) {
-            vm.error_handler = Some(handler.clone());
+    let handler = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    if !matches!(handler, Value::Null) {
+        let (ok, _, err) = check_callable(vm, &handler, false);
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line: vm.current_line,
+            });
         }
+        if !ok {
+            return Err(throw_type_error_msg(
+                vm,
+                format!(
+                    "set_error_handler(): Argument #1 ($callback) must be a valid callback or null, {}",
+                    err.unwrap_or_default()
+                ),
+            ));
+        }
+    }
+    let mask = args
+        .get(1)
+        .map(|v| v.to_long())
+        .unwrap_or(goro_core::errdisplay::E_ALL);
+    let prev = vm.error_handler.take();
+    vm.error_handler_stack
+        .push((prev.clone(), vm.error_handler_mask));
+    if !matches!(handler, Value::Null) {
+        vm.error_handler = Some(handler);
+        vm.error_handler_mask = mask;
     }
     Ok(prev.unwrap_or(Value::Null))
 }
 
 fn restore_error_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.error_handler = None;
+    match vm.error_handler_stack.pop() {
+        Some((h, mask)) => {
+            vm.error_handler = h;
+            vm.error_handler_mask = mask;
+        }
+        None => vm.error_handler = None,
+    }
     Ok(Value::True)
 }
 
@@ -930,69 +965,41 @@ fn get_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 }
 
 fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    use goro_core::errdisplay::{E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING};
     let message = args
         .first()
         .unwrap_or(&Value::Null)
         .to_php_string()
         .to_string_lossy();
-    let error_type = args.get(1).map(|v| v.to_long()).unwrap_or(256); // E_USER_ERROR = 256
-
+    let error_type = args.get(1).map(|v| v.to_long()).unwrap_or(E_USER_NOTICE);
+    let line = vm.current_line;
     match error_type {
-        256 => {
-            // E_USER_ERROR - fatal error
-            // PHP 8.4: passing E_USER_ERROR is deprecated
-            let call_line = vm.current_line;
-            vm.emit_deprecated_raw(
+        E_USER_ERROR => {
+            vm.emit_deprecated_at(
                 "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead",
-                call_line,
+                line,
             );
-            // Try user error handler first
-            if vm.call_user_error_handler(256, &message, call_line) {
-                return Ok(Value::True);
-            }
-            return Err(VmError {
-                message: message.to_string(),
-                line: call_line,
-            });
-        }
-        512 => {
-            // E_USER_WARNING
-            let call_line = vm.current_line;
-            // Honor error_reporting bitmask: only emit if E_USER_WARNING is set.
-            if vm.error_reporting & 512 == 0 {
-                return Ok(Value::True);
-            }
-            if !vm.call_user_error_handler(512, &message, call_line) {
-                vm.emit_warning_at(&message, call_line);
-                vm.record_last_error(512, &message, call_line);
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
             }
         }
-        1024 => {
-            // E_USER_NOTICE
-            let call_line = vm.current_line;
-            // Honor error_reporting bitmask: only emit if E_USER_NOTICE is set.
-            if vm.error_reporting & 1024 == 0 {
-                return Ok(Value::True);
-            }
-            if !vm.call_user_error_handler(1024, &message, call_line) {
-                vm.record_last_error(1024, &message, call_line);
-                let notice = format!(
-                    "\nNotice: {} in {} on line {}\n",
-                    message, vm.current_file, call_line
-                );
-                vm.write_output(notice.as_bytes());
-            }
-        }
-        16384 => {
-            // E_USER_DEPRECATED
-            let call_line = vm.current_line;
-            if !vm.call_user_error_handler(16384, &message, call_line) {
-                vm.emit_deprecated_raw(&message, call_line);
-            }
-        }
+        E_USER_WARNING | E_USER_NOTICE | E_USER_DEPRECATED => {}
         _ => {
-            vm.emit_warning(&message);
+            return Err(throw_value_error_msg(
+                vm,
+                "trigger_error(): Argument #2 ($error_level) must be one of E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, or E_USER_DEPRECATED",
+            ));
         }
+    }
+    if vm.call_user_error_handler(error_type, &message, line) {
+        return Ok(Value::True);
+    }
+    let file = vm.current_file.clone();
+    vm.error_cb(error_type, &message, &file, line);
+    if error_type == E_USER_ERROR {
+        // php_error_cb() bails out after a fatal error.
+        vm.fatal_emitted = true;
+        return Err(VmError { message, line });
     }
     Ok(Value::True)
 }
@@ -1546,24 +1553,14 @@ pub(crate) fn check_callable(
             let method = match &second {
                 Value::String(m) => m.as_bytes().to_vec(),
                 _ => {
-                    let name = match &first {
-                        Value::Object(o) => {
-                            let mut n = o.borrow().class_name.clone();
-                            n.extend_from_slice(b"::");
-                            n
-                        }
-                        Value::String(c) => {
-                            let mut n = c.as_bytes().to_vec();
-                            n.extend_from_slice(b"::");
-                            n
-                        }
-                        _ => b"Array".to_vec(),
+                    // zend_get_callable_name_ex() names it "Array"; the
+                    // first member is checked first.
+                    let err = if matches!(first, Value::Object(_) | Value::String(_)) {
+                        "second array member is not a valid method"
+                    } else {
+                        "first array member is not a valid class name or object"
                     };
-                    return (
-                        false,
-                        name,
-                        Some("second array member is not a valid method".to_string()),
-                    );
+                    return (false, b"Array".to_vec(), Some(err.to_string()));
                 }
             };
             let (class_bytes, has_object) = match &first {
@@ -5108,6 +5105,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .constants
         .get(&key)
         .map(|v| Value::String(v.to_php_string()));
+    ini_remember(vm, &key);
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
         let new_bytes = value.to_php_string().as_bytes().to_vec();
@@ -5258,7 +5256,27 @@ fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => Ok(Value::False),
     }
 }
-fn ini_restore(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+/// Record the startup value of an INI entry before it is first modified.
+fn ini_remember(vm: &mut Vm, key: &[u8]) {
+    if !vm.ini_originals.contains_key(key) {
+        let cur = vm.constants.get(key).cloned();
+        vm.ini_originals.insert(key.to_vec(), cur);
+    }
+}
+
+fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let name = args.first().unwrap_or(&Value::Null).to_php_string();
+    let key = name.as_bytes().to_vec();
+    match vm.ini_originals.remove(&key) {
+        Some(Some(orig)) => {
+            let _ = ini_set(vm, &[Value::String(name), orig]);
+            vm.ini_originals.remove(&key);
+        }
+        Some(None) => {
+            vm.constants.remove(&key);
+        }
+        None => {}
+    }
     Ok(Value::Null)
 }
 fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -8896,6 +8914,23 @@ fn register_shutdown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     let callback = args[0].clone();
+    // Z_PARAM_FUNC
+    let (ok, _, err) = check_callable(vm, &callback, false);
+    if vm.current_exception.is_some() {
+        return Err(VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        });
+    }
+    if !ok {
+        return Err(throw_type_error_msg(
+            vm,
+            format!(
+                "register_shutdown_function(): Argument #1 ($callback) must be a valid callback, {}",
+                err.unwrap_or_default()
+            ),
+        ));
+    }
     let extra_args: Vec<Value> = args[1..].to_vec();
     vm.shutdown_functions.push((callback, extra_args));
     Ok(Value::Null)
@@ -14826,6 +14861,11 @@ fn natcasesort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn set_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    // OnUpdateStringUnempty
+    if path.as_bytes().is_empty() {
+        return Ok(Value::False);
+    }
+    ini_remember(vm, b"include_path");
     let old = vm
         .constants
         .get(b"include_path".as_ref())
@@ -14847,11 +14887,7 @@ fn get_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn restore_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.constants.insert(
-        b"include_path".to_vec(),
-        Value::String(PhpString::from_bytes(b".")),
-    );
-    Ok(Value::Null)
+    ini_restore(vm, &[Value::String(PhpString::from_bytes(b"include_path"))])
 }
 
 fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -16605,18 +16641,8 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if path_str.starts_with('/') || path_str.starts_with("./") || path_str.starts_with("../") {
             return Err(e);
         }
-        let include_path = vm
-            .constants
-            .get(b"include_path".as_ref())
-            .map(|v| v.to_php_string().to_string_lossy().to_string())
-            .unwrap_or_else(|| ".".to_string());
-        for dir in include_path.split(':') {
-            let candidate = format!("{}/{}", dir.trim_end_matches('/'), path_str);
-            if let Ok(c) = std::fs::read_to_string(&candidate) {
-                return Ok(c);
-            }
-        }
-        Err(e)
+        // include_path, then the running script's directory
+        std::fs::read_to_string(vm.resolve_include_path(&path_str)).map_err(|_| e)
     });
 
     match read_result {
@@ -17542,9 +17568,11 @@ fn get_exception_handler_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
     Ok(Value::Null)
 }
 
-fn get_included_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Return empty array for now
-    let arr = PhpArray::new();
+fn get_included_files_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut arr = PhpArray::new();
+    for f in &vm.included_files_list {
+        arr.push(Value::String(PhpString::from_string(f.clone())));
+    }
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
@@ -19780,31 +19808,56 @@ fn rewinddir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-fn error_log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn error_log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let message = args.first().unwrap_or(&Value::Null).to_php_string();
     let message_type = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let destination = args.get(2).map(|v| v.to_php_string());
+    // _php_error_log_ex()
     match message_type {
+        1 => Ok(Value::False),
+        2 => Err(throw_value_error_msg(
+            vm,
+            "TCP/IP option is not available for error logging",
+        )),
         3 => {
-            if let Some(dest) = destination {
-                use std::io::Write;
-                match std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&*dest.to_string_lossy())
-                {
-                    Ok(mut f) => {
-                        let _ = f.write_all(message.as_bytes());
+            let dest = destination.map(|d| d.to_string_lossy()).unwrap_or_default();
+            use std::io::Write;
+            match std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&dest)
+            {
+                Ok(mut f) => {
+                    if f.write_all(message.as_bytes()).is_ok() {
                         Ok(Value::True)
+                    } else {
+                        Ok(Value::False)
                     }
-                    Err(_) => Ok(Value::False),
                 }
-            } else {
-                Ok(Value::False)
+                Err(e) => {
+                    let reason = match e.kind() {
+                        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+                        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+                        _ => e.to_string(),
+                    };
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
+                        &format!("error_log({}): Failed to open stream: {}", dest, reason),
+                        line,
+                    );
+                    Ok(Value::False)
+                }
             }
         }
+        4 => {
+            use std::io::Write;
+            let mut m = message.as_bytes().to_vec();
+            m.push(b'\n');
+            let _ = std::io::stderr().write_all(&m);
+            Ok(Value::True)
+        }
         _ => {
-            eprintln!("{}", message.to_string_lossy());
+            vm.log_err(&message.to_string_lossy());
             Ok(Value::True)
         }
     }

@@ -1388,7 +1388,7 @@ fn h_get_properties(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
     let mut first_exc: Option<Value> = None;
     let prev = IN_DEBUG.with(|c| c.replace(true));
     let saved_er = vm.error_reporting;
-    vm.error_reporting = 0;
+    vm.error_reporting = goro_core::errdisplay::ER_SILENT;
     for p in tbl.iter() {
         let r = (p.read)(vm, o, target);
         if let Some(e) = vm.current_exception.take() {

@@ -2302,12 +2302,16 @@ impl PhpGenerator {
 
                 OpCode::ErrorSuppress => {
                     vm.error_reporting_stack.push(vm.error_reporting);
-                    vm.error_reporting = 0;
+                    vm.error_reporting = crate::errdisplay::begin_silence(
+                        vm.error_reporting,
+                        matches!(op.op1, crate::opcode::OperandType::Const(_)),
+                    );
                 }
 
                 OpCode::ErrorRestore => {
                     if let Some(saved) = vm.error_reporting_stack.pop() {
-                        vm.error_reporting = saved;
+                        vm.error_reporting =
+                            crate::errdisplay::end_silence(vm.error_reporting, saved);
                     }
                 }
 

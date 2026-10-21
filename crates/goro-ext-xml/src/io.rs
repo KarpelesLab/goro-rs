@@ -80,7 +80,7 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         // go through file_get_contents (stream wrappers)
         let f = vm.functions.get(&b"file_get_contents"[..]).copied()?;
         let silenced = vm.error_reporting;
-        vm.error_reporting = 0;
+        vm.error_reporting = goro_core::errdisplay::ER_SILENT;
         let mut fargs = vec![Value::String(PhpString::from_string(filename.to_string()))];
         if let Some(ctx) = crate::libxml::streams_context() {
             fargs.push(Value::False);

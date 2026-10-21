@@ -12,6 +12,7 @@ pub mod foreach_obj;
 pub mod function;
 pub mod gc;
 pub mod generator;
+pub mod include_path;
 pub mod ini_quantity;
 pub mod internal_frames;
 pub mod ob;

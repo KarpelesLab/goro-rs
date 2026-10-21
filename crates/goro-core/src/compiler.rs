@@ -11898,10 +11898,13 @@ impl Compiler {
             }
 
             ExprKind::Suppress(inner) => {
-                // @ operator: suppress error reporting during expression evaluation
+                // @ operator: suppress error reporting during expression
+                // evaluation. A Const op1 marks a user `@` (BEGIN_SILENCE) as
+                // opposed to the engine's internal silencing.
+                let marker = self.op_array.add_literal(Value::Long(1));
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorSuppress,
-                    op1: OperandType::Unused,
+                    op1: OperandType::Const(marker),
                     op2: OperandType::Unused,
                     result: OperandType::Unused,
                     line: expr.span.line,

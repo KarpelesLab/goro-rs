@@ -889,7 +889,7 @@ fn read_html_file(vm: &mut Vm, fname: &str, path: &str) -> R<(Vec<u8>, String)> 
         }
         // the wrapper's own diagnostics are not part of createFromFile's
         let saved = vm.error_reporting;
-        vm.error_reporting = 0;
+        vm.error_reporting = goro_core::errdisplay::ER_SILENT;
         let r = f(vm, &fargs);
         vm.error_reporting = saved;
         if vm.current_exception.is_some() {

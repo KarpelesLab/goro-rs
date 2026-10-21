@@ -996,7 +996,7 @@ fn startup(vm: &mut Vm) {
 
 fn on_update_silent(vm: &mut Vm, name: &str, value: &[u8]) {
     let er = vm.error_reporting;
-    vm.error_reporting = 0;
+    vm.error_reporting = goro_core::errdisplay::ER_SILENT;
     on_update(vm, name, value, Stage::Startup);
     vm.error_reporting = er;
 }

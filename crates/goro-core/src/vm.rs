@@ -528,6 +528,14 @@ pub struct Vm {
     pending_finally_jump: Option<u32>,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
+    /// EG(user_error_handler_error_reporting): the `$error_levels` mask of
+    /// the current user error handler.
+    pub error_handler_mask: i64,
+    /// EG(user_error_handlers) / EG(user_error_handlers_error_reporting):
+    /// handlers saved by set_error_handler() for restore_error_handler().
+    pub error_handler_stack: Vec<(Option<Value>, i64)>,
+    /// PG(in_error_log): php_log_err() is running (no recursion).
+    pub in_error_log: bool,
     /// Indices into `pending_calls` of calls dispatched through a Closure
     /// object (closures bypass method visibility checks).
     pub closure_pending_calls: Vec<usize>,
@@ -606,6 +614,10 @@ pub struct Vm {
     include_return_cvs: Option<Vec<(Vec<u8>, Value)>>,
     /// Set of files that have been included via include_once/require_once (canonical paths)
     pub(crate) included_files: std::collections::HashSet<String>,
+    /// EG(included_files) in order (get_included_files()).
+    pub included_files_list: Vec<String>,
+    /// Startup values of INI entries changed at runtime (for ini_restore()).
+    pub ini_originals: HashMap<Vec<u8>, Option<Value>>,
     /// Autoload callback functions (spl_autoload_register)
     pub autoload_functions: Vec<Value>,
     /// Shutdown functions registered via register_shutdown_function
@@ -816,6 +828,9 @@ impl Vm {
             pending_return: None,
             pending_finally_jump: None,
             error_handler: None,
+            error_handler_mask: crate::errdisplay::E_ALL,
+            error_handler_stack: Vec::new(),
+            in_error_log: false,
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             exception_handler: None,
@@ -848,6 +863,8 @@ impl Vm {
             property_hook_stack: Vec::new(),
             include_return_cvs: None,
             included_files: std::collections::HashSet::new(),
+            included_files_list: Vec::new(),
+            ini_originals: HashMap::new(),
             autoload_functions: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
@@ -2471,172 +2488,6 @@ impl Vm {
         prop_name.to_vec()
     }
 
-    /// Emit a PHP warning message to output
-    /// Call the user error handler if set. Returns true if the handler was called and handled the error.
-    pub fn call_user_error_handler(&mut self, errno: i64, errstr: &str, line: u32) -> bool {
-        // zend_error_impl: the handler is detached while it runs, so errors
-        // raised inside it use the default handling; it is restored unless
-        // the handler installed another one.
-        let handler = match self.error_handler.clone() {
-            Some(h) => h,
-            None => return false,
-        };
-        let saved = self.error_handler.take();
-        let r = self.call_user_error_handler_inner(Some(handler), errno, errstr, line);
-        if self.error_handler.is_none() {
-            self.error_handler = saved;
-        }
-        r
-    }
-
-    fn call_user_error_handler_inner(
-        &mut self,
-        handler_opt: Option<Value>,
-        errno: i64,
-        errstr: &str,
-        line: u32,
-    ) -> bool {
-        if let Some(handler) = handler_opt {
-            // If the error handler itself is #[\Deprecated], emit that banner
-            // first, located at the original error site (the deprecated call's
-            // file/line, not "Unknown:0" — error handlers are invoked from user
-            // code, unlike exception handlers). Temporarily detach the handler
-            // so the meta-deprecation doesn't recurse.
-            let saved_handler = self.error_handler.take();
-            self.emit_deprecation_for_callback_at(&handler, &self.current_file.clone(), line);
-            self.error_handler = saved_handler;
-            let errno_val = Value::Long(errno);
-            let errstr_val = Value::String(PhpString::from_string(errstr.to_string()));
-            let file_val = Value::String(PhpString::from_string(self.current_file.clone()));
-            let line_val = Value::Long(line as i64);
-            let args = vec![errno_val, errstr_val, file_val, line_val];
-            // Closures: dispatch on the underlying function; captured values
-            // bind to the first CVs.
-            let closure_display = if handler.is_closure_obj() {
-                Some(String::from_utf8_lossy(&self.closure_function_name(&handler)).to_string())
-            } else {
-                None
-            };
-            let mut handler = handler.closure_callable();
-            let mut captured: Vec<Value> = Vec::new();
-            if let Value::Array(arr) = &handler {
-                let first = arr.borrow().get_int(0).cloned();
-                if let Some(Value::String(s)) = first {
-                    if crate::closure::is_closure_fn_name(s.as_bytes())
-                        || s.as_bytes().starts_with(b"__closure_fcc_")
-                    {
-                        captured = arr.borrow().values().skip(1).cloned().collect();
-                        handler = Value::String(s);
-                    }
-                }
-            }
-            match &handler {
-                Value::String(s) => {
-                    let func_lower: Vec<u8> = s
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                        let mut cvs = vec![Value::Undef; user_fn.cv_names.len()];
-                        for (i, arg) in captured.iter().chain(args.iter()).enumerate() {
-                            if i < cvs.len() {
-                                cvs[i] = arg.clone();
-                            }
-                        }
-                        // Push a [internal function] frame so backtraces captured by
-                        // an exception thrown inside the error handler include the
-                        // error handler call frame (and its args).
-                        let handler_display = closure_display
-                            .clone()
-                            .unwrap_or_else(|| s.to_string_lossy());
-                        self.call_stack.push((
-                            handler_display,
-                            String::new(),
-                            0,
-                            args.clone(),
-                            false,
-                        ));
-                        let result = self.execute_op_array(&user_fn, cvs);
-                        self.call_stack.pop();
-                        // If the error handler threw an exception, it's already in current_exception
-                        if result.is_err() || self.current_exception.is_some() {
-                            self.error_handler_threw = true;
-                            return true;
-                        }
-                        return true;
-                    } else if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        let _ = self.call_builtin_from_internal(builtin, &func_lower, &args);
-                        return true;
-                    }
-                }
-                Value::Array(arr) => {
-                    let arr_b = arr.borrow();
-                    let vals: Vec<Value> = arr_b.values().cloned().collect();
-                    drop(arr_b);
-                    if vals.len() >= 2 {
-                        let method_name = vals[1].to_php_string();
-                        let method_lower: Vec<u8> = method_name
-                            .as_bytes()
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        if let Value::Object(obj) = &vals[0] {
-                            let class_name_lower: Vec<u8> = obj
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            if let Some(class) = self.classes.get(&class_name_lower).cloned() {
-                                if let Some(method) = class.get_method(&method_lower) {
-                                    let op = method.op_array.clone();
-                                    let mut cvs = vec![Value::Undef; op.cv_names.len()];
-                                    // $this is CV 0 for instance methods
-                                    cvs[0] = Value::Object(obj.clone());
-                                    for (i, arg) in args.iter().enumerate() {
-                                        if i + 1 < cvs.len() {
-                                            cvs[i + 1] = arg.clone();
-                                        }
-                                    }
-                                    let _ = self.execute_op_array(&op, cvs);
-                                    if self.current_exception.is_some() {
-                                        self.error_handler_threw = true;
-                                    }
-                                    return true;
-                                }
-                            }
-                        } else if let Value::String(class_name) = &vals[0] {
-                            let class_lower: Vec<u8> = class_name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            if let Some(class) = self.classes.get(&class_lower).cloned() {
-                                if let Some(method) = class.get_method(&method_lower) {
-                                    let op = method.op_array.clone();
-                                    let mut cvs = vec![Value::Undef; op.cv_names.len()];
-                                    for (i, arg) in args.iter().enumerate() {
-                                        if i < cvs.len() {
-                                            cvs[i] = arg.clone();
-                                        }
-                                    }
-                                    let _ = self.execute_op_array(&op, cvs);
-                                    if self.current_exception.is_some() {
-                                        self.error_handler_threw = true;
-                                    }
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     /// Call a user callback (string function name, array [class/obj, method], or closure object).
     /// Scope-introspection functions may not be called dynamically
     /// ("Cannot call extract() dynamically"); returns the error message.
@@ -2740,6 +2591,30 @@ impl Vm {
                                     let r = self.execute_fn_with_named_args(
                                         &op,
                                         args.to_vec(),
+                                        vec![],
+                                        Some(Value::Object(obj.clone())),
+                                    );
+                                    self.called_class_stack.pop();
+                                    self.class_scope_stack.pop();
+                                    return r;
+                                }
+                                // Trampoline through __call().
+                                if let Some(call) = class.methods.get(b"__call".as_slice()) {
+                                    let op = call.op_array.clone();
+                                    let mut arr = crate::array::PhpArray::new();
+                                    for a in args {
+                                        arr.push(a.deref());
+                                    }
+                                    let call_args = vec![
+                                        Value::String(method_name.clone()),
+                                        Value::Array(Rc::new(RefCell::new(arr))),
+                                    ];
+                                    self.class_scope_stack.push(class_lower.clone());
+                                    self.called_class_stack
+                                        .push(obj.borrow().class_name.clone());
+                                    let r = self.execute_fn_with_named_args(
+                                        &op,
+                                        call_args,
                                         vec![],
                                         Some(Value::Object(obj.clone())),
                                     );
@@ -2925,34 +2800,22 @@ impl Vm {
 
     /// Emit a raw warning (no user error handler, no line tracking)
     pub fn emit_warning_raw(&mut self, msg: &str) {
-        if self.error_reporting & 2 != 0 {
-            let (file, line) = (self.current_file.clone(), self.current_line);
-            self.display_error("Warning", msg, &file, line);
-        }
+        let (file, line) = (self.current_file.clone(), self.current_line);
+        self.error_cb(crate::errdisplay::E_WARNING, msg, &file, line);
     }
 
-    /// Emit a PHP warning with line number
     /// Remember the last error for error_get_last().
     pub fn record_last_error(&mut self, ty: i64, msg: &str, line: u32) {
         self.last_error = Some((ty, msg.to_string(), self.current_file.clone(), line));
     }
 
+    /// Emit a PHP warning with line number
     pub fn emit_warning_at(&mut self, msg: &str, line: u32) {
         if let Some(cap) = self.warning_capture.as_mut() {
             cap.push(msg.to_string());
             return;
         }
-        if self.error_reporting & 2 == 0 {
-            self.record_last_error(2, msg, line);
-        }
-        if self.error_reporting & 2 != 0 {
-            if self.call_user_error_handler(2, msg, line) {
-                return;
-            }
-            self.record_last_error(2, msg, line);
-            let file = self.current_file.clone();
-            self.display_error("Warning", msg, &file, line);
-        }
+        self.raise_error(crate::errdisplay::E_WARNING, msg, line);
     }
 
     /// Emit a PHP "Fatal error" line directly to output and return a VmError
@@ -2961,7 +2824,7 @@ impl Vm {
     /// `self.fatal_emitted` so the top-level handler does not re-emit it.
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
         let file = self.current_file.clone();
-        self.display_error("Fatal error", msg, &file, line);
+        self.fatal_error_cb(crate::errdisplay::E_ERROR, msg, &file, line);
         self.fatal_emitted = true;
         VmError {
             message: msg.to_string(),
@@ -2971,25 +2834,13 @@ impl Vm {
 
     /// Emit a PHP notice
     pub fn emit_notice_at(&mut self, msg: &str, line: u32) {
-        if self.error_reporting & 8 == 0 {
-            self.record_last_error(8, msg, line);
-        }
-        if self.error_reporting & 8 != 0 {
-            // E_NOTICE = 8
-            if self.call_user_error_handler(8, msg, line) {
-                return;
-            }
-            self.record_last_error(8, msg, line);
-            self.emit_notice_raw(msg, line);
-        }
+        self.raise_error(crate::errdisplay::E_NOTICE, msg, line);
     }
 
     /// Emit a raw notice (no user error handler)
     pub fn emit_notice_raw(&mut self, msg: &str, line: u32) {
-        if self.error_reporting & 8 != 0 {
-            let file = self.current_file.clone();
-            self.display_error("Notice", msg, &file, line);
-        }
+        let file = self.current_file.clone();
+        self.error_cb(crate::errdisplay::E_NOTICE, msg, &file, line);
     }
 
     /// Emit object-to-scalar comparison notice when comparing object to int/float/string
@@ -3083,42 +2934,21 @@ impl Vm {
     }
 
     pub fn emit_deprecated_at(&mut self, msg: &str, line: u32) {
-        if self.error_reporting & 8192 == 0 {
-            self.record_last_error(8192, msg, line);
-        }
-        if self.error_reporting & 8192 != 0 {
-            // E_DEPRECATED = 8192
-            if self.call_user_error_handler(8192, msg, line) {
-                return;
-            }
-            self.record_last_error(8192, msg, line);
-            self.emit_deprecated_raw(msg, line);
-        }
+        self.raise_error(crate::errdisplay::E_DEPRECATED, msg, line);
     }
 
     /// Emit a raw deprecated warning (no user error handler)
     pub fn emit_deprecated_raw(&mut self, msg: &str, line: u32) {
-        if self.error_reporting & 8192 != 0 {
-            let effective_line = if line == 0 { self.current_line } else { line };
-            let file = self.current_file.clone();
-            self.display_error("Deprecated", msg, &file, effective_line);
-        }
+        let effective_line = if line == 0 { self.current_line } else { line };
+        let file = self.current_file.clone();
+        self.error_cb(crate::errdisplay::E_DEPRECATED, msg, &file, effective_line);
     }
 
     /// Emit a user-triggered deprecated notice (E_USER_DEPRECATED = 16384).
     /// Used by the #[\Deprecated] attribute when calling user functions,
     /// methods and constants.
     pub fn emit_user_deprecated_at(&mut self, msg: &str, line: u32) {
-        if self.error_reporting & 16384 != 0 {
-            // E_USER_DEPRECATED = 16384
-            if self.call_user_error_handler(16384, msg, line) {
-                return;
-            }
-            // Fall back to the standard deprecation banner if no handler ran.
-            let effective_line = if line == 0 { self.current_line } else { line };
-            let file = self.current_file.clone();
-            self.display_error("Deprecated", msg, &file, effective_line);
-        }
+        self.raise_error(crate::errdisplay::E_USER_DEPRECATED, msg, line);
     }
 
     /// Check if attributes contain #[\Deprecated] and return the message.
@@ -5922,10 +5752,11 @@ impl Vm {
                 func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
             }
         } else {
-            for (i, arg) in call.args.iter().enumerate() {
-                if i < func_cvs.len() {
-                    func_cvs[i] = arg.clone();
-                }
+            // Extra arguments are only reachable through func_get_args(),
+            // never through the function's local variables.
+            let nparams = (op_array.param_count as usize + cv_shift).min(func_cvs.len());
+            for (i, arg) in call.args.iter().enumerate().take(nparams) {
+                func_cvs[i] = arg.clone();
             }
         }
 
@@ -14330,6 +14161,13 @@ impl Vm {
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
+        if self.included_files_list.is_empty() && !self.current_file.is_empty() {
+            let main = std::fs::canonicalize(&self.current_file)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| self.current_file.clone());
+            self.included_files.insert(main.clone());
+            self.included_files_list.push(main);
+        }
         // The main script's CVs are the global symbol table (bound in
         // execute_op_array_inner).
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
@@ -33392,17 +33230,7 @@ impl Vm {
                     let abs_path = if is_stream_path || std::path::Path::new(path).is_absolute() {
                         path.to_string()
                     } else {
-                        // Resolve relative to the directory of the current file
-                        let base_dir = if let Some(pos) = self.current_file.rfind('/') {
-                            &self.current_file[..pos]
-                        } else {
-                            "."
-                        };
-                        let joined = format!("{}/{}", base_dir, path);
-                        // Try to canonicalize, fall back to joined path
-                        std::fs::canonicalize(&joined)
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or(joined)
+                        self.resolve_include_path(path)
                     };
 
                     // For include_once/require_once, skip if already included
@@ -33463,7 +33291,9 @@ impl Vm {
                                 crate::value::alloc_resource_id();
                             }
                             // Track file for _once variants
-                            self.included_files.insert(abs_path.clone());
+                            if self.included_files.insert(abs_path.clone()) {
+                                self.included_files_list.push(abs_path.clone());
+                            }
                             // Compile and execute
                             let mut lexer = goro_parser::Lexer::new(&source);
                             let tokens = lexer.tokenize();
@@ -37598,12 +37428,16 @@ impl Vm {
 
                 OpCode::ErrorSuppress => {
                     self.error_reporting_stack.push(self.error_reporting);
-                    self.error_reporting = 0;
+                    self.error_reporting = crate::errdisplay::begin_silence(
+                        self.error_reporting,
+                        matches!(op.op1, OperandType::Const(_)),
+                    );
                 }
 
                 OpCode::ErrorRestore => {
                     if let Some(saved) = self.error_reporting_stack.pop() {
-                        self.error_reporting = saved;
+                        self.error_reporting =
+                            crate::errdisplay::end_silence(self.error_reporting, saved);
                     }
                 }
 
@@ -44543,7 +44377,7 @@ impl Vm {
                                 && !matches!(op.opcode, OpCode::PropertyGetWUnset)
                                 && !hidden_private_prop
                                 && obj.borrow().has_property(&storage_key)
-                                && self.error_reporting != 0
+                                && self.error_reporting != crate::errdisplay::ER_SILENT
                             {
                                 // An uninitialized (never unset) typed property does not go through
                                 // __get(): only unset() makes it overloadable (IS_PROP_UNINIT).
@@ -44729,7 +44563,7 @@ impl Vm {
                                     // Recursive __get for the same prop: don't
                                     // re-enter; emit the standard undefined
                                     // property warning and return NULL.
-                                    if self.error_reporting != 0 {
+                                    if self.error_reporting != crate::errdisplay::ER_SILENT {
                                         let class_display =
                                             crate::value::display_class_name(&class_name_orig);
                                         let prop_display =
