@@ -295,6 +295,11 @@ impl Graph {
                             kids.push(c);
                         }
                     }
+                    if let Some(cv) = &b.closure {
+                        if let Some(c) = self.add_value(cv) {
+                            kids.push(c);
+                        }
+                    }
                     // WeakMap values keyed by this object are reachable
                     // through it (and only through it).
                     if let Some(vals) = self
@@ -554,6 +559,9 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                     Node::Obj(o) => {
                         if let Ok(mut b) = o.try_borrow_mut() {
                             dead_props.push(std::mem::take(&mut b.properties));
+                            if let Some(c) = b.closure.take() {
+                                dead_vals.push(*c);
+                            }
                             count += 1;
                         }
                     }

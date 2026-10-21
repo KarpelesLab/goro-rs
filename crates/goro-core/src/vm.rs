@@ -5779,6 +5779,19 @@ impl Vm {
             .insert(name.to_ascii_lowercase(), op_array);
     }
 
+    /// Wrap an internal callable (closure name, capture array, function
+    /// name, bound-method array) into a `Closure` object with its own object
+    /// id. Closure objects and Null (failure) are returned unchanged.
+    pub fn make_closure_object(&mut self, inner: Value) -> Value {
+        if matches!(inner, Value::Null | Value::Undef) || inner.is_closure_obj() {
+            return inner;
+        }
+        let id = self.alloc_object_id();
+        let mut o = PhpObject::new(b"Closure".to_vec(), id);
+        o.closure = Some(Box::new(inner));
+        Value::Object(Rc::new(RefCell::new(o)))
+    }
+
     /// Convert a callable to a Closure value.
     /// Handles string callables ("func", "Class::method"), array callables ([$obj, "method"],
     /// ["Class", "method"]), and closures (returned as-is).

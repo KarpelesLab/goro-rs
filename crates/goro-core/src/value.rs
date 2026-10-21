@@ -231,6 +231,31 @@ impl Value {
         }
     }
 
+    /// If this is a `Closure` object, return its underlying callable
+    /// (the legacy closure representation used for dispatch).
+    pub fn closure_inner(&self) -> Option<Value> {
+        match self {
+            Value::Object(o) => o.borrow().closure.as_ref().map(|c| (**c).clone()),
+            Value::Reference(r) => r.borrow().closure_inner(),
+            _ => None,
+        }
+    }
+
+    /// Whether this value is a `Closure` object.
+    pub fn is_closure_obj(&self) -> bool {
+        match self {
+            Value::Object(o) => o.borrow().closure.is_some(),
+            Value::Reference(r) => r.borrow().is_closure_obj(),
+            _ => false,
+        }
+    }
+
+    /// Replace a `Closure` object by its underlying callable; any other value
+    /// is returned unchanged (cloned).
+    pub fn unwrap_closure(&self) -> Value {
+        self.closure_inner().unwrap_or_else(|| self.clone())
+    }
+
     /// Returns true if this value is a Reference
     pub fn is_reference(&self) -> bool {
         matches!(self, Value::Reference(_))

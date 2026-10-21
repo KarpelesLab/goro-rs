@@ -193,6 +193,10 @@ pub struct PhpObject {
     pub object_id: u64,
     /// Registered with the cycle collector (see gc.rs).
     pub gc_tracked: GcFlag,
+    /// For `Closure` instances: the underlying callable (the internal
+    /// `__closure_N` name, a `[name, $this?, captures...]` array, a function
+    /// name, or a bound-method `["Class::m", $obj]` array).
+    pub closure: Option<Box<Value>>,
 }
 
 /// A flag that is *not* copied by `Clone` (a cloned object is a new,
@@ -220,6 +224,9 @@ impl Drop for PhpObject {
         for (_, v) in self.properties.iter() {
             crate::gc::on_child_released(v);
         }
+        if let Some(c) = &self.closure {
+            crate::gc::on_child_released(c);
+        }
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 {
             // Use try_with so we don't panic during thread-local
@@ -237,7 +244,14 @@ impl PhpObject {
             properties: Vec::new(),
             object_id,
             gc_tracked: GcFlag::default(),
+            closure: None,
         }
+    }
+
+    /// Whether this object is a Closure instance (wrapping a callable).
+    #[inline]
+    pub fn is_closure(&self) -> bool {
+        self.closure.is_some()
     }
 
     pub fn get_property(&self, name: &[u8]) -> Value {
