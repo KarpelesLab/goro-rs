@@ -531,6 +531,8 @@ pub struct Vm {
     pub(crate) zpp_map_fn_count: usize,
     /// Builtin calls in progress (see internal_frames.rs)
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
+    /// Parameter CVs of running user functions (see internal_frames.rs)
+    pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub(crate) ucf_call_line: Option<u32>,
     /// INI on-modify handlers registered by extensions (key -> handler).
@@ -1545,6 +1547,7 @@ impl Vm {
             zpp_map: HashMap::new(),
             zpp_map_fn_count: usize::MAX,
             builtin_frames: Vec::new(),
+            cv_frames: Vec::new(),
             ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
             startup_hooks: Vec::new(),
@@ -3807,6 +3810,7 @@ impl Vm {
 
     pub fn build_exception_trace(&mut self) -> Value {
         self.sync_builtin_frames();
+        self.sync_frame_args();
         let mut trace_arr = PhpArray::new();
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
         let sensitive = self.any_sensitive_params();
@@ -13997,7 +14001,12 @@ impl Vm {
                 line: self.current_line,
             });
         }
-        let result = self.execute_op_array_inner(op_array, cvs);
+        // Backtraces show the current values of the parameters.
+        let cv_frame = self.register_cv_frame(op_array);
+        let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
+        if cv_frame {
+            self.cv_frames.pop();
+        }
         self.call_depth -= 1;
         self.last_call_by_ref = op_array.returns_by_ref;
         if self.exit_requested {
@@ -14108,6 +14117,7 @@ impl Vm {
         &mut self,
         op_array: &OpArray,
         mut cvs: Vec<Value>,
+        cv_frame: bool,
     ) -> Result<Value, VmError> {
         let mut ip: usize = 0;
         let temp_count = op_array.temp_count as usize;
@@ -14181,6 +14191,9 @@ impl Vm {
             }
         }
 
+        if cv_frame {
+            self.set_cv_frame_vars(&cvs);
+        }
         'exec: loop {
             // exit() unwinds every frame (zend_throw_unwind_exit).
             if self.exit_requested {
@@ -22131,7 +22144,10 @@ impl Vm {
                             let mut generator =
                                 crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
                             // Store the args for func_get_args() support
-                            generator.args = call.args.clone();
+                            generator.args =
+                                call.args[crate::internal_frames::implicit_args(&user_fn)
+                                    .min(call.args.len())..]
+                                    .to_vec();
                             // Record the call site so backtraces include it
                             generator.call_file = self.current_file.clone();
                             generator.call_line = op.line;
@@ -45114,8 +45130,9 @@ impl Vm {
                         func_cvs[i] = arg.clone();
                     }
                 }
+                let skip = crate::internal_frames::implicit_args(&user_fn).min(call.args.len());
                 let mut generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
-                generator.args = call.args.clone();
+                generator.args = call.args[skip..].to_vec();
                 generator.call_file = self.current_file.clone();
                 generator.call_line = line;
                 let gen_rc = Rc::new(RefCell::new(generator));
@@ -46312,6 +46329,7 @@ impl Vm {
     /// stacks.
     fn fiber_enter_stacks(&mut self, fiber: &mut crate::fiber::PhpFiber) {
         self.fiber_restore_builtin_frames(&mut fiber.saved_builtin_frames);
+        self.fiber_restore_cv_frames(&mut fiber.saved_cv_frames);
         self.call_stack.append(&mut fiber.saved_call_stack);
         self.class_scope_stack
             .append(&mut fiber.saved_class_scope_stack);
@@ -46332,6 +46350,8 @@ impl Vm {
         let (a, b, c, d, e) = bases;
         if suspended {
             fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
+            // (the fiber function's frame, pushed just before `bases`, is its root)
+            fiber.saved_cv_frames = self.fiber_take_cv_frames(a.saturating_sub(1));
             if self.call_stack.len() > a {
                 fiber.saved_call_stack = self.call_stack.split_off(a);
             }
@@ -46346,6 +46366,7 @@ impl Vm {
             }
         } else {
             self.builtin_frames.truncate(e);
+            self.fiber_drop_cv_frames(a.saturating_sub(1));
             self.call_stack.truncate(a);
             self.class_scope_stack.truncate(b);
             self.called_class_stack.truncate(c);

@@ -251,6 +251,34 @@ impl PhpGenerator {
 
     /// Resume execution of the generator until the next yield or return.
     /// Returns Ok(true) if a value was yielded, Ok(false) if the generator completed.
+    /// Name of the generator function's frame in backtraces, and whether it
+    /// is an instance method.
+    fn frame_name(&self, vm: &Vm) -> (String, bool) {
+        let op = &self.op_array;
+        let raw_name = String::from_utf8_lossy(&op.name).to_string();
+        let is_instance = op.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        // Format closure names for stack traces using the canonical display name.
+        let name = if !op.display_name.is_empty() {
+            String::from_utf8_lossy(&op.display_name).to_string()
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
+            && !raw_name.starts_with("__closure_fcc_")
+        {
+            let file = String::from_utf8_lossy(&op.filename).to_string();
+            format!("{{closure:{}:{}}}", file, op.decl_line)
+        } else if let (Some(scope), false) = (&op.scope_class, raw_name.contains("::")) {
+            // A generator method: Class::method, as for other method frames
+            let class = vm
+                .classes
+                .get(scope)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+            format!("{}::{}", class, raw_name)
+        } else {
+            raw_name
+        };
+        (name, is_instance)
+    }
+
     pub fn resume(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         if self.state == GeneratorState::Completed {
             return Ok(false);
@@ -283,18 +311,7 @@ impl PhpGenerator {
         };
 
         // Push a call_stack entry for func_get_args() support
-        let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
-        // Format closure names for stack traces using the canonical display name.
-        let func_name = if !self.op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&self.op_array.display_name).to_string()
-        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
-            && !raw_name.starts_with("__closure_fcc_")
-        {
-            let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
-            format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
-        } else {
-            raw_name
-        };
+        let (func_name, is_instance) = self.frame_name(vm);
         // The generator's frame in stack traces should reflect the most recent caller.
         // When VM resumes the generator with caller context set (e.g. foreach), we use
         // the caller's file/line; otherwise (Generator method calls, yield-from priming)
@@ -309,7 +326,7 @@ impl PhpGenerator {
             func_file,
             func_line,
             self.args.clone(),
-            self.class_scope.is_some(),
+            is_instance,
         ));
 
         // Restore a deferred exception (yield-in-finally) if we stashed one
@@ -321,7 +338,14 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        let cv_frame = vm.register_cv_frame(&self.op_array);
+        if cv_frame {
+            vm.set_cv_frame_vars(&self.cvs);
+        }
         let result = self.resume_inner(vm);
+        if cv_frame {
+            vm.cv_frames.pop();
+        }
         self.is_running = false;
 
         // Pop the call_stack entry
@@ -2490,28 +2514,13 @@ impl PhpGenerator {
 
         // Push a call_stack entry for this generator so any exception
         // constructed/thrown inside it gets a proper trace frame.
-        let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
-        let func_name = if !self.op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&self.op_array.display_name).to_string()
-        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
-            && !raw_name.starts_with("__closure_fcc_")
-        {
-            let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
-            format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
-        } else {
-            raw_name
-        };
+        let (func_name, is_instance) = self.frame_name(vm);
         // For resume_with_exception, use call_line=0 and empty file to show [internal function]
         // (matches PHP: when an exception is thrown INTO the generator, the
         // top frame shows the generator function was called from [internal function]
         // which is Generator->throw itself).
-        vm.call_stack.push((
-            func_name,
-            String::new(),
-            0,
-            self.args.clone(),
-            self.class_scope.is_some(),
-        ));
+        vm.call_stack
+            .push((func_name, String::new(), 0, self.args.clone(), is_instance));
 
         // Try to find an exception handler in the generator
         let had_handler = if let Some((catch_target, finally_target, _)) =
@@ -2550,7 +2559,14 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        let cv_frame = vm.register_cv_frame(&self.op_array);
+        if cv_frame {
+            vm.set_cv_frame_vars(&self.cvs);
+        }
         let result = self.resume_inner(vm);
+        if cv_frame {
+            vm.cv_frames.pop();
+        }
         self.is_running = false;
 
         vm.call_stack.pop();

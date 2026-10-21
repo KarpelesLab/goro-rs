@@ -213,3 +213,199 @@ pub fn sprintf_is_rope(args: &[Value]) -> bool {
     }
     n == args.len() - 1
 }
+
+/// The compiled variables of a running user function, so backtraces show
+/// the current values of its parameters (zend_fetch_debug_backtrace reads
+/// the frame's CVs: `f(Array)` after `$a = []` inside `f`, NULL once unset)
+/// rather than the values it was called with.
+///
+/// `cvs` points at the CV vector owned by the executing frame
+/// (execute_op_array_inner's local, or a running generator's); the entry is
+/// removed before that frame ends (or moved with its fiber).
+pub struct CvFrame {
+    /// call_stack index of the function's frame
+    depth: usize,
+    /// Heap pointer of that frame's name, to recognize it
+    name: *const u8,
+    cvs: *const Vec<Value>,
+    /// CV index of the first parameter ($this / captured variables come first)
+    base: u32,
+    /// Number of declared non-variadic parameters
+    nfixed: u32,
+}
+
+impl Vm {
+    /// Register the frame of `op_array`, about to be run, for the
+    /// call_stack frame pushed for it (if the top frame is that frame).
+    /// Returns whether an entry was pushed; its `cvs` is set by the caller
+    /// once the CV vector is in place, and the caller pops the entry when the
+    /// function ends.
+    #[inline]
+    pub(crate) fn register_cv_frame(&mut self, op_array: &crate::opcode::OpArray) -> bool {
+        if op_array.param_count == 0 {
+            return false;
+        }
+        let Some(depth) = self.call_stack.len().checked_sub(1) else {
+            return false;
+        };
+        let frame = &self.call_stack[depth];
+        if frame.0.is_empty()
+            || frame.3.is_empty()
+            || self
+                .cv_frames
+                .last()
+                .is_some_and(|f| f.name == frame.0.as_ptr())
+            || !frame_is_for(&frame.0, op_array)
+        {
+            return false;
+        }
+        // A builtin's frame (the function called us without a frame of our own)
+        if self
+            .builtin_frames
+            .iter()
+            .rev()
+            .any(|b| b.materialized && b.depth == depth)
+        {
+            return false;
+        }
+        let base = implicit_args(op_array) as u32;
+        let nfixed = op_array
+            .param_count
+            .saturating_sub(base + op_array.variadic_param.is_some() as u32);
+        if nfixed == 0 {
+            return false;
+        }
+        self.cv_frames.push(CvFrame {
+            depth,
+            name: frame.0.as_ptr(),
+            cvs: std::ptr::null(),
+            base,
+            nfixed,
+        });
+        true
+    }
+
+    /// Point the CV frame registered last at the function's CV vector.
+    #[inline]
+    pub(crate) fn set_cv_frame_vars(&mut self, cvs: &Vec<Value>) {
+        if let Some(f) = self.cv_frames.last_mut() {
+            f.cvs = cvs;
+        }
+    }
+
+    /// Copy the current values of running functions' parameters into their
+    /// call_stack frames (before a backtrace or func_get_args() reads them).
+    pub fn sync_frame_args(&mut self) {
+        for k in 0..self.cv_frames.len() {
+            let f = &self.cv_frames[k];
+            if f.cvs.is_null() {
+                continue;
+            }
+            let at = if self
+                .call_stack
+                .get(f.depth)
+                .is_some_and(|e| e.0.as_ptr() == f.name)
+            {
+                f.depth
+            } else {
+                match self.call_stack.iter().rposition(|e| e.0.as_ptr() == f.name) {
+                    Some(i) => i,
+                    None => continue,
+                }
+            };
+            // SAFETY: see CvFrame; the function owning `cvs` is still running.
+            let cvs = unsafe { &*f.cvs };
+            let (base, nfixed) = (f.base as usize, f.nfixed as usize);
+            let args = &mut self.call_stack[at].3;
+            let n = args.len().min(nfixed);
+            for (i, a) in args.iter_mut().enumerate().take(n) {
+                if let Some(v) = cvs.get(base + i) {
+                    *a = match v {
+                        Value::Undef => Value::Null,
+                        Value::Reference(r) => match &*r.borrow() {
+                            Value::Undef => Value::Null,
+                            v => v.clone(),
+                        },
+                        v => v.clone(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// A fiber suspends: hand it the CV frames of its call_stack frames,
+    /// i.e. of its root frame (the fiber function's, at `root`) and above,
+    /// made relative to the root.
+    pub(crate) fn fiber_take_cv_frames(&mut self, root: usize) -> Vec<CvFrame> {
+        let at = self
+            .cv_frames
+            .iter()
+            .position(|f| f.depth >= root)
+            .unwrap_or(self.cv_frames.len());
+        let mut out = self.cv_frames.split_off(at);
+        for f in &mut out {
+            f.depth -= root;
+        }
+        out
+    }
+
+    /// A fiber resumes: re-install its CV frames once its root frame has
+    /// been pushed again (the top frame), before the rest of its call_stack
+    /// frames are appended.
+    pub(crate) fn fiber_restore_cv_frames(&mut self, frames: &mut Vec<CvFrame>) {
+        let Some(root) = self.call_stack.len().checked_sub(1) else {
+            frames.clear();
+            return;
+        };
+        let root_name = self.call_stack[root].0.as_ptr();
+        for f in frames.iter_mut() {
+            if f.depth == 0 {
+                f.name = root_name;
+            }
+            f.depth += root;
+        }
+        self.cv_frames.append(frames);
+    }
+
+    /// A fiber ended: drop the CV frames of its root frame (at `root`) and above.
+    pub(crate) fn fiber_drop_cv_frames(&mut self, root: usize) {
+        while self.cv_frames.last().is_some_and(|f| f.depth >= root) {
+            self.cv_frames.pop();
+        }
+    }
+}
+
+/// Number of leading CVs of `op_array` bound from the call's implicit
+/// arguments ($this, or a closure's captured variables) rather than from
+/// its parameters; frames show the arguments after them.
+pub fn implicit_args(op_array: &crate::opcode::OpArray) -> usize {
+    if crate::closure::is_closure_fn_name(&op_array.name)
+        && !op_array.closure_capture_names.is_empty()
+    {
+        op_array.closure_capture_names.len()
+    } else if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+        1
+    } else {
+        0
+    }
+}
+
+/// Whether call_stack frame `name` is the frame of a call to `op_array`.
+fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
+    if name.starts_with("{closure") {
+        return crate::closure::is_closure_fn_name(&op_array.name);
+    }
+    let last = |s: &[u8]| -> usize {
+        let mut i = s.len();
+        while i > 0 {
+            if s[i - 1] == b':' || s[i - 1] == b'>' {
+                break;
+            }
+            i -= 1;
+        }
+        i
+    };
+    let n = name.as_bytes();
+    let o = &op_array.name;
+    n[last(n)..].eq_ignore_ascii_case(&o[last(o)..])
+}

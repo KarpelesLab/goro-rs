@@ -1200,6 +1200,7 @@ fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    vm.sync_frame_args();
     // Return an array of all arguments passed to the calling user function
     if let Some((_name, _file, _line, args, _is_method)) = vm.call_stack.last() {
         let mut arr = PhpArray::new();
@@ -1231,6 +1232,7 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
+    vm.sync_frame_args();
     if let Some((_name, _file, _line, caller_args, _is_method)) = vm.call_stack.last() {
         if index as usize >= caller_args.len() {
             let msg = "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function".to_string();
@@ -13697,6 +13699,7 @@ pub(crate) fn strip_os_error(msg: &str) -> String {
 fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Frames of the builtins being run (not debug_backtrace() itself)
     vm.materialize_builtin_frames(true);
+    vm.sync_frame_args();
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
@@ -13791,6 +13794,7 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Frames of the builtins being run (not debug_backtrace() itself)
     vm.materialize_builtin_frames(true);
+    vm.sync_frame_args();
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
