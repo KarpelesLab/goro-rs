@@ -394,10 +394,23 @@ pub fn run_test_with_dir_and_filename(
                 .filter(|(k, _)| k != "output_handler" && k != "zlib.output_compression")
                 .cloned()
                 .collect();
-            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir, &skipif_ini) {
+            // Written next to the test as run-tests.php does, so that
+            // include('skipif.inc') and __DIR__ resolve.
+            let skip_filename = match filename.strip_suffix(".php") {
+                Some(stem) if filename != "Unknown.php" => format!("{}.skip.php", stem),
+                _ => "Unknown.php".to_string(),
+            };
+            match execute_php_with_timeout_and_filename(
+                skipif_trimmed.as_bytes(),
+                5,
+                test_dir,
+                &skipif_ini,
+                &skip_filename,
+            ) {
                 Ok(output) => {
                     let output_str = String::from_utf8_lossy(&output).to_lowercase();
-                    if output_str.contains("skip") {
+                    // run-tests.php: the output starts with "skip"
+                    if output_str.trim_start().starts_with("skip") {
                         return TestResult::Skip(
                             String::from_utf8_lossy(&output).trim().to_string(),
                         );
@@ -1053,21 +1066,6 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
     }
 }
 
-fn execute_php_with_timeout(
-    source: &[u8],
-    timeout_secs: u64,
-    test_dir: Option<&Path>,
-    ini_settings: &[(String, String)],
-) -> Result<Vec<u8>, String> {
-    execute_php_with_timeout_and_filename(
-        source,
-        timeout_secs,
-        test_dir,
-        ini_settings,
-        "Unknown.php",
-    )
-}
-
 fn execute_php_with_timeout_and_filename(
     source: &[u8],
     timeout_secs: u64,
@@ -1104,10 +1102,9 @@ fn execute_php_with_timeout_and_filename(
                 libc::close(read_fd);
             }
 
-            // Change to test directory
-            if let Some(dir) = test_dir {
-                let _ = std::env::set_current_dir(dir);
-            } else {
+            // Like run-tests.php, a test runs from the directory the runner
+            // was started in (its files are addressed by absolute paths).
+            if test_dir.is_none() {
                 let _ = std::env::set_current_dir(std::env::temp_dir());
             }
 
@@ -2345,7 +2342,10 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                 let test_name = test.name.clone();
                 // Use full path for filename, converting .phpt to .php
                 let test_filename = {
-                    let full = path.to_string_lossy().to_string();
+                    // Absolute, like run-tests.php: the test runs from its
+                    // own directory.
+                    let abs = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+                    let full = abs.to_string_lossy().to_string();
                     if full.ends_with(".phpt") {
                         format!("{}.php", &full[..full.len() - 5])
                     } else {
