@@ -4648,6 +4648,13 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_expression()?;
                 self.expect(&TokenKind::CloseParen)?;
+                // `(NAME)(...)` calls the value of constant NAME, not a
+                // function called NAME: mark the name as a constant fetch.
+                if let ExprKind::Identifier(name) = &expr.kind {
+                    if matches!(self.peek(), TokenKind::OpenParen) {
+                        return Ok(Expr { kind: ExprKind::ConstantAccess(vec![name.clone()]), span: expr.span });
+                    }
+                }
                 Ok(expr)
             }
             TokenKind::OpenBracket => {

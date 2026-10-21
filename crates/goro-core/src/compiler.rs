@@ -10081,6 +10081,13 @@ impl Compiler {
                 return self.compile_first_class_callable(target, expr.span.line);
             }
 
+            ExprKind::ConstantAccess(parts) if parts.len() == 1 => {
+                // Parenthesized constant name (`(NAME)(...)`): same lookup
+                // (with namespace resolution) as a bare identifier.
+                let e = Expr { kind: ExprKind::Identifier(parts[0].clone()), span: expr.span };
+                self.compile_expr(&e)
+            }
+
             ExprKind::ConstantAccess(parts) => {
                 // Qualified constant - build fully-qualified name and emit ConstLookup
                 let mut full_name = Vec::new();
