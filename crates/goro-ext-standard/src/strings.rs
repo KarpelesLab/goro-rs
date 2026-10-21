@@ -1970,10 +1970,9 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 0x08 => result.extend_from_slice(b"\\b"), // backspace
                 0x0B => result.extend_from_slice(b"\\v"), // vertical tab
                 0x0C => result.extend_from_slice(b"\\f"), // form feed
-                0x1B => result.extend_from_slice(b"\\e"), // escape
                 0 => result.extend_from_slice(b"\\000"),
-                _ if b < 0x20 || b == 0x7F => {
-                    // Other control chars: use octal
+                _ if b < 0x20 || b > 0x7E => {
+                    // Other control chars and bytes > 126: use octal
                     result.extend_from_slice(format!("\\{:03o}", b).as_bytes());
                 }
                 _ => {
