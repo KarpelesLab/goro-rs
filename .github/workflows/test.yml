@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master]
 
+# Pushes land in bursts; only the newest run of a branch is worth finishing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -35,9 +40,9 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  test:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -58,45 +63,83 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: goro-binary
+          path: target/release/goro
+          retention-days: 3
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: goro-binary
+          path: bin
+
       - name: Clone PHP test suite
         run: git clone --depth 1 --branch php-8.5.4 https://github.com/php/php-src.git /tmp/php-src
 
-      - name: Run PHPT tests
+      - name: Run PHPT tests (shard ${{ matrix.shard }}/8)
+        env:
+          GORO_PHPT_SHARD: ${{ matrix.shard }}/8
         run: |
-          ./target/release/goro --test /tmp/php-src/ 2>&1 | tee /tmp/test_results.txt
-          # Extract summary
+          chmod +x bin/goro
+          # The runner exits non-zero when any test fails; the summary job
+          # reports the counts instead.
+          ./bin/goro --test /tmp/php-src/ > /tmp/test_results.txt 2>&1 || true
           tail -6 /tmp/test_results.txt
 
-      - name: Generate failure report
-        if: always()
-        run: |
-          # Extract all FAIL lines with expected/actual
-          grep -A 2 "^FAIL:" /tmp/test_results.txt > /tmp/test_failures.txt || true
-          # Count
-          PASS=$(grep "^Pass:" /tmp/test_results.txt | awk '{print $2}')
-          FAIL=$(grep "^Fail:" /tmp/test_results.txt | awk '{print $2}')
-          TOTAL=$(grep "^Total:" /tmp/test_results.txt | awk '{print $2}')
-          echo "## Test Results: ${PASS}/${TOTAL} passing" > /tmp/test_summary.md
-          echo "" >> /tmp/test_summary.md
-          echo "| Metric | Count |" >> /tmp/test_summary.md
-          echo "|--------|-------|" >> /tmp/test_summary.md
-          grep -E "^(Pass|Fail|Skip|Error|Total):" /tmp/test_results.txt | while read line; do
-            key=$(echo "$line" | cut -d: -f1)
-            val=$(echo "$line" | awk '{print $2}')
-            echo "| $key | $val |" >> /tmp/test_summary.md
-          done
-
-      - name: Upload test results
+      - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: |
-            /tmp/test_results.txt
-            /tmp/test_failures.txt
-            /tmp/test_summary.md
+          name: test-results-${{ matrix.shard }}
+          path: /tmp/test_results.txt
           retention-days: 30
 
-      - name: Post summary
-        if: always()
-        run: cat /tmp/test_summary.md >> $GITHUB_STEP_SUMMARY
+  summary:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: results
+
+      - name: Summarize
+        run: |
+          total() { cat results/*/test_results.txt | grep "^$1:" | awk '{s+=$2} END {print s+0}'; }
+          PASS=$(total Pass); FAIL=$(total Fail); SKIP=$(total Skip); ERROR=$(total Error); TOTAL=$(total Total)
+          SHARDS=$(ls results | wc -l)
+          {
+            echo "## Test Results: ${PASS}/${TOTAL} passing (${SHARDS}/8 shards reported)"
+            echo ""
+            echo "| Metric | Count |"
+            echo "|--------|-------|"
+            echo "| Pass | $PASS |"
+            echo "| Fail | $FAIL |"
+            echo "| Skip | $SKIP |"
+            echo "| Error | $ERROR |"
+            echo "| Total | $TOTAL |"
+          } | tee -a $GITHUB_STEP_SUMMARY
+          cat results/*/test_results.txt | grep -A 2 "^FAIL:" > test_failures.txt || true
+
+      - name: Upload failure report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failures
+          path: test_failures.txt
+          retention-days: 30

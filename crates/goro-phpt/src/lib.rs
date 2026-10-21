@@ -2232,6 +2232,22 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
         collect_phpt_files(dir, &mut files);
     }
     files.sort();
+    // GORO_PHPT_SHARD=i/n keeps every n-th test starting at i (0-based), so CI
+    // can split the suite across parallel jobs.
+    if let Ok(spec) = std::env::var("GORO_PHPT_SHARD") {
+        if let Some((i, n)) = spec.split_once('/') {
+            if let (Ok(i), Ok(n)) = (i.trim().parse::<usize>(), n.trim().parse::<usize>()) {
+                if n > 0 && i < n {
+                    files = files
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(k, _)| k % n == i)
+                        .map(|(_, f)| f)
+                        .collect();
+                }
+            }
+        }
+    }
 
     // If any of the tests live under ext/mysqli/, try to spin up an embedded
     // MySQL/MariaDB server. The fixture exports MYSQL_TEST_* env vars so the
