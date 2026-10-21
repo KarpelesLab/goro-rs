@@ -408,8 +408,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"tmpfile", tmpfile_fn);
     vm.register_function(b"phpinfo", phpinfo_fn);
     vm.register_function(b"phpcredits", phpcredits_fn);
-    vm.register_function(b"image_type_to_mime_type", image_type_to_mime_type_fn);
-    vm.register_function(b"image_type_to_extension", image_type_to_extension_fn);
     vm.register_function(b"get_cfg_var", get_cfg_var_fn);
     vm.register_function(b"php_ini_loaded_file", php_ini_loaded_file_fn);
     vm.register_function(b"php_ini_scanned_files", php_ini_scanned_files_fn);
@@ -585,7 +583,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mail", mail_fn);
     vm.register_function(b"fsockopen", fsockopen_fn);
     vm.register_function(b"pfsockopen", pfsockopen_fn);
-    vm.register_function(b"getimagesize", getimagesize_fn);
     vm.register_function(b"register_tick_function", register_tick_function_fn);
     vm.register_function(b"unregister_tick_function", unregister_tick_function_fn);
     vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
@@ -624,8 +621,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_resolve_include_path", stream_resolve_include_path_fn);
     vm.register_function(b"stream_supports_lock", stream_supports_lock_fn);
     vm.register_function(b"stream_bucket_new", stream_bucket_new_fn);
-    vm.register_function(b"iptcparse", iptcparse_fn);
-    vm.register_function(b"iptcembed", iptcembed_fn);
 
     // Regex functions are now in the regex module (regex.rs)
 }
@@ -9552,7 +9547,7 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
     }
 }
 
-fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
     // Empty filename → ValueError, matching PHP's behavior.
     if filename.is_empty() {
@@ -9954,7 +9949,7 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     // Flush write-filter chain.
     let flush_bytes = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
@@ -12129,7 +12124,7 @@ fn readlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// Strip Rust's "(os error N)" trailer to produce a clean message like PHP's.
-fn strip_os_error(msg: &str) -> String {
+pub(crate) fn strip_os_error(msg: &str) -> String {
     if let Some(idx) = msg.rfind(" (os error") {
         msg[..idx].to_string()
     } else {
@@ -14679,59 +14674,6 @@ fn get_current_user_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::String(PhpString::from_bytes(b"magicaltux")))
 }
 
-fn image_type_to_mime_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let image_type = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let mime = match image_type {
-        1 => "image/gif",         // IMAGETYPE_GIF
-        2 => "image/jpeg",        // IMAGETYPE_JPEG
-        3 => "image/png",         // IMAGETYPE_PNG
-        4 => "application/x-shockwave-flash", // IMAGETYPE_SWF
-        5 => "image/psd",         // IMAGETYPE_PSD
-        6 => "image/bmp",         // IMAGETYPE_BMP
-        7 | 8 => "image/tiff",    // IMAGETYPE_TIFF_II/MM
-        9 => "application/octet-stream", // IMAGETYPE_JPC
-        10 => "image/jp2",        // IMAGETYPE_JP2
-        11 => "application/octet-stream", // IMAGETYPE_JPX
-        12 => "application/octet-stream", // IMAGETYPE_JB2
-        13 => "application/x-shockwave-flash", // IMAGETYPE_SWC
-        14 => "image/iff",        // IMAGETYPE_IFF
-        15 => "image/vnd.wap.wbmp", // IMAGETYPE_WBMP
-        16 => "image/xbm",        // IMAGETYPE_XBM
-        17 => "image/vnd.microsoft.icon", // IMAGETYPE_ICO
-        18 => "image/webp",       // IMAGETYPE_WEBP
-        19 => "image/avif",       // IMAGETYPE_AVIF
-        _ => "application/octet-stream",
-    };
-    Ok(Value::String(PhpString::from_bytes(mime.as_bytes())))
-}
-
-fn image_type_to_extension_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let image_type = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let include_dot = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let ext = match image_type {
-        1 => "gif",
-        2 => "jpeg",
-        3 => "png",
-        4 => "swf",
-        5 => "psd",
-        6 => "bmp",
-        7 | 8 => "tiff",
-        9 => "jpc",
-        10 => "jp2",
-        15 => "wbmp",
-        16 => "xbm",
-        17 => "ico",
-        18 => "webp",
-        19 => "avif",
-        _ => return Ok(Value::False),
-    };
-    let result = if include_dot {
-        format!(".{}", ext)
-    } else {
-        ext.to_string()
-    };
-    Ok(Value::String(PhpString::from_string(result)))
-}
 
 fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -15205,7 +15147,7 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
@@ -17281,61 +17223,6 @@ fn pfsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     fsockopen_fn(vm, args)
 }
 
-fn getimagesize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy();
-
-    // Read first few bytes to detect image type
-    match std::fs::read(&*path_str) {
-        Ok(data) => {
-            if data.len() < 8 { return Ok(Value::False); }
-            let mut arr = PhpArray::new();
-            // Detect image type from magic bytes
-            if data.starts_with(b"\x89PNG") {
-                // PNG
-                if data.len() >= 24 {
-                    let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as i64;
-                    let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as i64;
-                    arr.set(ArrayKey::Int(0), Value::Long(width));
-                    arr.set(ArrayKey::Int(1), Value::Long(height));
-                    arr.set(ArrayKey::Int(2), Value::Long(3)); // IMAGETYPE_PNG
-                    arr.set(ArrayKey::Int(3), Value::String(PhpString::from_string(format!("width=\"{}\" height=\"{}\"", width, height))));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/png")));
-                }
-            } else if data.starts_with(b"\xff\xd8\xff") {
-                // JPEG - basic detection
-                arr.set(ArrayKey::Int(0), Value::Long(0));
-                arr.set(ArrayKey::Int(1), Value::Long(0));
-                arr.set(ArrayKey::Int(2), Value::Long(2)); // IMAGETYPE_JPEG
-                arr.set(ArrayKey::Int(3), Value::String(PhpString::from_bytes(b"width=\"0\" height=\"0\"")));
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/jpeg")));
-            } else if data.starts_with(b"GIF8") {
-                // GIF
-                if data.len() >= 10 {
-                    let width = u16::from_le_bytes([data[6], data[7]]) as i64;
-                    let height = u16::from_le_bytes([data[8], data[9]]) as i64;
-                    arr.set(ArrayKey::Int(0), Value::Long(width));
-                    arr.set(ArrayKey::Int(1), Value::Long(height));
-                    arr.set(ArrayKey::Int(2), Value::Long(1)); // IMAGETYPE_GIF
-                    arr.set(ArrayKey::Int(3), Value::String(PhpString::from_string(format!("width=\"{}\" height=\"{}\"", width, height))));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"bits")), Value::Long(8));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"mime")), Value::String(PhpString::from_bytes(b"image/gif")));
-                }
-            } else {
-                return Ok(Value::False);
-            }
-            if arr.len() > 0 {
-                Ok(Value::Array(Rc::new(RefCell::new(arr))))
-            } else {
-                Ok(Value::False)
-            }
-        }
-        Err(_) => Ok(Value::False),
-    }
-}
-
 fn register_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
         validate_callback_arg(vm, "register_tick_function", cb)?;
@@ -17760,10 +17647,3 @@ fn stream_bucket_new_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
 
-fn iptcparse_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}
-
-fn iptcembed_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
-}

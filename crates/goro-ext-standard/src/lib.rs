@@ -2,6 +2,7 @@ pub mod basedir_guard;
 pub mod filters;
 pub mod html;
 pub mod ini_parser;
+pub mod image;
 pub(crate) mod html_tables;
 pub mod math;
 pub mod misc;
@@ -33,6 +34,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     ob::register(vm);
     arrdiff::register(vm);
     html::register(vm);
+    image::register(vm);
     regex::register(vm);
     request::register(vm);
     basedir_guard::register(vm);

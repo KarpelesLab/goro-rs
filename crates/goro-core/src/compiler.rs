@@ -213,6 +213,9 @@ impl Compiler {
                     (b"getopt", 2) => true,
                     // parse_str($string, &$result)
                     (b"parse_str", 1) => true,
+                    // getimagesize($filename, &$image_info)
+                    (b"getimagesize", 1) => true,
+                    (b"getimagesizefromstring", 1) => true,
                     // is_callable($value, $syntax_only, &$callable_name)
                     (b"is_callable", 2) => true,
                     // xml_parse_into_struct($parser, $data, &$values, &$index)
