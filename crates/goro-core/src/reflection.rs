@@ -593,6 +593,41 @@ pub fn class_method_list(vm: &Vm, class_lower: &[u8]) -> Option<Vec<(Vec<u8>, Vi
     )
 }
 
+
+/// Compile and run a PHP snippet with the given local variables, inside the
+/// scope of `scope_lower` (so private/protected access, hooks, magic
+/// methods and type checks behave as for code in that class). Returns None
+/// if it threw (the exception is left in `vm.current_exception`).
+pub(crate) fn run_snippet_in_scope(vm: &mut Vm, src: &str, vars: &[(&str, Value)], scope_lower: &[u8]) -> Option<Value> {
+    let source = format!("<?php {}", src).into_bytes();
+    let mut lexer = goro_parser::Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    let mut parser = goro_parser::Parser::new(tokens);
+    let program = parser.parse().ok()?;
+    let mut compiler = crate::compiler::Compiler::new();
+    let (mut op_array, _, _) = compiler.compile(&program).ok()?;
+    // Errors raised by the snippet are reported at the caller's line.
+    let line = vm.current_line;
+    for op in op_array.ops.iter_mut() {
+        op.line = line;
+    }
+    let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
+    for (name, val) in vars {
+        if let Some(i) = op_array.cv_names.iter().position(|n| n.as_slice() == name.as_bytes()) {
+            cvs[i] = val.clone();
+        }
+    }
+    vm.called_class_stack.push(scope_lower.to_vec());
+    vm.push_class_scope(scope_lower.to_vec());
+    let r = vm.execute_op_array_pub(&op_array, cvs);
+    vm.called_class_stack.pop();
+    vm.pop_class_scope();
+    if vm.current_exception.is_some() {
+        return None;
+    }
+    r.ok()
+}
+
 /// ReflectionClass constructor: sets up __reflection_target and name properties
 fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
@@ -5361,15 +5396,18 @@ pub fn reflection_property_docall(
                         .unwrap_or(Value::Null);
                     Some(val)
                 } else if let Some(target) = args.get(1) {
-                    if let Value::Object(target_obj) = target {
-                        // getValue() reads through the get hook, if any.
-                        match vm.call_property_hook_unchecked(target_obj, prop_name.as_bytes(), "get", None) {
-                            Some(Ok(v)) => return Some(v),
-                            Some(Err(_)) => return Some(Value::Null),
-                            None => {}
-                        }
-                        let target_ob = target_obj.borrow();
-                        Some(target_ob.get_property(prop_name.as_bytes()))
+                    if let Value::Object(_) = target {
+                        // zend_read_property_ex() in the declaring class's scope.
+                        let decl = rprop(vm, &class_lower, prop_name.as_bytes())
+                            .map(|p| p.declaring_class.to_ascii_lowercase())
+                            .unwrap_or_else(|| class_lower.clone());
+                        let v = run_snippet_in_scope(
+                            vm,
+                            "return $__o->{$__n};",
+                            &[("__o", target.clone()), ("__n", Value::String(PhpString::from_string(prop_name.clone())))],
+                            &decl,
+                        );
+                        Some(v.unwrap_or(Value::Null))
                     } else {
                         Some(Value::Null)
                     }
@@ -5403,41 +5441,34 @@ pub fn reflection_property_docall(
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
                     let value = args[2].clone();
-                    // setValue() writes through the set hook, if any.
-                    if let Value::Object(target_obj) = &target {
-                        if let Some(r) = vm.call_property_hook_unchecked(target_obj, prop_name.as_bytes(), "set", Some(value.clone())) {
-                            let _ = r;
-                            return Some(Value::Null);
-                        }
-                    }
-                    if let Value::Object(target_obj) = &target {
-                        // For typed properties, coerce the incoming value to
-                        // satisfy the declared type when possible. In particular
-                        // an object that is __toString()-able coerces to string
-                        // when assigned to a string-typed property — bug #79683.
-                        let prop_type = rcls(vm, &class_lower)
-                            .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                            .and_then(|p| p.property_type.clone());
-                        let mut coerced = value.clone();
+                    if let Value::Object(_) = &target {
+                        // A Stringable object assigned to a string-typed
+                        // property coerces to string (bug #79683).
+                        let mut value = value;
+                        let prop_type = rprop(vm, &class_lower, prop_name.as_bytes()).and_then(|p| p.property_type.clone());
                         if let Some(pt) = &prop_type {
-                            // Walk through Nullable wrapper
                             let inner = match pt {
                                 crate::opcode::ParamType::Nullable(inner) => inner.as_ref(),
                                 other => other,
                             };
-                            if let crate::opcode::ParamType::Simple(name) = inner {
-                                if name.as_slice() == b"string" {
-                                    if let Value::Object(_) = &coerced {
-                                        let s = vm.value_to_string(&coerced);
-                                        if vm.current_exception.is_none() {
-                                            coerced = Value::String(s);
-                                        }
-                                    }
+                            if matches!(inner, crate::opcode::ParamType::Simple(n) if n.as_slice() == b"string") && matches!(value, Value::Object(_)) {
+                                let s = vm.value_to_string(&value);
+                                if vm.current_exception.is_some() {
+                                    return Some(Value::Null);
                                 }
+                                value = Value::String(s);
                             }
                         }
-                        let mut target_ob = target_obj.borrow_mut();
-                        target_ob.set_property(prop_name.as_bytes().to_vec(), coerced);
+                        // zend_update_property_ex() in the declaring class's scope.
+                        let decl = rprop(vm, &class_lower, prop_name.as_bytes())
+                            .map(|p| p.declaring_class.to_ascii_lowercase())
+                            .unwrap_or_else(|| class_lower.clone());
+                        let _ = run_snippet_in_scope(
+                            vm,
+                            "$__o->{$__n} = $__v;",
+                            &[("__o", target.clone()), ("__n", Value::String(PhpString::from_string(prop_name.clone()))), ("__v", value)],
+                            &decl,
+                        );
                     }
                 }
                 Some(Value::Null)
