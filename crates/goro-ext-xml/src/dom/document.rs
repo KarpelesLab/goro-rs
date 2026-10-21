@@ -1,6 +1,6 @@
 //! DOMDocument (document.c)
 
-use super::node::{args, b, opt_s, s, str_of};
+use super::node::{args, b, cstr, opt_s, str_of};
 use super::*;
 use crate::parser::*;
 use crate::serialize;
@@ -232,7 +232,7 @@ fn m_create_element(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 2)?;
     let name = a.str(vm, 0, "localName")?;
-    let value = a.str(vm, 1, "value")?;
+    let value = cstr(&a.str(vm, 1, "value")?).to_string();
     let d = doc_node(vm, o)?;
     if !is_valid_name(&name) {
         throw_dom(vm, INVALID_CHARACTER_ERR, strict(Some(d)));
@@ -258,7 +258,7 @@ fn m_create_document_fragment(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_create_text_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 1)?;
-    let v = a.str(vm, 0, "data")?;
+    let v = cstr(&a.str(vm, 0, "data")?).to_string();
     let d = doc_node(vm, o)?;
     let n = tree::with(|t| t.new_text(Some(d), &v));
     Ok(node_obj(vm, n))
@@ -267,7 +267,7 @@ fn m_create_text_node(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn m_create_comment(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 1)?;
-    let v = a.str(vm, 0, "data")?;
+    let v = cstr(&a.str(vm, 0, "data")?).to_string();
     let d = doc_node(vm, o)?;
     let n = tree::with(|t| t.new_comment(Some(d), &v));
     Ok(node_obj(vm, n))
@@ -286,7 +286,7 @@ fn m_create_pi(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 2)?;
     let target = a.str(vm, 0, "target")?;
-    let data = a.str(vm, 1, "data")?;
+    let data = cstr(&a.str(vm, 1, "data")?).to_string();
     let d = doc_node(vm, o)?;
     if !is_valid_name(&target) {
         throw_dom(vm, INVALID_CHARACTER_ERR, strict(Some(d)));
@@ -702,6 +702,9 @@ fn cwd_url() -> Option<String> {
 
 /// Resolve a load() path like dom_get_valid_file_path.
 fn valid_file_path(source: &str) -> Option<String> {
+    if source.len() >= 4096 {
+        return None;
+    }
     let lower = source.to_ascii_lowercase();
     let has_scheme = crate::uri::parse_uri(source)
         .map(|u| u.scheme.is_some())
@@ -769,13 +772,14 @@ fn finish_loading(vm: &mut Vm, this: &Obj, newdoc: NodeId) {
 fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 2)?;
-    let source = a.str_bytes(vm, 0, "source")?;
+    let argname = if file { "filename" } else { "source" };
+    let source = a.str_bytes(vm, 0, argname)?;
     let options = a.long(vm, 1, "options", 0)?;
     if source.is_empty() {
         throw_error(
             vm,
             b"ValueError",
-            &format!("{}(): Argument #1 ($source) must not be empty", a.f),
+            &format!("{}(): Argument #1 (${}) must not be empty", a.f, argname),
         );
         return Err(());
     }
@@ -870,13 +874,14 @@ fn m_load_xml(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 fn html_load(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 2)?;
-    let source = a.str_bytes(vm, 0, "source")?;
+    let argname = if file { "filename" } else { "source" };
+    let source = a.str_bytes(vm, 0, argname)?;
     let options = a.long(vm, 1, "options", 0)?;
     if source.is_empty() {
         throw_error(
             vm,
             b"ValueError",
-            &format!("{}(): Argument #1 ($source) must not be empty", a.f),
+            &format!("{}(): Argument #1 (${}) must not be empty", a.f, argname),
         );
         return Err(());
     }
@@ -919,8 +924,10 @@ fn html_load(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     } else {
         (source, None)
     };
-    let out = crate::html_parse(&data, url.as_deref(), options);
-    crate::libxml::report(vm, &fname, &out.errors, crate::libxml::Style::Ctx);
+    let out = crate::html::parse_html(&data, url.as_deref(), options, None);
+    crate::libxml::report_ex(vm, &fname, &out.errors, crate::libxml::Style::Ctx, &|e| {
+        crate::html::error_is_silenced(e, options)
+    });
     match out.doc {
         Some(d) => {
             finish_loading(vm, o, d);
@@ -1013,21 +1020,11 @@ fn m_save_html(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                 throw_dom(vm, WRONG_DOCUMENT_ERR, strict(Some(d)));
                 return Ok(Value::False);
             }
-            let bytes = tree::with(|t| {
-                let mut out = Vec::new();
-                if t.nodes[n].t == NType::DocumentFrag {
-                    for c in t.children_of(n) {
-                        out.extend(crate::html_node_bytes(t, c, format));
-                    }
-                } else {
-                    out = crate::html_node_bytes(t, n, format);
-                }
-                out
-            });
+            let bytes = tree::with(|t| crate::html::html_node_to_bytes(t, n, None, format));
             Ok(Value::String(PhpString::from_vec(bytes)))
         }
         None => {
-            let bytes = tree::with(|t| crate::html_doc_bytes(t, d, format));
+            let bytes = tree::with(|t| crate::html::html_doc_to_bytes(t, d, None, format));
             if bytes.is_empty() {
                 return Ok(Value::False);
             }
@@ -1050,7 +1047,7 @@ fn m_save_html_file(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     }
     let d = doc_node(vm, o)?;
     let format = doc_props(Some(d)).format_output;
-    let bytes = tree::with(|t| crate::html_doc_bytes(t, d, format));
+    let bytes = tree::with(|t| crate::html::html_save_file_bytes(t, d, format));
     let n = crate::io::write_resource_len(vm, &file, &bytes);
     if n < 0 {
         return Ok(Value::False);

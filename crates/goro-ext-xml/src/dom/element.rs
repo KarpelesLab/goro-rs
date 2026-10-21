@@ -1,7 +1,7 @@
 //! DOMElement (element.c) and DOMAttr (attr.c)
 
 use super::document::{check_qname, get_ns};
-use super::node::{IdHelpers, args, b, s, str_of};
+use super::node::{IdHelpers, args, b, cstr, s, str_of};
 use super::*;
 use crate::parser::is_valid_name;
 use crate::tree::NsId;
@@ -59,6 +59,17 @@ pub fn set_content_legacy(t: &mut Tree, n: NodeId, value: &str) {
     super::node::remove_all_children(t, n);
     let doc = t.nodes[n].doc;
     crate::simplexml::string_get_node_list(t, doc, n, value);
+}
+
+/// xmlSetProp: "prefix:local" names use the in-scope namespace of the
+/// prefix when there is one.
+pub fn set_prop(t: &mut Tree, n: NodeId, name: &str, value: &str) -> NodeId {
+    if let Some(i) = name.find(':').filter(|&i| i > 0 && i + 1 < name.len()) {
+        if let Some(ns) = t.search_ns(n, Some(&name[..i])) {
+            return t.set_ns_prop(n, Some(ns), &name[i + 1..], value);
+        }
+    }
+    t.set_ns_prop(n, None, name, value)
 }
 
 /// dom_deep_ns_redef
@@ -132,7 +143,7 @@ fn r_class_name(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
 fn w_class_name(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
     let st = str_of(v);
     tree::with(|t| {
-        t.set_ns_prop(n, None, "class", &st);
+        t.set_ns_prop(n, None, "class", cstr(&st));
     });
     Ok(())
 }
@@ -144,7 +155,7 @@ fn r_id(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
 fn w_id(_vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
     let st = str_of(v);
     tree::with(|t| {
-        let at = t.set_ns_prop(n, None, "id", &st);
+        let at = t.set_ns_prop(n, None, "id", cstr(&st));
         t.nodes[at].atype = 2;
     });
     Ok(())
@@ -333,7 +344,7 @@ fn m_set_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 2, 2)?;
     let name = a.str(vm, 0, "qualifiedName")?;
-    let value = a.str(vm, 1, "value")?;
+    let value = cstr(&a.str(vm, 1, "value")?).to_string();
     if name.is_empty() {
         throw_error(
             vm,
@@ -364,18 +375,7 @@ fn m_set_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
             t.new_ns(Some(n), &value, None);
             return Some(None);
         }
-        // xmlSetProp: handles "prefix:local" by namespace lookup
-        let at = match name.find(':').filter(|&i| i > 0 && i + 1 < name.len()) {
-            Some(i) => {
-                let prefix = &name[..i];
-                match t.search_ns(n, Some(prefix)) {
-                    Some(ns) => t.set_ns_prop(n, Some(ns), &name[i + 1..], &value),
-                    None => t.set_ns_prop(n, None, &name, &value),
-                }
-            }
-            None => t.set_ns_prop(n, None, &name, &value),
-        };
-        Some(Some(at))
+        Some(Some(set_prop(t, n, &name, &value)))
     });
     match r {
         None => Ok(Value::False),
@@ -550,7 +550,7 @@ fn m_set_attribute_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     a.count(vm, 3, 3)?;
     let uri = a.opt_str(vm, 0, "namespace")?;
     let name = a.str(vm, 1, "qualifiedName")?;
-    let value = a.str(vm, 2, "value")?;
+    let value = cstr(&a.str(vm, 2, "value")?).to_string();
     let n = need_node(vm, o)?;
     if name.is_empty() {
         throw_error(
@@ -894,7 +894,7 @@ fn m_toggle_attribute(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                         if name == "xmlns" {
                             t.new_ns(Some(n), "", None);
                         } else {
-                            t.set_ns_prop(n, None, &name, "");
+                            set_prop(t, n, &name, "");
                         }
                     }
                 }

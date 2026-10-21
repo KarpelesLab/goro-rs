@@ -20,27 +20,6 @@ pub fn dom_node_of(
     dom::node_of(o)
 }
 
-/// HTML parsing entry point (DOMDocument::loadHTML).
-pub fn html_parse(_data: &[u8], _url: Option<&str>, _options: i64) -> sax2::ParseOutcome {
-    let doc = tree::with(|t| t.new_html_doc());
-    sax2::ParseOutcome {
-        doc: Some(doc),
-        well_formed: true,
-        ns_well_formed: true,
-        errors: Vec::new(),
-    }
-}
-
-/// HTML serialization of a node (DOMDocument::saveHTML($node)).
-pub fn html_node_bytes(t: &tree::Tree, n: tree::NodeId, format: bool) -> Vec<u8> {
-    serialize::node_to_bytes(t, n, None, format, false)
-}
-
-/// HTML serialization of a document (DOMDocument::saveHTML()).
-pub fn html_doc_bytes(t: &tree::Tree, d: tree::NodeId, format: bool) -> Vec<u8> {
-    serialize::doc_to_bytes(t, d, None, format, true, false)
-}
-
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;

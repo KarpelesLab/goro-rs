@@ -13223,12 +13223,25 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let categorize = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let mut result = PhpArray::new();
     if categorize {
-        // Return categorized array
+        // Return categorized array. Constants do not record the module
+        // that registered them; the libxml ones are recognised by prefix.
         let mut user = PhpArray::new();
+        let mut libxml = PhpArray::new();
         for (name, val) in &vm.constants {
-            user.set(
+            let target = if name.starts_with(b"LIBXML_") {
+                &mut libxml
+            } else {
+                &mut user
+            };
+            target.set(
                 goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                 val.clone(),
+            );
+        }
+        if libxml.len() > 0 {
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"libxml")),
+                Value::Array(Rc::new(RefCell::new(libxml))),
             );
         }
         result.set(

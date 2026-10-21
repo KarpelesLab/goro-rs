@@ -164,10 +164,21 @@ fn builtin_has_magic_serialize(cl: &[u8]) -> bool {
 }
 
 fn has_user_method(vm: &Vm, class_lower: &[u8], m: &[u8]) -> bool {
-    vm.classes
+    if vm
+        .classes
         .get(class_lower)
         .map(|c| c.get_method(m).is_some())
         .unwrap_or(false)
+    {
+        return true;
+    }
+    // methods of native (extension) classes, e.g. DOMNode::__sleep()
+    class_chain(vm, class_lower).iter().any(|c| {
+        vm.native_class_handlers
+            .get(c)
+            .map(|h| (h.has_method)(c, m, false))
+            .unwrap_or(false)
+    })
 }
 
 fn has_magic_serialize(vm: &Vm, class_lower: &[u8]) -> bool {

@@ -395,7 +395,18 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
                 let name = match k {
                     goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
                     goro_core::array::ArrayKey::Int(_) => {
+                        if is_closure(&v) {
+                            throw_error(
+                                vm,
+                                b"Error",
+                                "Object of class Closure could not be converted to string",
+                            );
+                            return Err(());
+                        }
                         let s = vm.value_to_string(&v);
+                        if vm.current_exception.is_some() {
+                            return Err(());
+                        }
                         s.to_string_lossy()
                     }
                 };
@@ -423,6 +434,10 @@ fn m_register_php_functions(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         }
         Some(v) => {
             let name = match &v {
+                c if is_closure(c) => {
+                    a.type_err(vm, 0, "restrict", "array|string|null", c);
+                    return Err(());
+                }
                 Value::String(s) => s.to_string_lossy(),
                 Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
                     v.to_php_string().to_string_lossy()
@@ -593,6 +608,10 @@ pub fn quote(vm: &mut Vm, a: &[Value]) -> R<Value> {
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
+fn m_quote(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {
+    quote(vm, a)
+}
+
 pub fn xpath_methods() -> Vec<(&'static str, MethodFn)> {
     vec![
         ("registerNamespace", m_register_namespace),
@@ -600,5 +619,6 @@ pub fn xpath_methods() -> Vec<(&'static str, MethodFn)> {
         ("evaluate", m_evaluate),
         ("registerPhpFunctions", m_register_php_functions),
         ("registerPhpFunctionNS", m_register_php_function_ns),
+        ("quote", m_quote),
     ]
 }

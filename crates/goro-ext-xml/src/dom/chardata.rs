@@ -417,9 +417,8 @@ pub fn sync_entity_ref(n: NodeId) -> Option<NodeId> {
         if t.nodes[n].t != NType::EntityRef {
             return t.nodes[n].children;
         }
-        let ent = t.nodes[n]
-            .doc
-            .and_then(|d| t.get_doc_entity(d, &t.nodes[n].name.clone()));
+        let name = t.nodes[n].name.clone();
+        let ent = t.get_doc_entity_any(t.nodes[n].doc, &name);
         t.nodes[n].children = ent;
         t.nodes[n].last = ent;
         ent
@@ -688,7 +687,7 @@ pub fn construct(vm: &mut Vm, this: &Obj, base: Base, a: &[Value]) -> R<()> {
     let n = match base {
         Base::Text | Base::Comment => {
             a.count(vm, 0, 1)?;
-            let v = a.str(vm, 0, "data")?;
+            let v = super::node::cstr(&a.str(vm, 0, "data")?).to_string();
             tree::with(|t| {
                 if base == Base::Text {
                     t.new_text(None, &v)
@@ -705,7 +704,7 @@ pub fn construct(vm: &mut Vm, this: &Obj, base: Base, a: &[Value]) -> R<()> {
         Base::ProcessingInstruction => {
             a.count(vm, 1, 2)?;
             let name = a.str(vm, 0, "name")?;
-            let v = a.str(vm, 1, "value")?;
+            let v = super::node::cstr(&a.str(vm, 1, "value")?).to_string();
             if !is_valid_name(&name) {
                 throw_dom(vm, INVALID_CHARACTER_ERR, true);
                 return Err(());

@@ -178,6 +178,8 @@ impl Node {
 pub struct Tree {
     pub nodes: Vec<Node>,
     pub nss: Vec<Ns>,
+    /// predefined entity declarations (lazily created)
+    pub predef: Vec<(String, NodeId)>,
 }
 
 thread_local! {
@@ -187,6 +189,14 @@ thread_local! {
 /// Run `f` with mutable access to the global tree. Must not be re-entered.
 pub fn with<R>(f: impl FnOnce(&mut Tree) -> R) -> R {
     TREE.with(|t| f(&mut t.borrow_mut()))
+}
+
+/// Like `with`, but returns None instead of panicking when the tree is
+/// already borrowed (or being torn down).
+pub fn try_with<R>(f: impl FnOnce(&mut Tree) -> R) -> Option<R> {
+    TREE.try_with(|t| t.try_borrow_mut().ok().map(|mut b| f(&mut b)))
+        .ok()
+        .flatten()
 }
 
 pub fn is_blank_char(c: u8) -> bool {
@@ -317,11 +327,9 @@ impl Tree {
     pub fn new_entity_ref(&mut self, doc: Option<NodeId>, name: &str) -> NodeId {
         let name = name.trim_start_matches('&').trim_end_matches(';');
         let id = self.new_node(doc, NType::EntityRef, name);
-        if let Some(d) = doc {
-            if let Some(ent) = self.get_doc_entity(d, name) {
-                self.nodes[id].children = Some(ent);
-                self.nodes[id].last = Some(ent);
-            }
+        if let Some(ent) = self.get_doc_entity_any(doc, name) {
+            self.nodes[id].children = Some(ent);
+            self.nodes[id].last = Some(ent);
         }
         id
     }
@@ -1072,6 +1080,44 @@ impl Tree {
 
     // ------------------------------------------------------------------
     // Entities
+
+    /// The predefined entities (lt, gt, amp, apos, quot) as shared,
+    /// document-less entity declarations (xmlGetPredefinedEntity).
+    pub fn predefined_entity(&mut self, name: &str) -> Option<NodeId> {
+        let content = match name {
+            "lt" => "<",
+            "gt" => ">",
+            "amp" => "&",
+            "apos" => "'",
+            "quot" => "\"",
+            _ => return None,
+        };
+        if let Some(id) = self.predef.iter().find(|(n, _)| n == name).map(|x| x.1) {
+            return Some(id);
+        }
+        let id = self.new_node(None, NType::EntityDecl, name);
+        self.nodes[id].content = content.to_string();
+        self.nodes[id].extra = Extra::Entity(Box::new(EntityInfo {
+            etype: EntityType::InternalPredefined,
+            external_id: None,
+            system_id: None,
+            notation: None,
+            orig: Some(content.to_string()),
+            checked: false,
+        }));
+        self.predef.push((name.to_string(), id));
+        Some(id)
+    }
+
+    /// xmlGetDocEntity: document entities, then the predefined ones.
+    pub fn get_doc_entity_any(&mut self, doc: Option<NodeId>, name: &str) -> Option<NodeId> {
+        if let Some(d) = doc {
+            if let Some(e) = self.get_doc_entity(d, name) {
+                return Some(e);
+            }
+        }
+        self.predefined_entity(name)
+    }
 
     pub fn get_doc_entity(&self, doc: NodeId, name: &str) -> Option<NodeId> {
         let info = self.doc_info(doc)?;

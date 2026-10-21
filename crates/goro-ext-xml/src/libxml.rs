@@ -44,6 +44,18 @@ pub enum Style {
 /// them as PHP's libxml glue would. `fname` is the PHP function name used
 /// as the warning prefix (e.g. "simplexml_load_string").
 pub fn report(vm: &mut Vm, fname: &str, errors: &[XmlError], style: Style) {
+    report_ex(vm, fname, errors, style, &|_| false)
+}
+
+/// `report`, with errors for which `silenced` is true only recorded
+/// (libxml_get_errors) and never emitted as warnings.
+pub fn report_ex(
+    vm: &mut Vm,
+    fname: &str,
+    errors: &[XmlError],
+    style: Style,
+    silenced: &dyn Fn(&XmlError) -> bool,
+) {
     for e in errors {
         let internal = STATE.with(|s| {
             let mut s = s.borrow_mut();
@@ -55,7 +67,7 @@ pub fn report(vm: &mut Vm, fname: &str, errors: &[XmlError], style: Style) {
                 false
             }
         });
-        if internal || vm.current_exception.is_some() {
+        if internal || vm.current_exception.is_some() || silenced(e) {
             continue;
         }
         match style {

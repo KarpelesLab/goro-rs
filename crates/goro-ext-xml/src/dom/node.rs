@@ -362,6 +362,14 @@ pub fn b(v: bool) -> Value {
     if v { Value::True } else { Value::False }
 }
 
+/// A string as libxml2 sees it through a `const xmlChar *` (cut at NUL).
+pub fn cstr(s: &str) -> &str {
+    match s.find('\0') {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
 pub fn str_of(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -573,7 +581,7 @@ fn r_prefix(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
 }
 
 fn w_prefix(vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
-    let prefix = str_of(v);
+    let prefix = cstr(&str_of(v)).to_string();
     let doc = doc_of_node(n);
     let r = tree::with(|t| -> Result<(), i64> {
         let ty = t.nodes[n].t;

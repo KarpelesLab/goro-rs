@@ -152,6 +152,76 @@ pub struct DomData {
     pub kind: RefCell<Kind>,
 }
 
+thread_local! {
+    /// Nodes whose wrapper died while the tree was borrowed.
+    static PENDING_FREE: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Drop for DomData {
+    fn drop(&mut self) {
+        if let Kind::Node(n) = self.kind.get_mut() {
+            let n = *n;
+            if tree::try_with(|t| free_detached(t, n)).is_none() {
+                let _ = PENDING_FREE.try_with(|p| p.borrow_mut().push(n));
+            }
+        }
+    }
+}
+
+/// php_libxml_node_free_resource: when the last reference to a detached
+/// (sub)tree goes away the tree is freed; descendants that still have a PHP
+/// object are unlinked from it and survive on their own.
+fn free_detached(t: &mut Tree, n: NodeId) {
+    let pending: Vec<NodeId> = PENDING_FREE
+        .try_with(|p| std::mem::take(&mut *p.borrow_mut()))
+        .unwrap_or_default();
+    for p in pending.into_iter().chain(std::iter::once(n)) {
+        free_detached_one(t, p);
+    }
+}
+
+fn alive(t: &Tree, n: NodeId) -> bool {
+    t.nodes[n]
+        .wrapper
+        .as_ref()
+        .map(|w| w.strong_count() > 0)
+        .unwrap_or(false)
+}
+
+fn free_detached_one(t: &mut Tree, n: NodeId) {
+    if n >= t.nodes.len() || t.nodes[n].parent.is_some() || t.is_doc(n) || alive(t, n) {
+        return;
+    }
+    if matches!(
+        t.nodes[n].t,
+        NType::NamespaceDecl
+            | NType::EntityDecl
+            | NType::Entity
+            | NType::Dtd
+            | NType::DocumentType
+            | NType::Notation
+    ) {
+        return;
+    }
+    let mut stack: Vec<NodeId> = Vec::new();
+    let push_kids = |t: &Tree, x: NodeId, stack: &mut Vec<NodeId>| {
+        if t.nodes[x].t != NType::EntityRef {
+            stack.extend(t.children_of(x));
+        }
+        if t.nodes[x].t == NType::Element {
+            stack.extend(t.attrs_of(x));
+        }
+    };
+    push_kids(t, n, &mut stack);
+    while let Some(x) = stack.pop() {
+        if alive(t, x) {
+            t.unlink(x);
+            continue;
+        }
+        push_kids(t, x, &mut stack);
+    }
+}
+
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     read_property: Some(h_read_property),
     write_property: Some(h_write_property),
@@ -462,7 +532,25 @@ pub fn map_obj(vm: &mut Vm, k: MapKind) -> Value {
 // ---------------------------------------------------------------------------
 // Argument parsing helpers (zpp)
 
+/// Closures may be represented as internal function-name strings.
+pub fn is_closure(v: &Value) -> bool {
+    match v {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+        }
+        Value::Object(o) => o.borrow().class_name.eq_ignore_ascii_case(b"closure"),
+        Value::Reference(r) => is_closure(&r.borrow()),
+        _ => false,
+    }
+}
+
 pub fn type_name_of(v: &Value) -> String {
+    if is_closure(v) {
+        return "Closure".into();
+    }
     match v {
         Value::Null | Value::Undef => "null".into(),
         Value::True | Value::False => "bool".into(),
@@ -567,6 +655,10 @@ impl<'a> Args<'a> {
         }
     }
     fn str_val(&self, vm: &mut Vm, i: usize, name: &str, v: &Value) -> R<String> {
+        if is_closure(v) {
+            self.type_err(vm, i, name, "string", v);
+            return Err(());
+        }
         match v {
             Value::String(s) => Ok(s.to_string_lossy()),
             Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
@@ -743,6 +835,8 @@ pub struct Prop {
     pub write: Option<WriteFn>,
     /// declared type, for write coercion: "string", "?string", "bool", "int", "mixed"
     pub ty: &'static str,
+    /// declaring class (for type errors)
+    pub owner: &'static str,
 }
 
 pub const fn p(name: &'static str, read: ReadFn, write: Option<WriteFn>, ty: &'static str) -> Prop {
@@ -751,7 +845,19 @@ pub const fn p(name: &'static str, read: ReadFn, write: Option<WriteFn>, ty: &'s
         read,
         write,
         ty,
+        owner: "",
     }
+}
+
+fn owned(v: Vec<Prop>, owner: &'static str) -> Vec<Prop> {
+    v.into_iter()
+        .map(|mut p| {
+            if p.owner.is_empty() {
+                p.owner = owner;
+            }
+            p
+        })
+        .collect()
 }
 
 thread_local! {
@@ -778,53 +884,86 @@ fn overwrite(v: &mut [Prop], np: Prop) {
 }
 
 fn build_tables() {
-    let node = node::node_props();
+    let node = owned(node::node_props(), "DOMNode");
     let mut t: HashMap<Base, Rc<Vec<Prop>>> = HashMap::new();
     t.insert(Base::Node, Rc::new(node.clone()));
     t.insert(
         Base::DocumentFragment,
-        Rc::new(merge(&node::parent_props(), &node)),
+        Rc::new(merge(
+            &owned(node::parent_props(), "DOMDocumentFragment"),
+            &node,
+        )),
     );
     t.insert(
         Base::Document,
-        Rc::new(merge(&document::document_props(), &node)),
+        Rc::new(merge(
+            &owned(document::document_props(), "DOMDocument"),
+            &node,
+        )),
     );
-    let chardata = merge(&chardata::chardata_props(), &node);
+    let chardata = merge(
+        &owned(chardata::chardata_props(), "DOMCharacterData"),
+        &node,
+    );
     t.insert(Base::CharacterData, Rc::new(chardata.clone()));
     t.insert(Base::Comment, Rc::new(chardata.clone()));
-    let text = merge(&chardata::text_props(), &chardata);
+    let text = merge(&owned(chardata::text_props(), "DOMText"), &chardata);
     t.insert(Base::Text, Rc::new(text.clone()));
     t.insert(Base::CdataSection, Rc::new(text));
-    t.insert(Base::Attr, Rc::new(merge(&element::attr_props(), &node)));
+    t.insert(
+        Base::Attr,
+        Rc::new(merge(&owned(element::attr_props(), "DOMAttr"), &node)),
+    );
     t.insert(
         Base::Element,
-        Rc::new(merge(&element::element_props(), &node)),
+        Rc::new(merge(&owned(element::element_props(), "DOMElement"), &node)),
     );
     t.insert(
         Base::DocumentType,
-        Rc::new(merge(&chardata::doctype_props(), &node)),
+        Rc::new(merge(
+            &owned(chardata::doctype_props(), "DOMDocumentType"),
+            &node,
+        )),
     );
     t.insert(
         Base::Notation,
-        Rc::new(merge(&chardata::notation_props(), &node)),
+        Rc::new(merge(
+            &owned(chardata::notation_props(), "DOMNotation"),
+            &node,
+        )),
     );
     t.insert(
         Base::Entity,
-        Rc::new(merge(&chardata::entity_props(), &node)),
+        Rc::new(merge(&owned(chardata::entity_props(), "DOMEntity"), &node)),
     );
     let mut eref = node.clone();
-    for np in chardata::entity_ref_overrides() {
+    for np in owned(chardata::entity_ref_overrides(), "DOMNode") {
         overwrite(&mut eref, np);
     }
     t.insert(Base::EntityReference, Rc::new(eref));
     t.insert(
         Base::ProcessingInstruction,
-        Rc::new(merge(&chardata::pi_props(), &node)),
+        Rc::new(merge(
+            &owned(chardata::pi_props(), "DOMProcessingInstruction"),
+            &node,
+        )),
     );
-    t.insert(Base::NameSpaceNode, Rc::new(chardata::nsnode_props()));
-    t.insert(Base::NodeList, Rc::new(lists::list_props()));
-    t.insert(Base::NamedNodeMap, Rc::new(lists::map_props()));
-    t.insert(Base::XPath, Rc::new(xpathobj::xpath_props()));
+    t.insert(
+        Base::NameSpaceNode,
+        Rc::new(owned(chardata::nsnode_props(), "DOMNameSpaceNode")),
+    );
+    t.insert(
+        Base::NodeList,
+        Rc::new(owned(lists::list_props(), "DOMNodeList")),
+    );
+    t.insert(
+        Base::NamedNodeMap,
+        Rc::new(owned(lists::map_props(), "DOMNamedNodeMap")),
+    );
+    t.insert(
+        Base::XPath,
+        Rc::new(owned(xpathobj::xpath_props(), "DOMXPath")),
+    );
     t.insert(Base::Implementation, Rc::new(Vec::new()));
     PROP_TABLES.with(|p| *p.borrow_mut() = t);
 }
@@ -866,8 +1005,8 @@ fn h_read_property(vm: &mut Vm, o: &Obj, name: &[u8], _mode: u8) -> Option<Value
     }
 }
 
-fn coerce_for_type(vm: &mut Vm, o: &Obj, p: &Prop, v: &Value) -> R<Value> {
-    let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+fn coerce_for_type(vm: &mut Vm, _o: &Obj, p: &Prop, v: &Value) -> R<Value> {
+    let cn = p.owner.to_string();
     let err = |vm: &mut Vm, v: &Value| {
         let msg = format!(
             "Cannot assign {} to property {}::${} of type {}",
@@ -906,7 +1045,11 @@ fn coerce_for_type(vm: &mut Vm, o: &Obj, p: &Prop, v: &Value) -> R<Value> {
                     .unwrap_or(false)
                     || goro_core::value::native_cast(ob, 3).is_some();
                 if has {
-                    Ok(Value::String(vm.value_to_string(v)))
+                    let sv = vm.value_to_string(v);
+                    if vm.current_exception.is_some() {
+                        return Err(());
+                    }
+                    Ok(Value::String(sv))
                 } else {
                     err(vm, v);
                     Err(())
@@ -1080,7 +1223,18 @@ fn h_clone(vm: &mut Vm, src: &Obj, dst: &Obj) {
             }
         }
         None => {
-            // lists/maps/xpath are not cloneable in PHP; keep a shallow copy
+            if matches!(
+                &*d.kind.borrow(),
+                Kind::List(_) | Kind::Map(_) | Kind::XPath(_) | Kind::Iter(_)
+            ) {
+                let cn = goro_core::value::display_class_name(&src.borrow().class_name).to_string();
+                throw_error(
+                    vm,
+                    b"Error",
+                    &format!("Trying to clone an uncloneable object of class {}", cn),
+                );
+                return;
+            }
             let nk = match &*d.kind.borrow() {
                 Kind::List(l) => Kind::List(l.clone()),
                 Kind::Map(m) => Kind::Map(m.clone()),
@@ -1178,9 +1332,10 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
         }
     };
     let m = String::from_utf8_lossy(method).to_ascii_lowercase();
-    if is_static {
-        return b == Base::XPath && m == "quote";
+    if is_static && b == Base::XPath && m == "quote" {
+        return true;
     }
+    // non-static methods called statically error out in call_method
     methods_of(b).contains_key(&m)
 }
 
@@ -1266,6 +1421,14 @@ fn call_method(
     if this.is_none() {
         if b == Base::XPath && m == "quote" {
             return xpathobj::quote(vm, args).unwrap_or(Value::Null);
+        }
+        if methods_of(b).contains_key(&m) {
+            let name = method_display(b, &m);
+            throw_error(
+                vm,
+                b"Error",
+                &format!("Non-static method {}() cannot be called statically", name),
+            );
         }
         return Value::Null;
     }
