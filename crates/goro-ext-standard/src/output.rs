@@ -1306,7 +1306,7 @@ fn print_r_value_inner(
         Value::Resource(id) => {
             buf.extend_from_slice(format!("Resource id #{}", id).as_bytes());
         }
-        Value::Double(f) => buf.extend_from_slice(format_float(*f).as_bytes()),
+        Value::Double(f) => buf.extend_from_slice(Value::Double(*f).to_php_string().as_bytes()),
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {

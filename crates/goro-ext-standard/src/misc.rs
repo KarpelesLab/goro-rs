@@ -12114,38 +12114,32 @@ fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_bytes(ft.as_bytes())))
 }
 
-fn natsort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| {
-            let sa = a.1.to_php_string().to_string_lossy();
-            let sb = b.1.to_php_string().to_string_lossy();
-            natcmp(&sa, &sb)
-        });
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
+/// php_natsort(): zend_hash_sort with php_array_natural_(case_)compare, keys kept.
+fn php_natsort(vm: &mut Vm, args: &[Value], fname: &str, fold_case: bool) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, fname, "array", 1)?;
+    if let Value::Array(arr) = first.deref() {
+        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if entries.len() <= 1 {
+            return Ok(Value::True);
         }
+        let flags = if fold_case { SORT_NATURAL | SORT_FLAG_CASE } else { SORT_NATURAL };
+        let sorted = crate::zsort::zend_sort_stable(entries, |x, y| php_data_cmp(vm, &x.1, &y.1, flags));
+        let mut new_arr = PhpArray::new();
+        for (k, v) in sorted {
+            new_arr.set(k, v);
+        }
+        *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
 }
 
-fn natcasesort_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| {
-            let sa = a.1.to_php_string().to_string_lossy().to_ascii_lowercase();
-            let sb = b.1.to_php_string().to_string_lossy().to_ascii_lowercase();
-            natcmp(&sa, &sb)
-        });
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
-        }
-    }
-    Ok(Value::True)
+fn natsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_natsort(vm, args, "natsort", false)
+}
+
+fn natcasesort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_natsort(vm, args, "natcasesort", true)
 }
 
 /// Natural order comparison (matches PHP strnatcmp).
