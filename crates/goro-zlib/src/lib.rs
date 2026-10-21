@@ -10,6 +10,7 @@
 
 pub mod checksum;
 pub mod deflate;
+pub mod gz;
 pub mod inflate;
 mod inftrees;
 

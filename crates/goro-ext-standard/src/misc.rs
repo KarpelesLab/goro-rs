@@ -7620,7 +7620,6 @@ fn check_access_bit(path: &str, owner_bit: u32, group_bit: u32, other_bit: u32) 
     };
     mode & bit != 0
 }
-/// Read a file with optional compress.zlib:// (gzip/zlib decompression) prefix.
 /// Lexically normalize a filesystem path, collapsing `.` and `..` segments
 /// without touching the filesystem. This mirrors PHP's behavior where
 /// `foo/bar/../baz` resolves to `foo/baz` even if `bar` doesn't exist.
@@ -7670,35 +7669,12 @@ pub(crate) fn normalize_path_lexical(p: &str) -> String {
 pub(crate) fn read_path_with_wrappers(path_str: &str) -> std::io::Result<Vec<u8>> {
     let r = read_path_with_wrappers_inner(path_str);
     if r.is_ok() {
-        if path_str.starts_with("compress.zlib://") {
-            goro_core::value::alloc_resource_id();
-        }
         goro_core::value::alloc_resource_id();
     }
     r
 }
 
 fn read_path_with_wrappers_inner(path_str: &str) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
-        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
-        let real_path = normalize_path_lexical(real_path);
-        let data = std::fs::read(&real_path)?;
-        if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-            let mut dec = flate2::read::GzDecoder::new(data.as_slice());
-            let mut buf = Vec::new();
-            dec.read_to_end(&mut buf)?;
-            return Ok(buf);
-        }
-        if data.len() >= 2 && (data[0] & 0x0F) == 8 {
-            let mut dec = flate2::read::ZlibDecoder::new(data.as_slice());
-            let mut buf = Vec::new();
-            if dec.read_to_end(&mut buf).is_ok() {
-                return Ok(buf);
-            }
-        }
-        return Ok(data);
-    }
     // Apply lexical normalization for plain filesystem paths.
     let normalized = if !path_str.contains("://") {
         normalize_path_lexical(path_str)
@@ -8305,29 +8281,6 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
     let path_str = path.to_string_lossy();
-
-    // Handle compress.zlib:// scheme for writes (gzip-compress the data)
-    if let Some(real_path) = path_str.strip_prefix("compress.zlib://") {
-        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
-        use std::io::Write;
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        if enc.write_all(&data_bytes).is_err() {
-            return Ok(Value::False);
-        }
-        match enc.finish() {
-            Ok(compressed) => match std::fs::write(real_path, &compressed) {
-                Ok(_) => return Ok(Value::Long(data_bytes.len() as i64)),
-                Err(e) => {
-                    vm.emit_warning(&format!(
-                        "file_put_contents({}): Failed to open stream: {}",
-                        path_str, e
-                    ));
-                    return Ok(Value::False);
-                }
-            },
-            Err(_) => return Ok(Value::False),
-        }
-    }
 
     let p = std::path::Path::new(&*path_str);
     if let Some(parent) = p.parent() {
@@ -10906,62 +10859,15 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Normalize mode: strip 'b' (binary) and 't' (text) flags - they're all the same on Linux
-    let mode_clean: String = mode.chars().filter(|&c| c != 'b' && c != 't').collect();
-
-    // Handle compress.zlib:// scheme: read+decompress to a temporary file (read-only).
-    if let Some(real_path) = filename.strip_prefix("compress.zlib://") {
-        let real_path = real_path.strip_prefix("file://").unwrap_or(real_path);
-        if mode_clean == "r" {
-            match std::fs::read(real_path) {
-                Ok(data) => {
-                    // Detect gzip vs zlib vs raw
-                    use std::io::Read;
-                    let decompressed = if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-                        let mut dec = flate2::read::GzDecoder::new(data.as_slice());
-                        let mut buf = Vec::new();
-                        if dec.read_to_end(&mut buf).is_err() {
-                            vm.emit_warning(&format!(
-                                "{}({}): Failed to open stream: operation failed",
-                                fopen_caller, filename
-                            ));
-                            return Ok(Value::False);
-                        }
-                        buf
-                    } else if data.len() >= 2 && (data[0] & 0x0F) == 8 {
-                        let mut dec = flate2::read::ZlibDecoder::new(data.as_slice());
-                        let mut buf = Vec::new();
-                        if dec.read_to_end(&mut buf).is_err() {
-                            data.clone()
-                        } else {
-                            buf
-                        }
-                    } else {
-                        data
-                    };
-                    // Create a tempfile
-                    let mut tmp = match tempfile::tempfile() {
-                        Ok(f) => f,
-                        Err(_) => return Ok(Value::False),
-                    };
-                    use std::io::{Seek, SeekFrom, Write};
-                    if tmp.write_all(&decompressed).is_err() {
-                        return Ok(Value::False);
-                    }
-                    let _ = tmp.seek(SeekFrom::Start(0));
-                    let fid = alloc_file_handle(tmp, &mode);
-                    goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::Resource(fid));
-                }
-                Err(_) => {
-                    vm.emit_warning(&format!(
-                        "{}({}): Failed to open stream: No such file or directory",
-                        fopen_caller, filename
-                    ));
-                    return Ok(Value::False);
-                }
-            }
+    // php_stream_parse_fopen_modes(): the first character and '+' matter,
+    // anything else ('b', 't', 'e', 'n', zlib's level digits...) is ignored.
+    let mode_clean: String = {
+        let mut m: String = mode.chars().take(1).collect();
+        if mode.contains('+') {
+            m.push('+');
         }
-    }
+        m
+    };
 
     // php://filter/<chain>/resource=<inner_url> (php_stream_url_wrap_php).
     if filename.len() > 13 && filename[..13].eq_ignore_ascii_case("php://filter/") {
@@ -11197,21 +11103,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    // Validate mode: first character must be one of r/w/a/x/c, optionally
-    // followed by '+', 'b' and/or 't' in any order.
-    let valid_mode = {
-        let chars: Vec<char> = mode.chars().collect();
-        if chars.is_empty() {
-            false
-        } else {
-            let first = chars[0];
-            let valid_first = matches!(first, 'r' | 'w' | 'a' | 'x' | 'c');
-            let valid_rest = chars[1..]
-                .iter()
-                .all(|&c| matches!(c, '+' | 'b' | 't' | 'e'));
-            valid_first && valid_rest
-        }
-    };
+    // Validate mode: the first character must be one of r/w/a/x/c
+    // (php_stream_parse_fopen_modes()).
+    let valid_mode = matches!(mode.chars().next(), Some('r' | 'w' | 'a' | 'x' | 'c'));
     if !valid_mode {
         vm.emit_warning(&format!(
             "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
@@ -11339,6 +11233,31 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+/// The name a stream builtin was called by, for its diagnostics: ext/zlib
+/// registers gzread() & co. as aliases of fread() & co., and
+/// zend_argument_*_error() name the active function.
+pub(crate) fn called_as(vm: &Vm, name: &str) -> String {
+    if let Some(cur) = vm.current_builtin_name() {
+        let alias_of = match cur.as_str() {
+            "gzread" => "fread",
+            "gzwrite" | "gzputs" => "fwrite",
+            "gzgets" => "fgets",
+            "gzgetc" => "fgetc",
+            "gzeof" => "feof",
+            "gzrewind" => "rewind",
+            "gzseek" => "fseek",
+            "gztell" => "ftell",
+            "gzpassthru" => "fpassthru",
+            "gzclose" => "fclose",
+            _ => "",
+        };
+        if alias_of == name {
+            return cur;
+        }
+    }
+    name.to_string()
+}
+
 pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     // PHP_STREAM_FLAG_NO_FCLOSE: a filter callback is running on it.
@@ -11446,10 +11365,13 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "fread")?;
+    let fid = require_open_stream(vm, arg, &called_as(vm, "fread"))?;
     let length_signed = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if length_signed <= 0 {
-        let msg = "fread(): Argument #2 ($length) must be greater than 0".to_string();
+        let msg = format!(
+            "{}(): Argument #2 ($length) must be greater than 0",
+            called_as(vm, "fread")
+        );
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -11736,7 +11658,7 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = if is_special_writer {
         raw_fid
     } else {
-        require_open_stream(vm, arg, "fwrite")?
+        require_open_stream(vm, arg, &called_as(vm, "fwrite"))?
     };
     let data = match args.get(1) {
         Some(v @ Value::Object(_)) => vm.value_to_string_checked(v)?,
@@ -11959,7 +11881,7 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "fgets")?;
+    let fid = require_open_stream(vm, arg, &called_as(vm, "fgets"))?;
     // PHP semantics: $length (if provided) must be > 0. fgets reads up to
     // length-1 bytes (the remaining byte is a virtual null terminator in C).
     // When omitted, reads until newline (no byte cap — we use a large default).
@@ -11969,7 +11891,10 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let limit = if let Some(n) = explicit_length {
         if n <= 0 {
-            let msg = "fgets(): Argument #2 ($length) must be greater than 0".to_string();
+            let msg = format!(
+                "{}(): Argument #2 ($length) must be greater than 0",
+                called_as(vm, "fgets")
+            );
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
             return Err(VmError {
@@ -12098,7 +12023,10 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_resource =
             matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
         if is_closed_resource || !is_resource {
-            let msg = "feof(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let msg = format!(
+                "{}(): Argument #1 ($stream) must be an open stream resource",
+                called_as(vm, "feof")
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError {
@@ -12132,7 +12060,7 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "rewind")?;
+    let fid = require_open_stream(vm, arg, &called_as(vm, "rewind"))?;
     flush_write_filters(vm, fid, false);
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -12151,7 +12079,7 @@ fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "fseek")?;
+    let fid = require_open_stream(vm, arg, &called_as(vm, "fseek"))?;
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let whence = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     // Invalid whence values return -1 without seeking.
@@ -12210,7 +12138,10 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_open_resource =
             matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
         if is_closed_resource || !is_open_resource {
-            let msg = "ftell(): Argument #1 ($stream) must be an open stream resource".to_string();
+            let msg = format!(
+                "{}(): Argument #1 ($stream) must be an open stream resource",
+                called_as(vm, "ftell")
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
             return Err(VmError {
@@ -16803,6 +16734,35 @@ fn phpinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         for hook in vm.phpinfo_hooks.clone() {
             out.push_str(&hook(vm));
         }
+        if vm.loaded_extensions.contains(b"zlib".as_slice()) {
+            // PHP_MINFO_FUNCTION(zlib)
+            let ini = |k: &[u8], default: &str| {
+                let v = vm
+                    .constants
+                    .get(k)
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_else(|| default.to_string());
+                if v.is_empty() {
+                    "no value".to_string()
+                } else {
+                    v
+                }
+            };
+            let oc = ini(b"zlib.output_compression", "0");
+            let oc = if oc == "0" || oc.eq_ignore_ascii_case("off") {
+                "Off".to_string()
+            } else if oc == "1" || oc.eq_ignore_ascii_case("on") {
+                "On".to_string()
+            } else {
+                oc
+            };
+            let lvl = ini(b"zlib.output_compression_level", "-1");
+            let oh = ini(b"zlib.output_handler", "");
+            out.push_str(&format!(
+                "zlib\n\nZLib Support => enabled\nStream Wrapper => compress.zlib://\nStream Filter => zlib.inflate, zlib.deflate\nCompiled Version => {v}\nLinked Version => {v}\n\nDirective => Local Value => Master Value\nzlib.output_compression => {oc} => {oc}\nzlib.output_compression_level => {lvl} => {lvl}\nzlib.output_handler => {oh} => {oh}\n\n",
+                v = goro_zlib::ZLIB_VERSION,
+            ));
+        }
     }
     if what & 32 != 0 {
         out.push_str("PHP Variables\n\n");
@@ -17196,7 +17156,7 @@ fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let fid = require_open_stream(vm, arg, "fgetc")?;
+    let fid = require_open_stream(vm, arg, &called_as(vm, "fgetc"))?;
     // PHP emits a notice if the underlying mode is write-only.
     let stream_mode = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.mode.clone()));
     if let Some(m) = stream_mode {
@@ -19463,7 +19423,8 @@ fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
     let mut arr = PhpArray::new();
     // Built-in wrappers (alphabetical).
     for name in &[
-        b"data" as &[u8],
+        b"compress.zlib" as &[u8],
+        b"data",
         b"file",
         b"glob",
         b"http",

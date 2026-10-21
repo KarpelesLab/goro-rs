@@ -57,6 +57,12 @@ pub fn register_standard_functions(vm: &mut Vm) {
     register_builtin_param_names(vm);
 }
 
+/// ext/zlib's stream functions (gzopen(), gzfile(), readgzfile() and the
+/// gz* aliases of the stream functions), served by the stream layer here.
+pub fn register_zlib_stream_functions(vm: &mut Vm) {
+    misc::userstream::register_zlib(vm);
+}
+
 /// Register parameter names for built-in functions (for named argument support)
 fn register_builtin_param_names(vm: &mut Vm) {
     // Helper macro to register param names

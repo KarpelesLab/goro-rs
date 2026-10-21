@@ -9,5 +9,5 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-flate2 = "1"
+goro-ext-standard = { path = "../goro-ext-standard" }
 goro-zlib = { path = "../goro-zlib" }

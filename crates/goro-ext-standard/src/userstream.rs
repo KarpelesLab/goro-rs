@@ -79,9 +79,38 @@ pub(crate) struct UserStream {
     pub closed: bool,
     /// The wrapper was registered with STREAM_IS_URL.
     pub is_url: bool,
+    /// Ops of a natively implemented stream (instead of `obj`'s methods).
+    pub native: Option<Rc<RefCell<dyn NativeStream>>>,
+    /// wops->label of the wrapper that opened a native stream (None when
+    /// it was opened without one, e.g. gzopen()).
+    pub wrapper_label: Option<&'static str>,
 }
 
-type Us = Rc<RefCell<UserStream>>;
+pub(crate) type Us = Rc<RefCell<UserStream>>;
+
+/// php_stream_ops of a stream implemented in Rust but served by this
+/// stream layer (buffering, line reading, positions...), e.g. the
+/// compress.zlib:// streams.
+pub(crate) trait NativeStream {
+    /// ops->read(): None == -1. Sets `*eof` like stream->eof.
+    fn read(&mut self, vm: &mut Vm, count: usize, eof: &mut bool) -> Option<Vec<u8>>;
+    /// ops->write(): bytes written, < 0 on error.
+    fn write(&mut self, vm: &mut Vm, buf: &[u8]) -> i64;
+    /// ops->close()
+    fn close(&mut self, vm: &mut Vm);
+    /// ops->flush(): 0 on success.
+    fn flush(&mut self, vm: &mut Vm) -> i32;
+    /// ops->seek(): the new offset, None on failure.
+    fn seek(&mut self, vm: &mut Vm, offset: i64, whence: i64) -> Option<i64>;
+    /// set_option(PHP_STREAM_OPTION_LOCKING, value)
+    fn lock(&mut self, vm: &mut Vm, value: i64) -> i32;
+    /// ops->label
+    fn label(&self) -> &'static str;
+}
+
+fn native_of(us: &Us) -> Option<Rc<RefCell<dyn NativeStream>>> {
+    us.borrow().native.clone()
+}
 
 impl UserStream {
     fn buffered(&self) -> usize {
@@ -450,6 +479,8 @@ pub(crate) struct UserWrapperRef {
     pub scheme: Vec<u8>,
     pub class_name: Vec<u8>,
     pub is_url: bool,
+    /// A builtin wrapper implemented in Rust (compress.zlib://).
+    pub native: bool,
 }
 
 /// Result of locating the wrapper for a path.
@@ -465,13 +496,27 @@ enum Loc {
 }
 
 fn user_wrapper(scheme_lower: &[u8]) -> Option<UserWrapperRef> {
-    USER_WRAPPERS.with(|w| {
+    let user = USER_WRAPPERS.with(|w| {
         w.borrow().get(scheme_lower).map(|u| UserWrapperRef {
             scheme: scheme_lower.to_vec(),
             class_name: u.class_name.clone(),
             is_url: u.flags & 1 != 0,
+            native: false,
         })
-    })
+    });
+    if user.is_some() {
+        return user;
+    }
+    // php_stream_gzip_wrapper is served by this layer too.
+    if scheme_lower == b"compress.zlib" && !builtin_disabled(scheme_lower) {
+        return Some(UserWrapperRef {
+            scheme: scheme_lower.to_vec(),
+            class_name: Vec::new(),
+            is_url: false,
+            native: true,
+        });
+    }
+    None
 }
 
 /// Length of the scheme part ("foo" for "foo://bar"), if `path` names a
@@ -928,6 +973,9 @@ fn with_no_fclose<T>(us: &Us, f: impl FnOnce() -> T) -> T {
 
 /// php_userstreamop_write()
 fn op_write(vm: &mut Vm, us: &Us, buf: &[u8]) -> Result<i64, VmError> {
+    if let Some(n) = native_of(us) {
+        return Ok(n.borrow_mut().write(vm, buf));
+    }
     let (obj, cname) = us_obj(us);
     let count = buf.len() as i64;
     let r = with_no_fclose(us, || call_method(vm, &obj, b"stream_write", vec![s(buf)]))?;
@@ -962,6 +1010,12 @@ fn op_write(vm: &mut Vm, us: &Us, buf: &[u8]) -> Result<i64, VmError> {
 
 /// php_userstreamop_read(): returns the bytes read, or None on error (-1).
 fn op_read(vm: &mut Vm, us: &Us, count: usize) -> Result<Option<Vec<u8>>, VmError> {
+    if let Some(n) = native_of(us) {
+        let mut eof = us.borrow().eof;
+        let r = n.borrow_mut().read(vm, count, &mut eof);
+        us.borrow_mut().eof = eof;
+        return Ok(r);
+    }
     let (obj, cname) = us_obj(us);
     with_no_fclose(us, || -> Result<Option<Vec<u8>>, VmError> {
         let ret = match call_method(vm, &obj, b"stream_read", vec![Value::Long(count as i64)])? {
@@ -1067,6 +1121,10 @@ fn object_to_string(vm: &mut Vm, v: &Value) -> Result<Option<Vec<u8>>, VmError> 
 
 /// php_userstreamop_close()
 fn op_close(vm: &mut Vm, us: &Us) -> Result<(), VmError> {
+    if let Some(n) = native_of(us) {
+        n.borrow_mut().close(vm);
+        return Ok(());
+    }
     let (obj, _) = us_obj(us);
     let _ = call_method(vm, &obj, b"stream_close", vec![])?;
     Ok(())
@@ -1074,6 +1132,9 @@ fn op_close(vm: &mut Vm, us: &Us) -> Result<(), VmError> {
 
 /// php_userstreamop_flush(): 0 on success, -1 on failure.
 fn op_flush(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
+    if let Some(n) = native_of(us) {
+        return Ok(n.borrow_mut().flush(vm));
+    }
     let (obj, _) = us_obj(us);
     Ok(match call_method(vm, &obj, b"stream_flush", vec![])? {
         CallRes::Val(v) if v.deref().is_truthy() => 0,
@@ -1083,6 +1144,12 @@ fn op_flush(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
 
 /// php_userstreamop_seek(): returns (ret, new offset)
 fn op_seek(vm: &mut Vm, us: &Us, offset: i64, whence: i64) -> Result<(i32, Option<i64>), VmError> {
+    if let Some(n) = native_of(us) {
+        return Ok(match n.borrow_mut().seek(vm, offset, whence) {
+            Some(p) => (0, Some(p)),
+            None => (-1, None),
+        });
+    }
     let (obj, cname) = us_obj(us);
     with_no_fclose(us, || -> Result<(i32, Option<i64>), VmError> {
         let r = call_method(
@@ -1117,6 +1184,9 @@ fn op_seek(vm: &mut Vm, us: &Us, offset: i64, whence: i64) -> Result<(i32, Optio
 
 /// php_userstreamop_stat()
 fn op_stat(vm: &mut Vm, us: &Us) -> Result<Option<StatBuf>, VmError> {
+    if native_of(us).is_some() {
+        return Ok(None);
+    }
     let (obj, cname) = us_obj(us);
     match call_method(vm, &obj, b"stream_stat", vec![])? {
         CallRes::NotImpl => {
@@ -1145,6 +1215,9 @@ fn zval_type_name(v: &Value) -> String {
 
 /// user_stream_set_check_liveliness()
 fn op_check_liveness(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
+    if native_of(us).is_some() {
+        return Ok(OPT_NOTIMPL);
+    }
     let (obj, cname) = us_obj(us);
     match call_method(vm, &obj, b"stream_eof", vec![])? {
         CallRes::NotImpl => {
@@ -1175,6 +1248,9 @@ fn op_check_liveness(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
 
 /// user_stream_set_locking()
 fn op_lock(vm: &mut Vm, us: &Us, value: i64) -> Result<i32, VmError> {
+    if let Some(n) = native_of(us) {
+        return Ok(n.borrow_mut().lock(vm, value));
+    }
     let (obj, cname) = us_obj(us);
     // Userland sees PHP_LOCK_SH/EX/UN (1/2/3) | PHP_LOCK_NB (4).
     let mut lock = 0;
@@ -1207,6 +1283,9 @@ fn op_lock(vm: &mut Vm, us: &Us, value: i64) -> Result<i32, VmError> {
 
 /// user_stream_set_truncation(): `size` None = PHP_STREAM_TRUNCATE_SUPPORTED
 fn op_truncate(vm: &mut Vm, us: &Us, size: Option<i64>) -> Result<i32, VmError> {
+    if native_of(us).is_some() {
+        return Ok(OPT_NOTIMPL);
+    }
     let (obj, cname) = us_obj(us);
     let size = match size {
         None => {
@@ -1256,6 +1335,9 @@ fn op_set_option(
     value: i64,
     ptr: Value,
 ) -> Result<i32, VmError> {
+    if native_of(us).is_some() {
+        return Ok(OPT_NOTIMPL);
+    }
     let (obj, cname) = us_obj(us);
     let args = vec![Value::Long(option), Value::Long(value), ptr];
     match call_method(vm, &obj, b"stream_set_option", args)? {
@@ -1313,6 +1395,24 @@ fn op_cast(
     for_select: bool,
     report_errors: bool,
 ) -> Result<Option<i64>, VmError> {
+    if let Some(n) = native_of(us) {
+        if report_errors {
+            let label = n.borrow().label();
+            warn(
+                vm,
+                &format!(
+                    "Cannot represent a stream of type {} as a {}",
+                    label,
+                    if for_select {
+                        "select()able descriptor"
+                    } else {
+                        "STDIO FILE*"
+                    }
+                ),
+            );
+        }
+        return Ok(None);
+    }
     let (obj, cname) = us_obj(us);
     let arg = Value::Long(if for_select { 3 } else { 0 });
     let r = with_no_fclose(us, || call_method(vm, &obj, b"stream_cast", vec![arg]))?;
@@ -1705,7 +1805,12 @@ fn write_buffer(vm: &mut Vm, us: &Us, buf: &[u8]) -> Result<i64, VmError> {
             us.borrow_mut().position = p;
         }
     }
-    let chunk = us.borrow().chunk_size.max(1);
+    // GH-13071: only userspace streams are written in chunk_size pieces.
+    let chunk = if us.borrow().native.is_some() {
+        buf.len().max(1)
+    } else {
+        us.borrow().chunk_size.max(1)
+    };
     let mut didwrite: i64 = 0;
     let mut off = 0usize;
     while off < buf.len() {
@@ -2025,10 +2130,48 @@ fn alloc_stream(
         in_free: false,
         closed: false,
         is_url,
+        native: None,
+        wrapper_label: None,
     }));
     USER_STREAMS.with(|m| {
         m.borrow_mut().insert(fid, us.clone());
     });
+    (fid, us)
+}
+
+/// php_stream_alloc() for a native stream served by this layer.
+pub(crate) fn alloc_native_stream(
+    native: Rc<RefCell<dyn NativeStream>>,
+    mode: &str,
+    uri: Option<&[u8]>,
+    wrapper_label: Option<&'static str>,
+    no_buffer: bool,
+) -> (i64, Us) {
+    let label = native.borrow().label();
+    let (fid, us) = alloc_stream(
+        Value::Null,
+        Vec::new(),
+        mode,
+        uri.unwrap_or_default(),
+        false,
+        false,
+    );
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            fh.wrapper_type = wrapper_label.unwrap_or_default().to_string();
+            fh.stream_type = label.to_string();
+            fh.user_wrapper = None;
+            fh.user_wrapper_class = None;
+        }
+    });
+    {
+        let mut b = us.borrow_mut();
+        b.native = Some(native);
+        b.wrapper_label = wrapper_label;
+        if no_buffer {
+            b.flags |= FLAG_NO_BUFFER;
+        }
+    }
     (fid, us)
 }
 
@@ -2054,6 +2197,10 @@ fn wrapper_open(
     options: i64,
     context: Option<i64>,
 ) -> Result<Option<(i64, Us, Option<Vec<u8>>)>, VmError> {
+    if uw.native {
+        return Ok(zlib_stream::gzopen(vm, path, mode, options, context, true)?
+            .map(|(fid, us)| (fid, us, None)));
+    }
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
         return Ok(None);
@@ -2128,6 +2275,10 @@ fn wrapper_opendir(
     options: i64,
     context: Option<i64>,
 ) -> Result<Option<(i64, Us)>, VmError> {
+    if uw.native {
+        log_error(vm, options, "not implemented".to_string());
+        return Ok(None);
+    }
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
         return Ok(None);
@@ -2259,6 +2410,9 @@ fn wrapper_url_stat(
     url: &[u8],
     flags: i64,
 ) -> Result<Option<StatBuf>, VmError> {
+    if uw.native {
+        return Ok(None);
+    }
     let obj = match create_object(vm, uw, None)? {
         Some(o) => o,
         None => return Ok(None),
@@ -2295,6 +2449,15 @@ fn wrapper_bool_op(
     method: &str,
     args: Vec<Value>,
 ) -> Result<bool, VmError> {
+    if uw.native {
+        // wops->unlink / rename / mkdir / rmdir are NULL
+        match method {
+            "unlink" => warn(vm, "ZLIB does not allow unlinking"),
+            "rename" => warn(vm, "ZLIB wrapper does not support renaming"),
+            _ => {}
+        }
+        return Ok(false);
+    }
     let obj = match create_object(vm, uw, context)? {
         Some(o) => o,
         None => return Ok(false),
@@ -2588,7 +2751,10 @@ fn h_fread(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         return Err(throw(
             vm,
             b"ValueError",
-            "fread(): Argument #2 ($length) must be greater than 0",
+            &format!(
+                "{}(): Argument #2 ($length) must be greater than 0",
+                cur_fn()
+            ),
         ));
     }
     Ok(Some(match stream_read(vm, fid, &us, len as usize)? {
@@ -2630,7 +2796,10 @@ fn h_fgets(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
                 return Err(throw(
                     vm,
                     b"ValueError",
-                    "fgets(): Argument #2 ($length) must be greater than 0",
+                    &format!(
+                        "{}(): Argument #2 ($length) must be greater than 0",
+                        cur_fn()
+                    ),
                 ));
             }
             stream_get_line(vm, fid, &us, Some(n as usize))?
@@ -2675,7 +2844,10 @@ fn h_fclose(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
                 return Err(throw(
                     vm,
                     b"TypeError",
-                    "fclose(): Argument #1 ($stream) must be an open stream resource",
+                    &format!(
+                        "{}(): Argument #1 ($stream) must be an open stream resource",
+                        cur_fn()
+                    ),
                 ));
             }
             return Ok(None);
@@ -2905,6 +3077,19 @@ fn h_stream_get_meta_data(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, 
     set(&mut a, b"timed_out", Value::False);
     set(&mut a, b"blocked", Value::True);
     set(&mut a, b"eof", b(eof));
+    if let Some(n) = &bb.native {
+        if let Some(l) = bb.wrapper_label {
+            set(&mut a, b"wrapper_type", s(l.as_bytes()));
+        }
+        set(&mut a, b"stream_type", s(n.borrow().label().as_bytes()));
+        set(&mut a, b"mode", s(bb.mode.as_bytes()));
+        set(&mut a, b"unread_bytes", Value::Long(bb.buffered() as i64));
+        set(&mut a, b"seekable", b(bb.flags & FLAG_NO_SEEK == 0));
+        if !bb.orig_path.is_empty() {
+            set(&mut a, b"uri", s(bb.orig_path.as_bytes()));
+        }
+        return Ok(Some(arr_val(a)));
+    }
     set(&mut a, b"wrapper_data", bb.obj.clone());
     set(&mut a, b"wrapper_type", s(b"user-space"));
     set(
@@ -3817,6 +4002,10 @@ fn h_rename(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         }
         Loc::User(u) => u,
     };
+    if uw.native {
+        warn(vm, "ZLIB wrapper does not support renaming");
+        return Ok(Some(Value::False));
+    }
     let same = match locate(vm, &to, 0) {
         Loc::User(u2) => u2.scheme == uw.scheme,
         _ => false,
@@ -3869,6 +4058,24 @@ fn metadata(
     option: i64,
     value: Value,
 ) -> Result<Option<Value>, VmError> {
+    if uw.native {
+        // wops->stream_metadata is NULL
+        let times_given = matches!(&value, Value::Array(a) if !a.borrow().is_empty());
+        if option == PHP_STREAM_META_TOUCH && !times_given {
+            return Ok(Some(match open_located(vm, p, "c", REPORT_ERRORS, None)? {
+                Opened::Stream(fid, us) => {
+                    stream_free(vm, fid, &us)?;
+                    Value::True
+                }
+                _ => Value::False,
+            }));
+        }
+        warn(
+            vm,
+            &format!("Cannot call {}() for a non-standard stream", cur_fn()),
+        );
+        return Ok(Some(Value::False));
+    }
     Ok(Some(b(wrapper_bool_op(
         vm,
         uw,
@@ -4657,7 +4864,16 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
 pub(crate) fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
     let p = path.as_bytes();
     if USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
-        return None;
+        // compress.zlib:// URLs are served by this layer too.
+        let zlib = scheme_len(p).is_some_and(|n| {
+            p[..n].eq_ignore_ascii_case(b"compress.zlib")
+                && user_wrapper(&p[..n].to_ascii_lowercase()).is_some()
+        });
+        return if zlib {
+            Some(Ok(path.to_string()))
+        } else {
+            None
+        };
     }
     FN_STACK.with(|st| st.borrow_mut().push("include"));
     let r = resolve_path_user(vm, p);
@@ -4851,4 +5067,47 @@ intercepts! {
     w_stream_wrapper_unregister => ("stream_wrapper_unregister", h_stream_wrapper_unregister),
     w_stream_wrapper_restore => ("stream_wrapper_restore", h_stream_wrapper_restore),
     w_stream_get_wrappers => ("stream_get_wrappers", h_stream_get_wrappers),
+}
+
+/// compress.zlib:// streams and gzopen() (ext/zlib/zlib_fopen_wrapper.c).
+#[path = "zlib_stream.rs"]
+pub(crate) mod zlib_stream;
+
+macro_rules! zlib_intercepts {
+    ($( $w:ident => ($name:literal, $orig:literal, $h:path) ),* $(,)?) => {
+        $(
+            fn $w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+                run(vm, $name, args, $h)
+            }
+        )*
+        /// ext/zlib's stream functions: gzopen() & co. and the gz* aliases
+        /// of the stream functions (zif_fread & co. in zlib_arginfo.h).
+        pub(crate) fn register_zlib(vm: &mut Vm) {
+            $(
+                if !$orig.is_empty() {
+                    if let Some(orig) = ORIG.with(|m| m.borrow().get($orig).copied()) {
+                        ORIG.with(|m| m.borrow_mut().insert($name, orig));
+                    }
+                }
+                vm.register_function($name.as_bytes(), $w);
+            )*
+        }
+    };
+}
+
+zlib_intercepts! {
+    w_gzwrite => ("gzwrite", "fwrite", h_fwrite),
+    w_gzputs => ("gzputs", "fwrite", h_fwrite),
+    w_gzrewind => ("gzrewind", "rewind", h_rewind),
+    w_gzclose => ("gzclose", "fclose", h_fclose),
+    w_gzeof => ("gzeof", "feof", h_feof),
+    w_gzgetc => ("gzgetc", "fgetc", h_fgetc),
+    w_gzpassthru => ("gzpassthru", "fpassthru", h_fpassthru),
+    w_gzseek => ("gzseek", "fseek", h_fseek),
+    w_gztell => ("gztell", "ftell", h_ftell),
+    w_gzread => ("gzread", "fread", h_fread),
+    w_gzgets => ("gzgets", "fgets", h_fgets),
+    w_gzopen => ("gzopen", "", zlib_stream::h_gzopen),
+    w_gzfile => ("gzfile", "", zlib_stream::h_gzfile),
+    w_readgzfile => ("readgzfile", "", zlib_stream::h_readgzfile),
 }
