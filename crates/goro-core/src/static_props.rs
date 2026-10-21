@@ -192,8 +192,9 @@ impl Vm {
         let def_idx = self.nearest_prop_decl(ce, name);
         let mut decl: Option<usize> = None;
         let (typed, set_vis) = match def_idx.map(|i| &ce.properties[i]) {
-            Some(d) if !d.is_static => return Err(undeclared()),
             Some(d) => {
+                // zend_std_get_static_property_with_info(): visibility is
+                // checked before the property is known to be static.
                 if let (Some(op_array), true) = (access, d.visibility != Visibility::Public) {
                     let scope = self.static_prop_scope(op_array);
                     let scope = scope.as_deref();
@@ -228,6 +229,9 @@ impl Vm {
                             ),
                         ));
                     }
+                }
+                if !d.is_static {
+                    return Err(undeclared());
                 }
                 decl = if d.declaring_class.eq_ignore_ascii_case(class_key) {
                     Some(ce_idx)

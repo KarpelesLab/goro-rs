@@ -13280,6 +13280,7 @@ impl Compiler {
                             | ExprKind::DynamicVariable(_)
                             | ExprKind::PropertyAccess { .. }
                             | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
                             | ExprKind::ArrayAccess { .. }
                             | ExprKind::NullCoalesce { .. }
                     );
