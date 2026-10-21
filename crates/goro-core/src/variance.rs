@@ -1042,3 +1042,33 @@ pub(crate) fn numeric_str(b: &[u8]) -> Option<Value> {
     }
     std::str::from_utf8(t).ok()?.parse::<f64>().ok().map(Value::Double)
 }
+
+impl Vm {
+    /// Runtime rendering of a declared type for TypeError messages
+    /// (zend_type_to_string_resolved with the current scope): canonical PHP
+    /// member order, self/parent/static resolved.
+    pub(crate) fn canonical_type_display(&self, pt: &ParamType) -> String {
+        let mut tv = TypeView::from_param_type(pt);
+        let mut static_name: Option<String> = None;
+        if tv.mask & T_STATIC != 0 {
+            let s = self.param_type_name_simple(b"static");
+            if s != "static" {
+                static_name = Some(s);
+            }
+        }
+        for e in tv.elems.iter_mut() {
+            if let TElem::Name(n) = e {
+                if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") {
+                    let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    *n = self.param_type_name_simple(&lower).into_bytes();
+                }
+            }
+        }
+        if let Some(sn) = static_name {
+            // The called scope name takes the place of "static", right after class names.
+            tv.mask &= !T_STATIC;
+            tv.elems.push(TElem::Name(sn.into_bytes()));
+        }
+        type_to_string(&tv, None)
+    }
+}

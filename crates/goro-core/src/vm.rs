@@ -3247,7 +3247,12 @@ impl Vm {
 
     /// Get a human-readable name for a ParamType
     pub fn param_type_name(&self, pt: &ParamType) -> String {
-        self.param_type_name_inner(pt, false)
+        self.canonical_type_display(pt)
+    }
+
+    /// Resolve a single simple type name (self/parent/static) for display.
+    pub(crate) fn param_type_name_simple(&self, name: &[u8]) -> String {
+        self.param_type_name_inner(&ParamType::Simple(name.to_vec()), false)
     }
 
     fn param_type_name_inner(&self, pt: &ParamType, in_union: bool) -> String {
@@ -3703,7 +3708,7 @@ impl Vm {
 
     /// Get the display name for a ParamType (for error messages)
     fn param_type_display(&self, param_type: &ParamType) -> String {
-        self.param_type_display_inner(param_type, false)
+        self.canonical_type_display(param_type)
     }
 
     fn param_type_display_inner(&self, param_type: &ParamType, in_union: bool) -> String {
