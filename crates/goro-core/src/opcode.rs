@@ -302,6 +302,8 @@ pub enum OpCode {
     ArrayGetRef,
     /// Emit a Notice: op1 = message string literal
     EmitNotice,
+    /// Throw an Error: op1 = message string literal
+    ThrowErrorMsg,
     /// Dynamic variable read: op1 = name expr, result = value
     VarVarGet,
     /// Dynamic variable write: op1 = name expr, op2 = value

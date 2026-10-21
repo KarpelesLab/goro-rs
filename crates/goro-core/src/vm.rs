@@ -4689,14 +4689,21 @@ impl Vm {
         };
         let frame_args: Vec<Value> = call.args.iter().skip(lead).map(|v| v.deref()).collect();
         let is_instance = this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
-        self.call_stack.push((frame_display, String::new(), 0, frame_args, is_instance));
+        // Callers that already recorded this frame (fibers, exception handlers)
+        // must not get a duplicate.
+        let pushed = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
+        if pushed {
+            self.call_stack.push((frame_display, String::new(), 0, frame_args, is_instance));
+        }
         // Imperative call entry point: run in function scope, not global scope
         // (see execute_fn for why this matters with includes in callbacks).
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
         let result = self.execute_op_array(op_array, func_cvs);
         self.is_global_scope = was_global;
-        self.call_stack.pop();
+        if pushed {
+            self.call_stack.pop();
+        }
         result
     }
 
@@ -25662,6 +25669,17 @@ impl Vm {
                     }
                 }
 
+                OpCode::ThrowErrorMsg => {
+                    let msg = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals).to_php_string().to_string_lossy();
+                    let exc_val = self.create_exception(b"Error", &msg, op.line);
+                    self.current_exception = Some(exc_val);
+                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                        pending_calls_catch_depth = Some(saved_pc);
+                        ip = catch_target as usize;
+                        continue;
+                    }
+                    return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                }
                 OpCode::EmitNotice => {
                     // op2 = Const(1): only when the preceding call did not
                     // return by reference.

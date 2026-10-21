@@ -902,6 +902,37 @@ impl Compiler {
                 if func_name.map(|n| n.eq_ignore_ascii_case(b"array_multisort")).unwrap_or(false) {
                     is_byref = Self::is_writable_lvalue(&arg.value);
                 }
+                // Builtins taking `array &$array`: goro passes arrays by shared
+                // handle, but the by-reference diagnostics still apply.
+                if !is_byref && !Self::is_writable_lvalue(&arg.value) {
+                    if let Some(fname) = func_name {
+                        let lower = fname.to_ascii_lowercase();
+                        let array_ref = i == 0 && matches!(lower.as_slice(),
+                            b"next" | b"prev" | b"reset" | b"end" | b"array_shift" | b"array_pop"
+                            | b"array_unshift" | b"array_push" | b"array_splice" | b"sort" | b"rsort"
+                            | b"usort" | b"uasort" | b"uksort" | b"asort" | b"arsort" | b"ksort"
+                            | b"krsort" | b"natsort" | b"natcasesort" | b"shuffle" | b"array_walk"
+                            | b"array_walk_recursive");
+                        if array_ref {
+                            let is_call = matches!(&arg.value.kind,
+                                ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. });
+                            let (opcode, msg) = if is_call {
+                                (OpCode::EmitNotice, b"Only variables should be passed by reference".to_vec())
+                            } else {
+                                let disp = String::from_utf8_lossy(fname).to_string();
+                                (OpCode::ThrowErrorMsg, format!("{}(): Argument #1 ($array) could not be passed by reference", disp).into_bytes())
+                            };
+                            let msg_idx = self.op_array.add_literal(Value::String(crate::string::PhpString::from_vec(msg)));
+                            self.op_array.emit(Op {
+                                opcode,
+                                op1: OperandType::Const(msg_idx),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line,
+                            });
+                        }
+                    }
+                }
                 // If by-ref, check that the arg is a variable/writable expression
                 // (not a function call, method call, constant, etc.)
                 if is_byref && !Self::is_writable_lvalue(&arg.value) {
