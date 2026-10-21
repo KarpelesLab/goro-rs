@@ -34134,6 +34134,8 @@ impl Vm {
                                 || class_lower == b"closure"
                                 || class_lower == b"xmlparser"
                                 || class_lower == b"fiber"
+                                || class_lower == b"random\\engine\\secure"
+                                || class_lower == b"random\\randomizer"
                                 || obj_borrow.has_property(b"__enum_case")
                             {
                                 let class_name =

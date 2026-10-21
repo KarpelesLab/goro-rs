@@ -5,16 +5,23 @@
 //!   * `Random\Engine\Secure`
 //!   * `Random\Randomizer`
 //!
+//! plus the engine-level helpers shared with the legacy ext/standard
+//! functions (mt_rand(), rand(), shuffle(), str_shuffle(), array_rand(),
+//! lcg_value(), random_int(), random_bytes()), ported from php-src
+//! ext/random/{random,randomizer,gammasection,engine_*}.c and the
+//! php_array_data_shuffle / php_array_pick_keys / php_binary_string_shuffle
+//! helpers of ext/standard.
+//!
 //! All algorithms are hand-rolled in pure Rust; no external crates.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
-use crate::object::PhpObject;
+use crate::object::{NativeData, PhpObject};
 use crate::string::PhpString;
 use crate::value::Value;
-use crate::vm::Vm;
+use crate::vm::{NativeObjectHandlers, Vm};
 
 // ===== Mt19937 =====
 
@@ -253,11 +260,7 @@ impl Default for PcgState {
 }
 
 // ===== Secure (CSPRNG) =====
-// Uses a fast Xoshiro256** seeded from /dev/urandom-equivalent on init.
-// Not actually cryptographically secure in our impl, but acceptable for tests.
-
-#[derive(Clone)]
-pub struct SecureState;
+// Random\Engine\Secure, random_bytes() and random_int() read the OS CSPRNG.
 
 fn os_random_seed() -> u64 {
     // Read 8 bytes from /dev/urandom; fall back to time.
@@ -310,26 +313,17 @@ fn u64_to_hex_le(v: u64) -> String {
     bin2hex_le(v.to_le_bytes())
 }
 
-fn hex_to_u32_le(s: &str) -> Option<u32> {
-    if s.len() != 8 {
-        return None;
-    }
-    let bytes = hex::<4>(s)?;
-    Some(u32::from_le_bytes(bytes))
+fn hex_to_u32_le(s: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(hex::<4>(s)?))
 }
-fn hex_to_u64_le(s: &str) -> Option<u64> {
-    if s.len() != 16 {
-        return None;
-    }
-    let bytes = hex::<8>(s)?;
-    Some(u64::from_le_bytes(bytes))
+fn hex_to_u64_le(s: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(hex::<8>(s)?))
 }
 
-fn hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != N * 2 {
+fn hex<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
+    if bytes.len() != N * 2 {
         return None;
     }
-    let bytes = s.as_bytes();
     let mut out = [0u8; N];
     for i in 0..N {
         let hi = hex_digit(bytes[i * 2])?;
@@ -348,183 +342,780 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-// ===== Property storage helpers =====
+// ===== Engine objects =====
 //
-// We store engine state on the PhpObject under hidden property keys
-// (prefixed with `__rng_`) so they don't show up in user property
-// iteration.
+// A native engine object carries its state as `PhpObject::native` data
+// (php_random_engine.engine.state). A Randomizer built on a native engine
+// shares that state, exactly like php-src copies the state pointer.
 
-const PROP_MT_STATE: &[u8] = b"__rng_mt_state"; // serialized as PhpArray of 624 hex strings
-const PROP_MT_COUNT: &[u8] = b"__rng_mt_count"; // i64
-const PROP_MT_MODE: &[u8] = b"__rng_mt_mode"; // i64
-
-const PROP_XOSHIRO_S: &[u8] = b"__rng_xoshiro_s"; // 4-element PhpArray of u64
-
-const PROP_PCG_STATE_HI: &[u8] = b"__rng_pcg_hi"; // i64 (low 64 bits of high half) - using i64 for negative wraparound
-const PROP_PCG_STATE_LO: &[u8] = b"__rng_pcg_lo"; // i64 (low 64 bits of low half)
-
-// We store u64 values as i64 (transmuted) to leverage existing Value::Long.
-
-fn u64_as_i64(v: u64) -> i64 {
-    v as i64
-}
-fn i64_as_u64(v: i64) -> u64 {
-    v as u64
+/// The state of a native engine (always held behind an `Rc`, so the size
+/// difference between the variants does not matter).
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum EngineState {
+    Mt(Mt19937State),
+    Pcg(PcgState),
+    Xoshiro(Xoshiro256State),
+    Secure,
 }
 
-pub fn save_mt_state(obj: &Rc<RefCell<PhpObject>>, state: &Mt19937State) {
-    let mut o = obj.borrow_mut();
-    let mut arr = PhpArray::new();
-    for (i, v) in state.state.iter().enumerate() {
-        arr.set(ArrayKey::Int(i as i64), Value::Long(*v as i64));
-    }
-    o.set_property(
-        PROP_MT_STATE.to_vec(),
-        Value::Array(Rc::new(RefCell::new(arr))),
+type StateRc = Rc<RefCell<EngineState>>;
+
+const MT19937: &[u8] = b"random\\engine\\mt19937";
+const PCG: &[u8] = b"random\\engine\\pcgoneseq128xslrr64";
+const XOSHIRO: &[u8] = b"random\\engine\\xoshiro256starstar";
+const SECURE: &[u8] = b"random\\engine\\secure";
+const RANDOMIZER: &[u8] = b"random\\randomizer";
+
+/// PHP_RANDOM_RANGE_ATTEMPTS
+const RANGE_ATTEMPTS: u32 = 50;
+/// PHP_MT_RAND_MAX
+const MT_RAND_MAX: u32 = 0x7FFF_FFFF;
+
+static ENGINE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    write_property: Some(no_dynamic_property),
+    clone_obj: Some(engine_clone),
+    ..NativeObjectHandlers::EMPTY
+};
+
+static RANDOMIZER_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    write_property: Some(randomizer_write_property),
+    unset_property: Some(randomizer_unset_property),
+    ..NativeObjectHandlers::EMPTY
+};
+
+fn class_lower(obj: &Rc<RefCell<PhpObject>>) -> Vec<u8> {
+    obj.borrow().class_name.to_ascii_lowercase()
+}
+
+fn class_display(obj: &Rc<RefCell<PhpObject>>) -> String {
+    crate::value::display_class_name(&obj.borrow().class_name)
+}
+
+fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
+    let exc = vm.create_exception(class, msg, vm.current_line);
+    vm.current_exception = Some(exc);
+}
+
+/// EG(exception) after an engine call (exit() inside a user engine too).
+fn failed(vm: &Vm) -> bool {
+    vm.current_exception.is_some() || vm.exit_requested
+}
+
+fn throw_range_attempts(vm: &mut Vm) {
+    throw(
+        vm,
+        b"Random\\BrokenRandomEngineError",
+        &format!(
+            "Failed to generate an acceptable random number in {} attempts",
+            RANGE_ATTEMPTS
+        ),
     );
-    o.set_property(PROP_MT_COUNT.to_vec(), Value::Long(state.count as i64));
-    o.set_property(PROP_MT_MODE.to_vec(), Value::Long(state.mode));
 }
 
-pub fn load_mt_state(obj: &Rc<RefCell<PhpObject>>) -> Mt19937State {
+/// `zend_throw_exception(NULL, "Invalid serialization data for X object")`,
+/// chaining the pending exception (if any) as previous.
+fn throw_invalid_serialization(vm: &mut Vm, class_name: &str) {
+    let prev = vm.current_exception.take();
+    let msg = format!("Invalid serialization data for {} object", class_name);
+    let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
+    if let (Some(p), Value::Object(o)) = (prev, &exc) {
+        o.borrow_mut().set_property(b"previous".to_vec(), p);
+    }
+    vm.current_exception = Some(exc);
+}
+
+fn new_engine_state(class_lower: &[u8]) -> Option<EngineState> {
+    Some(match class_lower {
+        MT19937 => EngineState::Mt(Mt19937State::new()),
+        PCG => EngineState::Pcg(PcgState::new()),
+        XOSHIRO => EngineState::Xoshiro(Xoshiro256State::new()),
+        SECURE => EngineState::Secure,
+        _ => return None,
+    })
+}
+
+fn attach_engine_state(obj: &Rc<RefCell<PhpObject>>, st: EngineState) -> StateRc {
+    let rc = Rc::new(RefCell::new(st));
+    obj.borrow_mut().native = Some(NativeData {
+        data: rc.clone() as Rc<dyn std::any::Any>,
+        handlers: &ENGINE_HANDLERS,
+    });
+    rc
+}
+
+/// The state of a native engine object, allocated on first use (as
+/// php_random_engine_common_init does when the object is created). None for
+/// user engines.
+fn engine_state(obj: &Rc<RefCell<PhpObject>>) -> Option<StateRc> {
+    if let Some(n) = obj.borrow().native.as_ref() {
+        if let Ok(rc) = n.data.clone().downcast::<RefCell<EngineState>>() {
+            return Some(rc);
+        }
+    }
+    let st = new_engine_state(&class_lower(obj))?;
+    Some(attach_engine_state(obj, st))
+}
+
+/// php_random_engine_common_clone_object: the clone gets a copy of the state.
+fn engine_clone(_vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, dst: &Rc<RefCell<PhpObject>>) {
+    if let Some(rc) = engine_state(src) {
+        let st = rc.borrow().clone();
+        attach_engine_state(dst, st);
+    }
+}
+
+/// The engines are @strict-properties classes without properties.
+fn no_dynamic_property(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    name: &[u8],
+    _value: &Value,
+) -> bool {
+    let msg = format!(
+        "Cannot create dynamic property {}::${}",
+        class_display(obj),
+        String::from_utf8_lossy(name)
+    );
+    throw(vm, b"Error", &msg);
+    true
+}
+
+fn randomizer_engine_initialized(obj: &Rc<RefCell<PhpObject>>) -> bool {
     let o = obj.borrow();
-    let mut st = Mt19937State::new();
-    if let Value::Array(arr) = o.get_property(PROP_MT_STATE) {
-        let arr_b = arr.borrow();
-        for (k, v) in arr_b.iter() {
-            if let ArrayKey::Int(i) = k {
-                if (*i as usize) < MT_N {
-                    st.state[*i as usize] = v.to_long() as u32;
+    o.has_property(b"engine") && !matches!(o.get_property(b"engine"), Value::Undef)
+}
+
+fn scope_suffix(vm: &Vm) -> Option<String> {
+    match vm.current_class_scope() {
+        Some(s) if s.eq_ignore_ascii_case(RANDOMIZER) => None,
+        Some(s) => Some(format!(
+            " from scope {}",
+            crate::value::display_class_name(&s)
+        )),
+        None => Some(" from global scope".to_string()),
+    }
+}
+
+/// `public readonly Engine $engine` on a @strict-properties class.
+fn randomizer_write_property(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    name: &[u8],
+    value: &Value,
+) -> bool {
+    if name != b"engine" {
+        return no_dynamic_property(vm, obj, name, value);
+    }
+    let msg = if randomizer_engine_initialized(obj) {
+        "Cannot modify readonly property Random\\Randomizer::$engine".to_string()
+    } else {
+        match scope_suffix(vm) {
+            Some(s) => {
+                format!("Cannot initialize readonly property Random\\Randomizer::$engine{s}")
+            }
+            // Initialization from inside the class: default handling.
+            None => return false,
+        }
+    };
+    throw(vm, b"Error", &msg);
+    true
+}
+
+fn randomizer_unset_property(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+    if name != b"engine" {
+        return false;
+    }
+    let msg = if randomizer_engine_initialized(obj) {
+        "Cannot unset readonly property Random\\Randomizer::$engine".to_string()
+    } else {
+        match scope_suffix(vm) {
+            Some(s) => format!("Cannot unset readonly property Random\\Randomizer::$engine{s}"),
+            None => return false,
+        }
+    };
+    throw(vm, b"Error", &msg);
+    true
+}
+
+fn attach_randomizer(obj: &Rc<RefCell<PhpObject>>) {
+    if obj.borrow().native.is_none() {
+        obj.borrow_mut().native = Some(NativeData {
+            data: Rc::new(()) as Rc<dyn std::any::Any>,
+            handlers: &RANDOMIZER_HANDLERS,
+        });
+    }
+}
+
+// ===== php_random_algo_with_state =====
+
+/// An engine as used by the Randomizer and the legacy functions: a native
+/// state, or a user object whose generate() method is called.
+#[derive(Clone)]
+pub enum Engine {
+    Native(StateRc),
+    User(Value),
+}
+
+/// php_random_result
+#[derive(Clone, Copy)]
+pub struct RandResult {
+    pub size: usize,
+    pub result: u64,
+}
+
+impl Engine {
+    /// The engine behind an engine object (randomizer_common_init).
+    pub fn from_value(v: &Value) -> Option<Engine> {
+        let Value::Object(o) = v else {
+            return None;
+        };
+        Some(match engine_state(o) {
+            Some(rc) => Engine::Native(rc),
+            None => Engine::User(v.clone()),
+        })
+    }
+
+    /// A native Mt19937 engine in MT_RAND_PHP mode.
+    fn is_mt_php_mode(&self) -> bool {
+        match self {
+            Engine::Native(rc) => matches!(&*rc.borrow(), EngineState::Mt(m) if m.mode != 0),
+            Engine::User(_) => false,
+        }
+    }
+}
+
+/// algo->generate()
+pub fn generate(vm: &mut Vm, e: &Engine) -> RandResult {
+    match e {
+        Engine::Native(rc) => match &mut *rc.borrow_mut() {
+            EngineState::Mt(m) => RandResult {
+                size: 4,
+                result: m.generate_u32() as u64,
+            },
+            EngineState::Pcg(p) => RandResult {
+                size: 8,
+                result: p.generate_u64(),
+            },
+            EngineState::Xoshiro(x) => RandResult {
+                size: 8,
+                result: x.generate_u64(),
+            },
+            EngineState::Secure => {
+                let mut b = [0u8; 8];
+                os_random_bytes(&mut b);
+                RandResult {
+                    size: 8,
+                    result: u64::from_le_bytes(b),
                 }
+            }
+        },
+        Engine::User(obj) => {
+            // engine_user.c
+            let fail = RandResult { size: 8, result: 0 };
+            // zend_call_known_instance_method: an "[internal function]" frame.
+            let r = vm.spl_call_method_at(obj, b"generate", &[], true);
+            if failed(vm) {
+                return fail;
+            }
+            let s = match r {
+                Some(v) => v.deref().to_php_string(),
+                None => PhpString::empty(),
+            };
+            let bytes = s.as_bytes();
+            if bytes.is_empty() {
+                throw(
+                    vm,
+                    b"Random\\BrokenRandomEngineError",
+                    "A random engine must return a non-empty string",
+                );
+                return fail;
+            }
+            let size = bytes.len().min(8);
+            let mut result = 0u64;
+            for (i, b) in bytes[..size].iter().enumerate() {
+                result |= (*b as u64) << (8 * i);
+            }
+            RandResult { size, result }
+        }
+    }
+}
+
+fn gen_u32(vm: &mut Vm, e: &Engine) -> Option<u32> {
+    let mut result: u32 = 0;
+    let mut total = 0usize;
+    loop {
+        let r = generate(vm, e);
+        result |= (r.result as u32) << (total * 8);
+        total += r.size;
+        if failed(vm) {
+            return None;
+        }
+        if total >= 4 {
+            return Some(result);
+        }
+    }
+}
+
+fn gen_u64(vm: &mut Vm, e: &Engine) -> Option<u64> {
+    let mut result: u64 = 0;
+    let mut total = 0usize;
+    loop {
+        let r = generate(vm, e);
+        result |= r.result << (total * 8);
+        total += r.size;
+        if failed(vm) {
+            return None;
+        }
+        if total >= 8 {
+            return Some(result);
+        }
+    }
+}
+
+/// php_random_range32()
+pub fn range32(vm: &mut Vm, e: &Engine, umax: u32) -> u32 {
+    let Some(mut result) = gen_u32(vm, e) else {
+        return 0;
+    };
+    if umax == u32::MAX {
+        return result;
+    }
+    let umax = umax + 1;
+    if umax & (umax - 1) == 0 {
+        return result & (umax - 1);
+    }
+    let limit = u32::MAX - (u32::MAX % umax) - 1;
+    let mut count = 0;
+    while result > limit {
+        count += 1;
+        if count > RANGE_ATTEMPTS {
+            throw_range_attempts(vm);
+            return 0;
+        }
+        match gen_u32(vm, e) {
+            Some(r) => result = r,
+            None => return 0,
+        }
+    }
+    result % umax
+}
+
+/// php_random_range64()
+pub fn range64(vm: &mut Vm, e: &Engine, umax: u64) -> u64 {
+    let Some(mut result) = gen_u64(vm, e) else {
+        return 0;
+    };
+    if umax == u64::MAX {
+        return result;
+    }
+    let umax = umax + 1;
+    if umax & (umax - 1) == 0 {
+        return result & (umax - 1);
+    }
+    let limit = u64::MAX - (u64::MAX % umax) - 1;
+    let mut count = 0;
+    while result > limit {
+        count += 1;
+        if count > RANGE_ATTEMPTS {
+            throw_range_attempts(vm);
+            return 0;
+        }
+        match gen_u64(vm, e) {
+            Some(r) => result = r,
+            None => return 0,
+        }
+    }
+    result % umax
+}
+
+/// php_random_range(): a value in [min, max].
+pub fn range(vm: &mut Vm, e: &Engine, min: i64, max: i64) -> i64 {
+    let umax = (max as u64).wrapping_sub(min as u64);
+    if umax > u32::MAX as u64 {
+        return range64(vm, e, umax).wrapping_add(min as u64) as i64;
+    }
+    (range32(vm, e, umax as u32) as u64).wrapping_add(min as u64) as i64
+}
+
+/// The RAND_RANGE_BADSCALING scaling of MT_RAND_PHP mode.
+fn bad_scaling(r: u64, min: i64, max: i64) -> i64 {
+    let offset = ((max as f64 - min as f64 + 1.0) * (r as f64 / (MT_RAND_MAX as f64 + 1.0))) as u64;
+    offset.wrapping_add(min as u64) as i64
+}
+
+// ===== Legacy global state (RANDOM_G) =====
+
+thread_local! {
+    static DEFAULT_MT: StateRc = Rc::new(RefCell::new(EngineState::Mt(Mt19937State::new())));
+    static MT_SEEDED: Cell<bool> = const { Cell::new(false) };
+    static LCG_STATE: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+}
+
+fn with_default_mt<R>(f: impl FnOnce(&mut Mt19937State) -> R) -> R {
+    DEFAULT_MT.with(|rc| match &mut *rc.borrow_mut() {
+        EngineState::Mt(m) => f(m),
+        _ => unreachable!("the default engine is Mt19937"),
+    })
+}
+
+/// php_random_default_engine(): the global Mt19937, seeded on first use.
+pub fn default_engine() -> Engine {
+    if !MT_SEEDED.get() {
+        with_default_mt(|m| {
+            m.mode = 0;
+            m.seed32(os_random_seed() as u32);
+        });
+        MT_SEEDED.set(true);
+    }
+    Engine::Native(DEFAULT_MT.with(|rc| rc.clone()))
+}
+
+/// mt_srand() / srand(): `mode` other than MT_RAND_PHP selects MT_RAND_MT19937.
+/// The MT_RAND_PHP deprecation is the caller's.
+pub fn mt_srand(seed: Option<i64>, mode: i64) {
+    with_default_mt(|m| {
+        m.mode = if mode == 1 { 1 } else { 0 };
+        let seed = match seed {
+            Some(s) => s as u32,
+            None => os_random_seed() as u32,
+        };
+        m.seed32(seed);
+    });
+    MT_SEEDED.set(true);
+}
+
+/// php_mt_rand(): the next raw 32-bit output of the global Mt19937.
+pub fn mt_rand_u32() -> u32 {
+    default_engine();
+    with_default_mt(|m| m.generate_u32())
+}
+
+/// php_mt_rand_range()
+pub fn mt_rand_range(vm: &mut Vm, min: i64, max: i64) -> i64 {
+    let e = default_engine();
+    range(vm, &e, min, max)
+}
+
+/// php_mt_rand_common(): mt_rand()/rand() with a range.
+pub fn mt_rand_common(vm: &mut Vm, min: i64, max: i64) -> i64 {
+    let e = default_engine();
+    if !e.is_mt_php_mode() {
+        return range(vm, &e, min, max);
+    }
+    let r = (with_default_mt(|m| m.generate_u32()) >> 1) as u64;
+    bad_scaling(r, min, max)
+}
+
+/// php_combined_lcg(): lcg_value().
+pub fn combined_lcg() -> f64 {
+    fn modmult(a: i32, b: i32, c: i32, m: i32, s: i32) -> i32 {
+        let q = s / a;
+        let mut s = b
+            .wrapping_mul(s.wrapping_sub(a.wrapping_mul(q)))
+            .wrapping_sub(c.wrapping_mul(q));
+        if s < 0 {
+            s = s.wrapping_add(m);
+        }
+        s
+    }
+    let (s0, s1) = LCG_STATE.get().unwrap_or_else(|| {
+        let seed = os_random_seed();
+        (seed as u32 as i32, (seed >> 32) as u32 as i32)
+    });
+    let s0 = modmult(53668, 40014, 12211, 2147483563, s0);
+    let s1 = modmult(52774, 40692, 3791, 2147483399, s1);
+    LCG_STATE.set(Some((s0, s1)));
+    let mut z = s0.wrapping_sub(s1);
+    if z < 1 {
+        z = z.wrapping_add(2147483562);
+    }
+    (z as u64) as f64 * 4.656613e-10
+}
+
+/// php_random_bytes(): fill `out` from the OS CSPRNG.
+pub fn csprng_bytes(out: &mut [u8]) {
+    os_random_bytes(out);
+}
+
+/// php_random_int(): a CSPRNG value in [min, max] (min <= max).
+pub fn csprng_int(min: i64, max: i64) -> i64 {
+    if min == max {
+        return min;
+    }
+    let mut umax = (max as u64).wrapping_sub(min as u64);
+    let next = || {
+        let mut b = [0u8; 8];
+        os_random_bytes(&mut b);
+        u64::from_le_bytes(b)
+    };
+    let mut result = next();
+    if umax == u64::MAX {
+        return result as i64;
+    }
+    umax += 1;
+    if umax & (umax - 1) != 0 {
+        let limit = u64::MAX - (u64::MAX % umax) - 1;
+        while result > limit {
+            result = next();
+        }
+    }
+    (result % umax).wrapping_add(min as u64) as i64
+}
+
+// ===== Shuffling and picking (ext/standard helpers) =====
+
+/// php_array_data_shuffle() / php_binary_string_shuffle(): Fisher-Yates over
+/// `items`. Returns false when the engine failed (exception pending).
+pub fn shuffle_items<T>(vm: &mut Vm, e: &Engine, items: &mut [T]) -> bool {
+    let mut n_left = items.len() as i64;
+    if n_left <= 1 {
+        return true;
+    }
+    loop {
+        n_left -= 1;
+        if n_left == 0 {
+            return true;
+        }
+        let j = range(vm, e, 0, n_left);
+        if failed(vm) {
+            return false;
+        }
+        if j != n_left {
+            items.swap(n_left as usize, j as usize);
+        }
+    }
+}
+
+fn key_value(k: &ArrayKey) -> Value {
+    match k {
+        ArrayKey::Int(n) => Value::Long(*n),
+        ArrayKey::String(s) => Value::String(s.clone()),
+    }
+}
+
+/// php_array_pick_keys(): `num_req` keys of an array (in array order), a
+/// single key when `num_req` is 1. `fname` prefixes the argument errors.
+/// None when an exception is pending.
+pub fn pick_keys(
+    vm: &mut Vm,
+    e: &Engine,
+    keys: &[ArrayKey],
+    num_req: i64,
+    fname: &str,
+) -> Option<Value> {
+    let num_avail = keys.len() as i64;
+    if num_avail == 0 {
+        throw(
+            vm,
+            b"ValueError",
+            &format!("{}(): Argument #1 ($array) must not be empty", fname),
+        );
+        return None;
+    }
+    if num_req == 1 {
+        // The arrays have no holes: sampling a bucket always hits.
+        let r = range(vm, e, 0, num_avail - 1);
+        if failed(vm) {
+            return None;
+        }
+        return Some(key_value(&keys[r as usize]));
+    }
+    if num_req <= 0 || num_req > num_avail {
+        throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)",
+                fname
+            ),
+        );
+        return None;
+    }
+    let mut num_req = num_req;
+    let negative = num_req > (num_avail >> 1);
+    if negative {
+        num_req = num_avail - num_req;
+    }
+    let mut bitset = vec![false; num_avail as usize];
+    let mut i = num_req;
+    let mut failures = 0;
+    while i > 0 {
+        let r = range(vm, e, 0, num_avail - 1);
+        if failed(vm) {
+            return None;
+        }
+        let r = r as usize;
+        if bitset[r] {
+            failures += 1;
+            if failures > RANGE_ATTEMPTS {
+                throw_range_attempts(vm);
+                return None;
+            }
+        } else {
+            bitset[r] = true;
+            i -= 1;
+            failures = 0;
+        }
+    }
+    let mut out = PhpArray::new();
+    for (k, picked) in keys.iter().zip(bitset) {
+        if picked != negative {
+            out.push(key_value(k));
+        }
+    }
+    Some(Value::Array(Rc::new(RefCell::new(out))))
+}
+
+// ===== γ-section (gammasection.c) =====
+
+fn next_after(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if x == y {
+        return y;
+    }
+    if x == 0.0 {
+        let tiny = f64::from_bits(1);
+        return if y > 0.0 { tiny } else { -tiny };
+    }
+    let bits = x.to_bits();
+    if (y > x) == (x > 0.0) {
+        f64::from_bits(bits + 1)
+    } else {
+        f64::from_bits(bits - 1)
+    }
+}
+
+fn gamma_low(x: f64) -> f64 {
+    x - next_after(x, -f64::MAX)
+}
+
+fn gamma_high(x: f64) -> f64 {
+    next_after(x, f64::MAX) - x
+}
+
+fn gamma_max(x: f64, y: f64) -> f64 {
+    if x.abs() > y.abs() {
+        gamma_high(x)
+    } else {
+        gamma_low(y)
+    }
+}
+
+fn split_int64(v: u64) -> (f64, f64) {
+    ((v >> 2) as f64, (v & 0x3) as f64)
+}
+
+fn ceil_int(a: f64, b: f64, g: f64) -> u64 {
+    let s = b / g - a / g;
+    let e = if a.abs() <= b.abs() {
+        -a / g - (s - b / g)
+    } else {
+        b / g - (s + a / g)
+    };
+    let si = s.ceil();
+    if s != si {
+        si as u64
+    } else {
+        (si as u64).wrapping_add((e > 0.0) as u64)
+    }
+}
+
+fn from_max(max: f64, k: u64, g: f64) -> f64 {
+    let (k_hi, k_lo) = split_int64(k);
+    4.0 * (max * 0.25 - k_hi * g) - k_lo * g
+}
+
+fn from_min(min: f64, k: u64, g: f64) -> f64 {
+    let (k_hi, k_lo) = split_int64(k);
+    4.0 * (min * 0.25 + k_hi * g) + k_lo * g
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Boundary {
+    ClosedOpen,
+    ClosedClosed,
+    OpenClosed,
+    OpenOpen,
+}
+
+fn gammasection(vm: &mut Vm, e: &Engine, min: f64, max: f64, b: Boundary) -> f64 {
+    let g = gamma_max(min, max);
+    let hi = ceil_int(min, max, g);
+    let near_min = min.abs() <= max.abs();
+    match b {
+        Boundary::ClosedOpen => {
+            if max <= min || hi < 1 {
+                return f64::NAN;
+            }
+            let k = 1 + range64(vm, e, hi - 1);
+            if near_min {
+                if k == hi { min } else { from_max(max, k, g) }
+            } else {
+                from_min(min, k - 1, g)
+            }
+        }
+        Boundary::ClosedClosed => {
+            if max < min {
+                return f64::NAN;
+            }
+            let k = range64(vm, e, hi);
+            if near_min {
+                if k == hi { min } else { from_max(max, k, g) }
+            } else if k == hi {
+                max
+            } else {
+                from_min(min, k, g)
+            }
+        }
+        Boundary::OpenClosed => {
+            if max <= min || hi < 1 {
+                return f64::NAN;
+            }
+            let k = range64(vm, e, hi - 1);
+            if near_min {
+                from_max(max, k, g)
+            } else if k == hi - 1 {
+                max
+            } else {
+                from_min(min, k + 1, g)
+            }
+        }
+        Boundary::OpenOpen => {
+            if max <= min || hi < 2 {
+                return f64::NAN;
+            }
+            let k = 1 + range64(vm, e, hi - 2);
+            if near_min {
+                from_max(max, k, g)
+            } else {
+                from_min(min, k, g)
             }
         }
     }
-    if let Value::Long(c) = o.get_property(PROP_MT_COUNT) {
-        st.count = c as u32;
-    }
-    if let Value::Long(m) = o.get_property(PROP_MT_MODE) {
-        st.mode = m;
-    }
-    st
 }
 
-pub fn save_xoshiro_state(obj: &Rc<RefCell<PhpObject>>, state: &Xoshiro256State) {
-    let mut o = obj.borrow_mut();
-    let mut arr = PhpArray::new();
-    for (i, v) in state.s.iter().enumerate() {
-        arr.set(ArrayKey::Int(i as i64), Value::Long(u64_as_i64(*v)));
-    }
-    o.set_property(
-        PROP_XOSHIRO_S.to_vec(),
-        Value::Array(Rc::new(RefCell::new(arr))),
-    );
-}
-
-pub fn load_xoshiro_state(obj: &Rc<RefCell<PhpObject>>) -> Xoshiro256State {
-    let o = obj.borrow();
-    let mut st = Xoshiro256State::new();
-    if let Value::Array(arr) = o.get_property(PROP_XOSHIRO_S) {
-        let arr_b = arr.borrow();
-        for (k, v) in arr_b.iter() {
-            if let ArrayKey::Int(i) = k {
-                if (*i as usize) < 4 {
-                    st.s[*i as usize] = i64_as_u64(v.to_long());
-                }
-            }
-        }
-    }
-    st
-}
-
-pub fn save_pcg_state(obj: &Rc<RefCell<PhpObject>>, state: &PcgState) {
-    let mut o = obj.borrow_mut();
-    let hi = (state.state >> 64) as u64;
-    let lo = state.state as u64;
-    o.set_property(PROP_PCG_STATE_HI.to_vec(), Value::Long(u64_as_i64(hi)));
-    o.set_property(PROP_PCG_STATE_LO.to_vec(), Value::Long(u64_as_i64(lo)));
-}
-
-pub fn load_pcg_state(obj: &Rc<RefCell<PhpObject>>) -> PcgState {
-    let o = obj.borrow();
-    let hi = i64_as_u64(o.get_property(PROP_PCG_STATE_HI).to_long());
-    let lo = i64_as_u64(o.get_property(PROP_PCG_STATE_LO).to_long());
-    PcgState {
-        state: ((hi as u128) << 64) | (lo as u128),
-    }
-}
-
-// ===== Initialization (called from NewObject) =====
-
-pub fn init_engine(class_lower: &[u8], obj: &Rc<RefCell<PhpObject>>) {
-    match class_lower {
-        b"random\\engine\\mt19937" => {
-            let mut st = Mt19937State::new();
-            // Default seed: random.
-            let seed = (os_random_seed() & 0xffffffff) as u32;
-            st.seed32(seed);
-            save_mt_state(obj, &st);
-        }
-        b"random\\engine\\xoshiro256starstar" => {
-            let mut st = Xoshiro256State::new();
-            st.seed64(os_random_seed());
-            save_xoshiro_state(obj, &st);
-        }
-        b"random\\engine\\pcgoneseq128xslrr64" => {
-            let mut st = PcgState::new();
-            st.seed64(os_random_seed());
-            save_pcg_state(obj, &st);
-        }
-        b"random\\engine\\secure" => {
-            // Stateless
-        }
-        b"random\\randomizer" => {
-            // engine property set during construct.
-        }
-        _ => {}
-    }
-}
-
-// ===== Method dispatchers =====
+// ===== Method dispatch =====
 //
 // Methods that don't need args are dispatched via dispatch_random_method().
 // Methods that need args are dispatched via handle_random_docall().
 
 pub fn is_random_class(class_lower: &[u8]) -> bool {
-    matches!(
-        class_lower,
-        b"random\\engine\\mt19937"
-            | b"random\\engine\\xoshiro256starstar"
-            | b"random\\engine\\pcgoneseq128xslrr64"
-            | b"random\\engine\\secure"
-            | b"random\\randomizer"
-    )
+    matches!(class_lower, MT19937 | XOSHIRO | PCG | SECURE | RANDOMIZER)
 }
 
 pub fn is_random_engine_class(class_lower: &[u8]) -> bool {
-    matches!(
-        class_lower,
-        b"random\\engine\\mt19937"
-            | b"random\\engine\\xoshiro256starstar"
-            | b"random\\engine\\pcgoneseq128xslrr64"
-            | b"random\\engine\\secure"
-    )
+    matches!(class_lower, MT19937 | XOSHIRO | PCG | SECURE)
 }
 
 pub fn is_random_args_method(class_lower: &[u8], method: &[u8]) -> bool {
-    if !is_random_class(class_lower) {
-        return false;
-    }
     match class_lower {
-        b"random\\engine\\mt19937" => matches!(method, b"__construct" | b"__unserialize"),
-        b"random\\engine\\xoshiro256starstar" => matches!(
-            method,
-            b"__construct" | b"__unserialize" | b"jump" | b"jumplong"
-        ),
-        b"random\\engine\\pcgoneseq128xslrr64" => {
-            matches!(method, b"__construct" | b"__unserialize" | b"jump")
-        }
-        b"random\\engine\\secure" => matches!(method, b"__unserialize"),
-        b"random\\randomizer" => matches!(
+        MT19937 => matches!(method, b"__construct" | b"__unserialize"),
+        XOSHIRO => matches!(method, b"__construct" | b"__unserialize"),
+        PCG => matches!(method, b"__construct" | b"__unserialize" | b"jump"),
+        RANDOMIZER => matches!(
             method,
             b"__construct"
                 | b"__unserialize"
@@ -540,6 +1131,115 @@ pub fn is_random_args_method(class_lower: &[u8], method: &[u8]) -> bool {
     }
 }
 
+fn str_value(bytes: Vec<u8>) -> Value {
+    Value::String(PhpString::from_vec(bytes))
+}
+
+fn arr_value(arr: PhpArray) -> Value {
+    Value::Array(Rc::new(RefCell::new(arr)))
+}
+
+fn hex_value(s: String) -> Value {
+    Value::String(PhpString::from_string(s))
+}
+
+/// algo->serialize(): the engine state as hex strings (+ count/mode).
+fn serialize_state(st: &EngineState) -> Option<PhpArray> {
+    let mut a = PhpArray::new();
+    match st {
+        EngineState::Mt(m) => {
+            for v in m.state.iter() {
+                a.push(hex_value(u32_to_hex_le(*v)));
+            }
+            a.push(Value::Long(m.count as i64));
+            a.push(Value::Long(m.mode));
+        }
+        EngineState::Pcg(p) => {
+            a.push(hex_value(u64_to_hex_le((p.state >> 64) as u64)));
+            a.push(hex_value(u64_to_hex_le(p.state as u64)));
+        }
+        EngineState::Xoshiro(x) => {
+            for v in x.s.iter() {
+                a.push(hex_value(u64_to_hex_le(*v)));
+            }
+        }
+        EngineState::Secure => return None,
+    }
+    Some(a)
+}
+
+/// The hex string at `i` of a serialized state.
+fn state_hex(a: &PhpArray, i: i64) -> Option<Vec<u8>> {
+    match a.get_int(i).map(|v| v.deref()) {
+        Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+fn state_long(a: &PhpArray, i: i64) -> Option<i64> {
+    match a.get_int(i).map(|v| v.deref()) {
+        Some(Value::Long(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// algo->unserialize()
+fn unserialize_state(class_lower: &[u8], a: &PhpArray) -> Option<EngineState> {
+    match class_lower {
+        MT19937 => {
+            if a.len() != MT_N + 2 {
+                return None;
+            }
+            let mut m = Mt19937State::new();
+            for i in 0..MT_N {
+                m.state[i] = hex_to_u32_le(&state_hex(a, i as i64)?)?;
+            }
+            let count = state_long(a, MT_N as i64)?;
+            if !(0..=MT_N as i64).contains(&count) {
+                return None;
+            }
+            m.count = count as u32;
+            let mode = state_long(a, MT_N as i64 + 1)?;
+            if mode != 0 && mode != 1 {
+                return None;
+            }
+            m.mode = mode;
+            Some(EngineState::Mt(m))
+        }
+        PCG => {
+            if a.len() != 2 {
+                return None;
+            }
+            let hi = hex_to_u64_le(&state_hex(a, 0)?)?;
+            let lo = hex_to_u64_le(&state_hex(a, 1)?)?;
+            Some(EngineState::Pcg(PcgState {
+                state: ((hi as u128) << 64) | lo as u128,
+            }))
+        }
+        XOSHIRO => {
+            if a.len() != 4 {
+                return None;
+            }
+            let mut x = Xoshiro256State::new();
+            for i in 0..4 {
+                x.s[i] = hex_to_u64_le(&state_hex(a, i as i64)?)?;
+            }
+            Some(EngineState::Xoshiro(x))
+        }
+        _ => None,
+    }
+}
+
+/// The first member that object_properties_load() would reject as a
+/// dynamic property (the classes are @strict-properties).
+fn first_dynamic_property(members: &PhpArray, allowed: &[u8]) -> Option<String> {
+    members.iter().find_map(|(k, _)| match k {
+        ArrayKey::String(s) if s.as_bytes() == allowed => None,
+        ArrayKey::String(s) => Some(s.to_string_lossy()),
+        ArrayKey::Int(n) => Some(n.to_string()),
+    })
+}
+
 /// Dispatch no-arg methods (e.g. generate, nextInt, nextFloat, __serialize)
 pub fn dispatch_random_method(
     vm: &mut Vm,
@@ -547,140 +1247,118 @@ pub fn dispatch_random_method(
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
-    if !is_random_class(class_lower) {
+    if is_random_engine_class(class_lower) {
+        let st = engine_state(obj)?;
+        return match method {
+            b"generate" => {
+                let e = Engine::Native(st);
+                let r = generate(vm, &e);
+                let bytes: Vec<u8> = (0..r.size).map(|i| (r.result >> (i * 8)) as u8).collect();
+                Some(str_value(bytes))
+            }
+            b"__serialize" if class_lower != SECURE => {
+                let state = serialize_state(&st.borrow())?;
+                let mut out = PhpArray::new();
+                out.push(arr_value(PhpArray::new()));
+                out.push(arr_value(state));
+                Some(arr_value(out))
+            }
+            b"__debuginfo" if class_lower != SECURE => {
+                let state = serialize_state(&st.borrow())?;
+                let mut out = PhpArray::new();
+                out.set(
+                    ArrayKey::String(PhpString::from_bytes(b"__states")),
+                    arr_value(state),
+                );
+                Some(arr_value(out))
+            }
+            b"jump" if class_lower == XOSHIRO => {
+                if let EngineState::Xoshiro(x) = &mut *st.borrow_mut() {
+                    x.jump_short();
+                }
+                Some(Value::Null)
+            }
+            b"jumplong" if class_lower == XOSHIRO => {
+                if let EngineState::Xoshiro(x) = &mut *st.borrow_mut() {
+                    x.jump_long();
+                }
+                Some(Value::Null)
+            }
+            _ => None,
+        };
+    }
+    if class_lower != RANDOMIZER {
         return None;
     }
-
-    match (class_lower, method) {
-        // Engine: generate()
-        (b"random\\engine\\mt19937", b"generate") => {
-            let mut st = load_mt_state(obj);
-            let v = st.generate_u32();
-            save_mt_state(obj, &st);
-            Some(Value::String(PhpString::from_vec(v.to_le_bytes().to_vec())))
-        }
-        (b"random\\engine\\xoshiro256starstar", b"generate") => {
-            let mut st = load_xoshiro_state(obj);
-            let v = st.generate_u64();
-            save_xoshiro_state(obj, &st);
-            Some(Value::String(PhpString::from_vec(v.to_le_bytes().to_vec())))
-        }
-        (b"random\\engine\\pcgoneseq128xslrr64", b"generate") => {
-            let mut st = load_pcg_state(obj);
-            let v = st.generate_u64();
-            save_pcg_state(obj, &st);
-            Some(Value::String(PhpString::from_vec(v.to_le_bytes().to_vec())))
-        }
-        (b"random\\engine\\secure", b"generate") => {
-            let mut buf = [0u8; 8];
-            os_random_bytes(&mut buf);
-            Some(Value::String(PhpString::from_vec(buf.to_vec())))
-        }
-
-        // Mt19937 __serialize
-        (b"random\\engine\\mt19937", b"__serialize") => Some(serialize_mt19937(obj)),
-        (b"random\\engine\\xoshiro256starstar", b"__serialize") => Some(serialize_xoshiro(obj)),
-        (b"random\\engine\\pcgoneseq128xslrr64", b"__serialize") => Some(serialize_pcg(obj)),
-
-        // __debugInfo: returns array with __states key containing the state hex strings
-        (b"random\\engine\\mt19937", b"__debuginfo") => {
-            let st = load_mt_state(obj);
-            let mut result = PhpArray::new();
-            let mut state_arr = PhpArray::new();
-            for (i, v) in st.state.iter().enumerate() {
-                state_arr.set(
-                    ArrayKey::Int(i as i64),
-                    Value::String(PhpString::from_string(u32_to_hex_le(*v))),
-                );
+    match method {
+        b"nextint" => {
+            let e = randomizer_engine(vm, obj)?;
+            let r = generate(vm, &e);
+            if failed(vm) {
+                return Some(Value::Null);
             }
-            state_arr.set(ArrayKey::Int(MT_N as i64), Value::Long(st.count as i64));
-            state_arr.set(ArrayKey::Int(MT_N as i64 + 1), Value::Long(st.mode));
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"__states")),
-                Value::Array(Rc::new(RefCell::new(state_arr))),
-            );
-            Some(Value::Array(Rc::new(RefCell::new(result))))
+            Some(Value::Long((r.result >> 1) as i64))
         }
-        (b"random\\engine\\xoshiro256starstar", b"__debuginfo") => {
-            let st = load_xoshiro_state(obj);
-            let mut result = PhpArray::new();
-            let mut state_arr = PhpArray::new();
-            for (i, v) in st.s.iter().enumerate() {
-                state_arr.set(
-                    ArrayKey::Int(i as i64),
-                    Value::String(PhpString::from_string(u64_to_hex_le(*v))),
-                );
-            }
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"__states")),
-                Value::Array(Rc::new(RefCell::new(state_arr))),
-            );
-            Some(Value::Array(Rc::new(RefCell::new(result))))
+        b"nextfloat" => {
+            let e = randomizer_engine(vm, obj)?;
+            let Some(r) = gen_u64(vm, &e) else {
+                return Some(Value::Null);
+            };
+            let step = 1.0 / (1u64 << 53) as f64;
+            Some(Value::Double(step * (r >> 11) as f64))
         }
-        (b"random\\engine\\pcgoneseq128xslrr64", b"__debuginfo") => {
-            let st = load_pcg_state(obj);
-            let mut result = PhpArray::new();
-            let hi = (st.state >> 64) as u64;
-            let lo = st.state as u64;
-            let mut state_arr = PhpArray::new();
-            state_arr.set(
-                ArrayKey::Int(0),
-                Value::String(PhpString::from_string(u64_to_hex_le(hi))),
-            );
-            state_arr.set(
-                ArrayKey::Int(1),
-                Value::String(PhpString::from_string(u64_to_hex_le(lo))),
-            );
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"__states")),
-                Value::Array(Rc::new(RefCell::new(state_arr))),
-            );
-            Some(Value::Array(Rc::new(RefCell::new(result))))
-        }
-
-        // Xoshiro: jump / jumpLong (no args)
-        (b"random\\engine\\xoshiro256starstar", b"jump") => {
-            let mut st = load_xoshiro_state(obj);
-            st.jump_short();
-            save_xoshiro_state(obj, &st);
-            Some(Value::Null)
-        }
-        (b"random\\engine\\xoshiro256starstar", b"jumplong") => {
-            let mut st = load_xoshiro_state(obj);
-            st.jump_long();
-            save_xoshiro_state(obj, &st);
-            Some(Value::Null)
-        }
-
-        // Randomizer: nextInt(), nextFloat()
-        (b"random\\randomizer", b"nextint") => {
-            let val = randomizer_next_int(vm, obj);
-            Some(val)
-        }
-        (b"random\\randomizer", b"nextfloat") => {
-            let v = randomizer_next_float(vm, obj);
-            Some(Value::Double(v))
-        }
-        (b"random\\randomizer", b"__serialize") => {
-            // serialize: return ['engine' => engine] + properties
-            let o = obj.borrow();
-            let engine = o.get_property(b"engine");
-            drop(o);
-            let mut arr = PhpArray::new();
-            // PHP wraps as: [0 => properties_array, 1 => state]
-            // Simpler: return ['engine' => engine] (won't perfectly match PHP serialize format but enough for many tests)
-            // Use index 0 for properties, 1 reserved.
+        b"__serialize" => {
             let mut props = PhpArray::new();
-            props.set(ArrayKey::String(PhpString::from_bytes(b"engine")), engine);
-            arr.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(props))));
-            Some(Value::Array(Rc::new(RefCell::new(arr))))
+            if randomizer_engine_initialized(obj) {
+                let engine = obj.borrow().get_property(b"engine");
+                props.set(ArrayKey::String(PhpString::from_bytes(b"engine")), engine);
+            }
+            let mut out = PhpArray::new();
+            out.push(arr_value(props));
+            Some(arr_value(out))
         }
         _ => None,
     }
 }
 
+/// The Randomizer's engine (randomizer->engine).
+fn randomizer_engine(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Engine> {
+    let v = obj.borrow().get_property(b"engine");
+    let e = Engine::from_value(&v);
+    if e.is_none() {
+        throw(
+            vm,
+            b"Error",
+            "Typed property Random\\Randomizer::$engine must not be accessed before initialization",
+        );
+    }
+    e
+}
+
+fn is_engine_object(vm: &Vm, v: &Value) -> bool {
+    match v {
+        Value::Object(o) => {
+            is_random_engine_class(&class_lower(o)) || vm.obj_instanceof(v, b"random\\engine")
+        }
+        _ => false,
+    }
+}
+
+fn arg(args: &[Value], i: usize) -> Value {
+    args.get(i).map(|v| v.deref()).unwrap_or(Value::Undef)
+}
+
+fn arg_is_null(args: &[Value], i: usize) -> bool {
+    matches!(arg(args, i), Value::Null | Value::Undef)
+}
+
+fn le_word(b: &[u8], i: usize) -> u64 {
+    let mut w = [0u8; 8];
+    w.copy_from_slice(&b[i * 8..i * 8 + 8]);
+    u64::from_le_bytes(w)
+}
+
 /// Dispatch args methods. `args[0]` is `$this`, the rest are user args.
-#[allow(clippy::mutable_key_type)] // ArrayKey's interior mutability is only a hash cache
 pub fn handle_random_docall(
     vm: &mut Vm,
     class_lower: &[u8],
@@ -690,1328 +1368,487 @@ pub fn handle_random_docall(
     if !is_random_class(class_lower) {
         return None;
     }
-    let this = args.first()?;
-    let obj = match this {
+    let obj = match args.first()? {
         Value::Object(o) => o.clone(),
         _ => return None,
     };
+    let null = Some(Value::Null);
 
     match (class_lower, method) {
         // ---- Engine __construct ----
-        (b"random\\engine\\mt19937", b"__construct") => {
-            let mut st = Mt19937State::new();
-            // mode (arg #2)
-            let mode_arg = args.get(2);
-            let mode: i64 = match mode_arg {
-                Some(Value::Long(n)) => *n,
-                Some(v) if !matches!(v, Value::Null | Value::Undef) => v.to_long(),
-                _ => 0,
+        (MT19937, b"__construct") => {
+            let mode = if arg_is_null(args, 2) {
+                0
+            } else {
+                arg(args, 2).to_long()
             };
-            if mode != 0 && mode != 1 {
-                let exc = vm.create_exception(b"ValueError",
-                    "Random\\Engine\\Mt19937::__construct(): Argument #2 ($mode) must be either MT_RAND_MT19937 or MT_RAND_PHP",
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::Null);
-            }
-            if mode == 1 {
-                vm.emit_deprecated_at(
+            match mode {
+                0 => {}
+                1 => vm.emit_deprecated_at(
                     "The MT_RAND_PHP variant of Mt19937 is deprecated",
                     vm.current_line,
-                );
-            }
-            st.mode = mode;
-            // Seed (arg #1)
-            let seed_arg = args.get(1).cloned().unwrap_or(Value::Null);
-            let seed: u32 = match seed_arg {
-                Value::Null | Value::Undef => (os_random_seed() & 0xffffffff) as u32,
-                Value::Long(n) => n as u32,
-                v => v.to_long() as u32,
-            };
-            st.seed32(seed);
-            save_mt_state(&obj, &st);
-            Some(Value::Null)
-        }
-
-        (b"random\\engine\\xoshiro256starstar", b"__construct") => {
-            let mut st = Xoshiro256State::new();
-            let seed_arg = args.get(1).cloned().unwrap_or(Value::Null);
-            match seed_arg {
-                Value::Null | Value::Undef => {
-                    st.seed64(os_random_seed());
-                }
-                Value::Long(n) => {
-                    st.seed64(n as u64);
-                }
-                Value::String(s) => {
-                    let bytes = s.as_bytes();
-                    if bytes.len() != 32 {
-                        let exc = vm.create_exception(b"ValueError",
-                            "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be a 32 byte (256 bit) string",
-                            vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Some(Value::Null);
-                    }
-                    let mut s0 = [0u8; 8];
-                    let mut s1 = [0u8; 8];
-                    let mut s2 = [0u8; 8];
-                    let mut s3 = [0u8; 8];
-                    s0.copy_from_slice(&bytes[0..8]);
-                    s1.copy_from_slice(&bytes[8..16]);
-                    s2.copy_from_slice(&bytes[16..24]);
-                    s3.copy_from_slice(&bytes[24..32]);
-                    st.seed256(
-                        u64::from_le_bytes(s0),
-                        u64::from_le_bytes(s1),
-                        u64::from_le_bytes(s2),
-                        u64::from_le_bytes(s3),
+                ),
+                _ => {
+                    throw(
+                        vm,
+                        b"ValueError",
+                        "Random\\Engine\\Mt19937::__construct(): Argument #2 ($mode) must be either MT_RAND_MT19937 or MT_RAND_PHP",
                     );
-                    if st.s == [0, 0, 0, 0] {
-                        let exc = vm.create_exception(b"ValueError",
-                            "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must not consist entirely of NUL bytes",
-                            vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Some(Value::Null);
-                    }
-                }
-                v => {
-                    let tn = Vm::value_type_name(&v);
-                    let exc = vm.create_exception(b"TypeError",
-                        &format!("Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be of type string|int|null, {} given", tn),
-                        vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
+                    return null;
                 }
             }
-            save_xoshiro_state(&obj, &st);
-            Some(Value::Null)
+            let seed = if arg_is_null(args, 1) {
+                os_random_seed() as u32
+            } else {
+                arg(args, 1).to_long() as u32
+            };
+            let mut m = Mt19937State::new();
+            m.mode = mode;
+            m.seed32(seed);
+            *engine_state(&obj)?.borrow_mut() = EngineState::Mt(m);
+            null
         }
 
-        (b"random\\engine\\pcgoneseq128xslrr64", b"__construct") => {
-            let mut st = PcgState::new();
-            let seed_arg = args.get(1).cloned().unwrap_or(Value::Null);
-            match seed_arg {
-                Value::Null | Value::Undef => {
-                    st.seed64(os_random_seed());
-                }
-                Value::Long(n) => {
-                    st.seed64(n as u64);
-                }
+        (XOSHIRO, b"__construct") => {
+            let mut x = Xoshiro256State::new();
+            match arg(args, 1) {
+                Value::Null | Value::Undef => x.seed64(os_random_seed()),
+                Value::Long(n) => x.seed64(n as u64),
                 Value::String(s) => {
-                    let bytes = s.as_bytes();
-                    if bytes.len() != 16 {
-                        let exc = vm.create_exception(b"ValueError",
-                            "Random\\Engine\\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be a 16 byte (128 bit) string",
-                            vm.current_line);
-                        vm.current_exception = Some(exc);
-                        return Some(Value::Null);
+                    let b = s.as_bytes();
+                    if b.len() != 32 {
+                        throw(
+                            vm,
+                            b"ValueError",
+                            "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be a 32 byte (256 bit) string",
+                        );
+                        return null;
                     }
-                    let mut hi_b = [0u8; 8];
-                    let mut lo_b = [0u8; 8];
-                    hi_b.copy_from_slice(&bytes[0..8]);
-                    lo_b.copy_from_slice(&bytes[8..16]);
-                    let hi = u64::from_le_bytes(hi_b);
-                    let lo = u64::from_le_bytes(lo_b);
-                    st.seed128(hi, lo);
+                    x.seed256(le_word(b, 0), le_word(b, 1), le_word(b, 2), le_word(b, 3));
+                    if x.s == [0, 0, 0, 0] {
+                        throw(
+                            vm,
+                            b"ValueError",
+                            "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must not consist entirely of NUL bytes",
+                        );
+                        return null;
+                    }
                 }
                 v => {
-                    let tn = Vm::value_type_name(&v);
-                    let exc = vm.create_exception(b"TypeError",
-                        &format!("Random\\Engine\\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be of type string|int|null, {} given", tn),
-                        vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
+                    let msg = format!(
+                        "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be of type string|int|null, {} given",
+                        Vm::value_type_name(&v)
+                    );
+                    throw(vm, b"TypeError", &msg);
+                    return null;
                 }
             }
-            save_pcg_state(&obj, &st);
-            Some(Value::Null)
+            *engine_state(&obj)?.borrow_mut() = EngineState::Xoshiro(x);
+            null
+        }
+
+        (PCG, b"__construct") => {
+            let mut p = PcgState::new();
+            match arg(args, 1) {
+                Value::Null | Value::Undef => p.seed128(os_random_seed(), os_random_seed()),
+                Value::Long(n) => p.seed64(n as u64),
+                Value::String(s) => {
+                    let b = s.as_bytes();
+                    if b.len() != 16 {
+                        throw(
+                            vm,
+                            b"ValueError",
+                            "Random\\Engine\\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be a 16 byte (128 bit) string",
+                        );
+                        return null;
+                    }
+                    p.seed128(le_word(b, 0), le_word(b, 1));
+                }
+                v => {
+                    let msg = format!(
+                        "Random\\Engine\\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be of type string|int|null, {} given",
+                        Vm::value_type_name(&v)
+                    );
+                    throw(vm, b"TypeError", &msg);
+                    return null;
+                }
+            }
+            *engine_state(&obj)?.borrow_mut() = EngineState::Pcg(p);
+            null
+        }
+
+        (PCG, b"jump") => {
+            let advance = arg(args, 1).to_long();
+            if advance < 0 {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Engine\\PcgOneseq128XslRr64::jump(): Argument #1 ($advance) must be greater than or equal to 0",
+                );
+                return null;
+            }
+            if let EngineState::Pcg(p) = &mut *engine_state(&obj)?.borrow_mut() {
+                p.advance(advance as u64);
+            }
+            null
         }
 
         // ---- Engine __unserialize ----
-        (b"random\\engine\\mt19937", b"__unserialize") => {
-            let data = args.get(1)?;
-            let class_name = "Random\\Engine\\Mt19937";
-            if let Value::Array(arr) = data {
-                let arr_b = arr.borrow();
-                if arr_b.len() != 2 {
-                    throw_invalid_serialization(vm, class_name);
-                    return Some(Value::Null);
-                }
-                // index 1 contains state array of 626 hex strings + 2 ints
-                let state_arr = arr_b.get(&ArrayKey::Int(1));
-                if let Some(Value::Array(state)) = state_arr {
-                    let state_b = state.borrow();
-                    if state_b.len() != MT_N + 2 {
-                        throw_invalid_serialization(vm, class_name);
-                        return Some(Value::Null);
-                    }
-                    let mut st = Mt19937State::new();
-                    for i in 0..MT_N {
-                        let entry = state_b.get(&ArrayKey::Int(i as i64));
-                        match entry {
-                            Some(Value::String(s)) => {
-                                let s_str = s.to_string_lossy();
-                                match hex_to_u32_le(&s_str) {
-                                    Some(v) => st.state[i] = v,
-                                    None => {
-                                        throw_invalid_serialization(vm, class_name);
-                                        return Some(Value::Null);
-                                    }
-                                }
-                            }
-                            _ => {
-                                throw_invalid_serialization(vm, class_name);
-                                return Some(Value::Null);
-                            }
-                        }
-                    }
-                    let count = state_b
-                        .get(&ArrayKey::Int(MT_N as i64))
-                        .map(|v| v.to_long())
-                        .unwrap_or(-1);
-                    let mode = state_b
-                        .get(&ArrayKey::Int(MT_N as i64 + 1))
-                        .map(|v| v.to_long())
-                        .unwrap_or(-1);
-                    if count < 0 || count as usize > MT_N || (mode != 0 && mode != 1) {
-                        throw_invalid_serialization(vm, class_name);
-                        return Some(Value::Null);
-                    }
-                    st.count = count as u32;
-                    st.mode = mode;
-                    save_mt_state(&obj, &st);
-                    return Some(Value::Null);
-                }
-                throw_invalid_serialization(vm, class_name);
-                return Some(Value::Null);
-            }
-            throw_invalid_serialization(vm, class_name);
-            Some(Value::Null)
-        }
-
-        (b"random\\engine\\xoshiro256starstar", b"__unserialize") => {
-            let data = args.get(1)?;
-            let class_name = "Random\\Engine\\Xoshiro256StarStar";
-            if let Value::Array(arr) = data {
-                let arr_b = arr.borrow();
-                if arr_b.len() != 2 {
-                    throw_invalid_serialization(vm, class_name);
-                    return Some(Value::Null);
-                }
-                let state_arr = arr_b.get(&ArrayKey::Int(1));
-                if let Some(Value::Array(state)) = state_arr {
-                    let state_b = state.borrow();
-                    if state_b.len() != 4 {
-                        throw_invalid_serialization(vm, class_name);
-                        return Some(Value::Null);
-                    }
-                    let mut st = Xoshiro256State::new();
-                    for i in 0..4 {
-                        let entry = state_b.get(&ArrayKey::Int(i));
-                        match entry {
-                            Some(Value::String(s)) => {
-                                let s_str = s.to_string_lossy();
-                                match hex_to_u64_le(&s_str) {
-                                    Some(v) => st.s[i as usize] = v,
-                                    None => {
-                                        throw_invalid_serialization(vm, class_name);
-                                        return Some(Value::Null);
-                                    }
-                                }
-                            }
-                            _ => {
-                                throw_invalid_serialization(vm, class_name);
-                                return Some(Value::Null);
-                            }
-                        }
-                    }
-                    save_xoshiro_state(&obj, &st);
-                    return Some(Value::Null);
-                }
-            }
-            throw_invalid_serialization(vm, class_name);
-            Some(Value::Null)
-        }
-
-        (b"random\\engine\\pcgoneseq128xslrr64", b"__unserialize") => {
-            let data = args.get(1)?;
-            let class_name = "Random\\Engine\\PcgOneseq128XslRr64";
-            if let Value::Array(arr) = data {
-                let arr_b = arr.borrow();
-                if arr_b.len() != 2 {
-                    throw_invalid_serialization(vm, class_name);
-                    return Some(Value::Null);
-                }
-                let state_arr = arr_b.get(&ArrayKey::Int(1));
-                if let Some(Value::Array(state)) = state_arr {
-                    let state_b = state.borrow();
-                    if state_b.len() != 2 {
-                        throw_invalid_serialization(vm, class_name);
-                        return Some(Value::Null);
-                    }
-                    let hi = match state_b.get(&ArrayKey::Int(0)) {
-                        Some(Value::String(s)) => match hex_to_u64_le(&s.to_string_lossy()) {
-                            Some(v) => v,
-                            None => {
-                                throw_invalid_serialization(vm, class_name);
-                                return Some(Value::Null);
-                            }
-                        },
-                        _ => {
-                            throw_invalid_serialization(vm, class_name);
-                            return Some(Value::Null);
-                        }
-                    };
-                    let lo = match state_b.get(&ArrayKey::Int(1)) {
-                        Some(Value::String(s)) => match hex_to_u64_le(&s.to_string_lossy()) {
-                            Some(v) => v,
-                            None => {
-                                throw_invalid_serialization(vm, class_name);
-                                return Some(Value::Null);
-                            }
-                        },
-                        _ => {
-                            throw_invalid_serialization(vm, class_name);
-                            return Some(Value::Null);
-                        }
-                    };
-                    let st = PcgState {
-                        state: ((hi as u128) << 64) | (lo as u128),
-                    };
-                    save_pcg_state(&obj, &st);
-                    return Some(Value::Null);
-                }
-            }
-            throw_invalid_serialization(vm, class_name);
-            Some(Value::Null)
-        }
-
-        // ---- Xoshiro::jump(steps) / Pcg::jump(steps) ----
-        // Note: jump() takes no args in Xoshiro256StarStar - it's in dispatch_random_method.
-        (b"random\\engine\\pcgoneseq128xslrr64", b"jump") => {
-            let advance = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-            if advance < 0 {
-                let exc = vm.create_exception(b"ValueError",
-                    "Random\\Engine\\PcgOneseq128XslRr64::jump(): Argument #1 ($advance) must be greater than or equal to 0",
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::Null);
-            }
-            let mut st = load_pcg_state(&obj);
-            st.advance(advance as u64);
-            save_pcg_state(&obj, &st);
-            Some(Value::Null)
-        }
-
-        // ---- Randomizer __construct ----
-        (b"random\\randomizer", b"__construct") => {
-            let engine_arg = args.get(1).cloned().unwrap_or(Value::Null);
-            let engine_val = match engine_arg {
-                Value::Null | Value::Undef => {
-                    // Default: Secure
-                    create_default_secure_engine(vm)
-                }
-                Value::Object(_) => engine_arg,
-                _ => {
-                    let exc = vm.create_exception(b"TypeError",
-                        "Random\\Randomizer::__construct(): Argument #1 ($engine) must be of type ?Random\\Engine, given",
-                        vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Null);
-                }
+        (MT19937 | XOSHIRO | PCG, b"__unserialize") => {
+            let cname = class_display(&obj);
+            let Value::Array(data) = arg(args, 1) else {
+                throw_invalid_serialization(vm, &cname);
+                return null;
             };
-            let mut o = obj.borrow_mut();
-            o.set_property(b"engine".to_vec(), engine_val);
-            Some(Value::Null)
-        }
-
-        (b"random\\randomizer", b"__unserialize") => {
-            let data = args.get(1)?;
-            let class_name = "Random\\Randomizer";
-            // PHP enforces that __unserialize must not bypass readonly. Since
-            // we don't have full readonly enforcement, we accept the data.
-            if let Value::Array(arr) = data {
-                let arr_b = arr.borrow();
-                // Look for index 0 properties
-                if let Some(Value::Array(props)) = arr_b.get(&ArrayKey::Int(0)) {
-                    let props_b = props.borrow();
-                    for (k, v) in props_b.iter() {
-                        if let ArrayKey::String(s) = k {
-                            let mut o = obj.borrow_mut();
-                            o.set_property(s.as_bytes().to_vec(), v.clone());
-                        }
-                    }
-                    return Some(Value::Null);
-                }
+            let data = data.borrow();
+            if data.len() != 2 {
+                throw_invalid_serialization(vm, &cname);
+                return null;
             }
-            throw_invalid_serialization(vm, class_name);
-            Some(Value::Null)
-        }
-
-        // ---- Randomizer methods with args ----
-        (b"random\\randomizer", b"getint") => {
-            let min = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-            let max = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-            if min > max {
-                let exc = vm.create_exception(b"ValueError",
-                    "Random\\Randomizer::getInt(): Argument #1 ($min) must be less than or equal to argument #2 ($max)",
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::Long(0));
-            }
-            let val = randomizer_range(vm, &obj, min, max);
-            Some(Value::Long(val))
-        }
-
-        (b"random\\randomizer", b"getbytes") => {
-            let len = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-            if len < 1 {
-                let exc = vm.create_exception(
-                    b"ValueError",
-                    "Random\\Randomizer::getBytes(): Argument #1 ($length) must be greater than 0",
-                    vm.current_line,
-                );
-                vm.current_exception = Some(exc);
-                return Some(Value::String(PhpString::empty()));
-            }
-            let bytes = randomizer_get_bytes(vm, &obj, len as usize);
-            Some(Value::String(PhpString::from_vec(bytes)))
-        }
-
-        (b"random\\randomizer", b"getbytesfromstring") => {
-            let src = match args.get(1) {
-                Some(Value::String(s)) => s.as_bytes().to_vec(),
-                Some(v) => v.to_php_string().as_bytes().to_vec(),
-                None => Vec::new(),
+            let Some(Value::Array(members)) = data.get_int(0).map(|v| v.deref()) else {
+                throw_invalid_serialization(vm, &cname);
+                return null;
             };
-            let len = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-            if src.is_empty() {
-                let exc = vm.create_exception(b"ValueError",
-                    "Random\\Randomizer::getBytesFromString(): Argument #1 ($string) must not be empty",
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::String(PhpString::empty()));
+            let bad = first_dynamic_property(&members.borrow(), b"");
+            if let Some(name) = bad {
+                let msg = format!("Cannot create dynamic property {}::${}", cname, name);
+                throw(vm, b"Error", &msg);
+                throw_invalid_serialization(vm, &cname);
+                return null;
             }
-            if len < 1 {
-                let exc = vm.create_exception(b"ValueError",
-                    "Random\\Randomizer::getBytesFromString(): Argument #2 ($length) must be greater than 0",
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::String(PhpString::empty()));
+            let st = match data.get_int(1).map(|v| v.deref()) {
+                Some(Value::Array(s)) => unserialize_state(class_lower, &s.borrow()),
+                _ => None,
+            };
+            match st {
+                Some(st) => *engine_state(&obj)?.borrow_mut() = st,
+                None => throw_invalid_serialization(vm, &cname),
             }
-            let mut out = Vec::with_capacity(len as usize);
-            let max_offset = src.len() - 1;
-            // Fast path: source <= 256 -> bitmask each generate output's bytes
-            if max_offset <= 0xff {
-                let mut mask = max_offset as u64;
-                mask |= mask >> 1;
-                mask |= mask >> 2;
-                mask |= mask >> 4;
-                mask = mask.wrapping_mul(0x0101010101010101);
-                let engine = obj.borrow().get_property(b"engine");
-                // For native engines, use a fast inline path that avoids load/save per call.
-                let native_class = native_engine_class(&engine);
-                if let Some(class) = native_class.as_ref() {
-                    if let Value::Object(eobj) = &engine {
-                        match class.as_slice() {
-                            b"random\\engine\\mt19937" => {
-                                let mut st = load_mt_state(eobj);
-                                while out.len() < len as usize {
-                                    let v = st.generate_u32();
-                                    let mut result = (v as u64) & mask;
-                                    for _ in 0..4 {
-                                        let offset = (result & 0xff) as usize;
-                                        result >>= 8;
-                                        if offset > max_offset {
-                                            continue;
-                                        }
-                                        out.push(src[offset]);
-                                        if out.len() >= len as usize {
-                                            break;
-                                        }
-                                    }
-                                }
-                                save_mt_state(eobj, &st);
-                            }
-                            b"random\\engine\\xoshiro256starstar" => {
-                                let mut st = load_xoshiro_state(eobj);
-                                while out.len() < len as usize {
-                                    let v = st.generate_u64();
-                                    let mut result = v & mask;
-                                    for _ in 0..8 {
-                                        let offset = (result & 0xff) as usize;
-                                        result >>= 8;
-                                        if offset > max_offset {
-                                            continue;
-                                        }
-                                        out.push(src[offset]);
-                                        if out.len() >= len as usize {
-                                            break;
-                                        }
-                                    }
-                                }
-                                save_xoshiro_state(eobj, &st);
-                            }
-                            b"random\\engine\\pcgoneseq128xslrr64" => {
-                                let mut st = load_pcg_state(eobj);
-                                while out.len() < len as usize {
-                                    let v = st.generate_u64();
-                                    let mut result = v & mask;
-                                    for _ in 0..8 {
-                                        let offset = (result & 0xff) as usize;
-                                        result >>= 8;
-                                        if offset > max_offset {
-                                            continue;
-                                        }
-                                        out.push(src[offset]);
-                                        if out.len() >= len as usize {
-                                            break;
-                                        }
-                                    }
-                                }
-                                save_pcg_state(eobj, &st);
-                            }
-                            _ => {
-                                while out.len() < len as usize {
-                                    let bytes = engine_generate_bytes(vm, &engine, 8);
-                                    if bytes.is_empty() {
-                                        break;
-                                    }
-                                    let mut buf = [0u8; 8];
-                                    let n = bytes.len().min(8);
-                                    buf[..n].copy_from_slice(&bytes[..n]);
-                                    let mut result = u64::from_le_bytes(buf) & mask;
-                                    for _ in 0..n {
-                                        let offset = (result & 0xff) as usize;
-                                        result >>= 8;
-                                        if offset > max_offset {
-                                            continue;
-                                        }
-                                        out.push(src[offset]);
-                                        if out.len() >= len as usize {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let mut consec_failures = 0;
-                    while out.len() < len as usize {
-                        let bytes = engine_generate_bytes(vm, &engine, 8);
-                        if vm.current_exception.is_some() {
-                            break;
-                        }
-                        if bytes.is_empty() {
-                            break;
-                        }
-                        let mut buf = [0u8; 8];
-                        let n = bytes.len().min(8);
-                        buf[..n].copy_from_slice(&bytes[..n]);
-                        let mut result = u64::from_le_bytes(buf) & mask;
-                        let prev_len = out.len();
-                        for _ in 0..n {
-                            let offset = (result & 0xff) as usize;
-                            result >>= 8;
-                            if offset > max_offset {
-                                continue;
-                            }
-                            out.push(src[offset]);
-                            if out.len() >= len as usize {
-                                break;
-                            }
-                        }
-                        if out.len() == prev_len {
-                            consec_failures += 1;
-                            if consec_failures > 50 {
-                                let exc = vm.create_exception(
-                                    b"Random\\BrokenRandomEngineError",
-                                    "Failed to generate an acceptable random number in 50 attempts",
-                                    vm.current_line,
-                                );
-                                vm.current_exception = Some(exc);
-                                break;
-                            }
-                        } else {
-                            consec_failures = 0;
-                        }
-                    }
-                }
+            null
+        }
+
+        // ---- Randomizer ----
+        (RANDOMIZER, b"__construct") => {
+            let engine = if arg_is_null(args, 1) {
+                let id = vm.alloc_object_id();
+                let o = PhpObject::new(b"Random\\Engine\\Secure".to_vec(), id);
+                Value::Object(Rc::new(RefCell::new(o)))
             } else {
-                // Slow path: source > 256 bytes - need range() per byte.
-                // For native engines, do bulk inline state ops to avoid load/save overhead.
-                let engine = obj.borrow().get_property(b"engine");
-                let native_class = native_engine_class(&engine);
-                let max_idx = max_offset as u64;
-                if let Some(class) = native_class.as_ref() {
-                    if let Value::Object(eobj) = &engine {
-                        // Compute umax
-                        let umax = max_idx;
-                        let umax_inc = umax.wrapping_add(1);
-                        let limit = if umax <= u32::MAX as u64 {
-                            (u32::MAX - (u32::MAX % umax_inc as u32) - 1) as u64
-                        } else {
-                            u64::MAX - (u64::MAX % umax_inc) - 1
-                        };
-                        let is_pow2 = umax_inc & umax == 0;
-                        let use_u32 = umax <= u32::MAX as u64;
-                        match class.as_slice() {
-                            b"random\\engine\\mt19937" => {
-                                let mut st = load_mt_state(eobj);
-                                while out.len() < len as usize {
-                                    // Need 32 bits per offset
-                                    let v = st.generate_u32() as u64;
-                                    if is_pow2 {
-                                        let r = v & umax;
-                                        out.push(src[r as usize]);
-                                    } else if use_u32 {
-                                        if (v as u32) <= limit as u32 {
-                                            let r = (v as u32) % umax_inc as u32;
-                                            out.push(src[r as usize]);
-                                        }
-                                    } else {
-                                        // 64-bit: fetch another word
-                                        let v2 = st.generate_u32() as u64;
-                                        let combined = (v2 << 32) | v;
-                                        if combined <= limit {
-                                            out.push(src[(combined % umax_inc) as usize]);
-                                        }
-                                    }
-                                }
-                                save_mt_state(eobj, &st);
-                            }
-                            b"random\\engine\\xoshiro256starstar" => {
-                                let mut st = load_xoshiro_state(eobj);
-                                while out.len() < len as usize {
-                                    let v = st.generate_u64();
-                                    if is_pow2 {
-                                        out.push(src[(v & umax) as usize]);
-                                    } else if use_u32 {
-                                        let v32 = v as u32;
-                                        if v32 <= limit as u32 {
-                                            out.push(src[(v32 % umax_inc as u32) as usize]);
-                                        }
-                                    } else if v <= limit {
-                                        out.push(src[(v % umax_inc) as usize]);
-                                    }
-                                }
-                                save_xoshiro_state(eobj, &st);
-                            }
-                            b"random\\engine\\pcgoneseq128xslrr64" => {
-                                let mut st = load_pcg_state(eobj);
-                                while out.len() < len as usize {
-                                    let v = st.generate_u64();
-                                    if is_pow2 {
-                                        out.push(src[(v & umax) as usize]);
-                                    } else if use_u32 {
-                                        let v32 = v as u32;
-                                        if v32 <= limit as u32 {
-                                            out.push(src[(v32 % umax_inc as u32) as usize]);
-                                        }
-                                    } else if v <= limit {
-                                        out.push(src[(v % umax_inc) as usize]);
-                                    }
-                                }
-                                save_pcg_state(eobj, &st);
-                            }
-                            _ => {
-                                let max_idx_i = max_offset as i64;
-                                for _ in 0..len {
-                                    let r = randomizer_range(vm, &obj, 0, max_idx_i);
-                                    if r >= 0 && (r as usize) < src.len() {
-                                        out.push(src[r as usize]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let max_idx_i = max_offset as i64;
-                    for _ in 0..len {
-                        let r = randomizer_range(vm, &obj, 0, max_idx_i);
-                        if r >= 0 && (r as usize) < src.len() {
-                            out.push(src[r as usize]);
-                        }
-                    }
+                let v = arg(args, 1);
+                if !is_engine_object(vm, &v) {
+                    let msg = format!(
+                        "Random\\Randomizer::__construct(): Argument #1 ($engine) must be of type ?Random\\Engine, {} given",
+                        Vm::value_type_name(&v)
+                    );
+                    throw(vm, b"TypeError", &msg);
+                    return null;
                 }
+                v
+            };
+            attach_randomizer(&obj);
+            if randomizer_engine_initialized(&obj) {
+                throw(
+                    vm,
+                    b"Error",
+                    "Cannot modify readonly property Random\\Randomizer::$engine",
+                );
+                return null;
             }
-            Some(Value::String(PhpString::from_vec(out)))
+            obj.borrow_mut().set_property(b"engine".to_vec(), engine);
+            null
         }
 
-        (b"random\\randomizer", b"getfloat") => {
-            let min = args.get(1).map(|v| v.to_double()).unwrap_or(0.0);
-            let max = args.get(2).map(|v| v.to_double()).unwrap_or(1.0);
-            // boundary: enum case object or int
-            // We accept default ClosedOpen.
-            let boundary = match args.get(3) {
-                Some(Value::Object(o)) => {
-                    let ob = o.borrow();
-                    let n = ob.get_property(b"name");
-                    n.to_php_string().to_string_lossy()
-                }
-                _ => "ClosedOpen".to_string(),
+        (RANDOMIZER, b"__unserialize") => {
+            let cname = "Random\\Randomizer";
+            attach_randomizer(&obj);
+            let Value::Array(data) = arg(args, 1) else {
+                throw_invalid_serialization(vm, cname);
+                return null;
             };
-            if !min.is_finite() {
-                let exc = vm.create_exception(
-                    b"ValueError",
-                    "Random\\Randomizer::getFloat(): Argument #1 ($min) must be finite",
-                    vm.current_line,
-                );
-                vm.current_exception = Some(exc);
-                return Some(Value::Double(0.0));
-            }
-            if !max.is_finite() {
-                let exc = vm.create_exception(
-                    b"ValueError",
-                    "Random\\Randomizer::getFloat(): Argument #2 ($max) must be finite",
-                    vm.current_line,
-                );
-                vm.current_exception = Some(exc);
-                return Some(Value::Double(0.0));
-            }
-            // Range check: ClosedClosed allows min == max, others require min < max
-            let allow_equal = boundary == "ClosedClosed";
-            if (allow_equal && min > max) || (!allow_equal && min >= max) {
-                let msg = if allow_equal {
-                    "Random\\Randomizer::getFloat(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)"
+            let members = {
+                let d = data.borrow();
+                match d.get_int(0).map(|v| v.deref()) {
+                    Some(Value::Array(m)) if d.len() == 1 => Some(m),
+                    _ => None,
+                }
+            };
+            let Some(members) = members else {
+                throw_invalid_serialization(vm, cname);
+                return null;
+            };
+            let entries: Vec<(ArrayKey, Value)> = members
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.deref()))
+                .collect();
+            for (k, v) in entries {
+                let is_engine = matches!(&k, ArrayKey::String(s) if s.as_bytes() == b"engine");
+                let msg = if !is_engine {
+                    let name = match &k {
+                        ArrayKey::String(s) => s.to_string_lossy(),
+                        ArrayKey::Int(n) => n.to_string(),
+                    };
+                    format!("Cannot create dynamic property {}::${}", cname, name)
+                } else if randomizer_engine_initialized(&obj) {
+                    "Cannot modify readonly property Random\\Randomizer::$engine".to_string()
                 } else {
-                    "Random\\Randomizer::getFloat(): Argument #2 ($max) must be greater than argument #1 ($min)"
+                    obj.borrow_mut().set_property(b"engine".to_vec(), v);
+                    continue;
                 };
-                let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::Double(0.0));
+                throw(vm, b"Error", &msg);
+                throw_invalid_serialization(vm, cname);
+                return null;
             }
-            let v = randomizer_get_float(vm, &obj, min, max, &boundary);
-            Some(Value::Double(v))
+            let engine = obj.borrow().get_property(b"engine");
+            if !is_engine_object(vm, &engine) {
+                throw_invalid_serialization(vm, cname);
+            }
+            null
         }
 
-        (b"random\\randomizer", b"shufflearray") => {
-            let arr_in = args.get(1).cloned().unwrap_or(Value::Null);
-            if let Value::Array(arr) = arr_in {
-                let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
-                let n = values.len();
-                if n > 1 {
-                    bulk_fisher_yates(vm, &obj, &mut values);
-                }
-                let mut out = PhpArray::new();
-                for v in values {
-                    out.push(v);
-                }
-                Some(Value::Array(Rc::new(RefCell::new(out))))
-            } else {
-                Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-            }
-        }
-
-        (b"random\\randomizer", b"shufflebytes") => {
-            let s = match args.get(1) {
-                Some(Value::String(s)) => s.as_bytes().to_vec(),
-                Some(v) => v.to_php_string().as_bytes().to_vec(),
-                None => Vec::new(),
-            };
-            let mut bytes = s;
-            let n = bytes.len();
-            if n > 1 {
-                bulk_fisher_yates(vm, &obj, &mut bytes);
-            }
-            Some(Value::String(PhpString::from_vec(bytes)))
-        }
-
-        (b"random\\randomizer", b"pickarraykeys") => {
-            let arr_in = args.get(1).cloned().unwrap_or(Value::Null);
-            let num = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-            if !matches!(arr_in, Value::Array(_)) {
-                let tn = Vm::value_type_name(&arr_in);
-                let exc = vm.create_exception(b"TypeError",
-                    &format!("Random\\Randomizer::pickArrayKeys(): Argument #1 ($array) must be of type array, {} given", tn),
-                    vm.current_line);
-                vm.current_exception = Some(exc);
-                return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-            }
-            if let Value::Array(arr) = arr_in {
-                let arr_b = arr.borrow();
-                let n = arr_b.len() as i64;
-                if n == 0 {
-                    let exc = vm.create_exception(b"ValueError",
-                        "Random\\Randomizer::pickArrayKeys(): Argument #1 ($array) must not be empty",
-                        vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                }
-                if num < 1 || num > n {
-                    let exc = vm.create_exception(b"ValueError",
-                        "Random\\Randomizer::pickArrayKeys(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)",
-                        vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                }
-                // Reservoir sampling? Simpler: collect all keys, shuffle, take first num.
-                let mut keys: Vec<ArrayKey> = arr_b.iter().map(|(k, _)| k.clone()).collect();
-                drop(arr_b);
-                if keys.len() > 1 {
-                    bulk_fisher_yates(vm, &obj, &mut keys);
-                }
-                // PHP returns keys in their original ascending positional order.
-                // Take first `num` (after shuffle), then re-sort by original index.
-                let original_order: Vec<ArrayKey> =
-                    arr.borrow().iter().map(|(k, _)| k.clone()).collect();
-                let mut selected: std::collections::HashSet<ArrayKey> =
-                    keys.into_iter().take(num as usize).collect();
-                let mut out = PhpArray::new();
-                for k in original_order.iter() {
-                    if selected.remove(k) {
-                        out.push(value_from_key(k));
-                    }
-                }
-                Some(Value::Array(Rc::new(RefCell::new(out))))
-            } else {
-                Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-            }
-        }
+        (RANDOMIZER, _) => randomizer_call(vm, &obj, method, args),
 
         _ => None,
     }
 }
 
-/// Fisher-Yates shuffle that uses native engine state inline when possible
-/// to avoid load/save overhead per swap.
-fn bulk_fisher_yates<T>(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, items: &mut [T]) {
-    let n = items.len();
-    if n < 2 {
-        return;
-    }
-    let engine = obj.borrow().get_property(b"engine");
-    let native_class = native_engine_class(&engine);
-
-    // Helper closure to compute a random index in [0, max] inclusive
-    // using a u64 from a generator function.
-    let pick_idx = |g: &mut dyn FnMut() -> u64, max: u64| -> u64 {
-        let umax_inc = max.wrapping_add(1);
-        if max == u64::MAX {
-            return g();
-        }
-        if umax_inc & max == 0 {
-            return g() & max;
-        }
-        let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
-        loop {
-            let r = g();
-            if r <= limit {
-                return r % umax_inc;
-            }
-        }
-    };
-
-    if let Some(class) = native_class.as_ref() {
-        if let Value::Object(eobj) = &engine {
-            match class.as_slice() {
-                b"random\\engine\\mt19937" => {
-                    let mut st = load_mt_state(eobj);
-                    for i in (1..n).rev() {
-                        let max = i as u64;
-                        let mut g = || {
-                            // Need 32 bits (range fits in u32)
-                            if max <= u32::MAX as u64 {
-                                st.generate_u32() as u64
-                            } else {
-                                let lo = st.generate_u32() as u64;
-                                let hi = st.generate_u32() as u64;
-                                (hi << 32) | lo
-                            }
-                        };
-                        let umax_inc = max.wrapping_add(1);
-                        let j = if umax_inc & max == 0 {
-                            g() & max
-                        } else if max <= u32::MAX as u64 {
-                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
-                            loop {
-                                let r = st.generate_u32();
-                                if r <= limit32 {
-                                    break (r % umax_inc as u32) as u64;
-                                }
-                            }
-                        } else {
-                            pick_idx(&mut g, max)
-                        };
-                        items.swap(i, j as usize);
-                    }
-                    save_mt_state(eobj, &st);
-                    return;
-                }
-                b"random\\engine\\xoshiro256starstar" => {
-                    let mut st = load_xoshiro_state(eobj);
-                    for i in (1..n).rev() {
-                        let max = i as u64;
-                        let umax_inc = max.wrapping_add(1);
-                        let j = if umax_inc & max == 0 {
-                            st.generate_u64() & max
-                        } else if max <= u32::MAX as u64 {
-                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
-                            loop {
-                                let r = st.generate_u64() as u32;
-                                if r <= limit32 {
-                                    break (r % umax_inc as u32) as u64;
-                                }
-                            }
-                        } else {
-                            let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
-                            loop {
-                                let r = st.generate_u64();
-                                if r <= limit {
-                                    break r % umax_inc;
-                                }
-                            }
-                        };
-                        items.swap(i, j as usize);
-                    }
-                    save_xoshiro_state(eobj, &st);
-                    return;
-                }
-                b"random\\engine\\pcgoneseq128xslrr64" => {
-                    let mut st = load_pcg_state(eobj);
-                    for i in (1..n).rev() {
-                        let max = i as u64;
-                        let umax_inc = max.wrapping_add(1);
-                        let j = if umax_inc & max == 0 {
-                            st.generate_u64() & max
-                        } else if max <= u32::MAX as u64 {
-                            let limit32 = u32::MAX - (u32::MAX % umax_inc as u32) - 1;
-                            loop {
-                                let r = st.generate_u64() as u32;
-                                if r <= limit32 {
-                                    break (r % umax_inc as u32) as u64;
-                                }
-                            }
-                        } else {
-                            let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
-                            loop {
-                                let r = st.generate_u64();
-                                if r <= limit {
-                                    break r % umax_inc;
-                                }
-                            }
-                        };
-                        items.swap(i, j as usize);
-                    }
-                    save_pcg_state(eobj, &st);
-                    return;
-                }
-                _ => {}
-            }
-        }
-    }
-    // Fallback: standard slow path with full call_object_method per swap
-    for i in (1..n).rev() {
-        let j = randomizer_range(vm, obj, 0, i as i64) as usize;
-        if vm.current_exception.is_some() {
-            return;
-        }
-        items.swap(i, j);
-    }
-}
-
-fn value_from_key(k: &ArrayKey) -> Value {
-    match k {
-        ArrayKey::Int(n) => Value::Long(*n),
-        ArrayKey::String(s) => Value::String(s.clone()),
-    }
-}
-
-fn throw_invalid_serialization(vm: &mut Vm, class_name: &str) {
-    let msg = format!("Invalid serialization data for {} object", class_name);
-    let exc = vm.create_exception(b"Exception", &msg, vm.current_line);
-    vm.current_exception = Some(exc);
-}
-
-fn create_default_secure_engine(vm: &mut Vm) -> Value {
-    let obj_id = vm.alloc_object_id();
-    let obj = PhpObject::new(b"Random\\Engine\\Secure".to_vec(), obj_id);
-    Value::Object(Rc::new(RefCell::new(obj)))
-}
-
-// Generate a 64-bit random value from the engine attached to the Randomizer.
-// Calls $engine->generate() and parses the returned bytes as little-endian.
-#[allow(dead_code)]
-fn engine_generate_u64(vm: &mut Vm, engine: &Value) -> u64 {
-    let bytes = engine_generate_bytes(vm, engine, 8);
-    let mut buf = [0u8; 8];
-    let n = bytes.len().min(8);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    u64::from_le_bytes(buf)
-}
-
-/// Try to identify a native engine class (lowercase). Used for the fast path.
-fn native_engine_class(engine: &Value) -> Option<Vec<u8>> {
-    if let Value::Object(o) = engine {
-        let cn: Vec<u8> = o
-            .borrow()
-            .class_name
-            .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-        match cn.as_slice() {
-            b"random\\engine\\mt19937"
-            | b"random\\engine\\xoshiro256starstar"
-            | b"random\\engine\\pcgoneseq128xslrr64"
-            | b"random\\engine\\secure" => Some(cn),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
-// Generate `count` raw bytes from the engine. Has a fast path for native engines
-// that bypasses the per-call dispatch overhead of `call_object_method`.
-fn engine_generate_bytes(vm: &mut Vm, engine: &Value, count: usize) -> Vec<u8> {
-    // Fast path: native engines have known generate sizes; we can bulk-pull state.
-    if let Some(class) = native_engine_class(engine) {
-        if let Value::Object(obj) = engine {
-            let mut out = Vec::with_capacity(count);
-            match class.as_slice() {
-                b"random\\engine\\mt19937" => {
-                    let mut st = load_mt_state(obj);
-                    while out.len() < count {
-                        let v = st.generate_u32();
-                        let bytes = v.to_le_bytes();
-                        let need = count - out.len();
-                        let take = bytes.len().min(need);
-                        out.extend_from_slice(&bytes[..take]);
-                    }
-                    save_mt_state(obj, &st);
-                }
-                b"random\\engine\\xoshiro256starstar" => {
-                    let mut st = load_xoshiro_state(obj);
-                    while out.len() < count {
-                        let v = st.generate_u64();
-                        let bytes = v.to_le_bytes();
-                        let need = count - out.len();
-                        let take = bytes.len().min(need);
-                        out.extend_from_slice(&bytes[..take]);
-                    }
-                    save_xoshiro_state(obj, &st);
-                }
-                b"random\\engine\\pcgoneseq128xslrr64" => {
-                    let mut st = load_pcg_state(obj);
-                    while out.len() < count {
-                        let v = st.generate_u64();
-                        let bytes = v.to_le_bytes();
-                        let need = count - out.len();
-                        let take = bytes.len().min(need);
-                        out.extend_from_slice(&bytes[..take]);
-                    }
-                    save_pcg_state(obj, &st);
-                }
-                b"random\\engine\\secure" => {
-                    let mut buf = vec![0u8; count];
-                    os_random_bytes(&mut buf);
-                    out = buf;
-                }
-                _ => {}
-            }
-            // Suppress unused-vm warning when only fast path runs
-            let _ = vm;
-            return out;
-        }
-    }
-    // For user engines, PHP truncates each generate() to 8 bytes (64 bits).
-    let mut out = Vec::with_capacity(count);
-    let mut consec_empty = 0;
-    while out.len() < count {
-        let result = vm.call_object_method(engine, b"generate", &[]);
-        if vm.current_exception.is_some() {
-            return out;
-        }
-        if vm.exit_requested {
-            return out;
-        }
-        match result {
-            Some(Value::String(s)) => {
-                let bytes = s.as_bytes();
-                if bytes.is_empty() {
-                    // PHP: A random engine must return a non-empty string.
-                    let _ = consec_empty;
-                    throw_broken_engine(vm);
-                    return out;
-                }
-                consec_empty = 0;
-                let truncated_len = bytes.len().min(8);
-                let truncated = &bytes[..truncated_len];
-                let need = count - out.len();
-                let take = truncated.len().min(need);
-                out.extend_from_slice(&truncated[..take]);
-            }
-            _ => {
-                // generate() returned non-string - PHP throws TypeError
-                let class_name = if let Value::Object(o) = engine {
-                    String::from_utf8_lossy(&o.borrow().class_name).to_string()
-                } else {
-                    String::from("Engine")
-                };
-                let msg = format!(
-                    "{}::generate(): Return value must be of type string",
-                    class_name
-                );
-                let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return out;
-            }
-        }
-    }
-    out
-}
-
-fn throw_broken_engine(vm: &mut Vm) {
-    let exc = vm.create_exception(
-        b"Random\\BrokenRandomEngineError",
-        "A random engine must return a non-empty string",
-        vm.current_line,
-    );
-    vm.current_exception = Some(exc);
-}
-
-// Range function: inclusive of both min and max.
-fn randomizer_range(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, min: i64, max: i64) -> i64 {
-    if min == max {
-        return min;
-    }
-    let engine = obj.borrow().get_property(b"engine");
-    let umax = (max as u64).wrapping_sub(min as u64);
-    if umax == 0 {
-        return min;
-    }
-    if umax <= u32::MAX as u64 {
-        let r = range_u32(vm, &engine, umax as u32);
-        return min.wrapping_add(r as i64);
-    }
-    let r = range_u64(vm, &engine, umax);
-    min.wrapping_add(r as i64)
-}
-
-fn range_u32(vm: &mut Vm, engine: &Value, umax: u32) -> u32 {
-    // First draw 32 bits from engine; some engines (Mt19937) return 4 bytes per generate(), some (xoshiro/pcg) return 8.
-    // We need to keep pulling until we have 4 bytes accumulated; engine_generate_bytes does that.
-    let bytes = engine_generate_bytes(vm, engine, 4);
-    if vm.current_exception.is_some() {
-        return 0;
-    }
-    let mut buf = [0u8; 4];
-    let n = bytes.len().min(4);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    let mut result = u32::from_le_bytes(buf);
-
-    if umax == u32::MAX {
-        return result;
-    }
-    let umax_inc = umax.wrapping_add(1);
-    if umax_inc & umax == 0 {
-        return result & umax;
-    }
-    let limit = u32::MAX - (u32::MAX % umax_inc) - 1;
-    let mut count = 0;
-    while result > limit {
-        count += 1;
-        if count > 50 {
-            let exc = vm.create_exception(
-                b"Random\\BrokenRandomEngineError",
-                "Failed to generate an acceptable random number in 50 attempts",
-                vm.current_line,
-            );
-            vm.current_exception = Some(exc);
-            return 0;
-        }
-        let bytes = engine_generate_bytes(vm, engine, 4);
-        if vm.current_exception.is_some() {
-            return 0;
-        }
-        let mut buf = [0u8; 4];
-        let n = bytes.len().min(4);
-        buf[..n].copy_from_slice(&bytes[..n]);
-        result = u32::from_le_bytes(buf);
-    }
-    result % umax_inc
-}
-
-fn range_u64(vm: &mut Vm, engine: &Value, umax: u64) -> u64 {
-    let bytes = engine_generate_bytes(vm, engine, 8);
-    if vm.current_exception.is_some() {
-        return 0;
-    }
-    let mut buf = [0u8; 8];
-    let n = bytes.len().min(8);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    let mut result = u64::from_le_bytes(buf);
-
-    if umax == u64::MAX {
-        return result;
-    }
-    let umax_inc = umax.wrapping_add(1);
-    if umax_inc & umax == 0 {
-        return result & umax;
-    }
-    let limit = u64::MAX - (u64::MAX % umax_inc) - 1;
-    let mut count = 0;
-    while result > limit {
-        count += 1;
-        if count > 50 {
-            let exc = vm.create_exception(
-                b"Random\\BrokenRandomEngineError",
-                "Failed to generate an acceptable random number in 50 attempts",
-                vm.current_line,
-            );
-            vm.current_exception = Some(exc);
-            return 0;
-        }
-        let bytes = engine_generate_bytes(vm, engine, 8);
-        if vm.current_exception.is_some() {
-            return 0;
-        }
-        let mut buf = [0u8; 8];
-        let n = bytes.len().min(8);
-        buf[..n].copy_from_slice(&bytes[..n]);
-        result = u64::from_le_bytes(buf);
-    }
-    result % umax_inc
-}
-
-fn randomizer_next_int(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Value {
-    let engine = obj.borrow().get_property(b"engine");
-    // Need 32-bit value (raises RandomException if engine is 64-bit on 32-bit platforms - we ignore).
-    // For Mt19937: 32-bit. For xoshiro/pcg: 64-bit.
-    // We just compose a 64-bit value from engine bytes.
-    let bytes = engine_generate_bytes(vm, &engine, 8);
-    let mut buf = [0u8; 8];
-    let n = bytes.len().min(8);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    let v = u64::from_le_bytes(buf) as i64 & i64::MAX;
-    Value::Long(v)
-}
-
-fn randomizer_get_bytes(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, length: usize) -> Vec<u8> {
-    let engine = obj.borrow().get_property(b"engine");
-    engine_generate_bytes(vm, &engine, length)
-}
-
-fn randomizer_next_float(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> f64 {
-    // Returns a float in [0, 1).
-    // PHP uses 53-bit precision: result_u64 >> 11 / 2^53.
-    let engine = obj.borrow().get_property(b"engine");
-    let bytes = engine_generate_bytes(vm, &engine, 8);
-    let mut buf = [0u8; 8];
-    let n = bytes.len().min(8);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    let v = u64::from_le_bytes(buf);
-    (v >> 11) as f64 / ((1u64 << 53) as f64)
-}
-
-fn randomizer_get_float(
+fn randomizer_call(
     vm: &mut Vm,
     obj: &Rc<RefCell<PhpObject>>,
-    min: f64,
-    max: f64,
-    boundary: &str,
-) -> f64 {
-    // Simple gamma-section-equivalent: uniform in [0,1), rescale.
-    // Boundaries: ClosedOpen [min, max), ClosedClosed [min, max], OpenClosed (min, max], OpenOpen (min, max).
-    // This is a simplification; for ClosedOpen we use [0, 1) -> [min, max).
-    let mut u = randomizer_next_float(vm, obj);
-    match boundary {
-        "ClosedOpen" => min + u * (max - min),
-        "ClosedClosed" => {
-            // [0, 1] inclusive: scale [0, 1) plus possible 1.0 rarely.
-            // Simplification: u in [0, 1) -> [min, max] with chance to hit max:
-            // scale to (max - min) and add min; cap at max.
-            let v = min + u * (max - min);
-            if v > max { max } else { v }
-        }
-        "OpenClosed" => {
-            // (min, max]: shift so 0 maps to "next after min".
-            // Simplification: use 1 - u in [0, 1] to (0, 1].
-            let v = 1.0 - u;
-            min + v * (max - min)
-        }
-        "OpenOpen" => {
-            // (min, max): exclude both. Loop until u > 0.
-            let mut tries = 0;
-            while u == 0.0 && tries < 50 {
-                u = randomizer_next_float(vm, obj);
-                tries += 1;
+    method: &[u8],
+    args: &[Value],
+) -> Option<Value> {
+    let null = Some(Value::Null);
+    match method {
+        b"getint" => {
+            let min = arg(args, 1).to_long();
+            let max = arg(args, 2).to_long();
+            if max < min {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getInt(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)",
+                );
+                return null;
             }
-            min + u * (max - min)
+            let e = randomizer_engine(vm, obj)?;
+            let v = if e.is_mt_php_mode() {
+                let r = generate(vm, &e).result >> 1;
+                bad_scaling(r, min, max)
+            } else {
+                range(vm, &e, min, max)
+            };
+            if failed(vm) {
+                return null;
+            }
+            Some(Value::Long(v))
         }
-        _ => min + u * (max - min),
+
+        b"getbytes" => {
+            let length = arg(args, 1).to_long();
+            if length < 1 {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getBytes(): Argument #1 ($length) must be greater than 0",
+                );
+                return null;
+            }
+            let e = randomizer_engine(vm, obj)?;
+            let length = length as usize;
+            let mut out = Vec::with_capacity(length);
+            while out.len() < length {
+                let mut r = generate(vm, &e);
+                if failed(vm) {
+                    return null;
+                }
+                for _ in 0..r.size {
+                    out.push(r.result as u8);
+                    r.result >>= 8;
+                    if out.len() >= length {
+                        break;
+                    }
+                }
+            }
+            Some(str_value(out))
+        }
+
+        b"getbytesfromstring" => {
+            let source = arg(args, 1).to_php_string();
+            let source = source.as_bytes();
+            let length = arg(args, 2).to_long();
+            if source.is_empty() {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getBytesFromString(): Argument #1 ($string) must not be empty",
+                );
+                return null;
+            }
+            if length < 1 {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getBytesFromString(): Argument #2 ($length) must be greater than 0",
+                );
+                return null;
+            }
+            let e = randomizer_engine(vm, obj)?;
+            let length = length as usize;
+            let max_offset = source.len() - 1;
+            let mut out = Vec::with_capacity(length);
+            if max_offset > 0xff {
+                while out.len() < length {
+                    let offset = range(vm, &e, 0, max_offset as i64);
+                    if failed(vm) {
+                        return null;
+                    }
+                    out.push(source[offset as usize]);
+                }
+            } else {
+                let mut mask = max_offset as u64;
+                mask |= mask >> 1;
+                mask |= mask >> 2;
+                mask |= mask >> 4;
+                mask = mask.wrapping_mul(0x0101010101010101);
+                let mut failures = 0;
+                while out.len() < length {
+                    let r = generate(vm, &e);
+                    if failed(vm) {
+                        return null;
+                    }
+                    let mut offsets = r.result & mask;
+                    for _ in 0..r.size {
+                        let offset = (offsets & 0xff) as usize;
+                        offsets >>= 8;
+                        if offset > max_offset {
+                            failures += 1;
+                            if failures > RANGE_ATTEMPTS {
+                                throw_range_attempts(vm);
+                                return null;
+                            }
+                            continue;
+                        }
+                        failures = 0;
+                        out.push(source[offset]);
+                        if out.len() >= length {
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(str_value(out))
+        }
+
+        b"getfloat" => {
+            let min = arg(args, 1).to_double();
+            let max = arg(args, 2).to_double();
+            let boundary = match arg(args, 3) {
+                Value::Object(o) => {
+                    let name = o.borrow().get_property(b"name").to_php_string();
+                    match name.as_bytes() {
+                        b"ClosedClosed" => Boundary::ClosedClosed,
+                        b"OpenClosed" => Boundary::OpenClosed,
+                        b"OpenOpen" => Boundary::OpenOpen,
+                        _ => Boundary::ClosedOpen,
+                    }
+                }
+                _ => Boundary::ClosedOpen,
+            };
+            if !min.is_finite() {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getFloat(): Argument #1 ($min) must be finite",
+                );
+                return null;
+            }
+            if !max.is_finite() {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getFloat(): Argument #2 ($max) must be finite",
+                );
+                return null;
+            }
+            if boundary == Boundary::ClosedClosed {
+                if max < min {
+                    throw(
+                        vm,
+                        b"ValueError",
+                        "Random\\Randomizer::getFloat(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)",
+                    );
+                    return null;
+                }
+            } else if max <= min {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "Random\\Randomizer::getFloat(): Argument #2 ($max) must be greater than argument #1 ($min)",
+                );
+                return null;
+            }
+            let e = randomizer_engine(vm, obj)?;
+            let v = gammasection(vm, &e, min, max, boundary);
+            if failed(vm) {
+                return null;
+            }
+            if boundary == Boundary::OpenOpen && v.is_nan() {
+                throw(
+                    vm,
+                    b"ValueError",
+                    "The given interval is empty, there are no floats between argument #1 ($min) and argument #2 ($max)",
+                );
+                return null;
+            }
+            Some(Value::Double(v))
+        }
+
+        b"shufflearray" => {
+            let Value::Array(arr) = arg(args, 1) else {
+                return null;
+            };
+            let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
+            let e = randomizer_engine(vm, obj)?;
+            if !shuffle_items(vm, &e, &mut values) {
+                return null;
+            }
+            let mut out = PhpArray::with_capacity(values.len());
+            for v in values {
+                out.push(v);
+            }
+            Some(arr_value(out))
+        }
+
+        b"shufflebytes" => {
+            let mut bytes = arg(args, 1).to_php_string().as_bytes().to_vec();
+            if bytes.len() < 2 {
+                return Some(str_value(bytes));
+            }
+            let e = randomizer_engine(vm, obj)?;
+            if !shuffle_items(vm, &e, &mut bytes) {
+                return null;
+            }
+            Some(str_value(bytes))
+        }
+
+        b"pickarraykeys" => {
+            let Value::Array(arr) = arg(args, 1) else {
+                return null;
+            };
+            let num = arg(args, 2).to_long();
+            let keys: Vec<ArrayKey> = arr.borrow().keys().cloned().collect();
+            let e = randomizer_engine(vm, obj)?;
+            match pick_keys(vm, &e, &keys, num, "Random\\Randomizer::pickArrayKeys")? {
+                Value::Array(a) => Some(Value::Array(a)),
+                single => {
+                    let mut out = PhpArray::new();
+                    out.push(single);
+                    Some(arr_value(out))
+                }
+            }
+        }
+
+        _ => None,
     }
-}
-
-// ---- Serialization helpers (called by __serialize) ----
-
-fn serialize_mt19937(obj: &Rc<RefCell<PhpObject>>) -> Value {
-    let st = load_mt_state(obj);
-    let mut outer = PhpArray::new();
-
-    // Index 0: properties array (empty for native engine)
-    let props = PhpArray::new();
-    outer.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(props))));
-
-    // Index 1: state array of 624 hex strings + count + mode
-    let mut state_arr = PhpArray::new();
-    for (i, v) in st.state.iter().enumerate() {
-        state_arr.set(
-            ArrayKey::Int(i as i64),
-            Value::String(PhpString::from_string(u32_to_hex_le(*v))),
-        );
-    }
-    state_arr.set(ArrayKey::Int(MT_N as i64), Value::Long(st.count as i64));
-    state_arr.set(ArrayKey::Int(MT_N as i64 + 1), Value::Long(st.mode));
-
-    outer.set(
-        ArrayKey::Int(1),
-        Value::Array(Rc::new(RefCell::new(state_arr))),
-    );
-    Value::Array(Rc::new(RefCell::new(outer)))
-}
-
-fn serialize_xoshiro(obj: &Rc<RefCell<PhpObject>>) -> Value {
-    let st = load_xoshiro_state(obj);
-    let mut outer = PhpArray::new();
-    let props = PhpArray::new();
-    outer.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(props))));
-
-    let mut state_arr = PhpArray::new();
-    for (i, v) in st.s.iter().enumerate() {
-        state_arr.set(
-            ArrayKey::Int(i as i64),
-            Value::String(PhpString::from_string(u64_to_hex_le(*v))),
-        );
-    }
-    outer.set(
-        ArrayKey::Int(1),
-        Value::Array(Rc::new(RefCell::new(state_arr))),
-    );
-    Value::Array(Rc::new(RefCell::new(outer)))
-}
-
-fn serialize_pcg(obj: &Rc<RefCell<PhpObject>>) -> Value {
-    let st = load_pcg_state(obj);
-    let mut outer = PhpArray::new();
-    let props = PhpArray::new();
-    outer.set(ArrayKey::Int(0), Value::Array(Rc::new(RefCell::new(props))));
-
-    let hi = (st.state >> 64) as u64;
-    let lo = st.state as u64;
-    let mut state_arr = PhpArray::new();
-    state_arr.set(
-        ArrayKey::Int(0),
-        Value::String(PhpString::from_string(u64_to_hex_le(hi))),
-    );
-    state_arr.set(
-        ArrayKey::Int(1),
-        Value::String(PhpString::from_string(u64_to_hex_le(lo))),
-    );
-    outer.set(
-        ArrayKey::Int(1),
-        Value::Array(Rc::new(RefCell::new(state_arr))),
-    );
-    Value::Array(Rc::new(RefCell::new(outer)))
 }
