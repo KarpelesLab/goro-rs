@@ -154,7 +154,7 @@ impl PhpArray {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            next_int_key: 0,
+            next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
             index: Vec::new(),
@@ -164,7 +164,7 @@ impl PhpArray {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             entries: Vec::with_capacity(cap),
-            next_int_key: 0,
+            next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
             index: Vec::new(),
@@ -349,7 +349,8 @@ impl PhpArray {
     /// Append a value with the next integer key ($arr[] = value).
     /// Silently ignores if memory limit is exceeded. Ignores key conflicts.
     pub fn push(&mut self, value: Value) {
-        let key = self.next_int_key;
+        // nNextFreeElement == ZEND_LONG_MIN means no integer key used yet
+        let key = if self.next_int_key == i64::MIN { 0 } else { self.next_int_key };
         if !memory_alloc(Self::ENTRY_SIZE) {
             return; // Memory limit exceeded
         }
@@ -362,7 +363,7 @@ impl PhpArray {
     /// Returns Err("Cannot add element...") if the key is already occupied (PHP_INT_MAX overflow).
     pub fn try_push(&mut self, value: Value) -> Result<(), &'static str> {
         // Check if next_int_key is already occupied (happens after PHP_INT_MAX was used)
-        let key = self.next_int_key;
+        let key = if self.next_int_key == i64::MIN { 0 } else { self.next_int_key };
         let already_occupied = self.find_int(key).is_some();
         if already_occupied {
             return Err("Cannot add element to the array as the next element is already occupied");
@@ -414,7 +415,7 @@ impl PhpArray {
     pub fn pop_entry(&mut self) -> Option<(ArrayKey, Value)> {
         let e = self.pop_entry_raw()?;
         if let ArrayKey::Int(k) = &e.0 {
-            if *k == self.next_int_key.wrapping_sub(1) {
+            if self.next_int_key != i64::MIN && *k == self.next_int_key.wrapping_sub(1) {
                 self.next_int_key -= 1;
             }
         }
@@ -472,7 +473,7 @@ impl PhpArray {
     /// Recalculate the next_int_key based on current entries.
     /// Called after array_pop to ensure array_push uses the correct key.
     pub fn recalculate_next_int_key(&mut self) {
-        self.next_int_key = 0;
+        self.next_int_key = i64::MIN;
         for (key, _) in &self.entries {
             if let ArrayKey::Int(n) = key {
                 if *n >= self.next_int_key {

@@ -518,7 +518,7 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
         Value::Array(arr) => {
             if mode == 1 {
                 // COUNT_RECURSIVE
-                Ok(Value::Long(count_recursive(&Value::Array(arr.clone()))))
+                Ok(Value::Long(count_recursive(vm, arr, &mut Vec::new())))
             } else {
                 Ok(Value::Long(arr.borrow().len() as i64))
             }
@@ -588,20 +588,23 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     }
 }
 
-fn count_recursive(val: &Value) -> i64 {
-    match val {
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            let mut total = arr.len() as i64;
-            for (_, v) in arr.iter() {
-                if let Value::Array(_) = v {
-                    total += count_recursive(v);
-                }
-            }
-            total
-        }
-        _ => 1,
+/// php_count_recursive()
+fn count_recursive(vm: &mut Vm, arr: &std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>, stack: &mut Vec<usize>) -> i64 {
+    let ptr = std::rc::Rc::as_ptr(arr) as usize;
+    if stack.contains(&ptr) {
+        vm.emit_warning("count(): Recursion detected");
+        return 0;
     }
+    stack.push(ptr);
+    let children: Vec<std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>> = arr.borrow().values()
+        .filter_map(|v| match v.deref() { Value::Array(a) => Some(a), _ => None })
+        .collect();
+    let mut total = arr.borrow().len() as i64;
+    for c in children {
+        total += count_recursive(vm, &c, stack);
+    }
+    stack.pop();
+    total
 }
 
 fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
