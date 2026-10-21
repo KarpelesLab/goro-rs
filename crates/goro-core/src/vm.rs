@@ -13993,11 +13993,14 @@ impl Vm {
     /// uncaught fatal error has been emitted so that destructor output (e.g. `echo`
     /// inside `__destruct`) appears AFTER the "Fatal error: ..." message, matching PHP.
     pub fn run_shutdown_destructors(&mut self) {
-        // Pop one object at a time (rather than taking the whole list) so that
-        // objects released while a destructor / fiber unwind runs are still
-        // seen by run_pending_destructors().
+        // shutdown_destructors(): first release the global variables holding
+        // the only reference to an object (in reverse order, repeated while
+        // that frees more), then destruct the remaining objects in creation
+        // order (zend_objects_store_call_destructors). One object is taken
+        // at a time so objects released meanwhile are still seen.
+        self.shutdown_symbol_table_destructors();
+        self.destructible_objects.reverse();
         while let Some(obj_val) = self.destructible_objects.pop() {
-            let obj_val = &obj_val;
             if self.current_exception.is_some() {
                 // An exception escaped a shutdown destructor: it is fatal
                 // (zend_exception_error), and remaining objects are marked
@@ -14010,12 +14013,72 @@ impl Vm {
                 self.destructible_objects.clear();
                 break;
             }
-            if let Value::Object(obj_rc) = obj_val {
-                if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
+            self.shutdown_destruct_one(&obj_val);
+        }
+        if self.current_exception.is_some() {
+            let line = self.current_line;
+            self.report_uncaught(&VmError {
+                message: "Uncaught exception".into(),
+                line,
+            });
+        }
+        for hook in self.shutdown_hooks.clone() {
+            hook(self);
+        }
+    }
+
+    fn shutdown_symbol_table_destructors(&mut self) {
+        loop {
+            let before = self.globals.borrow().len();
+            let keys: Vec<ArrayKey> = self.globals.borrow().keys().cloned().collect();
+            for k in keys.into_iter().rev() {
+                let obj = {
+                    let g = self.globals.borrow();
+                    match g.get(&k) {
+                        Some(Value::Object(o)) => Some(o.clone()),
+                        Some(Value::Reference(r)) if Rc::strong_count(r) == 1 => match &*r.borrow()
+                        {
+                            Value::Object(o) => Some(o.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                let Some(o) = obj else { continue };
+                let pos = self
+                    .destructible_objects
+                    .iter()
+                    .position(|v| matches!(v, Value::Object(d) if Rc::ptr_eq(d, &o)));
+                // Held only by the table (plus our clone and the destructor list).
+                if Rc::strong_count(&o) != 2 + pos.is_some() as usize {
                     continue;
                 }
+                let old = self.globals.borrow_mut().remove(&k);
+                self.globals_gen = self.globals_gen.wrapping_add(1);
+                drop(old);
+                if let Some(p) = pos {
+                    let v = self.destructible_objects.remove(p);
+                    self.shutdown_destruct_one(&v);
+                }
+                drop(o);
+                if self.exit_requested {
+                    return;
+                }
+            }
+            if self.globals.borrow().len() == before {
+                break;
+            }
+        }
+    }
+
+    fn shutdown_destruct_one(&mut self, obj_val: &Value) {
+        {
+            if let Value::Object(obj_rc) = obj_val {
+                if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
+                    return;
+                }
                 if matches!(obj_rc.borrow().get_property(b"__destructed"), Value::True) {
-                    continue;
+                    return;
                 }
                 obj_rc
                     .borrow_mut()
@@ -14028,7 +14091,7 @@ impl Vm {
                     .collect();
                 if class_lower == b"fiber" {
                     self.fiber_destroy(obj_rc);
-                    continue;
+                    return;
                 }
                 // zend_objects_destroy_object(): lazy objects (uninitialized
                 // ghosts, and proxies even once initialized) are not destructed.
@@ -14036,7 +14099,7 @@ impl Vm {
                     obj_rc.borrow().get_property(b"__lazy_state"),
                     Value::String(_)
                 ) {
-                    continue;
+                    return;
                 }
                 let destruct_vis = self
                     .classes
@@ -14059,7 +14122,7 @@ impl Vm {
                             );
                             self.display_error("Warning", &msg, "Unknown", 0);
                         }
-                        continue;
+                        return;
                     }
                 }
                 let destruct_op = self
@@ -14090,16 +14153,6 @@ impl Vm {
                     self.called_class_stack.pop();
                 }
             }
-        }
-        if self.current_exception.is_some() {
-            let line = self.current_line;
-            self.report_uncaught(&VmError {
-                message: "Uncaught exception".into(),
-                line,
-            });
-        }
-        for hook in self.shutdown_hooks.clone() {
-            hook(self);
         }
     }
 
