@@ -22,6 +22,7 @@ fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__cert_id")
         || name.starts_with(b"__csr_id")
         || name.starts_with(b"__xml_")
+        || name.starts_with(b"__sensitive_value")
         // ReflectionType internal storage (PHP exposes no public properties on
         // ReflectionNamedType / ReflectionUnionType / ReflectionIntersectionType).
         || matches!(name, b"__type_name" | b"__allows_null" | b"__is_builtin" | b"__types")

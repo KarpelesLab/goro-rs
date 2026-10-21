@@ -503,6 +503,8 @@ pub struct Vm {
     pub next_weak_ref_id: u64,
     /// WeakReference singleton cache: maps target object_id to (weak_ref_id, WeakReference Value)
     weak_ref_cache: HashMap<u64, (u64, Value)>,
+    /// (user_functions.len(), classes.len(), any #[SensitiveParameter]) cache
+    sensitive_cache: std::cell::Cell<(usize, usize, bool)>,
     /// WeakMap entries: keyed by (weakmap_object_id, target_object_id) -> (Weak<RefCell<PhpObject>>, Value)
     /// The Weak is used to detect when the key object has been freed
     pub weak_map_entries: HashMap<u64, Vec<(u64, Weak<RefCell<PhpObject>>, Value)>>,
@@ -1396,6 +1398,7 @@ impl Vm {
             weak_refs: HashMap::new(),
             next_weak_ref_id: 1,
             weak_ref_cache: HashMap::new(),
+            sensitive_cache: std::cell::Cell::new((usize::MAX, 0, false)),
             weak_map_entries: HashMap::new(),
             class_aliases: HashMap::new(),
             disabled_functions: std::collections::HashSet::new(),
@@ -3003,10 +3006,94 @@ impl Vm {
     }
 
     /// Build a trace array for exceptions from the current call stack
-    pub fn build_exception_trace(&self) -> Value {
+    /// Which parameters of the function shown as `func_name` in a stack frame
+    /// carry #[\SensitiveParameter]: (per-param flags, variadic-index).
+    fn sensitive_param_flags(&self, func_name: &str) -> Option<(Vec<bool>, Option<usize>)> {
+        let is_sensitive = |attrs: &Vec<crate::object::RuntimeAttribute>| {
+            attrs.iter().any(|a| a.name.strip_prefix(b"\\").unwrap_or(&a.name).eq_ignore_ascii_case(b"SensitiveParameter"))
+        };
+        let from_op = |op: &OpArray| -> Option<(Vec<bool>, Option<usize>)> {
+            let flags: Vec<bool> = op.param_attributes.iter().map(is_sensitive).collect();
+            if !flags.iter().any(|f| *f) {
+                return None;
+            }
+            let variadic = if op.variadic_param.is_some() && flags.last() == Some(&true) { Some(flags.len() - 1) } else { None };
+            Some((flags, variadic))
+        };
+        let lower: Vec<u8> = func_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        if let Some(sep) = lower.windows(2).position(|w| w == b"::" || w == b"->") {
+            let class = self.classes.get(&lower[..sep])?;
+            let m = class.get_method(&lower[sep + 2..])?;
+            return from_op(&m.op_array);
+        }
+        if let Some(op) = self.user_functions.get(&lower) {
+            return from_op(op);
+        }
+        if func_name.starts_with("{closure") {
+            for op in self.user_functions.values() {
+                if op.display_name.as_slice() == func_name.as_bytes() {
+                    if let Some(r) = from_op(op) {
+                        return Some(r);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Frame arguments as shown in backtraces: #[\SensitiveParameter] values
+    /// are wrapped in SensitiveParameterValue objects.
+    /// Cheap check (cached per function/class count) whether any
+    /// #[\SensitiveParameter] exists at all.
+    fn any_sensitive_params(&self) -> bool {
+        let key = (self.user_functions.len(), self.classes.len());
+        let (k0, k1, cached) = self.sensitive_cache.get();
+        if (k0, k1) == key {
+            return cached;
+        }
+        let is_s = |op: &OpArray| op.param_attributes.iter().flatten()
+            .any(|a| a.name.strip_prefix(b"\\").unwrap_or(&a.name).eq_ignore_ascii_case(b"SensitiveParameter"));
+        let any = self.user_functions.values().any(is_s)
+            || self.classes.values().any(|c| c.methods.values().any(|m| is_s(&m.op_array)));
+        self.sensitive_cache.set((key.0, key.1, any));
+        any
+    }
+
+    pub fn trace_frame_args(&mut self, func_name: &str, args: &[Value]) -> Vec<Value> {
+        if !self.any_sensitive_params() {
+            return args.to_vec();
+        }
+        let Some((flags, variadic)) = self.sensitive_param_flags(func_name) else {
+            return args.to_vec();
+        };
+        let mut out = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let sensitive = flags.get(i).copied().unwrap_or(false) || matches!(variadic, Some(v) if i >= v);
+            if sensitive {
+                let id = self.alloc_object_id();
+                let mut obj = PhpObject::new(b"SensitiveParameterValue".to_vec(), id);
+                obj.set_property(b"__sensitive_value".to_vec(), a.clone());
+                out.push(Value::Object(Rc::new(RefCell::new(obj))));
+            } else {
+                out.push(a.clone());
+            }
+        }
+        out
+    }
+
+    pub fn build_exception_trace(&mut self) -> Value {
         let mut trace_arr = PhpArray::new();
         // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
-        for (idx, (func_name, file, line, args, is_method)) in self.call_stack.iter().rev().enumerate() {
+        let sensitive = self.any_sensitive_params();
+        let frame_list: Vec<(String, String, u32, Vec<Value>, bool)> = self.call_stack.iter().rev().cloned().collect();
+        for (idx, (func_name, file, line, args, is_method)) in frame_list.iter().enumerate() {
+            let wrapped;
+            let args: &Vec<Value> = if sensitive {
+                wrapped = self.trace_frame_args(func_name, args);
+                &wrapped
+            } else {
+                args
+            };
             let mut frame = PhpArray::new();
             // Frames whose file is set to the placeholder "[internal function]" or
             // whose line is 0 represent an internal-engine call (Fiber callback,
@@ -13891,7 +13978,7 @@ pub(crate) fn is_known_builtin_class_name(class_lower: &[u8]) -> bool {
                 | b"xmlparser"
                 | b"streambucket"
                 | b"__php_incomplete_class"
-                | b"weakmap" | b"weakreference"
+                | b"weakmap" | b"weakreference" | b"sensitiveparametervalue"
                 | b"roundingmode"
                 | b"reflection" | b"reflector" | b"reflectionzendextension"
                 | b"propertyhooktype"
@@ -19495,6 +19582,11 @@ impl Vm {
                                 );
                             }
                         }
+                    } else if func_name_lower == b"__sensitiveparametervalue_construct" {
+                        if let (Some(Value::Object(o)), Some(v)) = (call.args.first(), call.args.get(1)) {
+                            o.borrow_mut().set_property(b"__sensitive_value".to_vec(), v.clone().deref());
+                        }
+                        self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if func_name_lower == b"__builtin_return" {
                         // Check if the SPL method set an exception
                         if let Some(exc_val) = self.current_exception.take() {
@@ -31871,6 +31963,7 @@ impl Vm {
                             b"reflectionclassconstant" => b"ReflectionClassConstant".to_vec(),
                             b"reflectiongenerator" => b"ReflectionGenerator".to_vec(),
                             b"reflectionfiber" => b"ReflectionFiber".to_vec(),
+                            b"sensitiveparametervalue" => b"SensitiveParameterValue".to_vec(),
                             b"reflectionattribute" => b"ReflectionAttribute".to_vec(),
                             b"fiber" => b"Fiber".to_vec(),
                             b"fibererror" => b"FiberError".to_vec(),
@@ -33201,7 +33294,7 @@ impl Vm {
                         }
 
                         // Closures/WeakReference/WeakMap cannot have dynamic properties
-                        if class_lower == b"closure" || class_lower == b"weakreference" || class_lower == b"weakmap" {
+                        if class_lower == b"closure" || class_lower == b"weakreference" || class_lower == b"weakmap" || class_lower == b"sensitiveparametervalue" {
                             let prop_str = String::from_utf8_lossy(prop_name.as_bytes()).to_string();
                             let class_display = crate::value::display_class_name(&class_name_orig);
                             let msg = format!("Cannot create dynamic property {}::${}", class_display, prop_str);
@@ -33796,6 +33889,30 @@ impl Vm {
                                     self.pending_calls.push(PendingCall {
                                         name: PhpString::from_vec(fiber_name),
                                         args: vec![obj_val.clone()],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // SensitiveParameterValue: __construct(mixed $value) / getValue()
+                        if class_name_lower == b"sensitiveparametervalue" && !has_user_method {
+                            match method_name_lower.as_slice() {
+                                b"__construct" => {
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__sensitiveparametervalue_construct"),
+                                        args: vec![obj_val.clone()],
+                                        named_args: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                b"getvalue" => {
+                                    let v = obj.borrow().get_property(b"__sensitive_value");
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![v],
                                         named_args: Vec::new(),
                                     });
                                     continue;

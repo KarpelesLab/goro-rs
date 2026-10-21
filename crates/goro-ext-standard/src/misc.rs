@@ -8169,7 +8169,7 @@ fn serialize_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check for non-serializable classes
     if let Value::Object(obj) = val {
         let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if matches!(class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber" | b"xmlparser") {
+        if matches!(class_lower.as_slice(), b"weakreference" | b"weakmap" | b"closure" | b"generator" | b"fiber" | b"xmlparser" | b"sensitiveparametervalue") {
             let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!("Serialization of '{}' is not allowed", class_name);
             let exc = _vm.create_exception(b"Exception", &msg, _vm.current_line);
@@ -12534,7 +12534,9 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stack_len = vm.call_stack.len();
     let max_frames = if limit > 0 { limit as usize } else { stack_len };
 
-    for (idx, (func_name, file, line, frame_args, is_method)) in vm.call_stack.iter().rev().enumerate() {
+    let frames: Vec<(String, String, u32, Vec<Value>, bool)> = vm.call_stack.iter().rev().cloned().collect();
+    for (idx, (func_name, file, line, frame_args, is_method)) in frames.iter().enumerate() {
+        let frame_args = &vm.trace_frame_args(func_name, frame_args);
         if idx >= max_frames {
             break;
         }
@@ -12617,7 +12619,9 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let max_frames = if limit > 0 { limit as usize } else { stack_len };
 
     let mut lines = Vec::new();
-    for (i, (func_name, file, line, frame_args, is_instance)) in vm.call_stack.iter().rev().enumerate() {
+    let frames: Vec<(String, String, u32, Vec<Value>, bool)> = vm.call_stack.iter().rev().cloned().collect();
+    for (i, (func_name, file, line, frame_args, is_instance)) in frames.iter().enumerate() {
+        let frame_args = &vm.trace_frame_args(func_name, frame_args);
         if i >= max_frames {
             break;
         }
