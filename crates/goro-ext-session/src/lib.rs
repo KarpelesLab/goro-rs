@@ -209,6 +209,7 @@ thread_local! {
     /// with the user file/line they were called from.
     static FN_STACK: RefCell<Vec<(String, String, u32)>> = const { RefCell::new(Vec::new()) };
     static PHASE: Cell<Phase> = const { Cell::new(Phase::Startup) };
+    static MODIFIED: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn ps<T>(f: impl FnOnce(&mut Ps) -> T) -> T {
@@ -365,6 +366,7 @@ fn already_started_error(vm: &mut Vm, level: i64, msg: &str) {
 enum Stage {
     Startup,
     Runtime,
+    Deactivate,
 }
 
 const INI_ENTRIES: &[(&str, &str, bool)] = &[
@@ -464,12 +466,12 @@ fn is_numeric_str(v: &[u8]) -> bool {
     goro_core::value::parse_numeric_string(v).is_some()
 }
 
-fn check_active_and_output(vm: &mut Vm) -> bool {
+fn check_active_and_output(vm: &mut Vm, stage: Stage) -> bool {
     if ps(|p| p.status) == Status::Active {
         already_started_error(vm, E_WARNING, "Session ini settings cannot be changed when a session is active");
         return false;
     }
-    if vm.headers_sent {
+    if vm.headers_sent && stage != Stage::Deactivate {
         headers_already_sent_error(vm, E_WARNING, "Session ini settings cannot be changed after headers have already been sent");
         return false;
     }
@@ -481,7 +483,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
     let key = &name["session.".len()..];
     match key {
         "save_path" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             if stage == Stage::Runtime {
@@ -506,7 +508,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "name" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             if value.is_empty()
@@ -514,24 +516,26 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 || is_numeric_str(value)
                 || value.iter().any(|c| SESSION_FORBIDDEN_CHARS.contains(c))
             {
-                err(vm, E_WARNING, &format!(
+                if stage != Stage::Deactivate { err(vm, E_WARNING, &format!(
                     "session.name \"{}\" must not be numeric, empty, contain null bytes or any of the following characters \"=,;.[ \\t\\r\\n\\013\\014\"",
                     lossy(cstr(value))
-                ));
+                )); }
                 return false;
             }
             ps(|p| p.session_name = value.to_vec());
             true
         }
         "save_handler" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let tmp = find_module(cstr(value));
             let err_type = if stage == Stage::Runtime { E_WARNING } else { E_ERROR };
             let activated = ps(|p| p.modules_activated);
             if activated && tmp.is_none() {
-                err(vm, err_type, &format!("Session save handler \"{}\" cannot be found", lossy(cstr(value))));
+                if stage != Stage::Deactivate {
+                    err(vm, err_type, &format!("Session save handler \"{}\" cannot be found", lossy(cstr(value))));
+                }
                 return false;
             }
             if !ps(|p| p.set_handler) && tmp == Some(Module::User) {
@@ -549,7 +553,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "gc_probability" | "gc_divisor" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
@@ -573,7 +577,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "gc_maxlifetime" | "cache_expire" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let v = atol(value);
@@ -581,20 +585,22 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "serialize_handler" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let tmp = find_serializer(cstr(value));
             if ps(|p| p.modules_activated) && tmp.is_none() {
                 let et = if stage == Stage::Runtime { E_WARNING } else { E_ERROR };
-                err(vm, et, &format!("Serialization handler \"{}\" cannot be found", lossy(cstr(value))));
+                if stage != Stage::Deactivate {
+                    err(vm, et, &format!("Serialization handler \"{}\" cannot be found", lossy(cstr(value))));
+                }
                 return false;
             }
             ps(|p| p.serializer = tmp);
             true
         }
         "cookie_lifetime" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let maxcookie: i64 = i64::MAX - i32::MAX as i64 - 1;
@@ -609,7 +615,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "cookie_path" | "cookie_domain" | "cookie_samesite" | "cache_limiter" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let v = value.to_vec();
@@ -622,7 +628,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "cookie_secure" | "cookie_partitioned" | "cookie_httponly" | "use_cookies" | "use_strict_mode" | "lazy_write" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let b = ini_bool(value);
@@ -637,7 +643,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "use_only_cookies" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let b = ini_bool(value);
@@ -648,7 +654,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "use_trans_sid" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let b = ini_bool(value);
@@ -659,7 +665,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "referer_check" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             if !value.is_empty() {
@@ -669,7 +675,7 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             true
         }
         "sid_length" | "sid_bits_per_character" => {
-            if !check_active_and_output(vm) {
+            if !check_active_and_output(vm, stage) {
                 return false;
             }
             let (val, used, _) = strtol(value, 10);
@@ -764,8 +770,31 @@ fn alter_ini(vm: &mut Vm, name: &[u8], value: &[u8]) -> bool {
     if !on_update(vm, e.0, value, Stage::Runtime) {
         return false;
     }
+    record_modified(vm, name);
     vm.constants.insert(name.to_vec(), Value::String(PhpString::from_bytes(value)));
     true
+}
+
+/// EG(modified_ini_directives): remember the value to restore at request end.
+fn record_modified(vm: &Vm, name: &[u8]) {
+    let orig = vm.constants.get(name).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    MODIFIED.with(|m| {
+        let mut m = m.borrow_mut();
+        if !m.iter().any(|(n, _)| n.as_slice() == name) {
+            m.push((name.to_vec(), orig));
+        }
+    });
+}
+
+/// zend_ini_deactivate for the session entries.
+fn ini_deactivate(vm: &mut Vm) {
+    let mods = MODIFIED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    for (name, orig) in mods {
+        if let Some(e) = ini_entry(&name) {
+            on_update(vm, e.0, &orig, Stage::Deactivate);
+        }
+        vm.constants.insert(name, Value::String(PhpString::from_vec(orig)));
+    }
 }
 
 /// ini_set() hook for session.* entries.
@@ -779,7 +808,11 @@ fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     }
     let v = value.to_php_string().as_bytes().to_vec();
     let _g = FnGuard::new(vm, "ini_set");
-    on_update(vm, e.0, &v, Stage::Runtime)
+    let ok = on_update(vm, e.0, &v, Stage::Runtime);
+    if ok {
+        record_modified(vm, key);
+    }
+    ok
 }
 
 /// MINIT: REGISTER_INI_ENTRIES — run every entry's handler with the
@@ -3294,6 +3327,7 @@ fn request_shutdown(vm: &mut Vm) {
     }
     let _ = rshutdown_globals(vm);
     ps(|p| p.mod_user_names = UserNames::default());
+    ini_deactivate(vm);
     PHASE.with(|p| p.set(Phase::Runtime));
     if vm.current_exception.is_none() {
         vm.current_exception = exc;
@@ -3305,6 +3339,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(b"session");
     PS.with(|p| *p.borrow_mut() = Ps::default());
     FN_STACK.with(|s| s.borrow_mut().clear());
+    MODIFIED.with(|m| m.borrow_mut().clear());
     PHASE.with(|p| p.set(Phase::Startup));
     rewrite::reset();
 
