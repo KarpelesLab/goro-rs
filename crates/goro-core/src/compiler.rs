@@ -6110,6 +6110,14 @@ impl Compiler {
         if !self.op_array.returns_by_ref || self.op_array.is_generator {
             return;
         }
+        // The return type check runs first in PHP and may throw; since we
+        // emit the notice before the Return op, only do so when there is no
+        // (non-void) return type to verify.
+        if let Some(rt) = &self.op_array.return_type {
+            if !matches!(rt, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void")) {
+                return;
+            }
+        }
         let is_var = match value {
             None => false,
             Some(e) => matches!(

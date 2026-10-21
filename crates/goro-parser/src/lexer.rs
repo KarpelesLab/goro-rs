@@ -1159,6 +1159,7 @@ impl<'a> Lexer<'a> {
                 // Scan expression until matching }
                 let mut depth = 1;
                 let start = self.pos;
+                let start_line_inner = self.line;
                 while depth > 0 {
                     match self.peek() {
                         Some(b'{') => {
@@ -1180,6 +1181,23 @@ impl<'a> Lexer<'a> {
                 let expr_bytes = self.source[start..self.pos].to_vec();
                 if self.peek() == Some(b'}') {
                     self.advance(); // skip }
+                }
+                // Anything other than `${name}` / `${$name}` is a real
+                // expression: rewind and let the parser handle `${ expr }`.
+                let is_ident = |b: &[u8]| {
+                    !b.is_empty()
+                        && (b[0].is_ascii_alphabetic() || b[0] == b'_' || b[0] >= 0x80)
+                        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 0x80)
+                };
+                // Note `${name}` is a constant lookup in PHP, not `$name`.
+                let simple = expr_bytes.first() == Some(&b'$') && is_ident(&expr_bytes[1..]);
+                if !simple {
+                    self.pos = start;
+                    self.line = start_line_inner;
+                    return Token::new(
+                        TokenKind::DollarOpenBrace,
+                        Span::new((start - 2) as u32, start as u32, start_line_inner),
+                    );
                 }
                 // If the expression is a simple variable name, treat as VariableVariable
                 let expr_str: Vec<u8> = expr_bytes.iter().copied().filter(|b| *b != b'$').collect();

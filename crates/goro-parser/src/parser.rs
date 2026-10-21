@@ -4394,6 +4394,19 @@ impl Parser {
                                 };
                             }
                         }
+                        TokenKind::DollarOpenBrace => {
+                            // Test::${expr} - static property named by expression
+                            self.advance();
+                            let name_expr = self.parse_expression()?;
+                            self.expect(&TokenKind::CloseBrace)?;
+                            expr = Expr {
+                                span: expr.span.merge(member_span),
+                                kind: ExprKind::DynamicStaticPropertyAccess {
+                                    class: Box::new(expr),
+                                    property: Box::new(name_expr),
+                                },
+                            };
+                        }
                         TokenKind::VariableVariable(name) => {
                             // Test::$$bar - access static property whose name is in $bar
                             self.advance();
@@ -4721,6 +4734,15 @@ impl Parser {
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Variable(name),
+                    span,
+                })
+            }
+            TokenKind::DollarOpenBrace => {
+                self.advance();
+                let inner = self.parse_expression()?;
+                self.expect(&TokenKind::CloseBrace)?;
+                Ok(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(inner)),
                     span,
                 })
             }
