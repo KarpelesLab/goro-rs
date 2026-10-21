@@ -4,98 +4,79 @@ A PHP 8.5 implementation in Rust.
 
 ## Status
 
-Active development. Core language features, OOP, generators, exceptions, closures, namespaces, enums, and references work.
+Active development, aiming at full PHP 8.5 parity. The language core (OOP, traits, enums,
+closures, generators, fibers, property hooks, lazy objects, typed properties and references,
+match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
+extensions run the official php-src test suite.
 
-**Test Suite Progress** (PHP 8.5.4 official tests):
+**php-src 8.5.4 test suite** (full run, master `92b69e9d`, 2026-10-22):
 
 | Metric | Count |
 |---|---|
-| Total tests | 21281 |
-| Pass | 6067 (28.5%) |
-| Fail | 7629 |
-| Skip | 7428 |
-| Error | 157 |
+| Total tests | 21455 |
+| Pass | 13103 (61.1% of all, **86.9% of runnable**) |
+| Fail | 1938 |
+| Skip | 6376 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
+| Error | 38 |
 
-**Recently completed features:**
+CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
+`cargo fmt --check` and `cargo clippy -D warnings`.
 
-| Feature (PHP version) | Pass | Total | Rate |
+**Pass rates by directory** (pass / run, skips excluded):
+
+| Area | Pass | Run | Rate |
 |---|---|---|---|
-| PhpToken / tokenizer | 34 | 53 | 64% |
-| Uri\WhatWg\Url + Uri\Rfc3986\Uri (8.5) | 117 | 117 runnable | 100% |
-| Property hooks (8.4) | 110 | 211 | 52% |
-| Lazy objects (8.4) | 107 | 213 | 50% |
-| SPL ArrayObject | 53 | 108 | 49% |
+| Zend/tests | 4112 | 5161 | 79.7% |
+| tests/ (lang, classes, basic, …) | 749 | 826 | 90.7% |
+| ext/standard | 3021 | 3281 | 92.1% |
+| ext/spl | 711 | 775 | 91.7% |
+| ext/date | 673 | 676 | 99.6% |
+| ext/reflection | 403 | 485 | 83.1% |
+| ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 819 | 843 | 97.2% |
+| ext/simplexml / xml / xmlreader / xmlwriter | 296 | 316 | 93.7% |
+| ext/mbstring | 388 | 414 | 93.7% |
+| ext/openssl (incl. TLS streams) | 205 | 212 | 96.7% |
+| ext/mysqli (embedded MySQL fixture) | 404 | 425 | 95.1% |
+| ext/session | 254 | 257 | 98.8% |
+| ext/json | 79 | 87 | 90.8% |
+| ext/gmp | 91 | 98 | 92.9% |
+| ext/ctype / ext/uri | 166 | 166 | 100% |
+| ext/opcache (behavioural tests) | 211 | 292 | 72.3% |
 
-**Key directory pass rates:**
-- ext/standard/tests/array: 553/840 (65.8%)
-- ext/standard/tests/strings: 429/705 (60.8%)
-- ext/standard/tests/math: 131/171 (76.6%)
-- ext/spl: 293/781 (37.5%)
-- ext/date: 212/688 (30.8%)
-- ext/reflection: 147/493 (29.8%)
-- ext/pcre: 101/161 (62.7%)
-- ext/hash: 28/80 (35.0%)
-- ext/json: 61/88 (69.3%)
-- ext/ctype: 38/49 (77.6%)
-- ext/uri: 117/117 runnable (100%)
-- ext/tokenizer: 34/53 (64.1%)
-- Zend/type_declarations: 252/496 (50.8%)
-- Zend/traits: 128/216 (59.3%)
-- Zend/enum: 108/151 (71.5%)
-- Zend/generators: 101/184 (54.9%)
-- Zend/closures: 61/135 (45.2%)
-- Zend/lazy_objects: 107/213 (50.2%)
-- Zend/property_hooks: 110/211 (52.1%)
+Zend highlights: type_declarations 83.5%, traits 90.0%, enum 86.6%, generators 80.4%,
+closures 82.2%, lazy_objects 88.3%, property_hooks 87.0%, fibers 89.7%, gc 88.2%,
+attributes 82.1%. (Type declarations, pcre, hash, random and zlib have improved further
+since this run.)
 
-*Test runner supports recursive directories, SKIPIF sections, EXPECTF pattern matching with backtracking, and timeout protection.*
+*The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
+EXPECTF/EXPECTREGEX matching, per-test timeouts and an embedded MySQL fixture for ext/mysqli.*
 
 ## Features
 
-### Working
-- Full execution pipeline: PHP source -> lexer -> parser -> AST -> bytecode -> VM
-- Types: null, bool, int, float, string (binary-safe), array (ordered hash map), object, reference
-- Arithmetic, comparison, bitwise, logical operators with PHP 8 semantics
-- String interpolation, concatenation, type juggling, cast operators
-- Control flow: if/elseif/else, while, do-while, for, foreach, switch, match, break/continue, goto
-- **OOP**: classes, inheritance, interfaces, abstract classes, final classes/methods
-- **Traits**: use, insteadof, as, conflict resolution
-- **Enums**: backed values, from/tryFrom/cases, methods, interface implementation
-- **Namespaces**: use/as imports, group imports, name resolution
-- **Visibility**: public/protected/private enforcement for properties and methods
-- **Readonly**: readonly properties and classes (PHP 8.1/8.2)
-- **Magic methods**: `__construct`, `__toString`, `__get`, `__set`, `__isset`, `__unset`, `__call`, `__callStatic`, `__invoke`, `__clone`
-- **Closures**: variable capture, arrow functions, Closure::bind/bindTo/call
-- **Generators**: yield, yield from, send, throw, return, finally
-- **Exceptions**: try/catch/finally, exception chaining, stack traces
-- **Type system**: parameter types, return types, typed properties, union/intersection/DNF types
-- **Named parameters**: positional+named mixing, builtin param registry
-- **First-class callables**: `strlen(...)`, `$obj->method(...)`, `Foo::method(...)`
-- **Throw expressions**: throw in &&, ||, ??, ternary
-- **Reflection API**: ReflectionClass, ReflectionMethod, ReflectionFunction, ReflectionProperty, ReflectionParameter
-- **SPL**: ArrayObject, SplFixedArray, SplDoublyLinkedList, SplStack, SplQueue, SplHeap, SplPriorityQueue, SplObjectStorage + iterator classes
-- **ArrayAccess**: `[]` operator on objects calls offsetGet/offsetSet/offsetExists/offsetUnset
-- **Iterator/IteratorAggregate**: foreach on objects implementing Iterator
-- **DateTime**: DateTime, DateTimeImmutable, DateInterval, DateTimeZone with format/modify/diff
-- **Regex**: Hand-written PCRE-compatible engine (preg_match/replace/split/grep)
-- **Hash**: MD5, SHA1, SHA-256/384/512, CRC32, HMAC, streaming API
-- eval(), list destructuring, foreach by-reference, dynamic calls
-- Memory limit tracking with allocation/deallocation
-- 500+ built-in functions, 300+ constants
-- CLI SAPI, PHPT test runner
-- **PhpToken** class (PHP 8): `PhpToken::tokenize()`, `is()`, `getTokenName()`, `isIgnorable()`, `__toString()`. Lexer emits T_WHITESPACE, T_COMMENT, T_DOC_COMMENT when trivia preservation is enabled.
-- **Uri classes (PHP 8.5)**: `Uri\WhatWg\Url` and `Uri\Rfc3986\Uri` with `parse`, `toString`, `toAsciiString`, `toUnicodeString` (IDN), `toRawString`, `equals` (IncludeFragment / ExcludeFragment modes), `resolve`, `withScheme/withHost/…`. Backed by the `url` and `idna` crates. WhatWg error codes (HostMissing, PortInvalid, DomainInvalidCodePoint, Ipv6InvalidCodePoint, MissingSchemeNonRelativeUrl). `Uri\WhatWg\InvalidUrlException`, `Uri\InvalidUriException`, `Uri\UriComparisonMode` enum. Base URL can be a string or another Uri object; errors array output parameter supported.
-- **Property hooks (PHP 8.4)**: `get` / `set` with short (`get => expr`) and block forms, `&get` and set parameter type hints. Abstract / final on hook and property. `parent::$prop::get()` and `::set()` with backing-store fallback. `isset()` on write-only throws `Property is write-only`; `unset()` on hooked property throws `Cannot unset hooked property`. Trait hook composition. Inheritance validation: final override, abstract-unimplemented, LSP-contravariant set param types. `ReflectionProperty::isVirtual/isAbstract/isFinal/hasHooks`.
-- **Lazy objects (PHP 8.4)**: `ReflectionClass::newLazyGhost`, `newLazyProxy`, `resetAsLazyGhost`, `resetAsLazyProxy`, `initializeLazyObject`, `markLazyObjectAsInitialized`, `isUninitializedLazyObject`, `getLazyInitializer`, `getLazyProxyInstance`. `ReflectionProperty::skipLazyInitialization`, `setRawValueWithoutLazyInitialization`, `getRawValue`. Initializer recursion guard, snapshot/restore on init exception, proxy forwarding, clone with deep-copy of proxy instance, array cast, destructor on initialized objects. `var_dump` shows `lazy ghost` / `lazy proxy` prefix with correct PHP formatting.
-- **Resource type registry**: `is_resource`, `gettype`, `get_resource_type` work for `fopen`, `tmpfile`, `popen`, `fsockopen`, `STDIN`/`STDOUT`/`STDERR`.
-- **Object handle recycling**: `PhpObject::Drop` returns freed ids to a thread-local pool so `alloc_object_id` reuses them, matching PHP's handle reuse behavior that tests with literal `#N` object numbers rely on.
+Highlights beyond the core language:
+
+- **Bytecode VM** with a PHP-style symbol table, real references, by-ref returns,
+  copy-on-write-like array separation, php-src destructor timing and shutdown order, and a
+  Zend-style cycle collector (`gc_collect_cycles`, auto-collection, `gc_status`).
+- **Closures** are real `Closure` objects; first-class callables (`strlen(...)`).
+- **Fibers**, generators (`yield from`, finally on destruction), property hooks (8.4),
+  lazy objects (8.4), asymmetric visibility (8.4), pipe operator `|>` (8.5), `Uri\*` (8.5).
+- **Builtin arginfo** generated from php-src `*.stub.php`: named arguments, argument-count
+  and zpp-style type errors, internal frames in backtraces, Reflection of internal
+  functions and classes.
+- **Streams**: userspace stream wrappers, filters (incl. user filters), sockets
+  (tcp/udp/unix), `stream_select`, `proc_open`, TLS (`ssl://`, `tls://`,
+  `stream_socket_enable_crypto`) and `https://`.
+- **Extensions** (all pure Rust, no C FFI): standard, date (timelib port), pcre (PCRE2 port),
+  hash, random, zlib (zlib port, byte-identical output), json, ctype, mbstring, spl,
+  reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
+  HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
+  mysqli (mysqlnd port), gmp, sockets, curl, bz2, tokenizer.
 
 ### Not Yet Implemented
-- Fibers (PHP 8.1)
-- Pipe operator (PHP 8.5)
-- Asymmetric visibility (PHP 8.4) (parser recognizes but VM enforcement partial)
-- Stream wrappers / file resources
-- `declare(strict_types=1)` enforcement
-- Many extensions (pdo, curl via object-handle protocol, etc.)
+- intl, gd, soap, phar, pdo_*, ffi, ldap, pgsql, sqlite3, exif, zip, xsl, iconv (mostly)
+- PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
+- Exact opcache optimizer behaviour
 
 ## Building
 
@@ -125,11 +106,11 @@ Workspace crates:
 - `goro-core` - Bytecode compiler and register-based VM
 - `goro-vfs` - Virtual filesystem abstraction
 - `goro-sapi` - Server API trait and CLI implementation
-- `goro-ext-standard` - PHP standard library (500+ functions, regex engine)
+- `goro-ext-standard` - PHP standard library (streams, sockets, filters, locale, …)
 - `goro-ext-date` - Date/time extension (DateTime, DateInterval, etc.)
 - `goro-ext-json` - JSON extension (json_encode/decode)
 - `goro-ext-ctype` - Character type extension
-- `goro-ext-hash` - Hash extension (MD5, SHA, CRC32, HMAC)
+- `goro-ext-hash` - Hash extension (all php-src algorithms, HMAC/HKDF/PBKDF2)
 - `goro-ext-reflection` - Reflection extension (stub; most logic lives in `goro-core::reflection`)
 - `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
 - `goro-ext-{bz2,curl,gmp,mbstring,mysqli,openssl,session,sockets,xml,zlib}` - misc extensions
@@ -139,6 +120,6 @@ Workspace crates:
 
 - **Performance**: Zero-cost abstractions, minimal allocations
 - **Completeness**: Target 100% PHP 8.5.4 test suite compatibility
-- **Minimal dependencies**: No external crates (everything hand-written)
+- **Pure Rust**: no C FFI dependencies; ports of the reference C code where exact behaviour matters
 - **Security**: Fully scopeable file/network access via VFS
 - **Modularity**: SAPIs and extensions are opt-in at compile time
