@@ -4169,6 +4169,15 @@ pub fn reflection_method_docall(
             }
             b"invokeargs" => {
                 let target_obj = args.get(1)?.clone();
+                if !matches!(&target_obj, Value::Object(_) | Value::Null) {
+                    let msg = format!(
+                        "ReflectionMethod::invokeArgs(): Argument #1 ($object) must be of type ?object, {} given",
+                        Vm::value_type_name(&target_obj)
+                    );
+                    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
                 let args_arr_val = args.get(2).cloned().unwrap_or(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
                 // Type-check: args must be array (PHP throws TypeError otherwise).
                 if !matches!(&args_arr_val, Value::Array(_)) {
@@ -4315,14 +4324,23 @@ pub fn reflection_method_docall(
                 } else {
                     let target_obj = args.get(1).cloned().unwrap_or(Value::Null);
                     if matches!(target_obj, Value::Null | Value::Undef) {
-                        // No object: cannot bind; return Null.
-                        Some(Value::Null)
-                    } else {
-                        let mut arr = PhpArray::new();
-                        arr.push(Value::String(PhpString::from_string(callable)));
-                        arr.push(target_obj);
-                        Some(Value::Array(Rc::new(RefCell::new(arr))))
+                        let exc = vm.create_exception(b"ValueError", "ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods", vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
                     }
+                    let decl = rmethod(vm, &class_lower, method_lower_bytes.as_bytes()).map(|m| m.declaring_class.to_ascii_lowercase()).unwrap_or_else(|| class_lower.clone());
+                    if let Value::Object(o) = &target_obj {
+                        let ocl = o.borrow().class_name.to_ascii_lowercase();
+                        if ocl != decl && !vm.class_extends(&ocl, &decl) {
+                            let exc = vm.create_exception(b"ReflectionException", "Given object is not an instance of the class this method was declared in", vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                    }
+                    let mut arr = PhpArray::new();
+                    arr.push(Value::String(PhpString::from_string(callable)));
+                    arr.push(target_obj);
+                    Some(Value::Array(Rc::new(RefCell::new(arr))))
                 }
             }
             _ => None,
