@@ -311,14 +311,14 @@ impl<'a> Ser<'a> {
                         }
                     }
                 } else if candidate.is_none() {
-                    let ap = self.ns_prefix(attr);
-                    if ap.is_none() || local.contains(ap.unwrap()) {
-                        candidate = Some(generate_prefix(map, local, Some(ans), index));
-                    } else {
-                        let p = ap.unwrap().to_string();
-                        map.add(&p, Some(ans));
-                        local.add(&p, ans);
-                        candidate = Some(p);
+                    match self.ns_prefix(attr) {
+                        Some(ap) if !local.contains(ap) => {
+                            let p = ap.to_string();
+                            map.add(&p, Some(ans));
+                            local.add(&p, ans);
+                            candidate = Some(p);
+                        }
+                        _ => candidate = Some(generate_prefix(map, local, Some(ans), index)),
                     }
                     self.out.push_str(" xmlns:");
                     self.out.push_str(candidate.as_deref().unwrap());

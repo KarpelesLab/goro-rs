@@ -11,6 +11,8 @@
 //! namespace of the document's namespace mapper (one per (prefix, uri)), and
 //! namespace declarations are ordinary attributes in the XMLNS namespace.
 
+#![allow(clippy::result_unit_err)]
+
 pub mod chardata;
 pub mod collections;
 pub mod css;

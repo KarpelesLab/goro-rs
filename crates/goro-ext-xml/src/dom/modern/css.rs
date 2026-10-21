@@ -877,7 +877,7 @@ impl Parser {
             Tok::Function(n) => {
                 let l = n.to_ascii_lowercase();
                 match l.as_str() {
-                    "dir" | "lang" | "nth-col" | "nth-last-col" => return Err(not_supported(&n)),
+                    "dir" | "lang" | "nth-col" | "nth-last-col" => Err(not_supported(&n)),
                     "not" | "is" | "where" | "current" | "has" => {
                         self.bump();
                         let list = self.list(l == "has", l != "not")?;

@@ -265,7 +265,7 @@ fn svg_title_element(t: &Tree, svg: NodeId) -> Option<NodeId> {
 
 /// dom_strip_and_collapse_ascii_whitespace
 pub fn strip_and_collapse(s_: &str) -> String {
-    s_.split(|c: char| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' '))
+    s_.split(['\t', '\n', '\x0C', '\r', ' '])
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
