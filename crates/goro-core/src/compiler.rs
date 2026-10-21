@@ -76,6 +76,10 @@ struct LoopContext {
     continue_target: Option<u32>,
     /// Whether this is a switch statement (for "continue targeting switch" warning)
     is_switch: bool,
+    /// Number of enclosing finally blocks when the loop started
+    finally_depth: usize,
+    /// Number of enclosing try-with-finally bodies when the loop started
+    try_finally_depth: usize,
 }
 
 /// Compiles an AST into bytecode
@@ -129,6 +133,12 @@ pub struct Compiler {
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
     pub deferred_fatal_errors: Vec<String>,
+    /// Ids of the finally blocks enclosing the code being compiled.
+    finally_path: Vec<u32>,
+    finally_id_counter: u32,
+    /// label -> enclosing finally path; gotos -> (label, path, line)
+    label_finally_paths: HashMap<Vec<u8>, Vec<u32>>,
+    goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
 }
 
 impl Default for Compiler {
@@ -271,6 +281,10 @@ impl Compiler {
             is_in_function_body: false,
             is_in_class_method: false,
             deferred_fatal_errors: Vec::new(),
+            finally_path: Vec::new(),
+            finally_id_counter: 0,
+            label_finally_paths: HashMap::new(),
+            goto_finally_paths: Vec::new(),
         }
     }
 
@@ -286,6 +300,19 @@ impl Compiler {
                 message: format!("'goto' to undefined label '{}'", label),
                 line,
             });
+        }
+        // zend_check_finally_breakout(): goto may not cross finally boundaries.
+        for (label, goto_path, line) in &self.goto_finally_paths {
+            if let Some(label_path) = self.label_finally_paths.get(label) {
+                let is_prefix = label_path.len() <= goto_path.len()
+                    && goto_path[..label_path.len()] == label_path[..];
+                if !is_prefix {
+                    return Err(CompileError { message: "jump into a finally block is disallowed".into(), line: *line });
+                }
+                if goto_path.len() > label_path.len() {
+                    return Err(CompileError { message: "jump out of a finally block is disallowed".into(), line: *line });
+                }
+            }
         }
         Ok(())
     }
@@ -1380,6 +1407,8 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                     continue_target: None,
                     is_switch: false,
+                    finally_depth: self.finally_path.len(),
+                    try_finally_depth: self.finally_targets.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -1427,6 +1456,8 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                     continue_target: None,
                     is_switch: false,
+                    finally_depth: self.finally_path.len(),
+                    try_finally_depth: self.finally_targets.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -1470,6 +1501,8 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                     continue_target: None,
                     is_switch: false,
+                    finally_depth: self.finally_path.len(),
+                    try_finally_depth: self.finally_targets.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -1566,6 +1599,8 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                     continue_target: None,
                     is_switch: false,
+                    finally_depth: self.finally_path.len(),
+                    try_finally_depth: self.finally_targets.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -1728,6 +1763,8 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                     continue_target: None,
                     is_switch: true,
+                    finally_depth: self.finally_path.len(),
+                    try_finally_depth: self.finally_targets.len(),
                 });
 
                 // Switch compilation strategy:
@@ -1846,8 +1883,16 @@ impl Compiler {
                     });
                 }
                 let target_index = stack_len - level;
-                // Check if we're inside a try-with-finally block
-                if let Some(&finally_target) = self.finally_targets.last() {
+                if self.finally_path.len() > self.loop_stack[target_index].finally_depth {
+                    return Err(CompileError {
+                        message: "jump out of a finally block is disallowed".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                // Check if we're inside a try-with-finally block that the
+                // jump leaves (the target loop started outside of it)
+                let leaves_try_finally = self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
+                if let Some(&finally_target) = self.finally_targets.last().filter(|_| leaves_try_finally) {
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
@@ -1928,8 +1973,16 @@ impl Compiler {
                     });
                 }
                 let target_index = stack_len - level;
-                // Check if we're inside a try-with-finally block
-                if let Some(&finally_target) = self.finally_targets.last() {
+                if self.finally_path.len() > self.loop_stack[target_index].finally_depth {
+                    return Err(CompileError {
+                        message: "jump out of a finally block is disallowed".into(),
+                        line: stmt.span.line,
+                    });
+                }
+                // Check if we're inside a try-with-finally block that the
+                // jump leaves (the target loop started outside of it)
+                let leaves_try_finally = self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
+                if let Some(&finally_target) = self.finally_targets.last().filter(|_| leaves_try_finally) {
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
@@ -2812,9 +2865,15 @@ impl Compiler {
                     // so that returns inside finally don't loop back to finally
                     self.finally_targets.pop();
 
+                    self.finally_id_counter += 1;
+                    self.finally_path.push(self.finally_id_counter);
                     for s in finally_stmts {
-                        self.compile_stmt(s)?;
+                        if let Err(e) = self.compile_stmt(s) {
+                            self.finally_path.pop();
+                            return Err(e);
+                        }
                     }
+                    self.finally_path.pop();
 
                     // After finally, check for deferred return
                     // Store finally_start in op1 so ReturnDeferred knows which handler(s) to pop
@@ -5525,6 +5584,7 @@ impl Compiler {
                 }
                 let offset = self.op_array.current_offset();
                 self.label_offsets.insert(name.clone(), offset);
+                self.label_finally_paths.insert(name.clone(), self.finally_path.clone());
                 // Patch any pending gotos that reference this label
                 if let Some(gotos) = self.pending_gotos.remove(name) {
                     for (goto_offset, _line) in gotos {
@@ -5534,6 +5594,7 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Goto(name) => {
+                self.goto_finally_paths.push((name.clone(), self.finally_path.clone(), stmt.span.line));
                 if let Some(&target) = self.label_offsets.get(name) {
                     // Label already seen - emit jump
                     self.op_array.emit(Op {
