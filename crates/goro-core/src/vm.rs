@@ -8373,6 +8373,16 @@ impl Vm {
         method_lower: &[u8],
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
+        if class_lower == b"internaliterator" {
+            // SPL's own iterators (SplDoublyLinkedList, SplFixedArray) share
+            // the InternalIterator class with extension-provided ones.
+            if let Some(r) = self.dll_iterator_call(method_lower, obj) {
+                return Some(r);
+            }
+            if let Some(r) = self.spl_internal_iterator_call(method_lower, obj) {
+                return Some(r);
+            }
+        }
         if self.native_class_handlers.contains_key(class_lower) {
             // Native handlers always receive their arguments at DoFCall time.
             return None;
