@@ -119,7 +119,9 @@ pub const XML_NS_ERR_QNAME: i32 = 202;
 pub const XML_NS_ERR_ATTRIBUTE_REDEFINED: i32 = 203;
 pub const XML_NS_ERR_COLON: i32 = 205;
 pub const XML_DTD_ID_REDEFINED: i32 = 513;
-pub const XML_DTD_UNKNOWN_ENTITY: i32 = 529;
+pub const XML_DTD_UNKNOWN_ENTITY: i32 = 535;
+pub const XML_DTD_STANDALONE_DEFAULTED: i32 = 538;
+pub const XML_ERR_NOT_STANDALONE: i32 = 103;
 
 pub fn err_string(code: i32) -> &'static str {
     match code {
@@ -1364,7 +1366,9 @@ pub struct Parser<'a, S: Sink> {
     /// (elem qname, attr qname) -> attribute type for normalization
     atts_special: HashMap<(String, String), u8>,
     /// elem qname -> defaults (prefix, localname, value)
-    atts_default: HashMap<String, Vec<(Option<String>, String, String)>>,
+    atts_default: HashMap<String, Vec<(Option<String>, String, String, bool)>>,
+    /// General entities declared in the external subset.
+    ext_entities: std::collections::HashSet<String>,
     elem_decls: HashMap<String, u8>,
     int_sub_name: Option<String>,
     ext_sub_uri: Option<String>,
@@ -1444,6 +1448,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             space: Vec::new(),
             atts_special: HashMap::new(),
             atts_default: HashMap::new(),
+            ext_entities: std::collections::HashSet::new(),
             elem_decls: HashMap::new(),
             int_sub_name: None,
             ext_sub_uri: None,
@@ -1675,9 +1680,10 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn ns_warn(&mut self, code: i32, msg: String) {
         self.err_full(FROM_NAMESPACE, code, ERR_WARNING, msg);
     }
+    /// xmlValidityError
     pub fn valid_err(&mut self, code: i32, msg: String) {
         self.st.valid = false;
-        self.err_full(FROM_VALID, code, ERR_ERROR, msg);
+        self.err_full(FROM_DTD, code, ERR_ERROR, msg);
     }
 
     // ------------------------------------------------------------------
@@ -3039,6 +3045,9 @@ impl<'a, S: Sink> Parser<'a, S> {
             if is_param {
                 self.pentities.insert(e.name.clone(), e);
             } else {
+                if self.st.in_subset == 2 {
+                    self.ext_entities.insert(e.name.clone());
+                }
                 self.entities.insert(e.name.clone(), e);
             }
         }
@@ -3520,10 +3529,10 @@ impl<'a, S: Sink> Parser<'a, S> {
             None => (None, attr.to_string()),
         };
         let list = self.atts_default.entry(elem.to_string()).or_default();
-        if list.iter().any(|(p, l, _)| *p == prefix && *l == local) {
+        if list.iter().any(|(p, l, _, _)| *p == prefix && *l == local) {
             return;
         }
-        list.push((prefix, local, value.to_string()));
+        list.push((prefix, local, value.to_string(), self.st.in_subset == 2));
     }
 
     fn parse_attribute_type(&mut self) -> Option<(u8, Vec<String>)> {
@@ -3756,6 +3765,20 @@ impl<'a, S: Sink> Parser<'a, S> {
             return predef;
         }
         let ent = self.entities.get(name).cloned();
+        if ent.is_some()
+            && self.st.standalone == 1
+            && self.st.in_subset != 2
+            && self.ext_entities.contains(name)
+        {
+            // xmlSAX2GetEntity
+            self.fatal_msg(
+                XML_ERR_NOT_STANDALONE,
+                format!(
+                    "Entity({}) document marked standalone but requires external subset\n",
+                    name
+                ),
+            );
+        }
         match ent {
             None => {
                 self.handle_undeclared_entity(name);
@@ -4339,7 +4362,7 @@ impl<'a, S: Sink> Parser<'a, S> {
             .get(&elem_qname)
             .cloned()
             .unwrap_or_default();
-        for (dp, dl, dv) in &defaults {
+        for (dp, dl, dv, _) in &defaults {
             if dl == "xmlns" && dp.is_none() {
                 nb_ns += self.ns_push(None, dv, true);
             } else if dp.as_deref() == Some("xmlns") {
@@ -4436,7 +4459,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         }
         // default attributes
         let mut nb_def = 0;
-        for (dp, dl, dv) in &defaults {
+        for (dp, dl, dv, ext) in &defaults {
             if (dl == "xmlns" && dp.is_none()) || dp.as_deref() == Some("xmlns") {
                 continue;
             }
@@ -4467,6 +4490,15 @@ impl<'a, S: Sink> Parser<'a, S> {
                 value: dv.clone(),
                 defaulted: true,
             });
+            if self.st.standalone == 1 && *ext {
+                self.valid_err(
+                    XML_DTD_STANDALONE_DEFAULTED,
+                    format!(
+                        "standalone: attribute {} on {} defaulted from external subset\n",
+                        dl, localname
+                    ),
+                );
+            }
             nb_def += 1;
         }
         let uri = self
