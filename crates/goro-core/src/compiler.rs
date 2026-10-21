@@ -9159,7 +9159,7 @@ impl Compiler {
                         object, property, ..
                     } => simple(object) && simple(property),
                     ExprKind::ArrayAccess { array, index } => {
-                        simple(array) && index.as_ref().map_or(true, |i| simple(i))
+                        simple(array) && index.as_ref().is_none_or(|i| simple(i))
                     }
                     ExprKind::StaticPropertyAccess { class, .. } => simple(class),
                     ExprKind::DynamicVariable(inner) => simple(inner),

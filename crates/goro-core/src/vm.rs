@@ -14362,6 +14362,9 @@ impl Vm {
         }
     }
 
+    // `cvs` / `tmps` are borrowed from the caller (a suspended generator frame
+    // in single-step mode); the body predates that and borrows them freely.
+    #[allow(clippy::needless_borrow)]
     fn execute_frame(
         &mut self,
         op_array: &OpArray,
