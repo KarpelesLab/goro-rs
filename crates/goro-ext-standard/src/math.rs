@@ -139,6 +139,11 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"is_finite", vec![f()]);
     vm.register_builtin_param_types(b"number_format", vec![f(), i(), s(), s()]);
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
+    // These validate their own arguments (check_math_num_arg/check_int_arg) and
+    // emit the null / float-to-int deprecations themselves.
+    for name in [&b"abs"[..], b"ceil", b"floor", b"round", b"decbin", b"decoct", b"dechex"] {
+        vm.builtin_self_coercing.insert(name.to_vec());
+    }
 }
 
 /// Throw a TypeError for a math function argument and set the current exception

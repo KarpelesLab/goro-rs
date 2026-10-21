@@ -508,6 +508,9 @@ pub struct Vm {
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
     pub builtin_param_types: HashMap<Vec<u8>, Vec<Option<ParamType>>>,
+    /// Builtins that emit their own null/float-to-int deprecations (the generic
+    /// call-site check skips those notices for them to avoid duplicates).
+    pub builtin_self_coercing: std::collections::HashSet<Vec<u8>>,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -1432,6 +1435,7 @@ impl Vm {
                 s
             },
             builtin_param_types: HashMap::new(),
+            builtin_self_coercing: std::collections::HashSet::new(),
             ini_set_hooks: HashMap::new(),
             startup_hooks: Vec::new(),
             request_startup_hooks: Vec::new(),
@@ -16383,16 +16387,19 @@ impl Vm {
                         if !op_array.strict_types {
                             if let Some(param_types) = self.builtin_param_types.get(&func_name_lower).cloned() {
                                 let mut nan_inf_err: Option<(usize, ParamType)> = None;
+                                let self_coercing = self.builtin_self_coercing.contains(&func_name_lower);
                                 for (i, arg) in call.args.iter().enumerate() {
                                     if i >= param_types.len() {
                                         break;
                                     }
                                     if let Some(ref pt) = param_types[i] {
-                                        self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
+                                        if !self_coercing {
+                                            self.emit_implicit_float_to_int_if_needed(arg, pt, op.line);
+                                        }
                                         let val = arg.deref();
                                         // Null to non-nullable scalar param: emit deprecation (PHP 8.1+).
                                         // (Not for optional params skipped via named arguments.)
-                                        if matches!(&val, Value::Null | Value::Undef)
+                                        if !self_coercing && matches!(&val, Value::Null | Value::Undef)
                                             && !named_skipped_args.contains(&i)
                                             && !Self::param_type_is_nullable(pt)
                                         {
