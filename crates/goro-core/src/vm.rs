@@ -23918,7 +23918,22 @@ impl Vm {
                     }
                     if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
-                        arr.borrow_mut().set(key, val);
+                        // Assigning to an element that is a PHP reference writes
+                        // through the reference (zend_assign_to_variable).
+                        let existing_ref = match arr.borrow().get(&key) {
+                            Some(Value::Reference(r)) => Some(r.clone()),
+                            _ => None,
+                        };
+                        match existing_ref {
+                            Some(r) => {
+                                let v = match val {
+                                    Value::Reference(vr) => vr.borrow().clone(),
+                                    v => v,
+                                };
+                                *r.borrow_mut() = v;
+                            }
+                            None => arr.borrow_mut().set(key, val),
+                        }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
                         // Auto-initialize null/undef/false to array
                         if matches!(&arr_val, Value::False) {
@@ -25157,7 +25172,7 @@ impl Vm {
                                 if let Some(value) = arr_borrow.get(&keys[next_pos]) {
                                     self.write_operand(
                                         &op.result,
-                                        value.clone(),
+                                        value.deref(), // by-value foreach never binds the element reference
                                         &mut cvs,
                                         &mut tmps,
                                         &static_cv_keys,
@@ -25179,7 +25194,7 @@ impl Vm {
                                 let (_, value) = entries[pos];
                                 self.write_operand(
                                     &op.result,
-                                    value.clone(),
+                                    value.deref(),
                                     &mut cvs,
                                     &mut tmps,
                                     &static_cv_keys,
@@ -36135,7 +36150,25 @@ impl Vm {
                 // PHP copy-on-write: when assigning an array to a CV,
                 // clone the inner PhpArray so each variable has its own copy.
                 let value = match &value {
-                    Value::Array(arr) => Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))),
+                    Value::Array(arr) => {
+                        // zend_array_dup(): references held only by the source
+                        // array (refcount 1) are copied as plain values.
+                        let mut copy = arr.borrow().clone();
+                        // Closures with captured variables are represented as
+                        // [name, captures...]; their by-ref captures must stay bound.
+                        let is_closure = matches!(copy.values().next(), Some(Value::String(s))
+                            if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") });
+                        for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
+                            let single = matches!(v, Value::Reference(r) if Rc::strong_count(r) == 2);
+                            if single {
+                                let inner = v.deref();
+                                if !matches!(&inner, Value::Array(a) if Rc::ptr_eq(a, arr)) {
+                                    *v = inner;
+                                }
+                            }
+                        }
+                        Value::Array(Rc::new(RefCell::new(copy)))
+                    }
                     _ => value,
                 };
                 if let Some(slot) = cvs.get_mut(*idx as usize) {

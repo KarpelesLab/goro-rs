@@ -3244,7 +3244,7 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             for (key, val) in arr.iter() {
                 match key {
                     goro_core::array::ArrayKey::Int(_) => {
-                        if let Err(msg) = result.try_push(val.clone()) {
+                        if let Err(msg) = result.try_push(unwrap_rc1_ref(val)) {
                             // PHP throws an Error when next int key overflows.
                             let exc = vm.create_exception(b"Error", msg, vm.current_line);
                             vm.current_exception = Some(exc);
@@ -3256,7 +3256,7 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                             let merged = merge_recursive_values(vm, &existing, val, 0)?;
                             result.set(key.clone(), merged);
                         } else {
-                            result.set(key.clone(), val.clone());
+                            result.set(key.clone(), unwrap_rc1_ref(val));
                         }
                     }
                 }
@@ -3275,7 +3275,7 @@ fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth:
             for (k, v) in b_ref.iter() {
                 match k {
                     goro_core::array::ArrayKey::Int(_) => {
-                        if let Err(msg) = merged_arr.try_push(v.clone()) {
+                        if let Err(msg) = merged_arr.try_push(unwrap_rc1_ref(v)) {
                             let exc = vm.create_exception(b"Error", msg, vm.current_line);
                             vm.current_exception = Some(exc);
                             return Err(VmError { message: msg.to_string(), line: vm.current_line });
@@ -3286,7 +3286,7 @@ fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth:
                             let merged = merge_recursive_values(vm, &ex, v, depth + 1)?;
                             merged_arr.set(k.clone(), merged);
                         } else {
-                            merged_arr.set(k.clone(), v.clone());
+                            merged_arr.set(k.clone(), unwrap_rc1_ref(v));
                         }
                     }
                 }
@@ -3308,7 +3308,7 @@ fn merge_recursive_values(vm: &mut Vm, existing: &Value, new_val: &Value, depth:
             }
             if let Value::Array(b) = new_v {
                 for (_, v) in b.borrow().iter() {
-                    if let Err(msg) = arr.try_push(v.clone()) {
+                    if let Err(msg) = arr.try_push(unwrap_rc1_ref(v)) {
                         let exc = vm.create_exception(b"Error", msg, vm.current_line);
                         vm.current_exception = Some(exc);
                         return Err(VmError { message: msg.to_string(), line: vm.current_line });
@@ -12538,7 +12538,7 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         let arg_deref = arg.deref();
         if let Value::Array(arr) = &arg_deref {
             let arr_ptr = Rc::as_ptr(arr) as usize;
-            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), unwrap_rc1_ref(v))).collect();
             for (key, value) in entries {
                 let value_deref = value.deref();
                 if let Value::Array(inner_new) = &value_deref {
@@ -12605,9 +12605,20 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpAr
                 }
             }
         }
-        result.set(key.clone(), value.clone());
+        result.set(key.clone(), unwrap_rc1_ref(value));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// A reference held only by its container (refcount 1) is copied as a
+/// plain value, like zend_array_dup()/php_array_merge_recursive do.
+fn unwrap_rc1_ref(v: &Value) -> Value {
+    if let Value::Reference(r) = v {
+        if Rc::strong_count(r) == 1 {
+            return r.borrow().clone();
+        }
+    }
+    v.clone()
 }
 
 fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
