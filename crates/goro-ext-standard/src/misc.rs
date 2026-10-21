@@ -3582,6 +3582,7 @@ fn type_priority(v: &Value) -> u8 {
 }
 
 // Sort flag constants
+const SORT_REGULAR: i64 = 0;
 const SORT_NUMERIC: i64 = 1;
 const SORT_STRING: i64 = 2;
 const SORT_LOCALE_STRING: i64 = 5;
