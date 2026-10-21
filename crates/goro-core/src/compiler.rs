@@ -171,6 +171,16 @@ pub struct Compiler {
     pending_finally_gotos: Vec<(Vec<u8>, u32, u32, Vec<u32>)>,
     /// Pending gotos for forward references: maps label name -> list of (jmp instruction offset, source line)
     pending_gotos: HashMap<Vec<u8>, Vec<(u32, u32)>>,
+    /// label -> number of loops enclosing it
+    label_loop_depth: HashMap<Vec<u8>, usize>,
+    /// Loop-variable frees emitted by forward gotos (label, loop index, op
+    /// range): those of loops that also enclose the label are removed.
+    pending_goto_frees: Vec<(Vec<u8>, usize, u32, u32)>,
+    /// Per enclosing try-with-finally: break/continue jumps that leave it
+    /// with loop variables to free between its finally block and the next
+    /// (SaveJump offset, target loop index, is continue, line). They resume
+    /// after the finally block, in stubs emitted after the try statement.
+    finally_stubs: Vec<Vec<(u32, usize, bool, u32)>>,
     /// Source file path (for __FILE__, __DIR__)
     pub source_file: Vec<u8>,
     /// Whether the current function has a "never" return type
@@ -416,6 +426,9 @@ impl Compiler {
             try_finally_counter: 0,
             label_try_finally: HashMap::new(),
             pending_finally_gotos: Vec::new(),
+            label_loop_depth: HashMap::new(),
+            pending_goto_frees: Vec::new(),
+            finally_stubs: Vec::new(),
             pending_gotos: HashMap::new(),
             source_file: Vec::new(),
             has_never_return: false,
@@ -2249,7 +2262,12 @@ impl Compiler {
     /// Release the foreach temporaries of the loops `loop_stack[from..]`
     /// (innermost first) that a return/break/continue leaves, except `keep`
     /// (the returned operand).
-    fn emit_loop_frees(&mut self, from: usize, keep: OperandType, line: u32) {
+    fn emit_loop_frees(
+        &mut self,
+        from: usize,
+        keep: OperandType,
+        line: u32,
+    ) -> Vec<(usize, u32, u32)> {
         // Loops outside the innermost try-with-finally are only released
         // after its finally block ran (php-src emits their FE_FREE after
         // the FAST_CALL), so a finally that throws keeps them running.
@@ -2259,11 +2277,13 @@ impl Compiler {
             .take_while(|&i| self.loop_stack[i].try_finally_depth >= depth)
             .filter(|&i| !self.loop_stack[i].free_tmps.is_empty())
             .collect();
+        let mut ranges = Vec::new();
         if levels.is_empty() {
-            return;
+            return ranges;
         }
         let undef_const = self.op_array.add_literal(Value::Undef);
         for i in levels {
+            let start = self.op_array.current_offset();
             // ZEND_FREE_ON_RETURN: an exception thrown by the release is
             // logically thrown at the end of the loop, so try blocks inside
             // the loop don't catch it (the handler stack is cut back to its
@@ -2305,7 +2325,72 @@ impl Compiler {
                     });
                 }
             }
+            ranges.push((i, start, self.op_array.current_offset()));
         }
+        ranges
+    }
+
+    /// The jump of `break` / `continue` to the loop `loop_stack[target_index]`:
+    /// frees the loop variables it leaves and runs the finally blocks in
+    /// between (zend_handle_loops_and_finally()).
+    fn emit_loop_exit(&mut self, target_index: usize, is_continue: bool, line: u32) {
+        self.emit_loop_frees(target_index + 1, OperandType::Unused, line);
+        // Check if we're inside a try-with-finally block that the
+        // jump leaves (the target loop started outside of it)
+        let leaves_try_finally =
+            self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
+        let Some(&finally_target) = self.finally_targets.last().filter(|_| leaves_try_finally)
+        else {
+            let jmp = self.op_array.emit(Op {
+                opcode: OpCode::Jmp,
+                op1: OperandType::JmpTarget(0),
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line,
+            });
+            if is_continue {
+                self.loop_stack[target_index].continue_jumps.push(jmp);
+            } else {
+                self.loop_stack[target_index].break_jumps.push(jmp);
+            }
+            return;
+        };
+        // Loops left after the innermost finally block ran (and before the
+        // next one): the jump continues from a stub after the try statement.
+        let depth = self.finally_targets.len();
+        let needs_stub = (target_index + 1..self.loop_stack.len()).any(|i| {
+            self.loop_stack[i].try_finally_depth < depth && !self.loop_stack[i].free_tmps.is_empty()
+        });
+        // Number of finally blocks the jump runs through.
+        let fin_levels = self.op_array.add_literal(Value::Long(if needs_stub {
+            1
+        } else {
+            (self.finally_targets.len() - self.loop_stack[target_index].try_finally_depth) as i64
+        }));
+        let save_jmp = self.op_array.emit(Op {
+            opcode: OpCode::SaveJump,
+            op1: OperandType::JmpTarget(0), // patched to the target (or stub) later
+            op2: OperandType::Const(fin_levels),
+            result: OperandType::Unused,
+            line,
+        });
+        if needs_stub {
+            if let Some(stubs) = self.finally_stubs.last_mut() {
+                stubs.push((save_jmp, target_index, is_continue, line));
+            }
+        } else if is_continue {
+            self.loop_stack[target_index].continue_jumps.push(save_jmp);
+        } else {
+            self.loop_stack[target_index].break_jumps.push(save_jmp);
+        }
+        // A placeholder 0 is patched by the finally compilation.
+        self.op_array.emit(Op {
+            opcode: OpCode::Jmp,
+            op1: OperandType::JmpTarget(finally_target),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
     }
 
     /// FreeTmps over a range of temporaries, if it is not empty
@@ -3496,69 +3581,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
-                self.emit_loop_frees(target_index + 1, OperandType::Unused, stmt.span.line);
-                // Check if we're inside a try-with-finally block that the
-                // jump leaves (the target loop started outside of it)
-                let leaves_try_finally =
-                    self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
-                if let Some(&finally_target) =
-                    self.finally_targets.last().filter(|_| leaves_try_finally)
-                {
-                    // Number of finally blocks the jump runs through.
-                    let fin_levels = self.op_array.add_literal(Value::Long(
-                        (self.finally_targets.len()
-                            - self.loop_stack[target_index].try_finally_depth)
-                            as i64,
-                    ));
-                    if finally_target > 0 {
-                        // Inside try-with-finally: save jump target and jump to finally
-                        let save_jmp = self.op_array.emit(Op {
-                            opcode: OpCode::SaveJump,
-                            op1: OperandType::JmpTarget(0), // patched to break target later
-                            op2: OperandType::Const(fin_levels),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                        self.loop_stack[target_index].break_jumps.push(save_jmp);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::Jmp,
-                            op1: OperandType::JmpTarget(finally_target),
-                            op2: OperandType::Unused,
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                    } else {
-                        // finally_target is 0 (not yet patched), use deferred jump
-                        let save_jmp = self.op_array.emit(Op {
-                            opcode: OpCode::SaveJump,
-                            op1: OperandType::JmpTarget(0), // patched to break target later
-                            op2: OperandType::Const(fin_levels),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                        self.loop_stack[target_index].break_jumps.push(save_jmp);
-                        // Emit Jmp with placeholder 0 - will be patched by finally compilation
-                        let jmp = self.op_array.emit(Op {
-                            opcode: OpCode::Jmp,
-                            op1: OperandType::JmpTarget(0), // patched to finally target later
-                            op2: OperandType::Unused,
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                        // Mark this Jmp as needing SaveJump patching (it follows a SaveJump)
-                        // The finally compilation will patch Jmp(0) that follow SaveJump
-                        let _ = jmp;
-                    }
-                } else {
-                    let jmp = self.op_array.emit(Op {
-                        opcode: OpCode::Jmp,
-                        op1: OperandType::JmpTarget(0),
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
-                    self.loop_stack[target_index].break_jumps.push(jmp);
-                }
+                self.emit_loop_exit(target_index, false, stmt.span.line);
                 Ok(())
             }
 
@@ -3623,66 +3646,7 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
-                self.emit_loop_frees(target_index + 1, OperandType::Unused, stmt.span.line);
-                // Check if we're inside a try-with-finally block that the
-                // jump leaves (the target loop started outside of it)
-                let leaves_try_finally =
-                    self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
-                if let Some(&finally_target) =
-                    self.finally_targets.last().filter(|_| leaves_try_finally)
-                {
-                    // Number of finally blocks the jump runs through.
-                    let fin_levels = self.op_array.add_literal(Value::Long(
-                        (self.finally_targets.len()
-                            - self.loop_stack[target_index].try_finally_depth)
-                            as i64,
-                    ));
-                    if finally_target > 0 {
-                        // Inside try-with-finally: save jump target and jump to finally
-                        let save_jmp = self.op_array.emit(Op {
-                            opcode: OpCode::SaveJump,
-                            op1: OperandType::JmpTarget(0), // patched to continue target later
-                            op2: OperandType::Const(fin_levels),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                        self.loop_stack[target_index].continue_jumps.push(save_jmp);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::Jmp,
-                            op1: OperandType::JmpTarget(finally_target),
-                            op2: OperandType::Unused,
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                    } else {
-                        // finally_target is 0 (not yet patched), use deferred jump
-                        let save_jmp = self.op_array.emit(Op {
-                            opcode: OpCode::SaveJump,
-                            op1: OperandType::JmpTarget(0), // patched to continue target later
-                            op2: OperandType::Const(fin_levels),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                        self.loop_stack[target_index].continue_jumps.push(save_jmp);
-                        // Emit Jmp with placeholder 0 - will be patched by finally compilation
-                        self.op_array.emit(Op {
-                            opcode: OpCode::Jmp,
-                            op1: OperandType::JmpTarget(0), // patched to finally target later
-                            op2: OperandType::Unused,
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
-                    }
-                } else {
-                    let jmp = self.op_array.emit(Op {
-                        opcode: OpCode::Jmp,
-                        op1: OperandType::JmpTarget(0),
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
-                    self.loop_stack[target_index].continue_jumps.push(jmp);
-                }
+                self.emit_loop_exit(target_index, true, stmt.span.line);
                 Ok(())
             }
 
@@ -4636,6 +4600,7 @@ impl Compiler {
                     self.finally_targets.push(0); // placeholder, patched below
                     self.try_finally_counter += 1;
                     self.try_finally_ids.push(self.try_finally_counter);
+                    self.finally_stubs.push(Vec::new());
                 }
 
                 // Compile try body
@@ -4949,6 +4914,26 @@ impl Compiler {
                     self.op_array.patch_jump(jmp_after_try, finally_or_end);
                     for jmp in end_of_catch_jumps {
                         self.op_array.patch_jump(jmp, finally_or_end);
+                    }
+                }
+                // Jumps out of loops resumed after the finally block.
+                if has_finally {
+                    let stubs = self.finally_stubs.pop().unwrap_or_default();
+                    if !stubs.is_empty() {
+                        let skip = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                        for (save_at, target_index, is_continue, line) in stubs {
+                            let here = self.op_array.current_offset();
+                            self.op_array.ops[save_at as usize].op1 = OperandType::JmpTarget(here);
+                            self.emit_loop_exit(target_index, is_continue, line);
+                        }
+                        let end = self.op_array.current_offset();
+                        self.op_array.patch_jump(skip, end);
                     }
                 }
                 Ok(())
@@ -9395,6 +9380,21 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                // Loop variables freed by forward gotos to this label stay
+                // alive for the loops that enclose it.
+                let depth = self.loop_stack.len();
+                let frees = std::mem::take(&mut self.pending_goto_frees);
+                for (label, loop_index, start, end) in frees {
+                    if &label != name {
+                        self.pending_goto_frees
+                            .push((label, loop_index, start, end));
+                    } else if loop_index < depth {
+                        for op in &mut self.op_array.ops[start as usize..end as usize] {
+                            op.opcode = OpCode::Nop;
+                        }
+                    }
+                }
+                self.label_loop_depth.insert(name.clone(), depth);
                 let offset = self.op_array.current_offset();
                 self.label_offsets.insert(name.clone(), offset);
                 self.label_finally_paths
@@ -9438,6 +9438,21 @@ impl Compiler {
                     self.finally_path.clone(),
                     stmt.span.line,
                 ));
+                // The loops it leaves free their variables first
+                // (zend_resolve_goto_label() keeps the frees of the loops the
+                // label is in).
+                match self.label_loop_depth.get(name).copied() {
+                    Some(d) => {
+                        self.emit_loop_frees(d, OperandType::Unused, stmt.span.line);
+                    }
+                    None => {
+                        for (i, start, end) in
+                            self.emit_loop_frees(0, OperandType::Unused, stmt.span.line)
+                        {
+                            self.pending_goto_frees.push((name.clone(), i, start, end));
+                        }
+                    }
+                }
                 // A goto leaving try/finally regions runs their finally
                 // blocks first (like break/continue).
                 let levels_known = self
