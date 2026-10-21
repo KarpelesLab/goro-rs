@@ -154,6 +154,16 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 
 pub fn register(vm: &mut Vm) {
     register_std_streams();
+    vm.register_function(b"fnmatch", fnmatch_fn);
+    for (n, v) in [
+        ("FNM_NOESCAPE", libc::FNM_NOESCAPE),
+        ("FNM_PATHNAME", libc::FNM_PATHNAME),
+        ("FNM_PERIOD", libc::FNM_PERIOD),
+        ("FNM_CASEFOLD", libc::FNM_CASEFOLD),
+    ] {
+        vm.constants
+            .insert(n.as_bytes().to_vec(), Value::Long(v as i64));
+    }
     vm.resource_shutdown_hooks.push(shutdown_filtered_streams);
     vm.unserialize_value_hook = Some(crate::serialize::unserialize_value_hook);
     // Built-in php_user_filter base class (user_filters.stub.php). Compiled
@@ -10329,6 +10339,49 @@ fn shutdown_filtered_streams(vm: &mut Vm) {
     }
 }
 
+/// PHP_FUNCTION(fnmatch)
+fn fnmatch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    const MAXPATHLEN: usize = 4096;
+    let pattern = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let filename = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    for (n, name, v) in [(1, "pattern", &pattern), (2, "filename", &filename)] {
+        if v.as_bytes().contains(&0) {
+            return Err(throw_value_error_msg(
+                vm,
+                &format!(
+                    "fnmatch(): Argument #{} (${}) must not contain any null bytes",
+                    n, name
+                ),
+            ));
+        }
+    }
+    if filename.len() >= MAXPATHLEN {
+        vm.emit_warning(&format!(
+            "fnmatch(): Filename exceeds the maximum allowed length of {} characters",
+            MAXPATHLEN
+        ));
+        return Ok(Value::False);
+    }
+    if pattern.len() >= MAXPATHLEN {
+        vm.emit_warning(&format!(
+            "fnmatch(): Pattern exceeds the maximum allowed length of {} characters",
+            MAXPATHLEN
+        ));
+        return Ok(Value::False);
+    }
+    let p = std::ffi::CString::new(pattern.as_bytes()).unwrap_or_default();
+    let f = std::ffi::CString::new(filename.as_bytes()).unwrap_or_default();
+    let r = unsafe { libc::fnmatch(p.as_ptr(), f.as_ptr(), flags as libc::c_int) };
+    Ok(if r == 0 { Value::True } else { Value::False })
+}
+
 /// Re-read the state of descriptors 0-2 after the embedder replaced them
 /// (e.g. the PHPT runner installing a test's stdin).
 pub fn refresh_std_streams() {
@@ -11754,8 +11807,16 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut out: Vec<u8> = Vec::new();
         let mut hit_newline = false;
         while out.len() < limit {
-            let chunk = read_filtered(vm, fid, 1);
+            let chunk = match read_filtered_ex(vm, fid, 1) {
+                Some(c) => c,
+                // A filter failed: _php_stream_get_line() returns NULL.
+                None if stream_fatal_error(fid) => return Ok(Value::False),
+                None => Vec::new(),
+            };
             if chunk.is_empty() {
+                if stream_fatal_error(fid) {
+                    return Ok(Value::False);
+                }
                 break;
             }
             out.extend_from_slice(&chunk);
@@ -19189,6 +19250,7 @@ fn read_some(vm: &mut Vm, fid: i64, max: usize) -> Option<Vec<u8>> {
         let d = read_filtered(vm, fid, max);
         return if d.is_empty() { None } else { Some(d) };
     }
+    // (callers check stream_fatal_error() for filter failures)
     FILE_HANDLES.with(|h| {
         let mut h = h.borrow_mut();
         let fh = h.get_mut(&fid)?;
@@ -19204,6 +19266,16 @@ fn read_some(vm: &mut Vm, fid: i64, max: usize) -> Option<Vec<u8>> {
             }
             Err(_) => None,
         }
+    })
+}
+
+/// stream->fatal_error
+fn stream_fatal_error(fid: i64) -> bool {
+    FILE_HANDLES.with(|h| {
+        h.borrow()
+            .get(&fid)
+            .map(|fh| fh.fatal_error)
+            .unwrap_or(false)
     })
 }
 
@@ -19250,6 +19322,7 @@ fn stream_get_record(vm: &mut Vm, fid: i64, maxlen: usize, delim: &[u8]) -> Opti
         let before = buf.len();
         match read_some(vm, fid, want) {
             Some(d) => buf.extend_from_slice(&d),
+            None if stream_fatal_error(fid) => return None,
             None => break,
         }
         found = find(&buf, before.saturating_sub(delim.len().saturating_sub(1)));
