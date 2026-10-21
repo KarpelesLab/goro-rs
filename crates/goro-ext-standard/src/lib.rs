@@ -1,4 +1,6 @@
 pub mod basedir_guard;
+pub mod crypt;
+mod crypt_blowfish_tables;
 pub mod filters;
 pub mod html;
 pub mod ini_parser;
@@ -28,6 +30,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     vm.register_extension(b"standard");
     output::register(vm);
     strings::register(vm);
+    crypt::register(vm);
     type_funcs::register(vm);
     math::register(vm);
     misc::register(vm);
