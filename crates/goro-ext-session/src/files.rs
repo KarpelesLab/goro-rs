@@ -141,6 +141,9 @@ pub(crate) fn open(vm: &mut Vm, save_path: &[u8]) -> bool {
     if save_path.is_empty() {
         tmp = temp_dir(vm);
         save_path = &tmp;
+        if !crate::basedir_ok(vm, save_path) {
+            return false;
+        }
     }
     let mut argv: Vec<&[u8]> = Vec::new();
     let mut last = save_path;

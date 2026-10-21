@@ -724,24 +724,9 @@ fn cstr(v: &[u8]) -> &[u8] {
     }
 }
 
-fn basedir_ok(vm: &mut Vm, path: &[u8]) -> bool {
-    let ob = vm.constants.get(b"open_basedir".as_slice()).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
-    if ob.is_empty() {
-        return true;
-    }
-    let p = lossy(path);
-    let ok = ob.split(|&c| c == b':').any(|d| {
-        let d = lossy(d);
-        !d.is_empty() && std::path::Path::new(&p).starts_with(&d)
-    });
-    if !ok {
-        err(vm, E_WARNING, &format!(
-            "open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
-            p,
-            lossy(&ob)
-        ));
-    }
-    ok
+pub(crate) fn basedir_ok(vm: &mut Vm, path: &[u8]) -> bool {
+    let fname = FN_STACK.with(|s| s.borrow().last().map(|f| f.0.clone())).unwrap_or_default();
+    goro_core::basedir::check_open_basedir_ex(vm, &fname, &lossy(path), true)
 }
 
 fn ini_entry(name: &[u8]) -> Option<&'static (&'static str, &'static str, bool)> {
@@ -920,6 +905,9 @@ fn session_encode_data(vm: &mut Vm) -> Option<Vec<u8>> {
     if vm.current_exception.is_some() {
         return None;
     }
+    if buf.is_empty() {
+        return None;
+    }
     Some(buf)
 }
 
@@ -1076,7 +1064,23 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
         return Ok(None);
     }
     ps(|p| p.in_save_handler = true);
+    // Stack frames: the session function, then the handler called from it.
+    let outer = FN_STACK.with(|s| s.borrow().last().cloned());
+    let pushed_outer = outer.is_some();
+    if let Some((fname, file, line)) = outer {
+        let (name, is_method) = match fname.find("::") {
+            Some(_) => (fname.clone(), true),
+            None => (fname.clone(), false),
+        };
+        vm.call_stack.push((name, file, line, Vec::new(), is_method));
+    }
+    let (cname, is_method) = callable_frame_name(&func);
+    vm.call_stack.push((cname, String::new(), 0, args.to_vec(), is_method));
     let r = vm.call_callback(&func, args);
+    vm.call_stack.pop();
+    if pushed_outer {
+        vm.call_stack.pop();
+    }
     ps(|p| p.in_save_handler = false);
     match r {
         Ok(Value::Undef) => Ok(Some(Value::Null)),
@@ -1088,6 +1092,35 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
                 Err(e)
             }
         }
+    }
+}
+
+fn callable_frame_name(f: &Value) -> (String, bool) {
+    match f.deref() {
+        Value::Array(a) => {
+            let vals: Vec<Value> = a.borrow().values().cloned().collect();
+            if vals.len() == 2 {
+                let m = vals[1].to_php_string().to_string_lossy();
+                match vals[0].deref() {
+                    Value::Object(o) => {
+                        let c = goro_core::value::display_class_name(&o.borrow().class_name);
+                        return (format!("{}::{}", c, m), true);
+                    }
+                    other => return (format!("{}::{}", other.to_php_string().to_string_lossy(), m), false),
+                }
+            }
+            ("{closure}".into(), false)
+        }
+        Value::String(s) => {
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") {
+                ("{closure}".into(), false)
+            } else {
+                (lossy(b), false)
+            }
+        }
+        Value::Object(_) => ("{closure}".into(), false),
+        _ => (String::new(), false),
     }
 }
 

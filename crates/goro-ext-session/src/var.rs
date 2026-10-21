@@ -215,10 +215,6 @@ fn serialize_nested(vm: &mut Vm, entries: &[(ArrayKey, Value)], st: &mut Seriali
         push_key(out, k);
         let inner_arr = match v {
             Value::Array(a) => Some(a.clone()),
-            Value::Reference(r) => match &*r.borrow() {
-                Value::Array(a) => Some(a.clone()),
-                _ => None,
-            },
             _ => None,
         };
         if let Some(a) = inner_arr {
