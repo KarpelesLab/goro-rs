@@ -195,8 +195,16 @@ pub fn easy_unescape(s: &[u8]) -> Vec<u8> {
     urlapi::easy_unescape(s)
 }
 
-/// Callbacks that swallow everything (for setopt-time traces)
-pub(crate) struct NullCallbacks;
+/// One trace event recorded outside of perform()
+pub(crate) enum TraceEvent {
+    Debug(u32, Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+/// Callbacks used outside of perform() (setopt time): trace output is kept
+/// and handed to the real callbacks at the start of the next perform()
+#[derive(Default)]
+pub(crate) struct NullCallbacks(pub(crate) Rc<RefCell<Vec<TraceEvent>>>);
 
 impl Callbacks for NullCallbacks {
     fn write(&mut self, data: &[u8]) -> usize {
@@ -208,7 +216,14 @@ impl Callbacks for NullCallbacks {
     fn read(&mut self, _max: usize) -> ReadResult {
         ReadResult::Data(Vec::new())
     }
-    fn stderr(&mut self, _data: &[u8]) {}
+    fn debug(&mut self, kind: u32, data: &[u8]) {
+        self.0
+            .borrow_mut()
+            .push(TraceEvent::Debug(kind, data.to_vec()));
+    }
+    fn stderr(&mut self, data: &[u8]) {
+        self.0.borrow_mut().push(TraceEvent::Stderr(data.to_vec()));
+    }
 }
 
 #[cfg(test)]

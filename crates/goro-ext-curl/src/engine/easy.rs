@@ -332,6 +332,8 @@ pub struct Easy {
     pub(crate) low_speed_since: Option<Instant>,
     /// data->req.setcookies
     pub(crate) setcookies: u8,
+    /// trace events of setopt() calls, replayed by the next perform()
+    pub(crate) backlog: Rc<RefCell<Vec<super::TraceEvent>>>,
 }
 
 impl Default for Easy {
@@ -374,6 +376,7 @@ impl Easy {
             pending_ntlm: Vec::new(),
             low_speed_since: None,
             setcookies: 0,
+            backlog: Rc::default(),
         }
     }
 
@@ -389,7 +392,7 @@ impl Easy {
             }
         }
         if self.cookies.is_some() && self.cookie_engine {
-            let mut sink = super::NullCallbacks;
+            let mut sink = self.backlog_sink();
             e.cookie_init(&mut sink, self.set.cookiesession);
         }
         e.cookie_files = self.cookie_files.clone();
@@ -447,6 +450,21 @@ impl Easy {
         match &self.ext_pool {
             Some(p) => p.clone(),
             None => self.own_pool.clone(),
+        }
+    }
+
+    pub(crate) fn backlog_sink(&self) -> super::NullCallbacks {
+        super::NullCallbacks(self.backlog.clone())
+    }
+
+    /// Hand the trace of setopt() calls to the transfer callbacks
+    pub(crate) fn replay_backlog(&self, cb: &mut dyn Callbacks) {
+        let ev = std::mem::take(&mut *self.backlog.borrow_mut());
+        for e in ev {
+            match e {
+                super::TraceEvent::Debug(k, d) => cb.debug(k, &d),
+                super::TraceEvent::Stderr(d) => cb.stderr(&d),
+            }
         }
     }
 
@@ -517,7 +535,7 @@ impl Easy {
     /// Write the cookie jar (CURLOPT_COOKIEJAR), like curl_easy_cleanup()
     /// does (Curl_flush_cookies(data, TRUE)).
     pub fn flush_cookies(&mut self) {
-        let mut sink = super::NullCallbacks;
+        let mut sink = self.backlog_sink();
         self.flush_cookies_cb(&mut sink, true);
     }
 
@@ -580,7 +598,7 @@ impl Easy {
     pub fn setopt(&mut self, option: u32, value: OptVal) -> CurlCode {
         let r = self.setopt_inner(option, value);
         if r == code::BAD_FUNCTION_ARGUMENT {
-            let mut sink = super::NullCallbacks;
+            let mut sink = self.backlog_sink();
             self.failf(&mut sink, &format!("setopt 0x{option:x} got bad argument"));
         }
         r
@@ -590,6 +608,10 @@ impl Easy {
         let Some(kind) = option_kind(option) else {
             return code::UNKNOWN_OPTION;
         };
+        if NOT_IN_BUILD.contains(&option) {
+            // SSH, GSS-API, c-ares and ECH options of a build without them
+            return code::UNKNOWN_OPTION;
+        }
         match (kind, value) {
             (OptKind::Long | OptKind::Values, OptVal::Long(v)) => self.setopt_long(option, v),
             (OptKind::OffT, OptVal::OffT(v)) | (OptKind::OffT, OptVal::Long(v)) => {
@@ -1011,7 +1033,7 @@ impl Easy {
             opt::PROTOCOLS => s.allowed_protocols = arg,
             opt::REDIR_PROTOCOLS => s.redir_protocols = arg,
             opt::RTSP_REQUEST => {
-                if !(0..=11).contains(&arg) {
+                if !(1..=11).contains(&arg) {
                     return code::BAD_FUNCTION_ARGUMENT;
                 }
                 return self.store_long(option, arg);
@@ -1209,7 +1231,7 @@ impl Easy {
             opt::COOKIEJAR => {
                 let r = self.setstr(option, v);
                 if r == code::OK {
-                    let mut sink = super::NullCallbacks;
+                    let mut sink = self.backlog_sink();
                     self.cookie_init(&mut sink, self.set.cookiesession);
                 }
                 r
@@ -1228,10 +1250,10 @@ impl Easy {
                         c.borrow_mut().clearsess();
                     }
                 } else if p.eq_ignore_ascii_case(b"FLUSH") {
-                    let mut sink = super::NullCallbacks;
+                    let mut sink = self.backlog_sink();
                     self.flush_cookies_cb(&mut sink, false);
                 } else if p.eq_ignore_ascii_case(b"RELOAD") {
-                    let mut sink = super::NullCallbacks;
+                    let mut sink = self.backlog_sink();
                     self.load_cookie_files(&mut sink);
                 } else {
                     if self.cookies.is_none() {
@@ -1246,6 +1268,11 @@ impl Easy {
                     let mut log = Vec::new();
                     jar.borrow_mut()
                         .add_cookielist_line(&mut self.setcookies, &p, &mut log);
+                    let mut sink = self.backlog_sink();
+                    let tr = self.tracer();
+                    for l in log {
+                        tr.text(&mut sink, &l);
+                    }
                 }
                 code::OK
             }
@@ -1296,11 +1323,34 @@ impl Easy {
                 if let Some(p) = v
                     && !cstr(p).is_empty()
                 {
-                    // there are no OpenSSL engines: Curl_ssl_set_engine fails
+                    // there are no crypto engines: Curl_ssl_set_engine fails
                     let _ = self.setstr(option, Some(p));
+                    let e = String::from_utf8_lossy(cstr(p)).into_owned();
+                    let mut sink = self.backlog_sink();
+                    self.failf(&mut sink, &format!("SSL Engine '{e}' not found"));
                     return code::SSL_ENGINE_NOTFOUND;
                 }
                 code::OK
+            }
+            opt::INTERFACE => {
+                if let Some(p) = v {
+                    let p = cstr(p);
+                    let bad = p.len() > 512
+                        || p.is_empty()
+                        || p == b"if!"
+                        || p == b"host!"
+                        || (p.starts_with(b"ifhost!") && {
+                            let rest = &p[7..];
+                            match rest.iter().position(|&c| c == b'!') {
+                                Some(i) => i + 1 >= rest.len(),
+                                None => true,
+                            }
+                        });
+                    if bad {
+                        return code::BAD_FUNCTION_ARGUMENT;
+                    }
+                }
+                self.setstr(option, v)
             }
             opt::HAPROXY_CLIENT_IP => {
                 let r = self.setstr(option, v);
@@ -1396,6 +1446,31 @@ impl Easy {
         }
     }
 }
+
+/// Options libcurl 8.14.1 only knows when built with libssh2, GSS-API,
+/// c-ares or ECH support: setopt() says CURLE_UNKNOWN_OPTION for them
+const NOT_IN_BUILD: &[u32] = &[
+    opt::SSH_AUTH_TYPES,
+    opt::NEW_DIRECTORY_PERMS,
+    opt::SOCKS5_GSSAPI_NEC,
+    opt::GSSAPI_DELEGATION,
+    opt::SSH_COMPRESSION,
+    opt::SSH_PUBLIC_KEYFILE,
+    opt::SSH_PRIVATE_KEYFILE,
+    opt::SSH_HOST_PUBLIC_KEY_MD5,
+    opt::SSH_KNOWNHOSTS,
+    opt::SSH_KEYFUNCTION,
+    opt::SSH_KEYDATA,
+    opt::SSH_HOST_PUBLIC_KEY_SHA256,
+    opt::SSH_HOSTKEYFUNCTION,
+    opt::SSH_HOSTKEYDATA,
+    opt::DNS_SERVERS,
+    opt::DNS_INTERFACE,
+    opt::DNS_LOCAL_IP4,
+    opt::DNS_LOCAL_IP6,
+    opt::ECH,
+    opt::KRBLEVEL,
+];
 
 /// strdup() semantics: a C string stops at the first NUL
 pub(crate) fn cstr(v: &[u8]) -> &[u8] {

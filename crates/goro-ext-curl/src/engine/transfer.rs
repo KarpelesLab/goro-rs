@@ -243,6 +243,7 @@ impl Easy {
     }
 
     fn perform_inner(&mut self, cb: &mut dyn Callbacks) -> CurlCode {
+        self.replay_backlog(cb);
         // curl_multi_add_handle(): a transfer id
         {
             let mp = self.multi_pool();
@@ -309,11 +310,14 @@ impl Easy {
             self.low_speed_since = None;
             let mut req = Req::new(self.set.opt_no_body);
             self.progress.time(Timer::PreTransfer);
-            let r = self.http_do(cb, &mut conn, &target, &mut req);
-            let r = match r {
-                Ok(()) => self.sendrecv(cb, &mut conn, &target, &mut req),
-                Err(e) => Err(e),
-            };
+            if let Err(e) = self.http_do(cb, &mut conn, &target, &mut req) {
+                // state_do(): multi_done(data, result, FALSE)
+                self.posttransfer();
+                self.progress.calc();
+                self.done_conn(cb, conn, false, &target);
+                return e;
+            }
+            let r = self.sendrecv(cb, &mut conn, &target, &mut req);
             // retry on a dead reused connection
             let mut retry = false;
             if (r.is_ok() && req.done) || r == Err(code::RECV_ERROR) || r == Err(code::SEND_ERROR) {
@@ -543,8 +547,6 @@ impl Easy {
         self.st.url = Some(tu.url.clone());
         let scheme = lossy(&tu.scheme).to_ascii_lowercase();
         let protocol = tu.handler.protocol as i64;
-        self.info.conn_scheme = Some(tu.handler.name.to_string());
-        self.info.conn_protocol = protocol;
         // credentials from the URL
         if tu.user.is_some() || tu.password.is_some() {
             if let Some(u) = &tu.user {
@@ -573,6 +575,8 @@ impl Easy {
         if protocol != proto::FILE {
             self.setup_proxy(cb, &mut t)?;
         }
+        self.info.conn_scheme = Some(t.tu.handler.name.to_string());
+        self.info.conn_protocol = protocol;
         Ok(t)
     }
 
@@ -961,10 +965,6 @@ impl Easy {
         if self.set.tcp_nodelay {
             let _ = sock.set_nodelay(true);
         }
-        self.info.primary_ip = primary.ip().to_string();
-        self.info.primary_port = primary.port() as i64;
-        self.info.local_ip = local.ip().to_string();
-        self.info.local_port = local.port() as i64;
         self.info.numconnects += 1;
         let mut conn = Conn {
             id,
@@ -996,6 +996,17 @@ impl Easy {
         } else {
             t.host.clone()
         };
+        // proxy tunnel
+        if t.proxy.is_some() && t.tunnel {
+            if let Err(e) = self.proxy_connect(cb, &mut conn, t) {
+                self.close_conn(cb, conn, true);
+                return Err(e);
+            }
+        }
+        self.info.primary_ip = conn.primary.ip().to_string();
+        self.info.primary_port = conn.primary.port() as i64;
+        self.info.local_ip = conn.local.ip().to_string();
+        self.info.local_port = conn.local.port() as i64;
         self.infof(
             cb,
             &format!(
@@ -1004,13 +1015,6 @@ impl Easy {
                 primary.port()
             ),
         );
-        // proxy tunnel
-        if t.proxy.is_some() && t.tunnel {
-            if let Err(e) = self.proxy_connect(cb, &mut conn, t) {
-                self.close_conn(cb, conn, true);
-                return Err(e);
-            }
-        }
         if t.scheme == "https" {
             if let Err(e) = self.tls_handshake(cb, &mut conn, t) {
                 self.close_conn(cb, conn, true);
@@ -1312,187 +1316,288 @@ impl Easy {
         Ok(())
     }
 
-    /// HTTP CONNECT through a proxy (lib/cf-h1-proxy.c)
+    /// HTTP CONNECT through a proxy (lib/http_proxy.c, lib/cf-h1-proxy.c)
     fn proxy_connect(
         &mut self,
         cb: &mut dyn Callbacks,
         conn: &mut Conn,
         t: &Target,
     ) -> Result<(), CurlCode> {
-        let hostport = if t.ipv6 {
+        let authority = if t.ipv6 {
             format!("[{}]:{}", t.host, t.port)
         } else {
             format!("{}:{}", t.host, t.port)
         };
         let ptype = t.proxy.as_ref().map(|p| p.proxytype).unwrap_or(0);
-        let httpv = if ptype == proxytype::HTTP_1_0 {
-            "1.0"
-        } else {
-            "1.1"
-        };
+        let minor = if ptype == proxytype::HTTP_1_0 { 0 } else { 1 };
+        self.infof(cb, &format!("CONNECT tunnel: HTTP/1.{minor} negotiated"));
+        self.infof(cb, "allocate connect buffer");
+        let mut req = Req::new(false);
         loop {
-            self.infof(cb, &format!("Establishing HTTP proxy tunnel to {hostport}"));
-            let mut r = format!("CONNECT {hostport} HTTP/{httpv}\r\n").into_bytes();
-            let hosthdr = checkheaders(self.connect_headers(), b"Host");
-            if hosthdr.is_none() {
-                r.extend_from_slice(format!("Host: {hostport}\r\n").as_bytes());
+            if self.timeleft(true) <= 0 {
+                self.failf(cb, "Proxy CONNECT aborted due to timeout");
+                return Err(code::OPERATION_TIMEDOUT);
             }
-            // proxy auth
-            let mut req = Req::new(false);
+            // start_CONNECT()
+            req.newurl = None;
             let auth = self.output_auth(
                 cb,
                 conn,
                 t,
                 &mut req,
                 b"CONNECT",
-                &hostport.clone().into_bytes(),
+                authority.as_bytes(),
                 true,
             )?;
-            r.extend_from_slice(&auth.proxy);
-            if checkheaders(self.connect_headers(), b"User-Agent").is_none()
-                && let Some(ua) = &self.st.uagent
-                && self
-                    .set
-                    .strs
-                    .get(&opt::USERAGENT)
-                    .is_some_and(|u| !u.is_empty())
-            {
-                r.extend_from_slice(ua);
+            self.infof(cb, &format!("Establish HTTP proxy tunnel to {authority}"));
+            let ph = self.connect_headers().cloned();
+            let mut r = format!("CONNECT {authority} HTTP/1.{minor}\r\n").into_bytes();
+            if checkheaders(ph.as_ref(), b"Host").is_none() {
+                r.extend_from_slice(format!("Host: {authority}\r\n").as_bytes());
             }
-            if checkheaders(self.connect_headers(), b"Proxy-Connection").is_none() {
+            r.extend_from_slice(&auth.proxy);
+            if checkheaders(ph.as_ref(), b"User-Agent").is_none()
+                && let Some(ua) = self.set.strs.get(&opt::USERAGENT)
+                && !ua.is_empty()
+            {
+                r.extend_from_slice(b"User-Agent: ");
+                r.extend_from_slice(ua);
+                r.extend_from_slice(b"\r\n");
+            }
+            if checkheaders(ph.as_ref(), b"Proxy-Connection").is_none() {
                 r.extend_from_slice(b"Proxy-Connection: Keep-Alive\r\n");
             }
-            let hdrs = self.connect_headers().cloned();
-            self.add_custom_headers(&mut r, hdrs.as_ref(), &req, 11, true);
+            self.add_connect_custom_headers(&mut r, ph.as_ref());
             r.extend_from_slice(b"\r\n");
-            self.tracer().debug(cb, info::HEADER_OUT, &r);
-            if let Err(e) = conn.send_all(&r) {
-                self.failf(
-                    cb,
-                    &format!(
-                        "Send failure: {}",
-                        net::os_strerror(e.raw_os_error().unwrap_or(0))
-                    ),
-                );
+            // send_CONNECT()
+            if conn.send_all(&r).is_err() {
+                self.failf(cb, "Failed sending CONNECT to proxy");
                 return Err(code::SEND_ERROR);
             }
-            self.info.request_size += r.len() as i64;
-            // read the response headers
-            let mut line = Vec::new();
-            let mut status: i64 = 0;
-            let mut first = true;
-            let mut clen: i64 = -1;
+            self.tracer().debug(cb, info::HEADER_OUT, &r);
+            // recv_CONNECT_resp()
+            req.httpcode = 0;
+            let mut line: Vec<u8> = Vec::new();
+            let mut headerlines = 0;
+            let mut cl: i64 = 0;
             let mut chunked = false;
-            let mut close = false;
-            self.info.proxyauthavail = 0;
+            let mut close_connection = false;
+            let mut error = false;
+            let mut ignoring = false;
+            let mut ch = Chunker::new();
             loop {
-                // one line
-                let l = loop {
-                    if conn.buffered() > 0 {
-                        let b = conn.take(1)[0];
-                        line.push(b);
-                        if b == b'\n' {
-                            break std::mem::take(&mut line);
-                        }
-                        continue;
-                    }
+                if conn.buffered() == 0 {
                     let left = self.timeleft(true);
                     match conn.fill(Some(Duration::from_millis(left.max(1) as u64))) {
-                        Ok(0) => {
-                            self.failf(cb, "Proxy CONNECT aborted");
-                            return Err(code::RECV_ERROR);
+                        Ok(0) | Err(_) => {
+                            if self.st.authproxy.avail != 0 && !auth.proxy.is_empty() {
+                                close_connection = true;
+                                self.infof(cb, "Proxy CONNECT connection closed");
+                            } else {
+                                error = true;
+                                self.failf(cb, "Proxy CONNECT aborted");
+                            }
+                            break;
                         }
                         Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                            let ms = self.progress.t_startsingle.elapsed().as_millis();
-                            self.failf(
-                                cb,
-                                &format!("Connection timed out after {ms} milliseconds"),
-                            );
-                            return Err(code::OPERATION_TIMEDOUT);
+                    }
+                }
+                let byte = conn.take(1)[0];
+                if ignoring {
+                    if cl > 0 {
+                        cl -= 1;
+                        if cl <= 0 {
+                            break;
                         }
-                        Err(_) => {
-                            self.failf(cb, "Proxy CONNECT aborted");
-                            return Err(code::RECV_ERROR);
+                    } else if chunked {
+                        let _ = ch.process(&[byte], false, &mut |_| Ok(()));
+                        if ch.is_done() {
+                            self.infof(cb, "chunk reading DONE");
+                            break;
                         }
                     }
-                };
-                self.tracer().debug(cb, info::HEADER_IN, &l);
-                if !self.set.suppress_connect_headers {
-                    let mut c = super::NullCallbacks;
-                    let _ = &mut c;
-                    let wt = CW_HEADER | CW_CONNECT | if first { CW_STATUS } else { 0 };
-                    let _ = wt;
-                    self.cw_out_header(cb, &l, true)?;
+                    continue;
                 }
+                line.push(byte);
+                if byte != b'\n' {
+                    continue;
+                }
+                headerlines += 1;
+                let l = std::mem::take(&mut line);
+                self.tracer().debug(cb, info::HEADER_IN, &l);
+                let wt = CW_HEADER | CW_CONNECT | if headerlines == 1 { CW_STATUS } else { 0 };
+                self.client_write(cb, &mut req, wt, &l)?;
+                // Curl_bump_headersize(connect_only)
                 self.info.header_size += l.len() as i64;
-                if l == b"\r\n" || l == b"\n" {
+                if l[0] == b'\r' || l[0] == b'\n' {
+                    if req.httpcode == 407 && !self.st.authproblem {
+                        if cl > 0 {
+                            self.infof(cb, &format!("Ignore {cl} bytes of response-body"));
+                            ignoring = true;
+                            continue;
+                        } else if chunked {
+                            self.infof(cb, "Ignore chunked response-body");
+                            ignoring = true;
+                            continue;
+                        }
+                    }
                     break;
                 }
-                if first {
-                    first = false;
-                    if l.len() >= 12 && l.starts_with(b"HTTP/1.") {
-                        status = lossy(&l[9..12]).parse().unwrap_or(0);
-                    }
-                    continue;
-                }
-                if let Some(v) = header_val(&l, b"Content-Length") {
-                    clen = lossy(v).trim().parse().unwrap_or(-1);
-                } else if compareheader(&l, b"Transfer-Encoding", b"chunked") {
-                    chunked = true;
-                } else if compareheader(&l, b"Connection", b"close")
-                    || compareheader(&l, b"Proxy-Connection", b"close")
+                // on_resp_header()
+                let hl = |n: &[u8]| l.len() >= n.len() && l[..n.len()].eq_ignore_ascii_case(n);
+                if (hl(b"WWW-Authenticate:") && req.httpcode == 401)
+                    || (hl(b"Proxy-authenticate:") && req.httpcode == 407)
                 {
-                    close = true;
-                } else if status == 407 && header_is(&l, b"Proxy-authenticate") {
                     let v = copy_header_value(&l);
-                    self.input_auth(cb, true, &v);
-                }
-            }
-            self.info.httpproxycode = status;
-            // skip a body
-            if status / 100 != 2 && !close {
-                if clen > 0 {
-                    let mut left = clen as usize;
-                    while left > 0 {
-                        if conn.buffered() == 0
-                            && conn.fill(Some(Duration::from_millis(1000))).unwrap_or(0) == 0
-                        {
-                            break;
-                        }
-                        let n = conn.take(left).len();
-                        left -= n;
-                    }
-                } else if chunked {
-                    let mut ch = Chunker::new();
-                    loop {
-                        if conn.buffered() == 0
-                            && conn.fill(Some(Duration::from_millis(1000))).unwrap_or(0) == 0
-                        {
-                            break;
-                        }
-                        let b = conn.take(usize::MAX);
-                        let _ = ch.process(&b, false, &mut |_| Ok(()));
-                        if ch.is_done() {
-                            break;
+                    self.input_auth(cb, req.httpcode == 407, &v);
+                } else if hl(b"Content-Length:") {
+                    if req.httpcode / 100 == 2 {
+                        self.infof(
+                            cb,
+                            &format!(
+                                "Ignoring Content-Length in CONNECT {:03} response",
+                                req.httpcode
+                            ),
+                        );
+                    } else {
+                        let v = lossy(trim_crlf(&l[15..]));
+                        match v.trim_start().parse::<i64>() {
+                            Ok(n) if n >= 0 => cl = n,
+                            _ => {
+                                self.failf(cb, "Unsupported Content-Length value");
+                                return Err(code::WEIRD_SERVER_REPLY);
+                            }
                         }
                     }
+                } else if compareheader(&l, b"Connection", b"close") {
+                    close_connection = true;
+                } else if hl(b"Transfer-Encoding:") {
+                    if req.httpcode / 100 == 2 {
+                        self.infof(
+                            cb,
+                            &format!(
+                                "Ignoring Transfer-Encoding in CONNECT {:03} response",
+                                req.httpcode
+                            ),
+                        );
+                    } else if compareheader(&l, b"Transfer-Encoding", b"chunked") {
+                        self.infof(cb, "CONNECT responded chunked");
+                        chunked = true;
+                        ch = Chunker::new();
+                    }
+                } else if compareheader(&l, b"Proxy-Connection", b"close") {
+                    close_connection = true;
+                } else if l.len() >= 13
+                    && l.starts_with(b"HTTP/1.")
+                    && (l[7] == b'0' || l[7] == b'1')
+                    && l[8] == b' '
+                    && l[9].is_ascii_digit()
+                    && l[10].is_ascii_digit()
+                    && l[11].is_ascii_digit()
+                    && !l[12].is_ascii_digit()
+                {
+                    req.httpcode = ((l[9] - b'0') as i64) * 100
+                        + ((l[10] - b'0') as i64) * 10
+                        + (l[11] - b'0') as i64;
+                    self.info.httpproxycode = req.httpcode;
                 }
             }
-            if status == 407 && self.st.proxyuser.is_some() {
-                // Curl_http_auth_act for the proxy
-                let picked = pickoneauth(&mut self.st.authproxy, !auth::BEARER);
-                if picked && !self.st.authproxy.done && !close {
-                    self.info.proxyauthpicked = self.st.authproxy.picked;
+            if error {
+                return Err(code::RECV_ERROR);
+            }
+            if self.info.httpproxycode / 100 != 2 {
+                self.auth_act(cb, conn, t, &mut req)?;
+            }
+            if self.pgrs_update(cb) {
+                return Err(code::ABORTED_BY_CALLBACK);
+            }
+            if req.newurl.is_some() {
+                if close_connection || conn.close {
+                    self.infof(cb, "Connect me again please");
+                    // reconnect to the proxy and try again
+                    let p = t.proxy.as_ref().unwrap();
+                    let addrs =
+                        net::resolve(&p.host, p.port, self.set.ipresolve).unwrap_or_default();
+                    let (sock, primary) =
+                        self.connect_addrs(cb, conn.id, &p.host, p.port, &addrs, true)?;
+                    conn.local = sock.local_addr().unwrap_or(primary);
+                    conn.sock = sock;
+                    conn.primary = primary;
+                    conn.rbuf.clear();
+                    conn.rpos = 0;
+                    conn.eof = false;
+                    conn.close = false;
+                }
+                continue;
+            }
+            break;
+        }
+        self.info.httpcode = 0;
+        if self.info.httpproxycode / 100 != 2 {
+            conn.close = true;
+            self.failf(
+                cb,
+                &format!("CONNECT tunnel failed, response {}", req.httpcode),
+            );
+            return Err(code::RECV_ERROR);
+        }
+        self.infof(cb, "CONNECT phase completed");
+        self.st.authproxy.done = true;
+        self.st.authproxy.multipass = false;
+        self.infof(
+            cb,
+            &format!(
+                "CONNECT tunnel established, response {}",
+                self.info.httpproxycode
+            ),
+        );
+        Ok(())
+    }
+
+    /// dynhds_add_custom() for CONNECT requests
+    fn add_connect_custom_headers(&mut self, r: &mut Vec<u8>, hl: Option<&Vec<Vec<u8>>>) {
+        let Some(hl) = hl else { return };
+        for h in hl {
+            let h = super::easy::cstr(h);
+            let (name, line) = if let Some(semi) = h.iter().position(|&c| c == b';')
+                && semi + 1 == h.len()
+                && !h[..semi].contains(&b':')
+            {
+                let mut l = h[..semi].to_vec();
+                l.extend_from_slice(b": \r\n");
+                (h[..semi].to_vec(), l)
+            } else {
+                let Some(colon) = h.iter().position(|&c| c == b':') else {
+                    continue;
+                };
+                let v = &h[colon + 1..];
+                if v.iter().all(|&c| c == b' ' || c == b'\t') {
                     continue;
                 }
+                let mut val = v;
+                while let Some((&c, rest)) = val.split_first() {
+                    if c == b' ' || c == b'\t' {
+                        val = rest;
+                    } else {
+                        break;
+                    }
+                }
+                let mut l = h[..colon].to_vec();
+                l.extend_from_slice(b": ");
+                l.extend_from_slice(val);
+                l.extend_from_slice(b"\r\n");
+                (h[..colon].to_vec(), l)
+            };
+            let is = |n: &[u8]| name.eq_ignore_ascii_case(n);
+            if is(b"Host")
+                || is(b"Content-Type")
+                || is(b"Content-Length")
+                || is(b"Connection")
+                || is(b"Transfer-Encoding")
+            {
+                continue;
             }
-            if status / 100 != 2 {
-                self.failf(cb, &format!("CONNECT tunnel failed, response {status}"));
-                return Err(code::COULDNT_CONNECT);
-            }
-            self.infof(cb, "CONNECT phase completed");
-            return Ok(());
+            r.extend_from_slice(&line);
         }
     }
 
@@ -1682,6 +1787,7 @@ impl Easy {
             self.st.allow_port = false;
         }
         self.st.url = Some(r.url.clone());
+        let rewind_result = self.client_rewind(cb, req);
         self.infof(
             cb,
             &format!("Issue another request to this URL: '{}'", lossy(&r.url)),
@@ -1696,18 +1802,77 @@ impl Easy {
             self.st.httpreq,
             HttpReq::Post | HttpReq::PostForm | HttpReq::PostMime
         );
+        let mut switch_to_get = false;
         match code {
-            301 if is_post && self.set.keep_post & 1 == 0 => self.switch_to_get(cb, 301),
-            302 if is_post && self.set.keep_post & 2 == 0 => self.switch_to_get(cb, 302),
+            301 if is_post && self.set.keep_post & 1 == 0 => {
+                self.switch_to_get(cb, 301);
+                switch_to_get = true;
+            }
+            302 if is_post && self.set.keep_post & 2 == 0 => {
+                self.switch_to_get(cb, 302);
+                switch_to_get = true;
+            }
             303 if self.st.httpreq != HttpReq::Get && (!is_post || self.set.keep_post & 4 == 0) => {
-                self.switch_to_get(cb, 303)
+                self.switch_to_get(cb, 303);
+                switch_to_get = true;
             }
             _ => {}
+        }
+        if let Err(e) = rewind_result
+            && !switch_to_get
+        {
+            return Err(e);
         }
         self.st.this_is_a_follow = true;
         self.progress.time(Timer::Redirect);
         self.progress.set_download_size(-1);
         self.progress.set_upload_size(-1);
+        Ok(())
+    }
+
+    /// Curl_client_start(): rewind the upload readers when needed
+    fn client_rewind(&mut self, cb: &mut dyn Callbacks, req: &Req) -> Result<(), CurlCode> {
+        if !self.st.rewind_read {
+            return Ok(());
+        }
+        let (name, r) = match &req.body {
+            BodySrc::Fread { read, eos, .. } => {
+                let used = *read > 0 || *eos;
+                if !used {
+                    ("cr-in", Ok(()))
+                } else if self.set.callbacks.contains(&opt::SEEKFUNCTION) {
+                    let err = cb.seek(0, 0);
+                    if err != 0 {
+                        self.failf(cb, &format!("seek callback returned error {err}"));
+                        ("cr-in", Err(code::SEND_FAIL_REWIND))
+                    } else {
+                        ("cr-in", Ok(()))
+                    }
+                } else {
+                    self.failf(cb, "necessary data rewind was not possible");
+                    ("cr-in", Err(code::SEND_FAIL_REWIND))
+                }
+            }
+            BodySrc::Mime(_, m) => {
+                let seekable = m
+                    .borrow()
+                    .parts
+                    .iter()
+                    .all(|p| !matches!(p.data, super::MimeData::Callback { .. }));
+                if seekable {
+                    ("cr-mime", Ok(()))
+                } else {
+                    self.failf(cb, "Cannot rewind mime/post data");
+                    ("cr-mime", Err(code::SEND_FAIL_REWIND))
+                }
+            }
+            _ => ("cr-buf", Ok(())),
+        };
+        if let Err(e) = r {
+            self.failf(cb, &format!("rewind of client reader '{name}' failed: {e}"));
+            return Err(e);
+        }
+        self.st.rewind_read = false;
         Ok(())
     }
 

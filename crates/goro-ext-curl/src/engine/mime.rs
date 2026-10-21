@@ -77,6 +77,16 @@ fn contenttype_for(filename: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// content_type_match()
+fn content_type_match(ct: &[u8], target: &[u8]) -> bool {
+    ct.len() >= target.len()
+        && ct[..target.len()].eq_ignore_ascii_case(target)
+        && matches!(
+            ct.get(target.len()),
+            None | Some(b'\t' | b'\r' | b'\n' | b' ' | b';')
+        )
+}
+
 /// escape_string() with the form table (or the mime one with
 /// CURLMIMEOPT_FORMESCAPE)
 fn escape_string(src: &[u8], formescape: bool) -> Vec<u8> {
@@ -146,6 +156,11 @@ impl MimeReader {
         let mut total: i64 = 0;
         let mut unknown = false;
         let n = mime.parts.len();
+        let disposition: &[u8] = if content_type_match(cthdr, b"multipart/form-data") {
+            b"form-data"
+        } else {
+            b"attachment"
+        };
         for (i, part) in mime.parts.iter().enumerate() {
             let mut hdr = Vec::new();
             if i == 0 {
@@ -186,13 +201,13 @@ impl MimeReader {
             }
             if let Some(ct) = &contenttype
                 && !custom
-                && ct.len() >= 10
-                && ct[..10].eq_ignore_ascii_case(b"text/plain")
+                && content_type_match(ct, b"text/plain")
                 && filename.is_none()
             {
                 contenttype = None;
             }
-            hdr.extend_from_slice(b"Content-Disposition: form-data");
+            hdr.extend_from_slice(b"Content-Disposition: ");
+            hdr.extend_from_slice(disposition);
             hdr.extend_from_slice(b"; name=\"");
             hdr.extend_from_slice(&escape_string(&part.name, formescape));
             hdr.push(b'"');
