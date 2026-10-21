@@ -173,19 +173,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"constant", constant);
 
     // Output buffering
-    vm.register_function(b"ob_start", ob_start);
-    vm.register_function(b"ob_end_clean", ob_end_clean);
-    vm.register_function(b"ob_end_flush", ob_end_flush);
-    vm.register_function(b"ob_get_contents", ob_get_contents);
-    vm.register_function(b"ob_get_clean", ob_get_clean);
-    vm.register_function(b"ob_get_level", ob_get_level);
-    vm.register_function(b"ob_flush", ob_flush);
-    vm.register_function(b"ob_clean", ob_clean);
-    vm.register_function(b"ob_get_length", ob_get_length);
-    vm.register_function(b"ob_implicit_flush", ob_implicit_flush);
-    vm.register_function(b"ob_get_status", ob_get_status);
-    vm.register_function(b"ob_get_flush", ob_get_flush);
-    vm.register_function(b"ob_list_handlers", ob_list_handlers);
     vm.register_function(b"flush", flush_fn);
 
     // Function handling
@@ -996,131 +983,8 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Err(VmError { message: msg, line })
 }
 
-// === Output buffering ===
+// === Output buffering === (see ob.rs)
 
-fn ob_start(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.ob_stack.push(Vec::new());
-    Ok(Value::True)
-}
-fn ob_end_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if vm.ob_stack.pop().is_some() {
-        Ok(Value::True)
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_end_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.pop() {
-        // Flush to parent buffer or output
-        vm.write_output(&buf);
-        Ok(Value::True)
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_get_contents(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.last() {
-        Ok(Value::String(PhpString::from_vec(buf.clone())))
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_get_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.pop() {
-        Ok(Value::String(PhpString::from_vec(buf)))
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_get_level(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(vm.ob_stack.len() as i64))
-}
-fn ob_get_length(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.last() {
-        Ok(Value::Long(buf.len() as i64))
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.last_mut() {
-        buf.clear();
-        Ok(Value::True)
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.last_mut() {
-        let data = std::mem::take(buf);
-        drop(buf);
-        // Pop this level, write to parent, push empty back
-        vm.ob_stack.pop();
-        vm.write_output(&data);
-        vm.ob_stack.push(Vec::new());
-        Ok(Value::True)
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_implicit_flush(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null)
-}
-fn ob_get_status(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let full = args.first().map(|v| v.to_bool()).unwrap_or(false);
-    if full {
-        let result = PhpArray::new();
-        let result_rc = Rc::new(RefCell::new(result));
-        for (i, buf) in vm.ob_stack.iter().enumerate() {
-            let entry_rc = Rc::new(RefCell::new(PhpArray::new()));
-            {
-                let mut e = entry_rc.borrow_mut();
-                e.set(ArrayKey::String(PhpString::from_bytes(b"name")), Value::String(PhpString::from_bytes(b"default output handler")));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(1));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(112));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"level")), Value::Long(i as i64));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"chunk_size")), Value::Long(0));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_size")), Value::Long(buf.len() as i64));
-                e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_used")), Value::Long(buf.len() as i64));
-            }
-            result_rc.borrow_mut().push(Value::Array(entry_rc));
-        }
-        Ok(Value::Array(result_rc))
-    } else if !vm.ob_stack.is_empty() {
-        let buf = vm.ob_stack.last().unwrap();
-        let entry_rc = Rc::new(RefCell::new(PhpArray::new()));
-        {
-            let mut e = entry_rc.borrow_mut();
-            e.set(ArrayKey::String(PhpString::from_bytes(b"name")), Value::String(PhpString::from_bytes(b"default output handler")));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(1));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"flags")), Value::Long(112));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"level")), Value::Long((vm.ob_stack.len() - 1) as i64));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"chunk_size")), Value::Long(0));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_size")), Value::Long(buf.len() as i64));
-            e.set(ArrayKey::String(PhpString::from_bytes(b"buffer_used")), Value::Long(buf.len() as i64));
-        }
-        Ok(Value::Array(entry_rc))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-    }
-}
-fn ob_get_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    if let Some(buf) = vm.ob_stack.pop() {
-        let contents = Value::String(PhpString::from_vec(buf.clone()));
-        vm.write_output(&buf);
-        Ok(contents)
-    } else {
-        Ok(Value::False)
-    }
-}
-fn ob_list_handlers(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let arr = PhpArray::new();
-    let arr_rc = Rc::new(RefCell::new(arr));
-    for _ in 0..vm.ob_stack.len() {
-        arr_rc.borrow_mut().push(Value::String(PhpString::from_bytes(b"default output handler")));
-    }
-    Ok(Value::Array(arr_rc))
-}
 fn flush_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // No-op in our implementation
     Ok(Value::Null)

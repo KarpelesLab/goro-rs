@@ -1314,121 +1314,13 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     match vm.execute(&op_array) {
         Ok(_) => Ok(vm.take_output()),
         Err(e) => {
-            // Capture any output produced before the error, plus the error message
-            let mut output = vm.take_output();
-
-            // Format the error like PHP does
-            let stack_trace = vm.format_stack_trace();
-            if let Some(exc) = vm.current_exception.take() {
-                if let goro_core::value::Value::Object(obj) = &exc {
-                    // Collect the exception chain (innermost first, then previous)
-                    let mut chain = Vec::new();
-                    {
-                        let obj_ref = obj.borrow();
-                        let class = goro_core::value::display_class_name(&obj_ref.class_name);
-                        let msg_str = obj_ref.get_property(b"message").to_php_string().to_string_lossy();
-                        // PHP uses the exception's `file`/`line` properties as-is once set.
-                        // If they were never populated (some engine-thrown Errors), fall back
-                        // to the actual throw site (vm.current_file, e.line) so we don't print ":0".
-                        let has_file = obj_ref.has_property(b"file");
-                        let has_line = obj_ref.has_property(b"line");
-                        let exc_file = obj_ref.get_property(b"file").to_php_string().to_string_lossy();
-                        let exc_line = obj_ref.get_property(b"line").to_long();
-                        let file_str = if has_file { exc_file } else { vm.current_file.clone() };
-                        let line_num = if has_line && exc_line >= 0 {
-                            exc_line as u32
-                        } else {
-                            e.line
-                        };
-                        // Get trace from exception object
-                        let exc_trace = obj_ref.get_property(b"trace");
-                        let trace_str = format_exception_trace_with_limit(&exc_trace, &stack_trace, vm.exception_string_param_max_len);
-                        chain.push((class, msg_str, file_str, line_num, trace_str));
-                        // Walk previous chain
-                        let mut prev = obj_ref.get_property(b"previous").clone();
-                        for _ in 0..100 {
-                            let next_prev;
-                            if let goro_core::value::Value::Object(prev_obj) = &prev {
-                                let prev_ref = prev_obj.borrow();
-                                let pc = goro_core::value::display_class_name(&prev_ref.class_name);
-                                let pm = prev_ref.get_property(b"message").to_php_string().to_string_lossy();
-                                let pf = prev_ref.get_property(b"file").to_php_string().to_string_lossy();
-                                let pl = prev_ref.get_property(b"line").to_long();
-                                let pf_str = if pf.is_empty() || pf == "Unknown" { vm.current_file.clone() } else { pf };
-                                let pl_num = if pl > 0 { pl as u32 } else { 0 };
-                                let pt = prev_ref.get_property(b"trace");
-                                let pt_str = format_exception_trace_with_limit(&pt, &stack_trace, vm.exception_string_param_max_len);
-                                chain.push((pc, pm, pf_str, pl_num, pt_str));
-                                next_prev = prev_ref.get_property(b"previous").clone();
-                            } else {
-                                break;
-                            }
-                            prev = next_prev;
-                        }
-                    }
-
-                    // Format: first exception is "Uncaught", rest are "Next"
-                    // But PHP displays them in reverse order (innermost first, then previous)
-                    // Actually PHP shows the innermost (last thrown) first, with "Uncaught",
-                    // then shows each previous with "\n\nNext"
-                    // The "thrown in" line comes at the very end with the last exception in chain
-                    // The "thrown in <file> on line <n>" line uses the exception's own
-                    // file/line. If file is empty, PHP renders "Unknown".
-                    let unknown_owned: String = "Unknown".to_string();
-                    let first = &chain[0];
-                    let thrown_file: &String = if first.2.is_empty() { &unknown_owned } else { &first.2 };
-                    let thrown_line = first.3;
-
-                    let mut fatal = String::new();
-                    for (i, (class, msg_str, file_str, line_num, trace_str)) in chain.iter().rev().enumerate() {
-                        if i == 0 {
-                            if msg_str.is_empty() {
-                                fatal.push_str(&format!(
-                                    "\nFatal error: Uncaught {} in {}:{}\nStack trace:\n{}",
-                                    class, file_str, line_num, trace_str
-                                ));
-                            } else {
-                                fatal.push_str(&format!(
-                                    "\nFatal error: Uncaught {}: {}{}{}:{}\nStack trace:\n{}",
-                                    class, msg_str, goro_core::vm::Vm::exception_location_connector(msg_str), file_str, line_num, trace_str
-                                ));
-                            }
-                        } else {
-                            if msg_str.is_empty() {
-                                fatal.push_str(&format!(
-                                    "\n\nNext {} in {}:{}\nStack trace:\n{}",
-                                    class, file_str, line_num, trace_str
-                                ));
-                            } else {
-                                fatal.push_str(&format!(
-                                    "\n\nNext {}: {}{}{}:{}\nStack trace:\n{}",
-                                    class, msg_str, goro_core::vm::Vm::exception_location_connector(msg_str), file_str, line_num, trace_str
-                                ));
-                            }
-                        }
-                    }
-                    fatal.push_str(&format!("\n  thrown in {} on line {}\n", thrown_file, thrown_line));
-
-                    output.extend_from_slice(fatal.as_bytes());
-                } else if !vm.fatal_emitted {
-                    let fatal =
-                        format!("\nFatal error: {} in {} on line {}", e.message, vm.current_file, e.line);
-                    output.extend_from_slice(fatal.as_bytes());
-                }
-            } else if !vm.fatal_emitted {
-                let fatal = format!(
-                    "\nFatal error: {} in {} on line {}\n",
-                    e.message, vm.current_file, e.line
-                );
-                output.extend_from_slice(fatal.as_bytes());
+            // The VM displays uncaught exceptions / fatal errors itself
+            // (through the output layer, before shutdown functions).
+            if vm.current_exception.is_some() || !vm.fatal_emitted {
+                vm.report_uncaught(&e);
             }
-
-            // PHP runs destructors AFTER emitting the fatal-error message, so any output
-            // from `__destruct` follows the trace.
             vm.run_shutdown_destructors();
-            output.extend_from_slice(&vm.take_output());
-
-            Ok(output)
+            Ok(vm.take_output())
         }
     }
 }

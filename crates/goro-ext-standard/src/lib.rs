@@ -3,6 +3,7 @@ pub mod html;
 pub(crate) mod html_tables;
 pub mod math;
 pub mod misc;
+pub mod ob;
 pub mod output;
 pub mod regex;
 pub mod strings;
@@ -22,6 +23,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     type_funcs::register(vm);
     math::register(vm);
     misc::register(vm);
+    ob::register(vm);
     html::register(vm);
     regex::register(vm);
     register_builtin_param_names(vm);

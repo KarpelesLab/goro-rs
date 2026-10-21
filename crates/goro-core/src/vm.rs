@@ -297,9 +297,16 @@ impl PendingCall {
 /// The virtual machine / executor
 pub struct Vm {
     /// Output buffer
-    output: Vec<u8>,
+    pub(crate) output: Vec<u8>,
     /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
     pub ob_stack: Vec<Vec<u8>>,
+    /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
+    pub ob_handlers: Vec<crate::ob::ObHandler>,
+    pub ob_running: Option<u64>,
+    pub ob_next_id: u64,
+    pub ob_deactivated: bool,
+    pub ob_pending_fatal: Option<VmError>,
+    pub ob_fname: Option<String>,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -503,6 +510,12 @@ impl Vm {
         let mut vm = Self {
             output: Vec::new(),
                 ob_stack: Vec::new(),
+                ob_handlers: Vec::new(),
+                ob_running: None,
+                ob_next_id: 0,
+                ob_deactivated: false,
+                ob_pending_fatal: None,
+                ob_fname: None,
             functions: HashMap::new(),
             builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
@@ -2117,7 +2130,7 @@ impl Vm {
     pub fn emit_warning_raw(&mut self, msg: &str) {
         if self.error_reporting & 2 != 0 {
             let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, self.current_line);
-            self.output.extend_from_slice(warning.as_bytes());
+            self.write_output(warning.as_bytes());
         }
     }
 
@@ -2128,7 +2141,7 @@ impl Vm {
                 return;
             }
             let warning = format!("\nWarning: {} in {} on line {}\n", msg, self.current_file, line);
-            self.output.extend_from_slice(warning.as_bytes());
+            self.write_output(warning.as_bytes());
         }
     }
 
@@ -2138,7 +2151,7 @@ impl Vm {
     /// `self.fatal_emitted` so the top-level handler does not re-emit it.
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
         let fatal = format!("\nFatal error: {} in {} on line {}\n", msg, self.current_file, line);
-        self.output.extend_from_slice(fatal.as_bytes());
+        self.write_output(fatal.as_bytes());
         self.fatal_emitted = true;
         VmError { message: msg.to_string(), line }
     }
@@ -2158,7 +2171,7 @@ impl Vm {
     pub fn emit_notice_raw(&mut self, msg: &str, line: u32) {
         if self.error_reporting & 8 != 0 {
             let notice = format!("\nNotice: {} in {} on line {}\n", msg, self.current_file, line);
-            self.output.extend_from_slice(notice.as_bytes());
+            self.write_output(notice.as_bytes());
         }
     }
 
@@ -2255,7 +2268,7 @@ impl Vm {
         if self.error_reporting & 8192 != 0 {
             let effective_line = if line == 0 { self.current_line } else { line };
             let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
-            self.output.extend_from_slice(deprec.as_bytes());
+            self.write_output(deprec.as_bytes());
         }
     }
 
@@ -2271,7 +2284,7 @@ impl Vm {
             // Fall back to the standard deprecation banner if no handler ran.
             let effective_line = if line == 0 { self.current_line } else { line };
             let deprec = format!("\nDeprecated: {} in {} on line {}\n", msg, self.current_file, effective_line);
-            self.output.extend_from_slice(deprec.as_bytes());
+            self.write_output(deprec.as_bytes());
         }
     }
 
@@ -5368,15 +5381,8 @@ impl Vm {
 
     /// Take the output buffer
     pub fn take_output(&mut self) -> Vec<u8> {
-        // Flush all output buffers (ob_start without matching ob_end_flush)
-        while let Some(buf) = self.ob_stack.pop() {
-            // Each buffer's content goes to the parent buffer or main output
-            if let Some(parent) = self.ob_stack.last_mut() {
-                parent.extend_from_slice(&buf);
-            } else {
-                self.output.extend_from_slice(&buf);
-            }
-        }
+        // Flush all output buffers through their handlers (php_output_end_all)
+        self.ob_end_all();
         std::mem::take(&mut self.output)
     }
 
@@ -14437,16 +14443,10 @@ impl Vm {
     }
 
     /// Max output buffer size (64MB) to prevent OOM from infinite echo loops
-    const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
+    pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
 
     pub fn write_output(&mut self, data: &[u8]) {
-        if let Some(buf) = self.ob_stack.last_mut() {
-            if buf.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
-                buf.extend_from_slice(data);
-            }
-        } else if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
-            self.output.extend_from_slice(data);
-        }
+        self.ob_write(data);
     }
 
     /// Compare two PHP values (for sorting)
@@ -15318,6 +15318,15 @@ impl Vm {
             }
         }
 
+        // Display an uncaught exception / fatal error now (through the output
+        // layer), before shutdown functions run — like zend_exception_error.
+        let mut real_fatal = false;
+        if let Err(ref e) = result {
+            real_fatal = self.current_exception.is_none();
+            let e2 = e.clone();
+            self.report_uncaught(&e2);
+        }
+
         // Call shutdown functions (before destructors, like PHP does)
         let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
         for (callback, extra_args) in shutdown_fns {
@@ -15329,14 +15338,16 @@ impl Vm {
             }
         }
 
-        let result = result?;
-
         // Call __destruct on all tracked objects in reverse creation order.
-        // (For uncaught-fatal paths, the SAPI calls `run_shutdown_destructors()` AFTER
-        // emitting the fatal message.)
-        self.run_shutdown_destructors();
+        // A real fatal error (not an uncaught exception) marks all objects as
+        // destructed (php_error_cb → zend_objects_store_mark_destructed).
+        if real_fatal {
+            self.destructible_objects.clear();
+        } else {
+            self.run_shutdown_destructors();
+        }
 
-        Ok(result)
+        result
     }
 
     /// Run __destruct on all destructible objects in reverse creation order.
@@ -15542,7 +15553,12 @@ impl Vm {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
                     match self.value_to_string_checked(&val) {
-                        Ok(s) => self.write_output(s.as_bytes()),
+                        Ok(s) => {
+                            self.write_output(s.as_bytes());
+                            if let Some(e) = self.ob_pending_fatal.take() {
+                                return Err(e);
+                            }
+                        }
                         Err(e) => {
                             if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
@@ -15566,7 +15582,12 @@ impl Vm {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
                     match self.value_to_string_checked(&val) {
-                        Ok(s) => self.write_output(s.as_bytes()),
+                        Ok(s) => {
+                            self.write_output(s.as_bytes());
+                            if let Some(e) = self.ob_pending_fatal.take() {
+                                return Err(e);
+                            }
+                        }
                         Err(e) => {
                             if let Some((_catch, _finally, _, _, _eh_pc)) = exception_handlers.last() { pending_calls_catch_depth = Some(*_eh_pc);
                                 let catch = *_catch;
@@ -26281,7 +26302,7 @@ impl Vm {
                                     "\nFatal error: {} in {} on line {}\n",
                                     msg, self.current_file, op.line
                                 );
-                                self.output.extend_from_slice(fatal.as_bytes());
+                                self.write_output(fatal.as_bytes());
                                 return Err(VmError {
                                     message: msg,
                                     line: op.line,
@@ -26405,7 +26426,7 @@ impl Vm {
                                         };
                                         let msg = format!("\n{}: {} in {}({}) : eval()'d code on line {}\n",
                                             error_type, e.message, self.current_file, op.line, e.line);
-                                        self.output.extend_from_slice(msg.as_bytes());
+                                        self.write_output(msg.as_bytes());
                                         Value::False
                                     }
                                 }
@@ -26438,7 +26459,7 @@ impl Vm {
                                 };
                                 let msg = format!("\nParse error: {} in {}({}) : eval()'d code on line {}\n",
                                     err_msg, self.current_file, op.line, e.span.line);
-                                self.output.extend_from_slice(msg.as_bytes());
+                                self.write_output(msg.as_bytes());
                                 Value::False
                             }
                         }
