@@ -4078,6 +4078,12 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
+    // Extension on-modify handler (may reject the value)
+    if let Some(hook) = vm.ini_set_hooks.get(&key).copied() {
+        if !hook(vm, &key, &value) {
+            return Ok(Value::False);
+        }
+    }
     // Handle precision specially to update thread-local
     if key == b"precision" {
         if let Value::Long(p) = &value {

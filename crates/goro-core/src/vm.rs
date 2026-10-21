@@ -467,6 +467,13 @@ pub struct Vm {
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
     pub builtin_param_types: HashMap<Vec<u8>, Vec<Option<ParamType>>>,
+    /// INI on-modify handlers registered by extensions (key -> handler).
+    /// Called by ini_set() before the value is stored; returning false
+    /// rejects the new value (ini_set() then returns false).
+    pub ini_set_hooks: HashMap<Vec<u8>, fn(&mut Vm, &[u8], &Value) -> bool>,
+    /// Extension startup handlers, run by the SAPI once the INI settings
+    /// are in place and before the script runs.
+    pub startup_hooks: Vec<fn(&mut Vm)>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1356,6 +1363,8 @@ impl Vm {
                 s
             },
             builtin_param_types: HashMap::new(),
+            ini_set_hooks: HashMap::new(),
+            startup_hooks: Vec::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
             weak_refs: HashMap::new(),

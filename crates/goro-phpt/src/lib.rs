@@ -1210,6 +1210,15 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         }
         vm.constants.insert(key.as_bytes().to_vec(), val);
     }
+    // Extension startup (MINIT/RINIT) now that INI settings are in place;
+    // startup messages come before any compile-time diagnostics.
+    if !vm.startup_hooks.is_empty() {
+        let prev = vm.take_output();
+        for hook in vm.startup_hooks.clone() {
+            hook(&mut vm);
+        }
+        vm.write_output(&prev);
+    }
     for class in compiled_classes {
         vm.register_class(class);
     }

@@ -149,6 +149,33 @@ impl MbState {
 
 thread_local! {
     pub static MBSTRG: RefCell<MbState> = RefCell::new(MbState::new());
+    /// How INI handler messages are reported: 0 = plain, 1 = PHP startup,
+    /// 2 = from ini_set()
+    static MSG_CTX: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+fn ini_warning(vm: &mut Vm, msg: &str) {
+    match MSG_CTX.with(|c| c.get()) {
+        1 => {
+            if vm.error_reporting & 2 != 0 {
+                vm.write_output(format!("\nWarning: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
+            }
+        }
+        2 => vm.emit_warning(&format!("ini_set(): {}", msg)),
+        _ => vm.emit_warning(msg),
+    }
+}
+
+fn ini_deprecated(vm: &mut Vm, msg: &str) {
+    match MSG_CTX.with(|c| c.get()) {
+        1 => {
+            if vm.error_reporting & 8192 != 0 {
+                vm.write_output(format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
+            }
+        }
+        2 => vm.emit_deprecated(&format!("ini_set(): {}", msg)),
+        _ => vm.emit_deprecated(msg),
+    }
 }
 
 /// Run `f` with mutable access to the globals.
@@ -238,7 +265,7 @@ pub fn parse_encoding_list_ini(vm: &mut Vm, st: &MbState, value: &[u8]) -> Optio
     match parse_encoding_list(st, value) {
         Ok(l) => Some(l),
         Err(bad) => {
-            vm.emit_warning(&format!("INI setting contains invalid encoding \"{}\"", String::from_utf8_lossy(&bad)));
+            ini_warning(vm, &format!("INI setting contains invalid encoding \"{}\"", String::from_utf8_lossy(&bad)));
             None
         }
     }
@@ -296,7 +323,7 @@ fn set_internal_encoding_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) {
     let enc = match enc {
         Some(e) => e,
         None => {
-            vm.emit_warning(&format!("Unknown encoding \"{}\" in ini setting", String::from_utf8_lossy(name)));
+            ini_warning(vm, &format!("Unknown encoding \"{}\" in ini setting", String::from_utf8_lossy(name)));
             &mbfl::basic::ENC_UTF8
         }
     };
@@ -329,7 +356,7 @@ fn set_http_input_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) -> bool {
     }
 }
 
-fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, startup: bool) {
+fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, startup: bool) -> bool {
     match key {
         "mbstring.language" => {
             let v = value.unwrap_or(b"neutral");
@@ -341,27 +368,25 @@ fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, sta
                 }
                 None => {
                     st.language = LangNo::Neutral;
+                    return false;
                 }
             }
         }
         "mbstring.detect_order" => match value {
             None => st.detect_order_list.clear(),
-            Some(v) => {
-                if let Some(l) = parse_encoding_list_ini(vm, st, v) {
-                    if !l.is_empty() {
-                        st.detect_order_list = l;
-                    }
-                }
-            }
+            Some(v) => match parse_encoding_list_ini(vm, st, v) {
+                Some(l) if !l.is_empty() => st.detect_order_list = l,
+                _ => return false,
+            },
         },
         "mbstring.http_input" => {
             if value.is_some() {
-                vm.emit_deprecated("Use of mbstring.http_input is deprecated");
+                ini_deprecated(vm, "Use of mbstring.http_input is deprecated");
             }
             match value {
                 Some(v) if !v.is_empty() => {
                     st.http_input_set = true;
-                    set_http_input_ini(vm, st, v);
+                    return set_http_input_ini(vm, st, v);
                 }
                 _ => {
                     st.http_input_set = false;
@@ -372,12 +397,12 @@ fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, sta
         }
         "mbstring.http_output" => {
             if value.is_some() {
-                vm.emit_deprecated("Use of mbstring.http_output is deprecated");
+                ini_deprecated(vm, "Use of mbstring.http_output is deprecated");
             }
             match value {
                 Some(v) if !v.is_empty() => {
                     st.http_output_set = true;
-                    set_http_output_ini(st, v);
+                    return set_http_output_ini(st, v);
                 }
                 _ => {
                     st.http_output_set = false;
@@ -388,7 +413,7 @@ fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, sta
         }
         "mbstring.internal_encoding" => {
             if value.is_some() {
-                vm.emit_deprecated("Use of mbstring.internal_encoding is deprecated");
+                ini_deprecated(vm, "Use of mbstring.internal_encoding is deprecated");
             }
             match value {
                 Some(v) if !v.is_empty() => {
@@ -431,11 +456,15 @@ fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, sta
             st.strict_detection = value.map(is_truthy_ini).unwrap_or(false);
         }
         "mbstring.encoding_translation" => {
+            if !startup && MSG_CTX.with(|c| c.get()) == 2 {
+                // PHP_INI_SYSTEM | PHP_INI_PERDIR: cannot be changed at runtime
+                return false;
+            }
             st.encoding_translation = value.map(is_truthy_ini).unwrap_or(false);
         }
         "internal_encoding" | "input_encoding" | "output_encoding" | "default_charset" => {
             if startup {
-                return;
+                return true;
             }
             // mbstring_internal_encoding_changed_hook
             if !st.internal_encoding_set {
@@ -452,6 +481,54 @@ fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, sta
             }
         }
         _ => {}
+    }
+    true
+}
+
+/// MINIT/RINIT, run by the SAPI after INI settings are applied
+pub fn startup(vm: &mut Vm) {
+    MSG_CTX.with(|c| c.set(1));
+    sync(vm);
+    MSG_CTX.with(|c| c.set(0));
+}
+
+/// ini_set() on-modify handler for the settings we track
+pub fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
+    sync(vm);
+    let key_s = match TRACKED_INI.iter().find(|k| k.as_bytes() == key) {
+        Some(k) => *k,
+        None => return true,
+    };
+    let raw = match value {
+        Value::String(s) => s.as_bytes().to_vec(),
+        other => other.to_php_string().as_bytes().to_vec(),
+    };
+    // Core settings are stored before PHP runs the change hook
+    let old = vm.constants.get(key).cloned();
+    if matches!(key_s, "internal_encoding" | "input_encoding" | "output_encoding" | "default_charset") {
+        vm.constants.insert(key.to_vec(), value.clone());
+    }
+    let mut st = MBSTRG.with(|s| std::mem::replace(&mut *s.borrow_mut(), MbState::new()));
+    MSG_CTX.with(|c| c.set(2));
+    let ok = apply_ini(vm, &mut st, key_s, Some(&raw), false);
+    MSG_CTX.with(|c| c.set(0));
+    if ok {
+        for e in st.ini_seen.iter_mut() {
+            if e.0 == key_s {
+                e.1 = Some(raw.clone());
+            }
+        }
+    } else if let Some(o) = old {
+        vm.constants.insert(key.to_vec(), o);
+    }
+    MBSTRG.with(|s| *s.borrow_mut() = st);
+    ok
+}
+
+pub fn register_hooks(vm: &mut Vm) {
+    vm.startup_hooks.push(startup);
+    for k in TRACKED_INI {
+        vm.ini_set_hooks.insert(k.as_bytes().to_vec(), ini_set_hook);
     }
 }
 
@@ -484,7 +561,7 @@ pub fn sync(vm: &mut Vm) {
         st.initialized = true;
         // MINIT: register INI entries in order (with their default values)
         let lang = ini_raw(vm, "mbstring.language").filter(|v| !v.is_empty());
-        apply_ini(vm, &mut st, "mbstring.language", Some(lang.as_deref().unwrap_or(b"neutral")), true);
+        let _ = apply_ini(vm, &mut st, "mbstring.language", Some(lang.as_deref().unwrap_or(b"neutral")), true);
         for key in [
             "mbstring.detect_order",
             "mbstring.http_input",
@@ -499,7 +576,7 @@ pub fn sync(vm: &mut Vm) {
             match key {
                 "mbstring.http_input" | "mbstring.http_output" | "mbstring.internal_encoding" => {
                     if raw.is_some() {
-                        apply_ini(vm, &mut st, key, raw.as_deref(), true);
+                        let _ = apply_ini(vm, &mut st, key, raw.as_deref(), true);
                     } else {
                         // NULL default: no deprecation, fall back to core settings
                         match key {
@@ -520,7 +597,7 @@ pub fn sync(vm: &mut Vm) {
                 }
                 _ => {
                     if raw.is_some() {
-                        apply_ini(vm, &mut st, key, raw.as_deref(), true);
+                        let _ = apply_ini(vm, &mut st, key, raw.as_deref(), true);
                     }
                 }
             }
@@ -539,7 +616,7 @@ pub fn sync(vm: &mut Vm) {
             let now = ini_raw(vm, key);
             if now != st.ini_seen[i].1 {
                 st.ini_seen[i].1 = now.clone();
-                apply_ini(vm, &mut st, key, now.as_deref(), false);
+                let _ = apply_ini(vm, &mut st, key, now.as_deref(), false);
             }
         }
     }

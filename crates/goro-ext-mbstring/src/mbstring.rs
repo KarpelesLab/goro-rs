@@ -15,6 +15,7 @@ use crate::state::{self, MbState};
 use crate::zpp::*;
 
 pub fn register(vm: &mut Vm) {
+    state::register_hooks(vm);
     vm.register_function(b"mb_language", mb_language);
     vm.register_function(b"mb_internal_encoding", mb_internal_encoding);
     vm.register_function(b"mb_http_input", mb_http_input);
