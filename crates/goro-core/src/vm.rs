@@ -24640,13 +24640,29 @@ impl Vm {
                                 } else {
                                     call.name.to_string_lossy()
                                 };
-                                // Extract just the function name for display
+                                // zend_missing_arg_error(): the function as declared, a
+                                // method qualified by its declaring class.
                                 let fn_display = if display_name.starts_with("{closure") {
-                                    &display_name
-                                } else if let Some(pos) = display_name.rfind("::") {
-                                    &display_name[pos + 2..]
+                                    display_name.clone()
                                 } else {
-                                    &display_name
+                                    let mut fname =
+                                        String::from_utf8_lossy(user_fn.effective_name())
+                                            .to_string();
+                                    if user_fn.display_name.is_empty() && !fname.contains("::") {
+                                        if let Some(sc) = &user_fn.scope_class {
+                                            let cname = self
+                                                .classes
+                                                .get(&sc.to_ascii_lowercase())
+                                                .map(|c| {
+                                                    String::from_utf8_lossy(&c.name).to_string()
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    String::from_utf8_lossy(sc).to_string()
+                                                });
+                                            fname = format!("{}::{}", cname, fname);
+                                        }
+                                    }
+                                    fname
                                 };
                                 let total_params = user_fn
                                     .param_count
