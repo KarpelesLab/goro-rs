@@ -78,6 +78,15 @@ impl Vm {
 
     /// Format and output one error message the way php_error_cb displays it.
     pub fn display_error(&mut self, kind: &str, msg: &str, file: &str, line: u32) {
+        // log_errors without an error_log: the CLI SAPI logs to stderr
+        // (sapi_cli_log_message()).
+        if ini_bool(self, b"log_errors") && ini_str(self, b"error_log").is_none_or(|s| s.is_empty())
+        {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(
+                format!("PHP {}:  {} in {} on line {}\n", kind, msg, file, line).as_bytes(),
+            );
+        }
         let mode = self.display_errors_mode();
         if mode == 0 {
             return;

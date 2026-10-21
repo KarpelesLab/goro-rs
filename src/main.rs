@@ -97,6 +97,12 @@ fn main() {
                 let _ = SCRIPT_ARGV.set(av);
                 break;
             }
+            // -i: PHP information (phpinfo() in text mode)
+            "-i" => {
+                inline_code = Some("phpinfo();".to_string());
+                let _ = SCRIPT_ARGV.set(vec!["Standard input code".to_string()]);
+                break;
+            }
             "-f" => {
                 if i + 1 >= args.len() {
                     eprintln!("Error: -f requires a file argument");

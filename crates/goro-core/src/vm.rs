@@ -32667,7 +32667,7 @@ impl Vm {
                                         // Set current file to eval's filename for correct error messages
                                         let saved_file = self.current_file.clone();
                                         self.current_file =
-                                            format!("{} : eval()'d code", saved_file);
+                                            format!("{}({}) : eval()'d code", saved_file, op.line);
                                         let eval_result =
                                             match self.execute_op_array(&eval_op_array, eval_cvs) {
                                                 Ok(v) => v,

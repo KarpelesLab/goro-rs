@@ -1097,9 +1097,20 @@ fn execute_php_with_timeout_and_filename(
                 let _ = std::env::set_current_dir(std::env::temp_dir());
             }
 
+            // run-tests.php merges the test's stderr into its output: what
+            // the script or its child processes (proc_open() workers that
+            // inherit STDERR) write to descriptor 2 is appended.
+            let stderr_cap = capture_stderr_start();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 execute_php_inner(source, ini_settings, filename)
             }));
+            let result = match (result, capture_stderr_end(stderr_cap)) {
+                (Ok(Ok(mut bytes)), extra) => {
+                    bytes.extend_from_slice(&extra);
+                    Ok(Ok(bytes))
+                }
+                (r, _) => r,
+            };
 
             let (status, output) = match result {
                 Ok(Ok(bytes)) => (0u8, bytes),
@@ -2563,4 +2574,54 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     info.env = full;
     let stdin = test.sections.get("STDIN").map(|s| test.bytes(s));
     PhptRequest { info, env, stdin }
+}
+
+/// Redirect descriptor 2 to an anonymous temporary file; returns
+/// (saved stderr, capture file) descriptors.
+#[cfg(unix)]
+fn capture_stderr_start() -> Option<(i32, i32)> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("goro-phpt-stderr-{}", std::process::id()));
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    let _ = std::fs::remove_file(&path);
+    use std::os::unix::io::IntoRawFd;
+    let fd = f.into_raw_fd();
+    unsafe {
+        let saved = libc::dup(2);
+        if saved < 0 || libc::dup2(fd, 2) < 0 {
+            libc::close(fd);
+            return None;
+        }
+        Some((saved, fd))
+    }
+}
+
+/// Restore descriptor 2 and return what was written to it.
+#[cfg(unix)]
+fn capture_stderr_end(cap: Option<(i32, i32)>) -> Vec<u8> {
+    let Some((saved, fd)) = cap else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    unsafe {
+        libc::dup2(saved, 2);
+        libc::close(saved);
+        libc::lseek(fd, 0, libc::SEEK_SET);
+        let mut chunk = [0u8; 65536];
+        loop {
+            let n = libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len());
+            if n <= 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n as usize]);
+        }
+        libc::close(fd);
+    }
+    out
 }
