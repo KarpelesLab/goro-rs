@@ -2746,6 +2746,7 @@ impl Parser {
             }
             TokenKind::Variable(_) => {
                 // Property (possibly with type hint already consumed as a modifier)
+                let prop_line = self.span().line;
                 let name = match self.peek().clone() {
                     TokenKind::Variable(name) => {
                         self.advance();
@@ -2780,6 +2781,7 @@ impl Parser {
                         // doc-comment between commas applies.
                         let extra_doc = self.take_doc_comment();
                         if let TokenKind::Variable(extra_name) = self.peek().clone() {
+                            let extra_line = self.span().line;
                             self.advance();
                             let extra_default = if self.eat(&TokenKind::Assign) {
                                 Some(self.parse_expression()?)
@@ -2788,6 +2790,7 @@ impl Parser {
                             };
                             self.pending_extra_properties.push(ClassMember::Property {
                                 name: extra_name,
+                                line: extra_line,
                                 type_hint: None,
                                 default: extra_default,
                                 visibility,
@@ -2867,6 +2870,7 @@ impl Parser {
                 }
                 Ok(ClassMember::Property {
                     name,
+                    line: prop_line,
                     type_hint: None,
                     default,
                     visibility,
@@ -2890,6 +2894,7 @@ impl Parser {
             _ => {
                 // Might be a typed property: type $name
                 let type_hint = self.parse_type_hint()?;
+                let prop_line = self.span().line;
                 let name = match self.peek().clone() {
                     TokenKind::Variable(name) => {
                         self.advance();
@@ -2926,6 +2931,7 @@ impl Parser {
                         // immediately before it; otherwise None.
                         let extra_doc = self.take_doc_comment();
                         if let TokenKind::Variable(extra_name) = self.peek().clone() {
+                            let extra_line = self.span().line;
                             self.advance();
                             let extra_default = if self.eat(&TokenKind::Assign) {
                                 Some(self.parse_expression()?)
@@ -2934,6 +2940,7 @@ impl Parser {
                             };
                             self.pending_extra_properties.push(ClassMember::Property {
                                 name: extra_name,
+                                line: extra_line,
                                 type_hint: Some(type_hint.clone()),
                                 default: extra_default,
                                 visibility,
@@ -3013,6 +3020,7 @@ impl Parser {
                 }
                 Ok(ClassMember::Property {
                     name,
+                    line: prop_line,
                     type_hint: Some(type_hint),
                     default,
                     visibility,

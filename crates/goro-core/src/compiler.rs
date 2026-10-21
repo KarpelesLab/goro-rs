@@ -4638,6 +4638,7 @@ impl Compiler {
                     match member {
                         ClassMember::Property {
                             name: prop_name,
+                            line: prop_line,
                             type_hint,
                             default,
                             visibility,
@@ -4664,7 +4665,7 @@ impl Compiler {
                                         "Enum {} cannot include properties",
                                         String::from_utf8_lossy(name)
                                     ),
-                                    line: stmt.span.line,
+                                    line: *prop_line,
                                 });
                             }
                             // Validate type hint for redundancy and standalone constraints
@@ -4678,7 +4679,7 @@ impl Compiler {
                                 {
                                     return Err(CompileError {
                                         message: err,
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                             }
@@ -4695,11 +4696,12 @@ impl Compiler {
                                 if check_callable(hint) {
                                     return Err(CompileError {
                                         message: format!(
-                                            "Property {}::${} cannot have type callable",
+                                            "Property {}::${} cannot have type {}",
                                             String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            String::from_utf8_lossy(prop_name),
+                                            type_hint_display(hint)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                                 // Properties cannot have type void
@@ -4716,7 +4718,7 @@ impl Compiler {
                                             String::from_utf8_lossy(name),
                                             String::from_utf8_lossy(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                                 // Properties cannot have type never
@@ -4733,7 +4735,7 @@ impl Compiler {
                                             String::from_utf8_lossy(name),
                                             String::from_utf8_lossy(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                             }
@@ -4748,7 +4750,7 @@ impl Compiler {
                                             String::from_utf8_lossy(name),
                                             String::from_utf8_lossy(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                                 // Readonly properties cannot be static
@@ -4759,7 +4761,7 @@ impl Compiler {
                                             String::from_utf8_lossy(name),
                                             String::from_utf8_lossy(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                                 // Readonly properties cannot have a default value
@@ -4770,7 +4772,7 @@ impl Compiler {
                                             String::from_utf8_lossy(name),
                                             String::from_utf8_lossy(prop_name)
                                         ),
-                                        line: stmt.span.line,
+                                        line: *prop_line,
                                     });
                                 }
                             }
@@ -4778,7 +4780,7 @@ impl Compiler {
                             if prop_is_readonly && (get_hook.is_some() || set_hook.is_some()) {
                                 return Err(CompileError {
                                     message: "Hooked properties cannot be readonly".to_string(),
-                                    line: stmt.span.line,
+                                    line: *prop_line,
                                 });
                             }
                             // Check: null default on typed non-nullable property
@@ -4802,7 +4804,7 @@ impl Compiler {
                                                 String::from_utf8_lossy(prop_name),
                                                 tstr
                                             ),
-                                            line: stmt.span.line,
+                                            line: *prop_line,
                                         });
                                     }
                                     let type_allows_null = match hint {
@@ -4877,7 +4879,7 @@ impl Compiler {
                                                 "Default value for property of type {} may not be null. Use the nullable type {} to allow null default value",
                                                 type_name, nullable_type_name
                                             ),
-                                            line: stmt.span.line,
+                                            line: *prop_line,
                                         });
                                     }
                                 }
@@ -4904,7 +4906,7 @@ impl Compiler {
                                                 String::from_utf8_lossy(prop_name),
                                                 tstr
                                             ),
-                                            line: stmt.span.line,
+                                            line: *prop_line,
                                         });
                                     }
                                     Ok(Some(v)) => widened_default = Some(v),

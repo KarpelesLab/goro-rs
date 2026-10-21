@@ -417,6 +417,8 @@ pub struct ClassModifiers {
 pub enum ClassMember {
     Property {
         name: Vec<u8>,
+        /// Line of the property's `$name`.
+        line: u32,
         type_hint: Option<TypeHint>,
         default: Option<Expr>,
         visibility: Visibility,
