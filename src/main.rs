@@ -722,6 +722,7 @@ fn run_request(
     } else {
         "Standard input code".to_string()
     };
+    goro_ext_standard::misc::set_translated_path(script_file.map(|_| s(&translated)));
 
     match mode {
         Mode::Lint => {
@@ -817,10 +818,49 @@ fn run_request(
             run_snippet(&mut vm, &code);
             false
         }
+        Mode::ReflectionExtInfo
+            if reflection_what.is_some_and(|w| w.eq_ignore_ascii_case(b"standard")) =>
+        {
+            // php_info_print_module() of PHP_MINFO(basic)
+            let ini = |vm: &Vm, k: &str, d: &str| -> String {
+                let v = vm
+                    .constants
+                    .get(k.as_bytes())
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_else(|| d.to_string());
+                if v.is_empty() {
+                    "no value".to_string()
+                } else {
+                    v
+                }
+            };
+            let mut out = String::from(
+                "\nstandard\n\nDynamic Library Support => enabled\nPath to sendmail => /usr/sbin/sendmail -t -i\n\nDirective => Local Value => Master Value\n",
+            );
+            for (k, d) in [
+                ("unserialize_max_depth", "4096"),
+                ("user_agent", ""),
+                ("from", ""),
+                ("default_socket_timeout", "60"),
+                ("auto_detect_line_endings", "Off"),
+                ("assert.active", "On"),
+                ("assert.bail", "Off"),
+                ("assert.warning", "On"),
+                ("assert.callback", ""),
+                ("assert.exception", "On"),
+                ("url_rewriter.tags", "form="),
+                ("url_rewriter.hosts", ""),
+            ] {
+                let v = ini(&vm, k, d);
+                out.push_str(&format!("{} => {} => {}\n", k, v, v));
+            }
+            vm.write_output(out.as_bytes());
+            false
+        }
         Mode::ReflectionExtInfo => {
             let what = s(reflection_what.unwrap_or_default());
             let code = format!(
-                "$__n = {0}; if (extension_loaded($__n)) {{ (new ReflectionExtension($__n))->info(); }} \
+                "$__n = {0}; if (extension_loaded($__n)) {{ echo \"\\n\"; (new ReflectionExtension($__n))->info(); }} \
                  elseif ($__n === 'main') {{ foreach (ini_get_all(null, false) as $__k => $__v) {{ }} }} \
                  else {{ echo \"Extension '\", $__n, \"' not present.\\n\"; exit(1); }}",
                 php_string_literal(&what)

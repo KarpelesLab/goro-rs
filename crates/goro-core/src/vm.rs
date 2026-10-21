@@ -34339,8 +34339,10 @@ impl Vm {
                             if self.included_files.insert(abs_path.clone()) {
                                 self.included_files_list.push(abs_path.clone());
                             }
-                            // Compile and execute
+                            // Compile and execute (the CLI sets CG(skip_shebang)
+                            // for every file it compiles)
                             let mut lexer = goro_parser::Lexer::new(&source);
+                            lexer.skip_shebang();
                             let tokens = lexer.tokenize();
                             let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
                             match parser.parse() {

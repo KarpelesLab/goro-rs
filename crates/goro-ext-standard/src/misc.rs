@@ -496,6 +496,7 @@ final class StreamBucket {
     vm.register_function(b"getmypid", getmypid_fn);
     vm.register_function(b"getmyuid", getmyuid_fn);
     vm.register_function(b"getlastmod", getlastmod_fn);
+    vm.register_function(b"getmyinode", getmyinode_fn);
     vm.register_function(b"getmygid", getmygid_fn);
     vm.register_function(b"get_current_user", get_current_user_fn);
     // sizeof is an alias for count (registered in type_funcs.rs)
@@ -16781,15 +16782,104 @@ fn phpinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut out = String::new();
     out.push_str("phpinfo()\n");
     if what & 1 != 0 {
+        let uname = unsafe {
+            let mut u: libc::utsname = std::mem::zeroed();
+            if libc::uname(&mut u) == 0 {
+                let f = |b: &[libc::c_char]| {
+                    std::ffi::CStr::from_ptr(b.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                format!(
+                    "{} {} {} {} {}",
+                    f(&u.sysname),
+                    f(&u.nodename),
+                    f(&u.release),
+                    f(&u.version),
+                    f(&u.machine)
+                )
+            } else {
+                "Linux".to_string()
+            }
+        };
+        let sapi = vm
+            .constants
+            .get(b"PHP_SAPI".as_slice())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default();
+        let sapi_name = if sapi == "cli-server" {
+            "Built-in HTTP server"
+        } else {
+            "Command Line Interface"
+        };
         out.push_str("PHP Version => 8.5.4\n\n");
-        out.push_str("System => Linux localhost 6.0.0 #1 x86_64\n");
-        out.push_str("Server API => Command Line Interface\n\n");
+        out.push_str(&format!("System => {}\n", uname));
+        out.push_str(&format!("Server API => {}\n", sapi_name));
+        out.push_str("Virtual Directory Support => disabled\n");
+        out.push_str("Configuration File (php.ini) Path => \n");
+        out.push_str("Loaded Configuration File => (none)\n");
+        out.push_str("Scan this dir for additional .ini files => (none)\n");
+        out.push_str("Additional .ini files parsed => (none)\n");
+        out.push_str("PHP API => 20250926\n");
+        out.push_str("PHP Extension => 20250926\n");
+        out.push_str("Zend Extension => 420250926\n");
+        out.push_str("Zend Extension Build => API420250926,NTS\n");
+        out.push_str("PHP Extension Build => API20250926,NTS\n");
+        out.push_str("Debug Build => no\n");
+        out.push_str("Thread Safety => disabled\n");
+        out.push_str("IPv6 Support => enabled\n\n");
+        out.push_str("This program makes use of the Zend Scripting Language Engine:\nZend Engine v4.5.4, Copyright (c) Zend Technologies\n\n");
     }
     if what & 4 != 0 {
         out.push_str("Configuration\n\n");
     }
     if what & 8 != 0 {
-        out.push_str("Core\n\n");
+        out.push_str("Core\n\nPHP Version => 8.5.4\n\nDirective => Local Value => Master Value\n");
+        for (k, d) in [
+            ("allow_url_fopen", "On"),
+            ("allow_url_include", "Off"),
+            ("arg_separator.input", "&"),
+            ("arg_separator.output", "&"),
+            ("auto_append_file", ""),
+            ("auto_prepend_file", ""),
+            ("default_charset", "UTF-8"),
+            ("default_mimetype", "text/html"),
+            ("disable_functions", ""),
+            ("display_errors", "1"),
+            ("display_startup_errors", "On"),
+            ("doc_root", ""),
+            ("enable_dl", "On"),
+            ("error_log", ""),
+            ("error_reporting", ""),
+            ("extension_dir", "/usr/lib/php/extensions"),
+            ("file_uploads", "On"),
+            ("html_errors", "Off"),
+            ("include_path", ".:/usr/share/php"),
+            ("log_errors", "Off"),
+            ("max_execution_time", "0"),
+            ("max_input_time", "-1"),
+            ("memory_limit", "128M"),
+            ("open_basedir", ""),
+            ("output_buffering", "0"),
+            ("post_max_size", "8M"),
+            ("short_open_tag", "Off"),
+            ("upload_max_filesize", "2M"),
+            ("upload_tmp_dir", ""),
+            ("variables_order", "EGPCS"),
+        ] {
+            let v = vm
+                .constants
+                .get(k.as_bytes())
+                .map(|v| v.to_php_string().to_string_lossy())
+                .unwrap_or_else(|| d.to_string());
+            let v = if v.is_empty() {
+                "no value".to_string()
+            } else {
+                v
+            };
+            out.push_str(&format!("{} => {} => {}\n", k, v, v));
+        }
+        out.push('\n');
         for hook in vm.phpinfo_hooks.clone() {
             out.push_str(&hook(vm));
         }
@@ -16827,7 +16917,19 @@ fn phpinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         out.push_str("PHP Variables\n\n");
     }
     if what & 64 != 0 {
-        out.push_str("PHP License\nThis program is free software\n\n");
+        out.push_str(
+            "\nPHP License\n\
+This program is free software; you can redistribute it and/or modify\n\
+it under the terms of the PHP License as published by the PHP Group\n\
+and included in the distribution in the file:  LICENSE\n\
+\n\
+This program is distributed in the hope that it will be useful,\n\
+but WITHOUT ANY WARRANTY; without even the implied warranty of\n\
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\
+\n\
+If you did not receive a copy of the PHP license, or have any\n\
+questions about PHP licensing, please contact license@php.net.\n",
+        );
     }
     vm.write_output(out.as_bytes());
     Ok(Value::True)
@@ -16911,13 +17013,67 @@ fn getmygid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(1000))
 }
 
-fn getlastmod_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // Returns the time the script was last modified, or false on failure
-    Ok(Value::False)
+thread_local! {
+    static TRANSLATED_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-fn get_current_user_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"magicaltux")))
+/// SG(request_info).path_translated, set by the SAPI (the resolved path of
+/// the main script).
+pub fn set_translated_path(p: Option<String>) {
+    TRANSLATED_PATH.with(|t| *t.borrow_mut() = p);
+}
+
+/// php_statpage(): stat() of the main script (SG(request_info).path_translated).
+fn statpage(vm: &Vm) -> Option<std::fs::Metadata> {
+    let mut path = TRANSLATED_PATH.with(|p| p.borrow().clone());
+    if let (None, Some(Value::Array(s))) = (&path, vm.get_global(b"_SERVER")) {
+        for k in [&b"PATH_TRANSLATED"[..], b"SCRIPT_FILENAME"] {
+            if let Some(Value::String(p)) =
+                s.borrow().get(&ArrayKey::String(PhpString::from_bytes(k)))
+            {
+                if !p.as_bytes().is_empty() {
+                    path = Some(p.to_string_lossy());
+                    break;
+                }
+            }
+        }
+    }
+    let path = path.unwrap_or_else(|| vm.current_file.clone());
+    std::fs::metadata(path).ok()
+}
+
+fn getlastmod_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(match statpage(vm) {
+        Some(m) => Value::Long(m.mtime()),
+        None => Value::False,
+    })
+}
+
+fn getmyinode_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(match statpage(vm) {
+        Some(m) => Value::Long(m.ino() as i64),
+        None => Value::False,
+    })
+}
+
+fn get_current_user_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = statpage(vm)
+        .map(|m| m.uid())
+        .unwrap_or_else(|| unsafe { libc::getuid() });
+    let name = unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr((*pw).pw_name)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    Ok(Value::String(PhpString::from_string(name)))
 }
 
 fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

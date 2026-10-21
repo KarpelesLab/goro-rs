@@ -1865,7 +1865,26 @@ fn execute_php_inner_impl(
         vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
     }
 
-    match vm.execute(&op_array) {
+    // php_execute_script(): auto_prepend_file / auto_append_file run as
+    // part of the main script
+    let main_result = {
+        let prepend = auto_include_chunk(ini_settings, "auto_prepend_file");
+        let append = auto_include_chunk(ini_settings, "auto_append_file");
+        let mut r = Ok(Value::Null);
+        if let Some(p) = &prepend {
+            r = vm.execute_chunk(p);
+        }
+        if r.is_ok() && !vm.exit_requested {
+            r = vm.execute_chunk(&op_array);
+        }
+        if let Some(a) = &append {
+            if r.is_ok() && !vm.exit_requested {
+                r = vm.execute_chunk(a);
+            }
+        }
+        vm.finish_request(r)
+    };
+    match main_result {
         Ok(_) => Ok(vm.take_output()),
         Err(e) => {
             // The VM displays uncaught exceptions / fatal errors itself
@@ -1877,6 +1896,31 @@ fn execute_php_inner_impl(
             Ok(vm.take_output())
         }
     }
+}
+
+/// The code that requires the auto_prepend_file / auto_append_file `key`.
+fn auto_include_chunk(
+    ini_settings: &[(String, String)],
+    key: &str,
+) -> Option<goro_core::opcode::OpArray> {
+    let path = ini_settings
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())?;
+    let src = format!(
+        "<?php require '{}';",
+        path.replace('\\', "\\\\").replace('\'', "\\'")
+    );
+    let mut lexer = goro_parser::Lexer::new(src.as_bytes());
+    let tokens = lexer.tokenize();
+    let program = goro_parser::Parser::new(tokens)
+        .with_source(src.as_bytes())
+        .parse()
+        .ok()?;
+    let compiler = goro_core::compiler::Compiler::new();
+    compiler.compile(&program).ok().map(|(op, _, _)| op)
 }
 
 /// Translate PCRE-isms run-tests relies on into Rust regex syntax: a `{`

@@ -1097,6 +1097,11 @@ impl PhpRun {
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
         info.server_vars = Some(server_variables(server, client));
+        goro_ext_standard::misc::set_translated_path(
+            req.path_translated
+                .as_ref()
+                .map(|p| String::from_utf8_lossy(cstr(p)).into_owned()),
+        );
         engine::request_startup(&mut vm, &info, &server.ini);
         PhpRun { vm }
     }
