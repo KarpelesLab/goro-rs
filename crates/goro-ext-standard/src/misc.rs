@@ -4281,8 +4281,11 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn compact(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn compact(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let msg = "Cannot call compact() dynamically";
+    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Err(VmError { message: format!("Uncaught Error: {}", msg), line: vm.current_line })
 }
 
 fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

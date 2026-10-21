@@ -4318,6 +4318,75 @@ impl Vm {
         result
     }
 
+    /// php_compact_var(): add the variable named by `entry` (recursing into
+    /// arrays) from the current scope to `result`.
+    fn compact_var(&mut self, result: &mut PhpArray, entry: &Value, pos: u32, cvs: &[Value], op_array: &OpArray, stack: &mut Vec<usize>, line: u32) {
+        let entry = entry.deref();
+        match &entry {
+            Value::String(name) => {
+                let n = name.as_bytes();
+                if n == b"this" {
+                    if let Some(i) = op_array.cv_names.iter().position(|c| c.as_slice() == b"this") {
+                        if let Value::Object(_) = cvs[i].deref() {
+                            result.set(ArrayKey::String(name.clone()), cvs[i].deref());
+                        }
+                    }
+                    return;
+                }
+                let found = match op_array.cv_names.iter().position(|c| c.as_slice() == n) {
+                    Some(i) => match cvs[i].deref() {
+                        Value::Undef => None,
+                        v => Some(v),
+                    },
+                    None => {
+                        if self.is_global_scope {
+                            self.globals.get(n).map(|v| v.deref()).filter(|v| !matches!(v, Value::Undef))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                match found {
+                    Some(mut v) => {
+                        if let Value::Array(a) = &v {
+                            let copy = a.borrow().clone();
+                            v = Value::Array(Rc::new(RefCell::new(copy)));
+                        }
+                        result.set(ArrayKey::String(name.clone()), v);
+                    }
+                    None => {
+                        self.emit_warning_at(&format!("compact(): Undefined variable ${}", String::from_utf8_lossy(n)), line);
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                let ptr = Rc::as_ptr(arr) as usize;
+                if stack.contains(&ptr) {
+                    let exc = self.create_exception(b"Error", "Recursion detected", line);
+                    self.current_exception = Some(exc);
+                    return;
+                }
+                stack.push(ptr);
+                let items: Vec<Value> = arr.borrow().values().cloned().collect();
+                for it in items {
+                    if self.current_exception.is_some() {
+                        break;
+                    }
+                    self.compact_var(result, &it, pos, cvs, op_array, stack, line);
+                }
+                stack.pop();
+            }
+            other => {
+                let tn = match other {
+                    Value::True => "true".to_string(),
+                    Value::False => "false".to_string(),
+                    _ => Self::value_type_name(other).to_string(),
+                };
+                self.emit_warning_at(&format!("compact(): Argument #{} must be string or array of strings, {} given", pos, tn), line);
+            }
+        }
+    }
+
     /// Run destructors for objects that are only held by the destructible_objects list.
     /// In PHP, __destruct is called eagerly when the last user reference is dropped.
     /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
@@ -20422,6 +20491,30 @@ impl Vm {
                             }
                         }
                     }
+                }
+                OpCode::CompactDyn => {
+                    let args_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let mut result = PhpArray::new();
+                    let top: Vec<Value> = match &args_val {
+                        Value::Array(a) => a.borrow().values().cloned().collect(),
+                        _ => Vec::new(),
+                    };
+                    let mut stack: Vec<usize> = Vec::new();
+                    for (i, entry) in top.iter().enumerate() {
+                        self.compact_var(&mut result, entry, (i + 1) as u32, &cvs, op_array, &mut stack, op.line);
+                        if self.current_exception.is_some() {
+                            break;
+                        }
+                    }
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: "Uncaught Error: Recursion detected".into(), line: op.line });
+                    }
+                    self.write_operand(&op.result, Value::Array(Rc::new(RefCell::new(result))), &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::CompactSet => {
                     // Like ArraySet but skip if the CV is Undef (emit warning)

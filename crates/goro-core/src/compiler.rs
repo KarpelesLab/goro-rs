@@ -7767,48 +7767,54 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if func_lower == b"compact" && !args.is_empty() {
-                        // compact("foo", "bar") => ["foo" => $foo, "bar" => $bar]
-                        let arr_tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayNew,
-                            op1: OperandType::Unused,
-                            op2: OperandType::Unused,
-                            result: OperandType::Tmp(arr_tmp),
-                            line: expr.span.line,
-                        });
-                        for arg in args {
-                            match &arg.value.kind {
-                                ExprKind::String(s) => {
-                                    let cv = self.op_array.get_or_create_cv(s);
-                                    let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
-                                    self.op_array.emit(Op {
-                                        opcode: OpCode::CompactSet,
-                                        op1: OperandType::Tmp(arr_tmp),
-                                        op2: OperandType::Cv(cv),
-                                        result: OperandType::Const(key_idx),
-                                        line: expr.span.line,
-                                    });
-                                }
-                                ExprKind::Array(elements) => {
-                                    // compact(["a", "b"]) - flatten array of string literals
-                                    for elem in elements {
-                                        if let ExprKind::String(s) = &elem.value.kind {
-                                            let cv = self.op_array.get_or_create_cv(s);
-                                            let key_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(s.clone())));
-                                            self.op_array.emit(Op {
-                                                opcode: OpCode::CompactSet,
-                                                op1: OperandType::Tmp(arr_tmp),
-                                                op2: OperandType::Cv(cv),
-                                                result: OperandType::Const(key_idx),
-                                                line: expr.span.line,
-                                            });
-                                        }
+                    if func_lower == b"compact" && !args.is_empty() && args.iter().all(|a| a.name.is_none() && !a.unpack) {
+                        // Make sure literal variable names have CV slots.
+                        fn collect_names(e: &Expr, out: &mut Vec<Vec<u8>>) {
+                            match &e.kind {
+                                ExprKind::String(s) => out.push(s.clone()),
+                                ExprKind::Array(elems) => {
+                                    for el in elems {
+                                        collect_names(&el.value, out);
                                     }
                                 }
                                 _ => {}
                             }
                         }
+                        let mut names = Vec::new();
+                        for arg in args {
+                            collect_names(&arg.value, &mut names);
+                        }
+                        for n in &names {
+                            if n.as_slice() != b"this" {
+                                self.op_array.get_or_create_cv(n);
+                            }
+                        }
+                        let args_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayNew,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(args_tmp),
+                            line: expr.span.line,
+                        });
+                        for arg in args {
+                            let v = self.compile_expr(&arg.value)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: OperandType::Tmp(args_tmp),
+                                op2: v,
+                                result: OperandType::Tmp(args_tmp),
+                                line: expr.span.line,
+                            });
+                        }
+                        let arr_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::CompactDyn,
+                            op1: OperandType::Tmp(args_tmp),
+                            op2: OperandType::Unused,
+                            result: OperandType::Tmp(arr_tmp),
+                            line: expr.span.line,
+                        });
                         return Ok(OperandType::Tmp(arr_tmp));
                     }
                 }
