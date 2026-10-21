@@ -19094,6 +19094,13 @@ impl Vm {
                                     } else {
                                         (cv0_object.unwrap_or(Value::Null), false)
                                     };
+                                    // parent::m() naming a user class that inherits m from a
+                                    // built-in SPL class: dispatch on that built-in.
+                                    let class_lower = if self.classes.contains_key(&class_lower) {
+                                        self.spl_builtin_base(&class_lower).map(|b| b.to_vec()).unwrap_or(class_lower)
+                                    } else {
+                                        class_lower
+                                    };
                                     if let Value::Object(obj) = &this_val {
                                         // Try dispatch_spl_method
                                         let spl_result = self.dispatch_spl_method(&class_lower, &method_lower, obj);
@@ -19129,6 +19136,22 @@ impl Vm {
                                                     format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
                                                 } else { "Uncaught exception".to_string() };
                                                 return Err(VmError { message: msg, line: op.line });
+                                            }
+                                        }
+                                        // Propagate an exception thrown by the built-in.
+                                        if handled && self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                ip = *catch_target as usize;
+                                                continue;
+                                            } else {
+                                                let exc_msg = if let Some(Value::Object(o)) = self.current_exception.as_ref() {
+                                                    let ob = o.borrow();
+                                                    let cls = crate::value::display_class_name(&ob.class_name);
+                                                    let msg = ob.get_property(b"message").to_php_string().to_string_lossy().to_string();
+                                                    format!("Uncaught {}: {}", cls, msg)
+                                                } else { "Uncaught exception".to_string() };
+                                                return Err(VmError { message: exc_msg, line: op.line });
                                             }
                                         }
                                     }

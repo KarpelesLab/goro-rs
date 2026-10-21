@@ -651,12 +651,29 @@ impl Vm {
     pub(crate) fn fs_debug_info(&mut self, obj: &Rc<RefCell<PhpObject>>) -> PhpArray {
         let mut out = self.spl_std_props(obj);
         let key = |c: &[u8], n: &[u8]| ArrayKey::String(PhpString::from_vec(mangle_private(c, n)));
-        let path_name = self.fs_get_pathname(obj).unwrap_or_default();
-        if self.current_exception.is_some() {
-            self.current_exception = None;
-        }
+        // Computed without caching: callers may hold a borrow of obj.
+        let file_name = match sprop(obj, b"__spl_file_path") {
+            Some(f) => Some(f),
+            None if Self::fs_is_dir(obj) && !Self::fs_entry(obj).is_empty() => {
+                let entry = Self::fs_entry(obj);
+                Some(match Self::fs_get_path(obj) {
+                    None => entry,
+                    Some(mut p) => {
+                        p.push(b'/');
+                        p.extend_from_slice(&entry);
+                        p
+                    }
+                })
+            }
+            None => None,
+        };
+        let path_name = if Self::fs_is_dir(obj) && Self::fs_entry(obj).is_empty() {
+            Vec::new()
+        } else {
+            file_name.clone().unwrap_or_default()
+        };
         out.set(key(b"SplFileInfo", b"pathName"), svec(path_name));
-        if let Some(f) = sprop(obj, b"__spl_file_path") {
+        if let Some(f) = file_name {
             out.set(key(b"SplFileInfo", b"fileName"), svec(Self::fs_short_name(obj, &f)));
         }
         let cl = obj_class_lower(obj);
