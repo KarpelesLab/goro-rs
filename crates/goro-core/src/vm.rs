@@ -1922,6 +1922,28 @@ impl Vm {
                 doc_comment: None,
             });
             vm.classes.insert(b"deprecated".to_vec(), dep);
+
+            // final class NoDiscard { public readonly ?string $message; }
+            let mut nd = ClassEntry::new(b"NoDiscard".to_vec());
+            nd.is_final = true;
+            nd.properties.push(PropertyDef {
+                name: b"message".to_vec(),
+                default: Value::Null,
+                is_static: false,
+                is_readonly: true,
+                visibility: ObjVis::Public,
+                set_visibility: None,
+                declaring_class: b"nodiscard".to_vec(),
+                property_type: None,
+                has_get_hook: false,
+                has_set_hook: false,
+                is_virtual: false,
+                is_abstract: false,
+                is_final: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+            vm.classes.insert(b"nodiscard".to_vec(), nd);
         }
         vm
     }
@@ -2869,6 +2891,11 @@ impl Vm {
         self.raise_error(crate::errdisplay::E_WARNING, msg, line);
     }
 
+    /// Emit an E_USER_WARNING (512), displayed as "Warning".
+    pub fn emit_user_warning_at(&mut self, msg: &str, line: u32) {
+        self.raise_error(crate::errdisplay::E_USER_WARNING, msg, line);
+    }
+
     /// Emit a PHP "Fatal error" line directly to output and return a VmError
     /// that callers should propagate up. The error message is *not* wrapped
     /// in an exception — fatal errors halt execution unconditionally. Sets
@@ -3330,32 +3357,189 @@ impl Vm {
     }
 
     /// Check if attributes contain #[\NoDiscard] and return the message
+    /// (get_nodiscard_suffix_from_attribute()): the attribute's arguments go
+    /// through `NoDiscard::__construct(?string $message = null)`; a type
+    /// mismatch sets `current_exception` to a TypeError and returns `None`.
     pub fn get_nodiscard_message(
         &mut self,
         attrs: &[crate::object::RuntimeAttribute],
     ) -> Option<String> {
         for attr in attrs {
-            let lower: Vec<u8> = attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if lower == b"nodiscard" {
-                if attr.args_op_array.ops.is_empty() {
-                    return Some(String::new());
-                }
-                let args_val = self
-                    .execute_op_array_pub(&attr.args_op_array, vec![])
-                    .unwrap_or(Value::Null);
-                if let Value::Array(arr) = &args_val {
-                    let arr = arr.borrow();
-                    let msg = arr
-                        .iter()
-                        .next()
-                        .map(|(_, v)| v.to_php_string().to_string_lossy())
-                        .unwrap_or_default();
-                    return Some(msg);
-                }
+            if !attr.name.eq_ignore_ascii_case(b"nodiscard") {
+                continue;
+            }
+            if attr.args_op_array.ops.is_empty() {
                 return Some(String::new());
             }
+            let caller_file = self.current_file.clone();
+            let caller_line = self.current_line;
+            let args_val = self
+                .execute_op_array_pub(&attr.args_op_array, vec![])
+                .unwrap_or(Value::Null);
+            if self.current_exception.is_some() {
+                return None;
+            }
+            let Value::Array(arr) = &args_val else {
+                return Some(String::new());
+            };
+            let msg_val = {
+                let arr = arr.borrow();
+                arr.get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                    b"message",
+                )))
+                .or_else(|| arr.get(&crate::array::ArrayKey::Int(0)))
+                .cloned()
+            };
+            let strict = attr.args_op_array.strict_types;
+            return match msg_val {
+                None | Some(Value::Null) => Some(String::new()),
+                Some(Value::String(s)) => Some(s.to_string_lossy()),
+                Some(v @ (Value::True | Value::False | Value::Long(_) | Value::Double(_)))
+                    if !strict =>
+                {
+                    Some(v.to_php_string().to_string_lossy())
+                }
+                Some(v) => {
+                    let msg = format!(
+                        "NoDiscard::__construct(): Argument #1 ($message) must be of type ?string, {} given",
+                        self.format_arg_type(&v)
+                    );
+                    self.call_stack.push((
+                        "NoDiscard->__construct".to_string(),
+                        caller_file,
+                        caller_line,
+                        vec![v],
+                        true,
+                    ));
+                    let exc = self.create_exception(b"TypeError", &msg, caller_line);
+                    self.call_stack.pop();
+                    self.current_exception = Some(exc);
+                    None
+                }
+            };
         }
         None
+    }
+
+    /// Attributes and display name ("f" / "Class::m") of the user function a
+    /// string or array callback names, if it resolves to one.
+    pub fn callback_attributes(
+        &self,
+        callback: &Value,
+    ) -> Option<(Vec<crate::object::RuntimeAttribute>, String)> {
+        let (class_lower, method) = match callback.deref() {
+            Value::String(s) => {
+                let b = s.as_bytes();
+                match b.windows(2).position(|w| w == b"::") {
+                    None => {
+                        let lower = b.strip_prefix(b"\\").unwrap_or(b).to_ascii_lowercase();
+                        let f = self.user_functions.get(&lower)?;
+                        let display = if f.display_name.is_empty() {
+                            String::from_utf8_lossy(b.strip_prefix(b"\\").unwrap_or(b)).into_owned()
+                        } else {
+                            String::from_utf8_lossy(&f.display_name).into_owned()
+                        };
+                        return Some((f.attributes.clone(), display));
+                    }
+                    Some(p) => (b[..p].to_ascii_lowercase(), b[p + 2..].to_vec()),
+                }
+            }
+            Value::Array(arr) => {
+                let arr = arr.borrow();
+                let vals: Vec<Value> = arr.values().cloned().collect();
+                if vals.len() != 2 {
+                    return None;
+                }
+                let method = vals[1].to_php_string().as_bytes().to_vec();
+                match vals[0].deref() {
+                    Value::Object(o) => (o.borrow().class_name.to_ascii_lowercase(), method),
+                    Value::String(s) => (s.as_bytes().to_ascii_lowercase(), method),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let class = self.classes.get(&class_lower)?;
+        let m = class.get_method(&method.to_ascii_lowercase())?;
+        let attrs = if m.attributes.is_empty() {
+            m.op_array.attributes.clone()
+        } else {
+            m.attributes.clone()
+        };
+        let display = format!(
+            "{}::{}",
+            String::from_utf8_lossy(&class.name),
+            String::from_utf8_lossy(&m.name)
+        );
+        Some((attrs, display))
+    }
+
+    /// #[\NoDiscard] on internal methods (stubs): DateTimeImmutable's
+    /// "modifiers" return a new object. `func_lower` is "class::method".
+    fn internal_nodiscard_check(&mut self, func_lower: &[u8], line: u32) {
+        const DTI: &[(&[u8], &str)] = &[
+            (b"modify", "modify"),
+            (b"add", "add"),
+            (b"sub", "sub"),
+            (b"settimezone", "setTimezone"),
+            (b"settime", "setTime"),
+            (b"setdate", "setDate"),
+            (b"setisodate", "setISODate"),
+            (b"settimestamp", "setTimestamp"),
+            (b"setmicrosecond", "setMicrosecond"),
+        ];
+        // Internal methods are queued as "__spl::class::method".
+        let Some(rest) = func_lower.strip_prefix(b"__spl::") else {
+            return;
+        };
+        let Some(sep) = rest.windows(2).position(|w| w == b"::") else {
+            return;
+        };
+        let (class, method) = (&rest[..sep], &rest[sep + 2..]);
+        let Some(&(_, m)) = DTI.iter().find(|(n, _)| *n == method) else {
+            return;
+        };
+        if class != b"datetimeimmutable" {
+            return;
+        }
+        let msg = format!(
+            "The return value of method DateTimeImmutable::{m}() should either be used or intentionally ignored by casting it as (void), as DateTimeImmutable::{m}() does not modify the object itself"
+        );
+        self.emit_warning_at(&msg, line);
+    }
+
+    /// zend_nodiscard_function(): warn that the result of a #[\NoDiscard]
+    /// function is unused. `display` is "name" for functions and
+    /// "Class::name" for methods. User functions raise E_USER_WARNING,
+    /// internal ones E_WARNING.
+    pub fn emit_nodiscard_warning(
+        &mut self,
+        attrs: &[crate::object::RuntimeAttribute],
+        display: &str,
+        internal: bool,
+        line: u32,
+    ) {
+        let Some(custom_msg) = self.get_nodiscard_message(attrs) else {
+            return;
+        };
+        let kind = if display.contains("::") && !display.starts_with("{closure") {
+            "method"
+        } else {
+            "function"
+        };
+        let mut msg = format!(
+            "The return value of {} {}() should either be used or intentionally ignored by casting it as (void)",
+            kind, display
+        );
+        if !custom_msg.is_empty() {
+            msg.push_str(", ");
+            msg.push_str(&custom_msg);
+        }
+        if internal {
+            self.emit_warning_at(&msg, line);
+        } else {
+            self.emit_user_warning_at(&msg, line);
+        }
     }
 
     /// Check open_basedir restriction. Returns true if path is allowed, false if blocked.
@@ -19861,6 +20045,20 @@ impl Vm {
                         }
                     }
 
+                    // call_user_func() compiles to INIT_USER_CALL + DO_FCALL: an
+                    // unused result is checked against the callback's #[\NoDiscard].
+                    if matches!(op.op1, OperandType::Const(_))
+                        && func_name_lower == b"call_user_func"
+                    {
+                        if let Some(cb) = call.args.first().cloned() {
+                            if let Some((attrs, display)) = self.callback_attributes(&cb) {
+                                self.emit_nodiscard_warning(&attrs, &display, false, op.line);
+                            }
+                        }
+                    } else if matches!(op.op1, OperandType::Const(_)) {
+                        self.internal_nodiscard_check(&func_name_lower, op.line);
+                    }
+
                     // Generic zpp for static methods of internal classes
                     // (verified stub arginfo).
                     if (func_name_lower.first() == Some(&b'_') || func_name_lower.contains(&b':'))
@@ -22803,26 +23001,55 @@ impl Vm {
                                 }
                             }
                             // #[\NoDiscard] - warn if result is discarded
-                            if matches!(op.op1, OperandType::Const(_)) {
-                                if let Some(custom_msg) = self.get_nodiscard_message(&attrs_clone) {
-                                    let fn_display = call.name.to_string_lossy();
-                                    let msg = if custom_msg.is_empty() {
-                                        format!(
-                                            "The return value of function {}() should either be used or intentionally ignored by casting it as (void)",
-                                            fn_display
-                                        )
-                                    } else {
-                                        format!(
-                                            "The return value of function {}() should either be used or intentionally ignored by casting it as (void), {}",
-                                            fn_display, custom_msg
-                                        )
-                                    };
-                                    // zend_nodiscard_function(): E_USER_WARNING for user functions
-                                    self.raise_error(
-                                        crate::errdisplay::E_USER_WARNING,
-                                        &msg,
-                                        op.line,
-                                    );
+                            if matches!(op.op1, OperandType::Const(_))
+                                && attrs_clone
+                                    .iter()
+                                    .any(|a| a.name.eq_ignore_ascii_case(b"nodiscard"))
+                            {
+                                let mut fn_display = if !user_fn.display_name.is_empty() {
+                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                } else {
+                                    call.name.to_string_lossy()
+                                };
+                                // __call/__callStatic name the method that was called.
+                                let magic_name = if func_name_lower.ends_with(b"::__call") {
+                                    call.args.get(1)
+                                } else if func_name_lower.ends_with(b"::__callstatic") {
+                                    call.args.first()
+                                } else {
+                                    None
+                                };
+                                if let Some(Value::String(s)) = magic_name {
+                                    if let Some(sep) = fn_display.rfind("::") {
+                                        fn_display = format!(
+                                            "{}::{}",
+                                            &fn_display[..sep],
+                                            s.to_string_lossy()
+                                        );
+                                    }
+                                }
+                                self.emit_nodiscard_warning(
+                                    &attrs_clone,
+                                    &fn_display,
+                                    false,
+                                    op.line,
+                                );
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
                                 }
                             }
                         }
@@ -26716,6 +26943,90 @@ impl Vm {
                                                 });
                                             }
                                         }
+                                        b"nodiscard" => {
+                                            // NoDiscard::__construct(?string $message = null)
+                                            let mut arg = call.args.get(1).cloned();
+                                            if arg.is_none() {
+                                                if let Some((_, v)) = call
+                                                    .named_args
+                                                    .iter()
+                                                    .find(|(n, _)| n == b"message")
+                                                {
+                                                    arg = Some(v.clone());
+                                                }
+                                            }
+                                            let arg = arg.unwrap_or(Value::Null).deref();
+                                            let ctor_trace_args: Vec<Value> =
+                                                call.args.iter().skip(1).cloned().collect();
+                                            let err: Option<(&[u8], String)> = if call.args.len()
+                                                > 2
+                                            {
+                                                Some((
+                                                    b"ArgumentCountError",
+                                                    format!(
+                                                        "NoDiscard::__construct() expects at most 1 argument, {} given",
+                                                        call.args.len() - 1
+                                                    ),
+                                                ))
+                                            } else if !matches!(arg, Value::Null | Value::String(_))
+                                                && (op_array.strict_types
+                                                    || !matches!(
+                                                        arg,
+                                                        Value::True
+                                                            | Value::False
+                                                            | Value::Long(_)
+                                                            | Value::Double(_)
+                                                    ))
+                                            {
+                                                Some((
+                                                    b"TypeError",
+                                                    format!(
+                                                        "NoDiscard::__construct(): Argument #1 ($message) must be of type ?string, {} given",
+                                                        self.format_arg_type(&arg)
+                                                    ),
+                                                ))
+                                            } else if !matches!(
+                                                obj_mut.get_property(b"message"),
+                                                Value::Undef
+                                            ) {
+                                                Some((
+                                                    b"Error",
+                                                    "Cannot modify readonly property NoDiscard::$message"
+                                                        .to_string(),
+                                                ))
+                                            } else {
+                                                None
+                                            };
+                                            if let Some((cls, msg)) = err {
+                                                drop(obj_mut);
+                                                self.call_stack.push((
+                                                    "NoDiscard->__construct".to_string(),
+                                                    self.current_file.clone(),
+                                                    op.line,
+                                                    ctor_trace_args,
+                                                    true,
+                                                ));
+                                                let exc = self.create_exception(cls, &msg, op.line);
+                                                self.call_stack.pop();
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                                    exception_handlers.pop()
+                                                {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    continue;
+                                                }
+                                                return Err(VmError {
+                                                    message: self.uncaught_exception_message(),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            let val = match arg {
+                                                Value::Null | Value::String(_) => arg,
+                                                other => Value::String(other.to_php_string()),
+                                            };
+                                            obj_mut.set_property(b"message".to_vec(), val);
+                                        }
                                         b"deprecated" => {
                                             // Deprecated::__construct(?string $message = null, ?string $since = null)
                                             // Validate args as nullable string. On type mismatch, throw TypeError.
@@ -27168,6 +27479,15 @@ impl Vm {
                                                     op.line,
                                                     true,
                                                 );
+                                                if matches!(op.op1, OperandType::Const(_)) {
+                                                    let attrs = call_op.attributes.clone();
+                                                    self.emit_nodiscard_warning(
+                                                        &attrs,
+                                                        &display_fallback,
+                                                        false,
+                                                        op.line,
+                                                    );
+                                                }
                                                 let mut fn_cvs =
                                                     vec![Value::Undef; call_op.cv_names.len()];
                                                 // __call($name, $arguments): CV[0]=$this, CV[1]=$name, CV[2]=$args
@@ -27255,6 +27575,15 @@ impl Vm {
                                                     op.line,
                                                     true,
                                                 );
+                                                if matches!(op.op1, OperandType::Const(_)) {
+                                                    let attrs = call_static_op.attributes.clone();
+                                                    self.emit_nodiscard_warning(
+                                                        &attrs,
+                                                        &display_fallback,
+                                                        false,
+                                                        op.line,
+                                                    );
+                                                }
                                                 let mut fn_cvs = vec![
                                                     Value::Undef;
                                                     call_static_op.cv_names.len()
@@ -41487,8 +41816,17 @@ impl Vm {
                             let mut func_name = class_name_orig.clone();
                             func_name.extend_from_slice(b"::");
                             func_name.extend_from_slice(&method.name);
+                            // MethodDef keeps attributes apart from the OpArray;
+                            // DoFCall's #[\Deprecated]/#[\NoDiscard] checks read
+                            // them from the registered function.
+                            let mut method_op_array = method.op_array.clone();
+                            if method_op_array.attributes.is_empty()
+                                && !method.attributes.is_empty()
+                            {
+                                method_op_array.attributes = method.attributes.clone();
+                            }
                             self.user_functions
-                                .insert(func_name.to_ascii_lowercase(), method.op_array.clone());
+                                .insert(func_name.to_ascii_lowercase(), method_op_array);
                         }
 
                         // Resolve deferred constant references (self::CONST, ClassName::CONST)

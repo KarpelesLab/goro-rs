@@ -1421,6 +1421,7 @@ fn execute_php_inner_impl(
                 || err_msg.starts_with("Parameter $")
                 || err_msg.starts_with("set hook parameter")
                 || err_msg.starts_with("Cannot use the static modifier on a property hook")
+                || err_msg.starts_with("#[\\NoDiscard] is not supported for property hooks")
                 || err_msg.starts_with("Cannot use the public modifier on a property hook")
                 || err_msg.starts_with("Cannot use the protected modifier on a property hook")
                 || err_msg.starts_with("Cannot use the private modifier on a property hook")

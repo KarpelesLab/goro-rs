@@ -11149,6 +11149,8 @@ impl Compiler {
             }
 
             ExprKind::FunctionCall { name, args } => {
+                // Only this call's own result is discarded, not its arguments'.
+                let discard_result = std::mem::take(&mut self.is_discarding_result);
                 // Special case: compact() - build array from variable names
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -11374,7 +11376,7 @@ impl Compiler {
 
                 // Do the call (op1 signals if result is being discarded for #[\NoDiscard])
                 let tmp = self.op_array.alloc_temp();
-                let discard_flag = if self.is_discarding_result {
+                let discard_flag = if discard_result {
                     let idx = self.op_array.add_literal(Value::True);
                     OperandType::Const(idx)
                 } else {
@@ -14394,6 +14396,11 @@ impl Compiler {
                 args,
             } => {
                 self.check_parent_hook_call(class, method, false, expr.span.line)?;
+                let discard_flag = if std::mem::take(&mut self.is_discarding_result) {
+                    OperandType::Const(self.op_array.add_literal(Value::True))
+                } else {
+                    OperandType::Unused
+                };
                 // Check if the class expression is in a nullsafe chain
                 let chain_nullsafe = expr_is_in_nullsafe_chain(class);
                 let tmp = self.op_array.alloc_temp();
@@ -14445,7 +14452,7 @@ impl Compiler {
 
                     self.op_array.emit(Op {
                         opcode: OpCode::DoFCall,
-                        op1: OperandType::Unused,
+                        op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
                         line: expr.span.line,
@@ -14532,7 +14539,7 @@ impl Compiler {
 
                     self.op_array.emit(Op {
                         opcode: OpCode::DoFCall,
-                        op1: OperandType::Unused,
+                        op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
                         line: expr.span.line,
@@ -14878,6 +14885,11 @@ impl Compiler {
                         line: expr.span.line,
                     });
                 }
+                let discard_flag = if std::mem::take(&mut self.is_discarding_result) {
+                    OperandType::Const(self.op_array.add_literal(Value::True))
+                } else {
+                    OperandType::Unused
+                };
                 let effective_nullsafe =
                     *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
@@ -14937,7 +14949,7 @@ impl Compiler {
 
                 self.op_array.emit(Op {
                     opcode: OpCode::DoFCall,
-                    op1: OperandType::Unused,
+                    op1: discard_flag,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,

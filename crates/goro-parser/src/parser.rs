@@ -3081,9 +3081,28 @@ impl Parser {
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             // Skip optional attributes and modifiers: #[...] final, public, protected, private, &
+            let mut hook_attrs = Vec::new();
+            let attr_span = self.span();
             while matches!(self.peek(), TokenKind::AttributeOpen) {
                 // Parse and discard attributes for now
-                let _ = self.parse_attributes()?;
+                hook_attrs.extend(self.parse_attributes()?);
+            }
+            // zend_compile_func_decl(): #[\NoDiscard] cannot apply to hooks
+            // (unless its validation is delayed).
+            let is_attr = |a: &Attribute, n: &[u8]| {
+                a.name
+                    .last()
+                    .is_some_and(|l| l.strip_prefix(b"\\").unwrap_or(l).eq_ignore_ascii_case(n))
+            };
+            if hook_attrs.iter().any(|a| is_attr(a, b"NoDiscard"))
+                && !hook_attrs
+                    .iter()
+                    .any(|a| is_attr(a, b"DelayedTargetValidation"))
+            {
+                return Err(ParseError {
+                    message: "#[\\NoDiscard] is not supported for property hooks".into(),
+                    span: attr_span,
+                });
             }
             let mut hook_is_final = false;
             let mut hook_is_static = false;
