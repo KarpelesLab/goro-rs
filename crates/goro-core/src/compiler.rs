@@ -7402,6 +7402,8 @@ impl Compiler {
                 // as a second argument at compile time (PHP behavior).
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // `\assert(...)` is the same compile-time special case.
+                    let func_lower: Vec<u8> = func_lower.strip_prefix(b"\\").map(|r| r.to_vec()).unwrap_or(func_lower);
                     if func_lower == b"assert"
                         && args.len() == 1
                         && args[0].name.is_none()

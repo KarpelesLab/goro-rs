@@ -1321,6 +1321,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     vm.register_extension(b"pcre");
 
     // Apply all INI settings to the VM constants
+    let mut startup_messages: Vec<u8> = Vec::new();
     for (key, value) in ini_settings {
         // Handle disable_functions: remove those functions from the VM
         if key == "disable_functions" {
@@ -1346,6 +1347,11 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             if let Value::Long(n) = &val {
                 vm.error_reporting = *n;
             }
+        }
+        // INI handlers that emit "PHP Startup" deprecations.
+        if let Some(msg) = goro_ext_standard::misc::assert_ini_deprecation(key.as_bytes(), &val) {
+            startup_messages.extend_from_slice(
+                format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
         }
         // Apply zend.exception_string_param_max_len to the VM (PHP rejects values outside [0,1_000_000])
         if key == "zend.exception_string_param_max_len" {
@@ -1389,6 +1395,10 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             hook(&mut vm);
         }
         vm.write_output(&prev);
+    }
+    if !startup_messages.is_empty() && vm.error_reporting & 8192 != 0 {
+        let buf = vm.active_output_buffer();
+        buf.splice(0..0, startup_messages);
     }
     for class in compiled_classes {
         vm.register_class(class);

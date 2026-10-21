@@ -818,11 +818,10 @@ impl Vm {
                 c.insert(b"assert.exception".to_vec(), Value::Long(1));
                 // Assert option constants
                 c.insert(b"ASSERT_ACTIVE".to_vec(), Value::Long(1));
-                c.insert(b"ASSERT_WARNING".to_vec(), Value::Long(2));
+                c.insert(b"ASSERT_CALLBACK".to_vec(), Value::Long(2));
                 c.insert(b"ASSERT_BAIL".to_vec(), Value::Long(3));
-                c.insert(b"ASSERT_QUIET_EVAL".to_vec(), Value::Long(4));
-                c.insert(b"ASSERT_CALLBACK".to_vec(), Value::Long(5));
-                c.insert(b"ASSERT_EXCEPTION".to_vec(), Value::Long(6));
+                c.insert(b"ASSERT_WARNING".to_vec(), Value::Long(4));
+                c.insert(b"ASSERT_EXCEPTION".to_vec(), Value::Long(5));
                 // String constants
                 c.insert(b"STR_PAD_RIGHT".to_vec(), Value::Long(1));
                 c.insert(b"STR_PAD_LEFT".to_vec(), Value::Long(0));

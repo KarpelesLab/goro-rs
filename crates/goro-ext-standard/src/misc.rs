@@ -1344,7 +1344,8 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Handle array callback: [class_or_object, method_name]
     if let Value::Array(arr) = callback {
         let arr_borrow = arr.borrow();
-        let vals: Vec<Value> = arr_borrow.values().cloned().collect();
+        // [&$obj, 'method'] — element references are transparent.
+        let vals: Vec<Value> = arr_borrow.values().map(|v| v.deref()).collect();
         drop(arr_borrow);
         if vals.len() >= 2 {
             let method_name = vals[1].to_php_string();
@@ -1511,7 +1512,9 @@ fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
                                 let line = vm.current_line;
                                 vm.check_user_function_deprecation(&op, &display_fallback, line);
-                                return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+                                // Static methods called through an object get no $this.
+                                let this = if method.is_static { None } else { Some(Value::Object(obj.clone())) };
+                                return vm.execute_fn_with_named_args(&op, call_args, named_args, this);
                             }
                             // Method exists but not accessible - fall through to __call
                         }
@@ -4036,6 +4039,23 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
+    if key.starts_with(b"assert.") {
+        if key == b"assert.callback" {
+            ASSERT_CALLBACK.with(|c| *c.borrow_mut() = None);
+        }
+        if let Some(msg) = assert_ini_deprecation(&key, &value) {
+            vm.emit_deprecated(&format!("ini_set(): {}", msg));
+        }
+        // ini values are stored as strings
+        let sv = match &value {
+            Value::True => Value::String(PhpString::from_bytes(b"1")),
+            Value::False | Value::Null => Value::String(PhpString::empty()),
+            Value::Long(_) | Value::Double(_) => Value::String(value.to_php_string()),
+            v => v.clone(),
+        };
+        vm.constants.insert(key, sv);
+        return Ok(old.map(|v| Value::String(v.to_php_string())).unwrap_or(Value::False));
+    }
     // Actually update the value
     vm.constants.insert(key, value);
     // Return old value or false if not previously set
@@ -4057,75 +4077,136 @@ fn ini_restore(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn set_time_limit(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
-fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Check zend.assertions setting (0 or -1 means disabled)
-    if let Some(val) = vm.constants.get(b"zend.assertions".as_ref()) {
-        let v = val.to_long();
-        if v <= 0 {
-            return Ok(Value::True);
-        }
-    }
-    // Check assert.active setting (0 means disabled)
-    if let Some(val) = vm.constants.get(b"assert.active".as_ref()) {
-        let v = val.to_long();
-        if v == 0 {
-            return Ok(Value::True);
-        }
-    }
-    // Check assert.exception setting
-    let assert_exception = vm.constants.get(b"assert.exception".as_ref())
-        .map(|v| v.to_long() != 0)
-        .unwrap_or(true); // default is true in PHP 8
+thread_local! {
+    /// ASSERTG(callback): set by assert_options(ASSERT_CALLBACK) / ini_set().
+    static ASSERT_CALLBACK: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
 
-    let val = args.first().unwrap_or(&Value::Null);
-    if val.is_truthy() {
-        Ok(Value::True)
-    } else {
-        // Get the description if provided (2nd argument)
-        let description = args.get(1);
-
-        // If description is a Throwable, throw it directly
-        if let Some(Value::Object(obj)) = description {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if class_lower == b"assertionerror" || class_lower == b"exception" || class_lower == b"error"
-                || vm.class_extends(&class_lower, b"exception")
-                || vm.class_extends(&class_lower, b"error")
-            {
-                vm.current_exception = Some(Value::Object(obj.clone()));
-                return Err(VmError {
-                    message: "assert() failed".into(),
-                    line: 0,
-                });
+/// zend_ini_parse_bool()
+fn ini_parse_bool(v: &Value) -> bool {
+    match v {
+        Value::True => true,
+        Value::False | Value::Null | Value::Undef => false,
+        Value::Long(n) => *n != 0,
+        other => {
+            let s = other.to_php_string().to_string_lossy();
+            let t = s.trim();
+            if t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") || t.eq_ignore_ascii_case("on") {
+                true
+            } else {
+                let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
+                digits.parse::<i64>().map(|n| n != 0).unwrap_or(false)
             }
         }
-
-        // Build message
-        let msg = match description {
-            Some(Value::String(s)) => s.to_string_lossy(),
-            _ => "assert(false)".to_string(),
-        };
-
-        if !assert_exception {
-            // When assert.exception is 0, issue a warning and return NULL
-            vm.emit_warning(&format!("assert(): {} failed", msg));
-            return Ok(Value::Null);
-        }
-
-        // Throw AssertionError
-        let err_id = vm.next_object_id();
-        let mut err_obj = goro_core::object::PhpObject::new(b"AssertionError".to_vec(), err_id);
-        err_obj.set_property(b"message".to_vec(), Value::String(PhpString::from_string(msg.clone())));
-        err_obj.set_property(b"code".to_vec(), Value::Long(0));
-        err_obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
-        err_obj.set_property(b"line".to_vec(), Value::Long(vm.current_line as i64));
-        err_obj.set_property(b"previous".to_vec(), Value::Null);
-        let exc = Value::Object(Rc::new(RefCell::new(err_obj)));
-        vm.current_exception = Some(exc);
-        Err(VmError {
-            message: format!("assert(): {} failed", msg),
-            line: vm.current_line,
-        })
     }
+}
+
+fn assert_ini_bool(vm: &Vm, key: &[u8], default: bool) -> bool {
+    vm.constants.get(key).map(ini_parse_bool).unwrap_or(default)
+}
+
+/// Deprecations emitted by the assert.* INI handlers when a value is changed
+/// (not from assert_options()). Returns the message, if any.
+pub fn assert_ini_deprecation(key: &[u8], value: &Value) -> Option<String> {
+    let name = String::from_utf8_lossy(key).to_string();
+    let deprecated = match key {
+        b"assert.active" | b"assert.warning" | b"assert.exception" => !ini_parse_bool(value),
+        b"assert.bail" => ini_parse_bool(value),
+        b"assert.callback" => !value.to_php_string().as_bytes().is_empty(),
+        _ => false,
+    };
+    if deprecated { Some(format!("{} INI setting is deprecated", name)) } else { None }
+}
+
+fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let zend_assertions = vm.constants.get(b"zend.assertions".as_ref()).map(|v| v.to_long()).unwrap_or(1);
+    if !assert_ini_bool(vm, b"assert.active", true) || zend_assertions <= 0 {
+        return Ok(Value::True);
+    }
+    let assertion = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    let description = args.get(1).map(|v| v.deref());
+    if let Some(d) = &description {
+        match d {
+            Value::Null | Value::String(_) | Value::Object(_) => {}
+            other => {
+                let msg = format!("assert(): Argument #2 ($description) must be of type Throwable|string|null, {} given", Vm::value_type_name(other));
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: vm.current_line });
+            }
+        }
+    }
+    if assertion.is_truthy() {
+        return Ok(Value::True);
+    }
+    if let Some(Value::Object(obj)) = &description {
+        vm.current_exception = Some(Value::Object(obj.clone()));
+        return Err(VmError { message: "assert() failed".into(), line: vm.current_line });
+    }
+    let desc_str: Option<PhpString> = match &description {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let line = vm.current_line;
+    // Callback: an explicitly set callback, else the assert.callback INI string.
+    let mut callback = ASSERT_CALLBACK.with(|c| c.borrow().clone());
+    if callback.is_none() {
+        if let Some(cb) = vm.constants.get(b"assert.callback".as_ref()) {
+            let cbs = cb.to_php_string();
+            if !cbs.as_bytes().is_empty() {
+                callback = Some(Value::String(cbs));
+            }
+        }
+    }
+    if let Some(cb) = callback {
+        // [&$obj, "method"] callables: unwrap element references.
+        let cb = match &cb {
+            Value::Array(a) => {
+                let mut c = PhpArray::new();
+                for (k, v) in a.borrow().iter() {
+                    c.set(k.clone(), v.deref());
+                }
+                Value::Array(Rc::new(RefCell::new(c)))
+            }
+            _ => cb,
+        };
+        let mut cargs = vec![
+            Value::String(PhpString::from_string(vm.current_file.clone())),
+            Value::Long(line as i64),
+            Value::Null,
+        ];
+        if let Some(d) = &desc_str {
+            cargs.push(Value::String(d.clone()));
+        }
+        let mut full = vec![cb.clone()];
+        full.extend(cargs);
+        let _ = call_user_func(vm, &full);
+        vm.current_line = line;
+        if vm.current_exception.is_some() {
+            return Err(VmError { message: "Uncaught exception".into(), line });
+        }
+    }
+    if assert_ini_bool(vm, b"assert.exception", true) {
+        let msg = desc_str.as_ref().map(|d| d.to_string_lossy()).unwrap_or_default();
+        // The dispatcher may already have pushed our frame.
+        let pushed = vm.call_stack.last().map(|f| f.0 != "assert").unwrap_or(true);
+        if pushed {
+            vm.call_stack.push(("assert".to_string(), vm.current_file.clone(), line, args.to_vec(), false));
+        }
+        let exc = vm.create_exception(b"AssertionError", &msg, line);
+        if pushed {
+            vm.call_stack.pop();
+        }
+        if let Value::Object(o) = &exc {
+            o.borrow_mut().set_property(b"code".to_vec(), Value::Long(1));
+        }
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: format!("Uncaught AssertionError: {}", msg), line });
+    } else if assert_ini_bool(vm, b"assert.warning", true) {
+        let d = desc_str.as_ref().map(|d| d.to_string_lossy()).unwrap_or_else(|| "Assertion".to_string());
+        vm.emit_warning_at(&format!("assert(): {} failed", d), line);
+    }
+    Ok(Value::False)
 }
 fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -13627,62 +13708,58 @@ fn process_ini_value(raw: &str, is_raw: bool, _is_typed: bool, vm: &Vm) -> (Stri
     (val, false)
 }
 
-fn assert_options_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let option = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let new_value = args.get(1);
+    let new_value = args.get(1).map(|v| v.deref());
 
-    // Emit deprecated for the ASSERT_* constant - must come before the function deprecation
-    // (in PHP, constant access happens before function dispatch)
+    // The ASSERT_* constant access happens before the call itself.
     let const_name = match option {
         1 => Some("ASSERT_ACTIVE"),
-        2 => Some("ASSERT_WARNING"),
+        2 => Some("ASSERT_CALLBACK"),
         3 => Some("ASSERT_BAIL"),
-        4 => Some("ASSERT_QUIET_EVAL"),
-        5 => Some("ASSERT_CALLBACK"),
-        6 => Some("ASSERT_EXCEPTION"),
+        4 => Some("ASSERT_WARNING"),
+        5 => Some("ASSERT_EXCEPTION"),
         _ => None,
     };
     if let Some(name) = const_name {
-        _vm.emit_deprecated(&format!("Constant {} is deprecated since 8.3, as assert_options() is deprecated", name));
+        vm.emit_deprecated(&format!("Constant {} is deprecated since 8.3, as assert_options() is deprecated", name));
     }
+    vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
 
-    _vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
-
-    // INI key mapping for assert options
-    let ini_key = match option {
-        1 => Some(b"assert.active".as_ref()),
-        2 => Some(b"assert.warning".as_ref()),
-        3 => Some(b"assert.bail".as_ref()),
-        4 => Some(b"assert.quiet_eval".as_ref()),
-        5 => Some(b"assert.callback".as_ref()),
-        6 => Some(b"assert.exception".as_ref()),
-        _ => None,
-    };
-
-    // Get previous value
-    let prev = if let Some(key) = ini_key {
-        if option == 5 {
-            // ASSERT_CALLBACK returns the callback value or null
-            _vm.constants.get(key).cloned().unwrap_or(Value::Null)
-        } else {
-            // Others return int
-            let val = _vm.constants.get(key).map(|v| v.to_long()).unwrap_or(match option {
-                1 => 1, // ASSERT_ACTIVE default
-                6 => 1, // ASSERT_EXCEPTION default
-                _ => 0,
+    let (key, default): (&[u8], bool) = match option {
+        1 => (b"assert.active", true),
+        3 => (b"assert.bail", false),
+        4 => (b"assert.warning", true),
+        5 => (b"assert.exception", true),
+        2 => {
+            // ASSERT_CALLBACK
+            let prev = ASSERT_CALLBACK.with(|c| c.borrow().clone()).unwrap_or_else(|| {
+                match vm.constants.get(b"assert.callback".as_ref()) {
+                    Some(v) if !v.to_php_string().as_bytes().is_empty() => Value::String(v.to_php_string()),
+                    _ => Value::Null,
+                }
             });
-            Value::Long(val)
+            if let Some(nv) = new_value {
+                ASSERT_CALLBACK.with(|c| *c.borrow_mut() = if matches!(nv, Value::Null) { None } else { Some(nv) });
+            }
+            return Ok(prev);
         }
-    } else {
-        return Ok(Value::False);
+        _ => {
+            let msg = "assert_options(): Argument #1 ($option) must be an ASSERT_* constant";
+            let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
+        }
     };
-
-    // Set new value if provided
-    if let (Some(new_val), Some(key)) = (new_value, ini_key) {
-        _vm.constants.insert(key.to_vec(), new_val.clone());
+    let old = assert_ini_bool(vm, key, default);
+    if let Some(nv) = new_value {
+        let sv = match &nv {
+            Value::Object(_) | Value::Array(_) => nv.to_php_string(),
+            other => other.to_php_string(),
+        };
+        vm.constants.insert(key.to_vec(), Value::String(sv));
     }
-
-    Ok(prev)
+    Ok(Value::Long(old as i64))
 }
 
 fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
