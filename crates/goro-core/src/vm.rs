@@ -31051,6 +31051,15 @@ impl Vm {
                     };
 
                     if done {
+                        // The iteration is over: release the iterated array
+                        // (for an object, its references to the property slots).
+                        if foreach_ref_arrays.remove(&iter_idx).is_some() {
+                            if let Some(slot) = tmps.get_mut(iter_idx as usize) {
+                                if matches!(slot, Value::Array(_)) {
+                                    *slot = Value::Undef;
+                                }
+                            }
+                        }
                         if let OperandType::JmpTarget(target) = op.op2 {
                             ip = target as usize;
                         }
