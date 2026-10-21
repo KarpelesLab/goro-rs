@@ -2462,6 +2462,13 @@ impl Vm {
         Option<crate::opcode::ParamType>,
         Option<Visibility>,
     )> {
+        // Enum cases have the readonly properties `name` (and `value` when
+        // backed).
+        if let Some(c) = self.classes.get(class_name_lower).filter(|c| c.is_enum) {
+            if prop_name == b"name" || (prop_name == b"value" && c.enum_backing_type.is_some()) {
+                return Some((Visibility::Public, c.name.clone(), true, None, None));
+            }
+        }
         let mut current = class_name_lower.to_vec();
         let mut last_private: Option<(
             Visibility,
