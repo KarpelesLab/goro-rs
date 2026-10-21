@@ -54,13 +54,7 @@ fn is_closure_name(b: &[u8]) -> bool {
 
 /// Internal bookkeeping properties that must never show up in serialized data.
 pub(crate) fn is_internal_property(name: &[u8]) -> bool {
-    name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-        || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
-        || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
-        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-        || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-        || name.starts_with(b"__dir_") || name.starts_with(b"__pkey_id")
-        || name.starts_with(b"__lazy_")
+    crate::output::is_internal_property(name)
 }
 
 /// zend_is_valid_class_name()
@@ -193,7 +187,7 @@ fn mangle(cls: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 /// Split a mangled property name into (class, name). Unmangled → (None, name).
-fn unmangle(key: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
+pub(crate) fn unmangle(key: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
     if key.first() != Some(&0) {
         return Some((None, key));
     }
@@ -204,14 +198,14 @@ fn unmangle(key: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
 
 /// One entry of an object's property table, keyed the way PHP's
 /// properties HashTable is keyed (with private/protected mangling).
-struct PropEntry {
-    php_key: Vec<u8>,
-    storage_key: Vec<u8>,
-    value: Value,
+pub(crate) struct PropEntry {
+    pub(crate) php_key: Vec<u8>,
+    pub(crate) storage_key: Vec<u8>,
+    pub(crate) value: Value,
 }
 
 /// Build the mangled property table of an object (zend_std_get_properties).
-fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
+pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
     let class_lower = lower(&obj.class_name);
     let ce = vm.classes.get(&class_lower);
     let exc_base = throwable_base(vm, &class_lower);

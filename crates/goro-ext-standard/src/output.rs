@@ -10,7 +10,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"var_export", var_export);
 }
 
-fn is_internal_property(name: &[u8]) -> bool {
+pub(crate) fn is_internal_property(name: &[u8]) -> bool {
     name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
         || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
         || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
@@ -1571,7 +1571,7 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         original
     };
     let mut buf = Vec::new();
-    var_export_value(&val_owned, &mut buf, 0);
+    var_export_value(vm, &val_owned, &mut buf, 1);
 
     if return_output {
         Ok(Value::String(PhpString::from_vec(buf)))
@@ -1581,161 +1581,198 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn var_export_value(val: &Value, buf: &mut Vec<u8>, indent: usize) {
-    // Prevent infinite recursion
-    if indent > 100 {
-        buf.extend_from_slice(b"NULL");
-        return;
+thread_local! {
+    /// Arrays/objects currently being exported (recursion guard).
+    static VAR_EXPORT_STACK: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn var_export_spaces(buf: &mut Vec<u8>, n: usize) {
+    buf.extend(std::iter::repeat(b' ').take(n));
+}
+
+/// php_addcslashes(s, "'\\") + "\0" → `' . "\0" . '`
+fn var_export_escape(buf: &mut Vec<u8>, s: &[u8], nul_concat: bool) {
+    for &byte in s {
+        match byte {
+            b'\0' if nul_concat => buf.extend_from_slice(b"' . \"\\0\" . '"),
+            b'\'' => buf.extend_from_slice(b"\\'"),
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            _ => buf.push(byte),
+        }
     }
-    let prefix = " ".repeat(indent);
+}
+
+/// Port of php_var_export_ex().
+fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
     match val {
-        Value::Null | Value::Undef => buf.extend_from_slice(b"NULL"),
+        Value::Null | Value::Undef | Value::Resource(_) | Value::Generator(_) => buf.extend_from_slice(b"NULL"),
         Value::True => buf.extend_from_slice(b"true"),
         Value::False => buf.extend_from_slice(b"false"),
         Value::Long(n) => {
-            // PHP_INT_MIN must be represented as (-9223372036854775807-1) to be parsable
             if *n == i64::MIN {
-                buf.extend_from_slice(b"(-9223372036854775807-1)");
+                buf.extend_from_slice(b"-9223372036854775807-1");
             } else {
                 buf.extend_from_slice(n.to_string().as_bytes());
             }
         }
-        Value::Resource(_) => {
-            buf.extend_from_slice(b"NULL");
-        }
         Value::Double(f) => {
-            // var_export uses a representation that can be parsed back
-            let s = format_float(*f);
+            let s = crate::serialize::format_serialize_double(*f);
             buf.extend_from_slice(s.as_bytes());
-            // Ensure there's a digit after the decimal point
-            if s.ends_with('.') {
-                buf.push(b'0');
-            } else if !s.contains('.')
-                && !s.contains('E')
-                && !s.contains('e')
-                && s != "INF"
-                && s != "-INF"
-                && s != "NAN"
-            {
+            if f.is_finite() && !s.contains('.') {
                 buf.extend_from_slice(b".0");
             }
         }
         Value::String(s) => {
-            buf.push(b'\'');
-            for &byte in s.as_bytes() {
-                match byte {
-                    b'\0' => buf.extend_from_slice(b"' . \"\\0\" . '"),
-                    b'\'' => buf.extend_from_slice(b"\\'"),
-                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                    _ => buf.push(byte),
-                }
+            let b = s.as_bytes();
+            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") {
+                // Closures are objects without __set_state support.
+                buf.extend_from_slice(b"\\Closure::__set_state(array(\n");
+                if level > 1 { var_export_spaces(buf, level - 1); }
+                buf.extend_from_slice(b"))");
+                return;
             }
             buf.push(b'\'');
+            var_export_escape(buf, b, true);
+            buf.push(b'\'');
+        }
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            var_export_value(vm, &inner, buf, level);
         }
         Value::Array(arr) => {
-            let arr = arr.borrow();
+            let ptr = Rc::as_ptr(arr) as *const u8 as usize;
+            if VAR_EXPORT_STACK.with(|st| st.borrow().contains(&ptr)) {
+                buf.extend_from_slice(b"NULL");
+                vm.emit_warning("var_export does not handle circular references");
+                return;
+            }
+            VAR_EXPORT_STACK.with(|st| st.borrow_mut().push(ptr));
+            if level > 1 {
+                buf.push(b'\n');
+                var_export_spaces(buf, level - 1);
+            }
             buf.extend_from_slice(b"array (\n");
-            for (key, value) in arr.iter() {
-                buf.extend_from_slice(format!("{}  ", prefix).as_bytes());
+            let items: Vec<(goro_core::array::ArrayKey, Value)> =
+                arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (key, value) in &items {
+                var_export_spaces(buf, level + 1);
                 match key {
                     goro_core::array::ArrayKey::Int(n) => {
-                        buf.extend_from_slice(format!("{} => ", n).as_bytes());
+                        buf.extend_from_slice(n.to_string().as_bytes());
+                        buf.extend_from_slice(b" => ");
                     }
                     goro_core::array::ArrayKey::String(s) => {
-                        buf.extend_from_slice(b"'");
-                        buf.extend_from_slice(s.as_bytes());
+                        buf.push(b'\'');
+                        var_export_escape(buf, s.as_bytes(), true);
                         buf.extend_from_slice(b"' => ");
                     }
                 }
-                // For complex values (arrays, objects/enums), put value on next line
-                let needs_newline = match &value {
-                    Value::Array(_) | Value::Object(_) => true,
-                    Value::Reference(r) => matches!(&*r.borrow(), Value::Array(_) | Value::Object(_)),
-                    _ => false,
-                };
-                if needs_newline {
-                    buf.extend_from_slice(b"\n");
-                    buf.extend_from_slice(format!("{}  ", prefix).as_bytes());
-                }
-                var_export_value(value, buf, indent + 2);
+                var_export_value(vm, value, buf, level + 2);
                 buf.extend_from_slice(b",\n");
             }
-            buf.extend_from_slice(format!("{})", prefix).as_bytes());
+            VAR_EXPORT_STACK.with(|st| { st.borrow_mut().pop(); });
+            if level > 1 {
+                var_export_spaces(buf, level - 1);
+            }
+            buf.push(b')');
         }
         Value::Object(obj) => {
-            let obj_borrow = obj.borrow();
-            // Check if this is an enum case
-            if obj_borrow.has_property(b"__enum_case") {
-                let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
-                let case_name = obj_borrow.get_property(b"name");
-                let case_name_str = case_name.to_php_string().to_string_lossy();
-                // PHP always adds a leading \ to enum class names in var_export
-                let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
-                buf.extend_from_slice(format!("{}{}::{}", prefix_backslash, class_name, case_name_str).as_bytes());
+            let ptr = Rc::as_ptr(obj) as *const u8 as usize;
+            if VAR_EXPORT_STACK.with(|st| st.borrow().contains(&ptr)) {
+                buf.extend_from_slice(b"NULL");
+                vm.emit_warning("var_export does not handle circular references");
                 return;
             }
-            let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
-            let class_lower = class_name.to_ascii_lowercase();
-            if class_lower == "stdclass" {
-                // PHP 8.2+: stdClass uses (object) array(...) format
-                buf.extend_from_slice(b"(object) array(\n");
-                for (name, value) in &obj_borrow.properties {
-                    if is_internal_property(name) { continue; }
-                    if matches!(value, Value::Undef) { continue; }
-                    // Demangle private/protected storage keys (\0Class\0name);
-                    // var_export emits the bare property name.
-                    let bare_name: &[u8] = if name.first() == Some(&0) {
-                        name[1..].iter().position(|&b| b == 0)
-                            .map(|sep| &name[1 + sep + 1..])
-                            .unwrap_or(name.as_slice())
-                    } else {
-                        name.as_slice()
-                    };
-                    let name_str = String::from_utf8_lossy(bare_name);
-                    buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
-                    var_export_value(value, buf, indent + 2);
-                    buf.extend_from_slice(b",\n");
-                }
-                buf.extend_from_slice(format!("{})", prefix).as_bytes());
-            } else {
-                // PHP prefixes class names with \ in var_export unless they already start with \
-                let prefix_backslash = if class_name.starts_with('\\') { "" } else { "\\" };
-                buf.extend_from_slice(format!("{}{}::__set_state(array(\n", prefix_backslash, class_name).as_bytes());
-                for (name, value) in &obj_borrow.properties {
-                    if is_internal_property(name) { continue; }
-                    if matches!(value, Value::Undef) { continue; }
-                    // Demangle private/protected storage keys (\0Class\0name);
-                    // var_export emits the bare property name.
-                    let bare_name: &[u8] = if name.first() == Some(&0) {
-                        name[1..].iter().position(|&b| b == 0)
-                            .map(|sep| &name[1 + sep + 1..])
-                            .unwrap_or(name.as_slice())
-                    } else {
-                        name.as_slice()
-                    };
-                    let name_str = String::from_utf8_lossy(bare_name);
-                    buf.extend_from_slice(format!("{}   '{}' => ", prefix, name_str).as_bytes());
-                    // For complex values (arrays, objects), put value on next line
-                    let needs_newline = match &value {
-                        Value::Array(_) | Value::Object(_) => true,
-                        Value::Reference(r) => matches!(&*r.borrow(), Value::Array(_) | Value::Object(_)),
-                        _ => false,
-                    };
-                    if needs_newline {
-                        buf.extend_from_slice(b"\n");
-                        buf.extend_from_slice(format!("{}  ", prefix).as_bytes());
+            let (class_name, is_enum, class_lower) = {
+                let ob = obj.borrow();
+                let cl: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let name = vm.classes.get(&cl).map(|c| c.name.clone()).unwrap_or_else(|| ob.class_name.clone());
+                (goro_core::value::display_class_name(&name), ob.has_property(b"__enum_case"), cl)
+            };
+            // Properties as exposed for var_export (zend_get_properties_for).
+            let is_array_object = {
+                let mut c = class_lower.clone();
+                let mut found = false;
+                for _ in 0..32 {
+                    if matches!(c.as_slice(), b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator") {
+                        found = true;
+                        break;
                     }
-                    var_export_value(value, buf, indent + 2);
+                    let next = vm.classes.get(&c).and_then(|ce| ce.parent.clone())
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                        .or_else(|| goro_core::vm::get_builtin_parent(&c).map(|p| p.to_vec()));
+                    match next { Some(n) => c = n, None => break }
+                }
+                found
+            };
+            let props: Vec<(Vec<u8>, Value)> = if is_array_object
+                && obj.borrow().get_property(b"__spl_flags").to_long() & 1 == 0
+            {
+                // ArrayObject without STD_PROP_LIST exports its storage.
+                match obj.borrow().get_property(b"__spl_array") {
+                    Value::Array(a) => a.borrow().iter().map(|(k, v)| {
+                        let kb = match k {
+                            goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        };
+                        (kb, v.clone())
+                    }).collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                crate::serialize::mangled_props(vm, &obj.borrow()).into_iter()
+                    .filter(|e| !matches!(e.value, Value::Undef))
+                    .map(|e| (e.php_key, e.value))
+                    .collect()
+            };
+            VAR_EXPORT_STACK.with(|st| st.borrow_mut().push(ptr));
+            if level > 1 {
+                buf.push(b'\n');
+                var_export_spaces(buf, level - 1);
+            }
+            let is_std = class_lower == b"stdclass";
+            if is_std {
+                buf.extend_from_slice(b"(object) array(\n");
+            } else {
+                buf.push(b'\\');
+                buf.extend_from_slice(class_name.as_bytes());
+                if is_enum {
+                    let case_name = obj.borrow().get_property(b"name").to_php_string();
+                    buf.extend_from_slice(b"::");
+                    buf.extend_from_slice(case_name.as_bytes());
+                } else {
+                    buf.extend_from_slice(b"::__set_state(array(\n");
+                }
+            }
+            if !is_enum {
+                for (key, value) in &props {
+                    var_export_spaces(buf, level + 2);
+                    let name = crate::serialize::unmangle(key).map(|(_, n)| n.to_vec()).unwrap_or_else(|| key.clone());
+                    let is_int = is_array_object && !name.is_empty() && {
+                        let s = std::str::from_utf8(&name).unwrap_or("");
+                        s.parse::<i64>().map(|n| n.to_string() == s).unwrap_or(false)
+                    };
+                    if is_int {
+                        buf.extend_from_slice(&name);
+                    } else {
+                        buf.push(b'\'');
+                        var_export_escape(buf, &name, false);
+                        buf.push(b'\'');
+                    }
+                    buf.extend_from_slice(b" => ");
+                    var_export_value(vm, value, buf, level + 2);
                     buf.extend_from_slice(b",\n");
                 }
-                buf.extend_from_slice(format!("{}))", prefix).as_bytes());
             }
-        }
-        Value::Generator(_) => {
-            buf.extend_from_slice(b"NULL");
-        }
-        Value::Reference(r) => {
-            var_export_value(&r.borrow(), buf, indent);
+            VAR_EXPORT_STACK.with(|st| { st.borrow_mut().pop(); });
+            if level > 1 && !is_enum {
+                var_export_spaces(buf, level - 1);
+            }
+            if is_std {
+                buf.push(b')');
+            } else if !is_enum {
+                buf.extend_from_slice(b"))");
+            }
         }
     }
 }
