@@ -315,6 +315,7 @@ fn is_fatal_parse_error(err_msg: &str) -> bool {
     // harness (crates/goro-phpt/src/lib.rs) so the CLI binary produces
     // matching output for these cases.
     err_msg.contains("Match expressions")
+        || err_msg.starts_with("Cannot create Closure")
         || err_msg.contains("Cannot use")
         || err_msg.contains("cannot declare")
         || err_msg.contains("cannot implement")

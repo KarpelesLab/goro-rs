@@ -297,7 +297,15 @@ impl Parser {
                 if matches!(self.peek(), TokenKind::Backslash) { self.advance(); }
                 match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } TokenKind::Variable(v) => { return Err(ParseError { message: format!("syntax error, unexpected variable \"${}\"", String::from_utf8_lossy(&v)), span: self.span() }); } _ => { return Err(ParseError { message: "expected attribute name".into(), span: self.span() }); } }
                 while matches!(self.peek(), TokenKind::Backslash) { self.advance(); match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } _ => break, } }
-                let args = if matches!(self.peek(), TokenKind::OpenParen) { self.advance(); let a = self.parse_arguments()?; self.expect(&TokenKind::CloseParen)?; a } else { Vec::new() };
+                let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                    self.advance();
+                    let a = self.parse_arguments()?;
+                    if self.first_class_callable_flag {
+                        return Err(ParseError { message: "Cannot create Closure as attribute argument".into(), span: self.span() });
+                    }
+                    self.expect(&TokenKind::CloseParen)?;
+                    a
+                } else { Vec::new() };
                 attrs.push(Attribute { name: parts, args });
                 if !self.eat(&TokenKind::Comma) { break; }
                 if matches!(self.peek(), TokenKind::CloseBracket) { break; }
@@ -4989,6 +4997,9 @@ impl Parser {
                         let ctor_args = if matches!(self.peek(), TokenKind::OpenParen) {
                             self.advance();
                             let args = self.parse_arguments()?;
+                            if self.first_class_callable_flag {
+                                return Err(ParseError { message: "Cannot create Closure for new expression".into(), span: self.span() });
+                            }
                             self.expect(&TokenKind::CloseParen)?;
                             args
                         } else {
@@ -5112,6 +5123,9 @@ impl Parser {
                 let args = if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let args = self.parse_arguments()?;
+                    if self.first_class_callable_flag {
+                        return Err(ParseError { message: "Cannot create Closure for new expression".into(), span });
+                    }
                     self.expect(&TokenKind::CloseParen)?;
                     args
                 } else {
@@ -5820,6 +5834,8 @@ impl Parser {
             }
         }
 
+        // A nested `inner(...)` must not mark this (outer) call as an FCC.
+        self.first_class_callable_flag = false;
         Ok(args)
     }
 

@@ -10291,7 +10291,13 @@ impl Compiler {
         line: u32,
     ) -> CompileResult<OperandType> {
         // Check for nullsafe operator which cannot be combined with closure creation
-        if let CallableTarget::Method { nullsafe: true, .. } = target {
+        let in_nullsafe_chain = match target {
+            CallableTarget::Method { nullsafe: true, .. } => true,
+            CallableTarget::Method { object, .. } => expr_is_in_nullsafe_chain(object),
+            CallableTarget::StaticMethod { class, .. } => expr_is_in_nullsafe_chain(class),
+            CallableTarget::Function(f) => expr_is_in_nullsafe_chain(f),
+        };
+        if in_nullsafe_chain {
             return Err(CompileError {
                 message: "Cannot combine nullsafe operator with Closure creation".into(),
                 line,

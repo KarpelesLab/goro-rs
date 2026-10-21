@@ -2607,6 +2607,14 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
             }
             for (key, val) in arr.iter() {
+                if user_fn.variadic_param.is_some() {
+                    // Variadic parameters need proper argument packing.
+                    let mut call_args = captured_args.clone();
+                    call_args.push(val.clone());
+                    let mapped = vm.execute_fn_with_named_args(&user_fn, call_args, vec![], None)?;
+                    result.set(key.clone(), mapped);
+                    continue;
+                }
                 let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                 // Pass captured vars first, then the element
                 let mut arg_idx = 0;
