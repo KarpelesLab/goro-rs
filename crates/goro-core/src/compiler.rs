@@ -205,6 +205,8 @@ impl Compiler {
                     // mb_ereg($pattern, $string, &$regs)
                     (b"mb_ereg", 2) => true,
                     (b"mb_eregi", 2) => true,
+                    (b"mb_parse_str", 1) => true,
+                    (b"mb_convert_variables", p) if p >= 2 => true,
                     // openssl functions with output params
                     (b"openssl_seal", 1) => true,
                     (b"openssl_seal", 2) => true,

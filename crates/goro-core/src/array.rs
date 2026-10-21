@@ -191,6 +191,20 @@ impl PhpArray {
         })
     }
 
+    /// Remove and return the last entry, adjusting the next free integer
+    /// key the way PHP's array_pop() does (decremented only if the popped
+    /// key was the most recently assigned one).
+    pub fn pop_entry(&mut self) -> Option<(ArrayKey, Value)> {
+        let e = self.entries.pop()?;
+        memory_free(Self::ENTRY_SIZE);
+        if let ArrayKey::Int(k) = &e.0 {
+            if *k == self.next_int_key.wrapping_sub(1) {
+                self.next_int_key -= 1;
+            }
+        }
+        Some(e)
+    }
+
     /// Remove and return the first element (like array_shift)
     pub fn shift(&mut self) -> Option<Value> {
         if self.entries.is_empty() {

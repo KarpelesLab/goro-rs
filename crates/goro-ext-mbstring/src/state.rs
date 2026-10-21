@@ -103,6 +103,8 @@ pub struct MbState {
     pub internal_encoding_set: bool,
     pub http_output_set: bool,
     pub http_input_set: bool,
+    pub last_used_encoding_name: Option<Vec<u8>>,
+    pub last_used_encoding: Option<&'static Encoding>,
     /// Last seen raw values of the INI settings we track
     pub ini_seen: Vec<(&'static str, Option<Vec<u8>>)>,
 }
@@ -138,6 +140,8 @@ impl MbState {
             internal_encoding_set: false,
             http_output_set: false,
             http_input_set: false,
+            last_used_encoding_name: None,
+            last_used_encoding: None,
             ini_seen: Vec::new(),
         }
     }

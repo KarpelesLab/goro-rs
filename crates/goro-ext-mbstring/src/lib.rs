@@ -1,6 +1,11 @@
 pub mod mbfl;
+pub mod entities;
 pub mod mbstring;
+pub mod mime;
+pub mod misc;
 pub mod state;
+pub mod strfuncs;
+pub mod unicode;
 pub mod zpp;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -76,7 +81,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_split", mb_split_fn);
     vm.register_function(b"mb_send_mail", mb_send_mail_fn);
     // New libmbfl-based implementations (override the legacy ones above)
-    if std::env::var_os("GORO_MB_NEW").is_some() { mbstring::register(vm); }
+    mbstring::register(vm);
 
     // Register parameter names for named argument support
     vm.builtin_param_names.insert(b"mb_strcut".to_vec(), vec![b"string".to_vec(), b"start".to_vec(), b"length".to_vec(), b"encoding".to_vec()]);
@@ -140,10 +145,10 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"MB_CASE_UPPER".to_vec(), Value::Long(0));
     vm.constants.insert(b"MB_CASE_LOWER".to_vec(), Value::Long(1));
     vm.constants.insert(b"MB_CASE_TITLE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"MB_CASE_FOLD".to_vec(), Value::Long(0)); // Same as UPPER for simplicity
-    vm.constants.insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(3));
-    vm.constants.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(4));
-    vm.constants.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(5));
+    vm.constants.insert(b"MB_CASE_FOLD".to_vec(), Value::Long(3));
+    vm.constants.insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(4));
+    vm.constants.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(5));
+    vm.constants.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(7));
     vm.constants.insert(b"MB_CASE_TITLE_SIMPLE".to_vec(), Value::Long(6));
 
     // Default mbstring.* INI keys to empty strings so ini_get() returns "".

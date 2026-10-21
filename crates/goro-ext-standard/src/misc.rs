@@ -1910,17 +1910,10 @@ fn array_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if len == 0 {
             return Ok(Value::Null);
         }
-        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let (last_key, last_val) = entries.last().unwrap();
-        let was_int_key = matches!(last_key, goro_core::array::ArrayKey::Int(_));
-        arr.remove(last_key);
+        let (_, last_val) = arr.pop_entry().unwrap();
         // Reset internal pointer
         arr.pointer = 0;
-        // Recalculate next_int_key after removal
-        if was_int_key {
-            arr.recalculate_next_int_key();
-        }
-        Ok(last_val.clone())
+        Ok(last_val)
     } else {
         Ok(Value::Null)
     }

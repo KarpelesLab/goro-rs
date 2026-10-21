@@ -209,3 +209,8 @@ pub fn pstring(b: Vec<u8>) -> Value {
 pub fn vbool(b: bool) -> Value {
     if b { Value::True } else { Value::False }
 }
+
+/// Was an optional argument passed? (skipped named arguments arrive as null)
+pub fn present(args: &[Value], idx: usize) -> bool {
+    !matches!(args.get(idx).map(|v| v.deref()), None | Some(Value::Null) | Some(Value::Undef))
+}

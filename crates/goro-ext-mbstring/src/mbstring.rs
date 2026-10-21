@@ -29,6 +29,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_encoding_aliases", mb_encoding_aliases);
     vm.register_function(b"mb_check_encoding", mb_check_encoding);
     vm.register_function(b"mb_get_info", mb_get_info);
+    crate::strfuncs::register(vm);
+    crate::mime::register(vm);
+    crate::entities::register(vm);
+    crate::misc::register(vm);
 }
 
 /* ===== Helpers ===== */
@@ -67,7 +71,14 @@ pub fn get_encoding(vm: &mut Vm, func: &str, name: Option<&[u8]>, arg_num: usize
     state::sync(vm);
     match name {
         None => Ok(state::current_internal_encoding()),
-        Some(n) => match mbfl::name2encoding(n) {
+        Some(n) => {
+            if let Some(e) = state::with(|s| match &s.last_used_encoding_name {
+                Some(last) if last.eq_ignore_ascii_case(n) => s.last_used_encoding,
+                _ => None,
+            }) {
+                return Ok(e);
+            }
+            match mbfl::name2encoding(n) {
             None => Err(arg_value_error(
                 vm,
                 func,
@@ -79,9 +90,14 @@ pub fn get_encoding(vm: &mut Vm, func: &str, name: Option<&[u8]>, arg_num: usize
                 if is_transfer_pseudo(e.no) {
                     emit_transfer_deprecation(vm, func, e);
                 }
+                state::with(|s| {
+                    s.last_used_encoding_name = Some(n.to_vec());
+                    s.last_used_encoding = Some(e);
+                });
                 Ok(e)
             }
-        },
+            }
+        }
     }
 }
 
@@ -545,9 +561,6 @@ fn mb_convert_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if from_list.is_empty() {
         return Err(arg_value_error(vm, f, 3, "from_encoding", "must specify at least one encoding"));
     }
-    if from_list.len() == 1 && is_transfer_pseudo(from_list[0].no) && args.get(2).map(|v| !matches!(v.deref(), Value::Null)).unwrap_or(false) {
-        emit_transfer_deprecation(vm, f, from_list[0]);
-    }
     match input_arr {
         Some(a) => {
             let r = convert_encoding_recursive(vm, &a, to, &from_list, 0).unwrap_or_default();
@@ -694,6 +707,10 @@ pub fn guess_encoding(strings: &[&[u8]], elist: &[&'static Encoding], strict: bo
 
 thread_local! {
     static ALL_ENCODINGS_LIST: RefCell<Option<Rc<RefCell<PhpArray>>>> = const { RefCell::new(None) };
+}
+
+pub fn is_all_encodings_list(a: &Rc<RefCell<PhpArray>>) -> bool {
+    ALL_ENCODINGS_LIST.with(|l| l.borrow().as_ref().map(|x| Rc::ptr_eq(x, a)).unwrap_or(false))
 }
 
 fn mb_detect_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
