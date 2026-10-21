@@ -1928,8 +1928,21 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     // Handle array callback: [class_or_object, method_name]
     if let Value::Array(arr) = callback {
         let arr_borrow = arr.borrow();
-        // [&$obj, 'method'] — element references are transparent.
-        let vals: Vec<Value> = arr_borrow.values().map(|v| v.deref()).collect();
+        // [&$obj, 'method'] — element references are transparent. A
+        // closure's internal [name, captured...] keeps its by-reference
+        // captures as the shared reference cells.
+        let mut vals: Vec<Value> = arr_borrow.values().cloned().collect();
+        if let Some(v) = vals.first_mut() {
+            *v = v.deref();
+        }
+        let is_closure = matches!(vals.first(), Some(Value::String(n))
+            if goro_core::closure::is_closure_fn_name(n.as_bytes())
+                || n.as_bytes().starts_with(b"__closure_fcc_"));
+        if !is_closure {
+            if let Some(v) = vals.get_mut(1) {
+                *v = v.deref();
+            }
+        }
         drop(arr_borrow);
         if vals.len() >= 2 {
             let method_name = vals[1].to_php_string();
