@@ -1571,6 +1571,35 @@ impl Compiler {
                     let idx = self.op_array.add_literal(Value::Null);
                     OperandType::Const(idx)
                 };
+                // ZEND_RETURN_BY_REF of a non-variable (zend_compile_return):
+                // "Only variable references should be returned by reference".
+                if self.op_array.returns_by_ref && !self.op_array.is_generator {
+                    let is_var_or_call = match value {
+                        Some(e) => matches!(e.kind,
+                            ExprKind::Variable(_) | ExprKind::DynamicVariable(_) | ExprKind::ArrayAccess { .. }
+                            | ExprKind::PropertyAccess { .. } | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                            | ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }),
+                        None => true,
+                    };
+                    // The return type is verified first: a literal failing it throws
+                    // before the notice would be raised.
+                    let fails_return_type = match (value, &self.op_array.return_type) {
+                        (Some(e), Some(rt)) => Self::check_literal_default(rt, e).is_err(),
+                        _ => false,
+                    };
+                    if !is_var_or_call && !fails_return_type {
+                        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
+                            b"Only variable references should be returned by reference")));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::EmitNotice,
+                            op1: OperandType::Const(msg_idx),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: stmt.span.line,
+                        });
+                    }
+                }
                 if let Some(&finally_target) = self.finally_targets.last() {
                     // Inside try-with-finally: save return value and jump to finally
                     self.op_array.emit(Op {
@@ -9477,6 +9506,7 @@ impl Compiler {
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.display_name = display_name;
                 closure_compiler.op_array.is_generator = is_generator;
+                closure_compiler.op_array.returns_by_ref = *closure_returns_by_ref;
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.returns_by_ref = *closure_returns_by_ref;
