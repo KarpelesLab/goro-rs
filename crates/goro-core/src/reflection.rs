@@ -628,6 +628,38 @@ pub(crate) fn run_snippet_in_scope(vm: &mut Vm, src: &str, vars: &[(&str, Value)
     r.ok()
 }
 
+
+/// Record a closure's bound `$this`, scope and called class on its
+/// ReflectionFunction. A bound `$this` travels as the first captured value
+/// when the closure's first CV is `$this`; it's removed from `captured`.
+fn set_closure_scope_info(vm: &Vm, this: &Rc<RefCell<PhpObject>>, fn_name: &[u8], captured: &mut Vec<Value>) {
+    let lower = fn_name.to_ascii_lowercase();
+    let op = match vm.user_functions.get(&lower) {
+        Some(op) => op,
+        None => return,
+    };
+    let mut bound_this: Option<Value> = None;
+    if op.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) {
+        if let Some(Value::Object(_)) = captured.first() {
+            bound_this = Some(captured.remove(0));
+        }
+    }
+    let scope = op.scope_class.clone();
+    let mut ob = this.borrow_mut();
+    if let Some(t) = &bound_this {
+        ob.set_property(b"__reflection_closure_this".to_vec(), t.clone());
+    }
+    if let Some(sc) = scope {
+        let scope_name = rcls(vm, &sc).map(|c| c.name.clone()).unwrap_or(sc);
+        let called = match &bound_this {
+            Some(Value::Object(o)) => o.borrow().class_name.clone(),
+            _ => scope_name.clone(),
+        };
+        ob.set_property(b"__reflection_closure_scope".to_vec(), Value::String(PhpString::from_vec(scope_name)));
+        ob.set_property(b"__reflection_closure_called".to_vec(), Value::String(PhpString::from_vec(called)));
+    }
+}
+
 /// ReflectionClass constructor: sets up __reflection_target and name properties
 fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
@@ -1002,7 +1034,8 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
         });
         if let Some(s) = first_is_closure_str {
             // Capture the trailing values (use-var bindings).
-            let captured: Vec<Value> = arr.borrow().values().skip(1).cloned().collect();
+            let mut captured: Vec<Value> = arr.borrow().values().skip(1).cloned().collect();
+            set_closure_scope_info(vm, &this, s.as_bytes(), &mut captured);
             let mut obj = this.borrow_mut();
             obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"{closure}")));
             obj.set_property(b"__reflection_target".to_vec(), Value::String(s));
@@ -1028,6 +1061,7 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
             let name = s.to_string_lossy();
             // Check for closures
             if name.starts_with("__closure_") || name.starts_with("__arrow_") || name.starts_with("__bound_closure_") || name.starts_with("__closure_fcc_") {
+                set_closure_scope_info(vm, &this, s.as_bytes(), &mut Vec::new());
                 let mut obj = this.borrow_mut();
                 obj.set_property(b"name".to_vec(), Value::String(PhpString::from_bytes(b"{closure}")));
                 obj.set_property(b"__reflection_target".to_vec(), Value::String(s.clone()));
