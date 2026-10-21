@@ -7405,7 +7405,8 @@ impl Vm {
                 {
                     return "Object(Closure)".to_string();
                 }
-                // PHP escapes non-printable and non-ASCII bytes as \xHH
+                // smart_str_append_escaped: backslash, control and non-ASCII
+                // bytes are escaped (\n, \r, \t, \f, \v, \\, \e, else \xHH)
                 let mut escaped = String::new();
                 let mut char_count = 0;
                 let mut truncated = false;
@@ -7414,10 +7415,19 @@ impl Vm {
                         truncated = true;
                         break;
                     }
-                    if (0x20..0x7f).contains(&b) {
+                    if (0x20..0x7f).contains(&b) && b != b'\\' {
                         escaped.push(b as char);
                     } else {
-                        escaped.push_str(&format!("\\x{:02X}", b));
+                        match b {
+                            b'\n' => escaped.push_str("\\n"),
+                            b'\r' => escaped.push_str("\\r"),
+                            b'\t' => escaped.push_str("\\t"),
+                            0x0C => escaped.push_str("\\f"),
+                            0x0B => escaped.push_str("\\v"),
+                            b'\\' => escaped.push_str("\\\\"),
+                            0x1B => escaped.push_str("\\e"),
+                            _ => escaped.push_str(&format!("\\x{:02X}", b)),
+                        }
                     }
                     char_count += 1;
                 }
