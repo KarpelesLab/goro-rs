@@ -240,11 +240,11 @@ fn mb_language(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     &format!("must be a valid language, \"{}\" given", String::from_utf8_lossy(&n)),
                 ))
             }
-            Some(l) => {
+            Some(_) => {
                 // zend_alter_ini_entry("mbstring.language")
-                vm.constants.insert(b"mbstring.language".to_vec(), pstr(&n));
-                state::sync(vm);
-                let _ = l;
+                let v = pstr(&n);
+                state::ini_set_hook(vm, b"mbstring.language", &v);
+                vm.constants.insert(b"mbstring.language".to_vec(), v);
                 Ok(Value::True)
             }
         },
