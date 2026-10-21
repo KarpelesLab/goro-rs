@@ -496,6 +496,8 @@ pub struct Vm {
     /// When Some, E_WARNINGs are collected here instead of being reported
     /// (emulates php-src's EH_THROW error handling for SPL constructors).
     pub warning_capture: Option<Vec<String>>,
+    /// unserialize() one value at a byte position (set by ext/standard).
+    pub unserialize_value_hook: Option<fn(&mut Vm, &[u8], &mut usize) -> Option<Value>>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -1414,6 +1416,7 @@ impl Vm {
             native_class_handlers: std::collections::HashMap::new(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
+            unserialize_value_hook: None,
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available
@@ -6290,10 +6293,13 @@ impl Vm {
                 self.spl_fixed_call(method_lower, obj, None)
             }
             b"internaliterator" => {
+                if let Some(r) = self.dll_iterator_call(method_lower, obj) {
+                    return Some(r);
+                }
                 self.spl_internal_iterator_call(method_lower, obj)
             }
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
-                self.spl_linked_list_method(method_lower, obj)
+                self.spl_dll_call(method_lower, obj, None)
             }
             b"splobjectstorage" => {
                 self.spl_object_storage_method(method_lower, obj)
@@ -7158,186 +7164,6 @@ impl Vm {
                 arr.push(iter_class);
                 Some(Value::Array(Rc::new(RefCell::new(arr))))
             }
-            _ => None,
-        }
-    }
-
-    fn spl_linked_list_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        let storage_prop = b"__spl_array";
-        match method {
-            b"count" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(Value::Long(a.borrow().len() as i64))
-                } else {
-                    Some(Value::Long(0))
-                }
-            }
-            b"isempty" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(if a.borrow().len() == 0 { Value::True } else { Value::False })
-                } else {
-                    Some(Value::True)
-                }
-            }
-            b"top" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    if a.len() == 0 {
-                        drop(a);
-                        drop(ob);
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty datastructure", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    } else {
-                        Some(a.values().last().cloned().unwrap_or(Value::Null))
-                    }
-                } else {
-                    drop(ob);
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty datastructure", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
-                }
-            }
-            b"current" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let pos = ob.get_property(b"__spl_pos");
-                // Prefer the snapshot taken at rewind() time so changing the
-                // iterator mode mid-iteration does not flip direction.
-                let snapshot = ob.get_property(b"__spl_iter_mode_snapshot");
-                let iter_mode = if matches!(snapshot, Value::Null | Value::Undef) {
-                    ob.get_property(b"__spl_iter_mode")
-                } else {
-                    snapshot
-                };
-                let mode = if let Value::Long(m) = iter_mode { m } else { 0 };
-                let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    let len = a.len();
-                    if len == 0 {
-                        Some(Value::Null)
-                    } else {
-                        // Check IT_MODE_LIFO (bit 1) - if set, iterate in reverse
-                        let actual_pos = if (mode & 2) != 0 {
-                            if pos_val < len { len - 1 - pos_val } else { return Some(Value::Null); }
-                        } else {
-                            pos_val
-                        };
-                        Some(a.values().nth(actual_pos).cloned().unwrap_or(Value::Null))
-                    }
-                } else {
-                    Some(Value::Null)
-                }
-            }
-            b"bottom" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    if a.len() == 0 {
-                        drop(a);
-                        drop(ob);
-                        let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty datastructure", 0);
-                        self.current_exception = Some(exc);
-                        Some(Value::Null)
-                    } else {
-                        Some(a.values().next().cloned().unwrap_or(Value::Null))
-                    }
-                } else {
-                    drop(ob);
-                    let exc = self.create_exception(b"RuntimeException", "Can't peek at an empty datastructure", 0);
-                    self.current_exception = Some(exc);
-                    Some(Value::Null)
-                }
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                if let Value::Array(a) = arr {
-                    let a = a.borrow();
-                    Some(if (pos_val as usize) < a.len() { Value::True } else { Value::False })
-                } else {
-                    Some(Value::False)
-                }
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let pos = ob.get_property(b"__spl_pos");
-                Some(if let Value::Long(p) = pos { Value::Long(p) } else { Value::Long(0) })
-            }
-            b"next" => {
-                let mut ob = obj.borrow_mut();
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos_val + 1));
-                Some(Value::Null)
-            }
-            b"prev" => {
-                let mut ob = obj.borrow_mut();
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(if pos_val > 0 { pos_val - 1 } else { 0 }));
-                Some(Value::Null)
-            }
-            b"rewind" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                // Snapshot the current iterator mode so the iteration
-                // direction is consistent even if setIteratorMode() is
-                // called while iterating.
-                let mode = ob.get_property(b"__spl_iter_mode");
-                let snap = if let Value::Long(_) = mode { mode } else { Value::Long(0) };
-                ob.set_property(b"__spl_iter_mode_snapshot".to_vec(), snap);
-                Some(Value::Null)
-            }
-            b"getiteratormode" => {
-                let ob = obj.borrow();
-                let mode = ob.get_property(b"__spl_iter_mode");
-                Some(if let Value::Long(_) = mode { mode } else { Value::Long(0) })
-            }
-            b"__serialize" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let mode = ob.get_property(b"__spl_iter_mode");
-                let class_lower_name: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let mut result = PhpArray::new();
-                // i:0 => flags
-                let flags_val = if let Value::Long(m) = mode { m } else {
-                    match class_lower_name.as_slice() {
-                        b"splstack" => 6,
-                        b"splqueue" => 4,
-                        _ => 0,
-                    }
-                };
-                result.set(ArrayKey::Int(0), Value::Long(flags_val));
-                // i:1 => dllist array
-                if let Value::Array(a) = arr {
-                    let mut dllist = PhpArray::new();
-                    for (_, v) in a.borrow().iter() {
-                        dllist.push(v.clone());
-                    }
-                    result.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(dllist))));
-                } else {
-                    result.set(ArrayKey::Int(1), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                }
-                // i:2 => extra properties (empty)
-                result.set(ArrayKey::Int(2), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-                Some(Value::Array(Rc::new(RefCell::new(result))))
-            }
-            b"__unserialize" => None, // handled in handle_spl_docall
             _ => None,
         }
     }
@@ -9029,7 +8855,7 @@ impl Vm {
                 b"push" | b"pop" | b"shift" | b"unshift" | b"enqueue" | b"dequeue"
                     | b"setiteratormode" | b"offsetget" | b"offsetset"
                     | b"offsetexists" | b"offsetunset" | b"add"
-                    | b"__unserialize"
+                    | b"__unserialize" | b"unserialize"
             ),
             b"splfixedarray" => matches!(
                 method,
@@ -9942,280 +9768,7 @@ impl Vm {
                     }
                 }
                 b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
-                    match method {
-                        b"push" | b"enqueue" => {
-                            let val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().push(val);
-                            }
-                            Some(Value::Null)
-                        }
-                        b"pop" => {
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
-                            if is_empty {
-                                drop(ob);
-                                let exc = self.create_exception(b"RuntimeException", "Can't pop from an empty datastructure", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            if let Value::Array(a) = arr {
-                                let mut a = a.borrow_mut();
-                                a.pop().map(|v| Some(v)).unwrap_or(Some(Value::Null))
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        b"dequeue" | b"shift" => {
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            let is_empty = if let Value::Array(a) = &arr { a.borrow().len() == 0 } else { true };
-                            if is_empty {
-                                drop(ob);
-                                let what = if method == b"dequeue" { "dequeue" } else { "shift" };
-                                let exc = self.create_exception(b"RuntimeException", &format!("Can't {} from an empty datastructure", what), 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            if let Value::Array(a) = arr {
-                                let mut a = a.borrow_mut();
-                                a.shift().map(|v| Some(v)).unwrap_or(Some(Value::Null))
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        b"unshift" => {
-                            let val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut new_arr = PhpArray::new();
-                                new_arr.push(val);
-                                for (_, v) in a.borrow().iter() {
-                                    new_arr.push(v.clone());
-                                }
-                                *a.borrow_mut() = new_arr;
-                            }
-                            Some(Value::Null)
-                        }
-                        b"setiteratormode" => {
-                            let mode = args.get(1).cloned().unwrap_or(Value::Long(0));
-                            let mode_val = mode.to_long();
-                            // Check restrictions for SplStack and SplQueue
-                            let ob = obj.borrow();
-                            let class_lower_name: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            drop(ob);
-                            let is_stack = class_lower_name == b"SplStack".to_ascii_lowercase().as_slice();
-                            let is_queue = class_lower_name == b"SplQueue".to_ascii_lowercase().as_slice();
-                            if is_stack && (mode_val & 2) == 0 {
-                                // SplStack must be LIFO
-                                let exc = self.create_exception(b"RuntimeException", "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            if is_queue && (mode_val & 2) != 0 {
-                                // SplQueue must be FIFO
-                                let exc = self.create_exception(b"RuntimeException", "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_iter_mode".to_vec(), mode);
-                            Some(Value::Null)
-                        }
-                        b"offsetget" => {
-                            let key = args.get(1)?;
-                            // Type check: must be int (or numeric string)
-                            if let Value::String(s) = key {
-                                let s_str = s.to_string_lossy();
-                                if s_str.parse::<i64>().is_err() {
-                                    let exc = self.create_exception(b"TypeError",
-                                        "SplDoublyLinkedList::offsetGet(): Argument #1 ($index) must be of type int, string given", 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            } else if let Value::Array(_) = key {
-                                let exc = self.create_exception(b"TypeError",
-                                    "SplDoublyLinkedList::offsetGet(): Argument #1 ($index) must be of type int, array given", 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let idx = key.to_long();
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let len = a.borrow().len() as i64;
-                                if idx < 0 || idx >= len {
-                                    drop(ob);
-                                    let exc = self.create_exception(b"OutOfRangeException",
-                                        &format!("SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range"), 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                Some(a.borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null))
-                            } else {
-                                Some(Value::Null)
-                            }
-                        }
-                        b"offsetset" => {
-                            let key = args.get(1).cloned().unwrap_or(Value::Null);
-                            let val = args.get(2).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                if matches!(key, Value::Null) {
-                                    a.borrow_mut().push(val);
-                                } else {
-                                    let idx = key.to_long();
-                                    let len = a.borrow().len() as i64;
-                                    if idx < 0 || idx >= len {
-                                        drop(ob);
-                                        let exc = self.create_exception(b"OutOfRangeException",
-                                            "SplDoublyLinkedList::offsetSet(): Argument #1 ($index) is out of range", 0);
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                    a.borrow_mut().set(ArrayKey::Int(idx), val);
-                                }
-                            }
-                            Some(Value::Null)
-                        }
-                        b"offsetexists" => {
-                            let key = args.get(1)?;
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let idx = key.to_long();
-                                let len = a.borrow().len() as i64;
-                                Some(if idx >= 0 && idx < len { Value::True } else { Value::False })
-                            } else {
-                                Some(Value::False)
-                            }
-                        }
-                        b"offsetunset" => {
-                            let key = args.get(1)?;
-                            let idx = key.to_long();
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let len = a.borrow().len() as i64;
-                                if idx < 0 || idx >= len {
-                                    drop(ob);
-                                    let exc = self.create_exception(b"OutOfRangeException",
-                                        &format!("SplDoublyLinkedList::offsetUnset(): Argument #1 ($index) is out of range"), 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                // Remove element and renumber
-                                let entries: Vec<Value> = a.borrow().values().cloned().collect();
-                                let mut new_arr = PhpArray::new();
-                                for (i, v) in entries.iter().enumerate() {
-                                    if i as i64 != idx {
-                                        new_arr.push(v.clone());
-                                    }
-                                }
-                                *a.borrow_mut() = new_arr;
-                            }
-                            Some(Value::Null)
-                        }
-                        b"add" => {
-                            let key_arg = args.get(1).cloned().unwrap_or(Value::Null);
-                            // Type check: must be int (or numeric string)
-                            let type_name = match &key_arg {
-                                Value::Array(_) => Some("array"),
-                                Value::Object(_) => Some("object"),
-                                Value::True | Value::False => None, // bool coerces
-                                Value::String(s) => {
-                                    let s_str = s.to_string_lossy();
-                                    if s_str.parse::<i64>().is_err() { Some("string") } else { None }
-                                }
-                                _ => None,
-                            };
-                            if let Some(tn) = type_name {
-                                let exc = self.create_exception(b"TypeError",
-                                    &format!("SplDoublyLinkedList::add(): Argument #1 ($index) must be of type int, {} given", tn), 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let index = key_arg.to_long();
-                            let val = args.get(2).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let len = a.borrow().len() as i64;
-                                if index < 0 || index > len {
-                                    drop(ob);
-                                    let exc = self.create_exception(b"OutOfRangeException",
-                                        &format!("SplDoublyLinkedList::add(): Argument #1 ($index) is out of range"), 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                // Insert at position
-                                let entries: Vec<Value> = a.borrow().values().cloned().collect();
-                                let mut new_arr = PhpArray::new();
-                                for (i, v) in entries.iter().enumerate() {
-                                    if i as i64 == index {
-                                        new_arr.push(val.clone());
-                                    }
-                                    new_arr.push(v.clone());
-                                }
-                                if index == len {
-                                    new_arr.push(val);
-                                }
-                                *a.borrow_mut() = new_arr;
-                            }
-                            Some(Value::Null)
-                        }
-                        b"__unserialize" => {
-                            // __unserialize receives [0 => flags (int), 1 =>
-                            // dllist (array), 2 => props (array)]. Every slot
-                            // must be present and well-typed; any mismatch
-                            // throws UnexpectedValueException.
-                            let data = args.get(1).cloned().unwrap_or(Value::Null);
-                            if let Value::Array(a) = &data {
-                                let a_borrow = a.borrow();
-                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
-                                let dllist_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
-                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
-                                let flags_ok = matches!(flags_v, Some(Value::Long(_)));
-                                let dllist_ok = matches!(dllist_v, Some(Value::Array(_)));
-                                let props_ok = matches!(props_v, Some(Value::Array(_)));
-                                if !(flags_ok && dllist_ok && props_ok) {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Incomplete or ill-typed serialization data",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                drop(a_borrow);
-                                let mut ob = obj.borrow_mut();
-                                ob.set_property(b"__spl_iter_mode".to_vec(), flags_v.unwrap());
-                                ob.set_property(b"__spl_array".to_vec(), dllist_v.unwrap());
-                                if let Some(Value::Array(p)) = props_v {
-                                    for (k, v) in p.borrow().iter() {
-                                        if let ArrayKey::String(s) = k {
-                                            ob.set_property(s.as_bytes().to_vec(), v.clone());
-                                        }
-                                    }
-                                }
-                            } else {
-                                let exc = self.create_exception(
-                                    b"UnexpectedValueException",
-                                    "Incomplete or ill-typed serialization data",
-                                    self.current_line,
-                                );
-                                self.current_exception = Some(exc);
-                            }
-                            Some(Value::Null)
-                        }
-                        _ => None,
-                    }
+                    self.spl_dll_call(method, obj, Some(&args[1..]))
                 }
                 b"splfixedarray" => {
                     self.spl_fixed_call(method, obj, Some(&args[1..]))
@@ -23434,10 +22987,16 @@ impl Vm {
                             }
                         } else if self.class_implements_interface(&class_lower, b"iterator") {
                             // Iterator: call rewind() and store the object
-                            self.call_object_method(&arr_val, b"rewind", &[]);
+                            // (SplDoublyLinkedList: an independent internal iterator).
+                            let iter_obj = if self.dll_uses_internal_iterator(obj) {
+                                self.dll_new_iterator(obj)
+                            } else {
+                                arr_val.clone()
+                            };
+                            self.call_object_method(&iter_obj, b"rewind", &[]);
                             self.write_operand(
                                 &op.result,
-                                arr_val,
+                                iter_obj,
                                 &mut cvs,
                                 &mut tmps,
                                 &static_cv_keys,

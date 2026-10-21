@@ -2060,3 +2060,23 @@ pub fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(()) => Err(exception_err(vm)),
     }
 }
+
+/// Hook used by core SPL code to unserialize one embedded value at `pos`
+/// (shares the active var hash, like php_var_unserialize on a nested call).
+pub(crate) fn unserialize_value_hook(vm: &mut Vm, data: &[u8], pos: &mut usize) -> Option<Value> {
+    let line = vm.current_line;
+    let d = unser_init(vm);
+    let tmp_idx = {
+        let mut dd = d.borrow_mut();
+        dd.tmps.push(Value::Null);
+        dd.tmps.len() - 1
+    };
+    let mut parser = Parser { data, d: d.clone(), line };
+    let ok = parser.unserialize(vm, pos, &Slot::Tmp(tmp_idx));
+    let result = if ok { d.borrow().tmps.get(tmp_idx).cloned() } else { None };
+    unser_destroy(vm, &d);
+    result.map(|v| match v {
+        Value::Reference(r) => r.borrow().clone(),
+        v => v,
+    })
+}

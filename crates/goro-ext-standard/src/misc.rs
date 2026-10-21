@@ -122,6 +122,7 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 }
 
 pub fn register(vm: &mut Vm) {
+    vm.unserialize_value_hook = Some(crate::serialize::unserialize_value_hook);
     // Built-in php_user_filter base class. User filters extend this class
     // and override filter(); the property `filtername`, `params`, and
     // `stream` are set by the runtime before onCreate() is invoked.

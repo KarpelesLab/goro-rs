@@ -14,6 +14,7 @@ pub mod random;
 pub mod reflection;
 pub mod rfc1867;
 pub mod spl;
+pub mod spl_dll;
 pub mod spl_file;
 pub mod spl_fixed;
 pub mod spl_heap;
