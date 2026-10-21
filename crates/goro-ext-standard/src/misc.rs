@@ -396,7 +396,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"apache_request_headers", getallheaders_fn);
     vm.register_function(b"apache_response_headers", apache_response_headers_fn);
     vm.register_function(b"setcookie", setcookie_fn);
-    vm.register_function(b"setrawcookie", setcookie_fn);
+    vm.register_function(b"setrawcookie", setrawcookie_fn);
     // SPL object functions moved to goro-ext-spl
     vm.register_function(b"forward_static_call", call_user_func);
     vm.register_function(b"forward_static_call_array", call_user_func_array);
@@ -10801,46 +10801,148 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::Null)
 }
-fn setcookie_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Build a Set-Cookie header from the arguments.
-    let name = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    if name.is_empty() {
-        return Ok(Value::False);
-    }
-    let value = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    let expires_or_opts = args.get(2);
-    let mut cookie = format!("{}={}", name, value);
-    if let Some(Value::Array(arr)) = expires_or_opts {
-        let arr = arr.borrow();
-        for (k, v) in arr.iter() {
-            let key = match k {
-                ArrayKey::String(s) => s.to_string_lossy(),
-                _ => continue,
-            };
-            let val = v.to_php_string().to_string_lossy();
-            match key.to_ascii_lowercase().as_str() {
-                "path" => cookie.push_str(&format!("; path={}", val)),
-                "domain" => cookie.push_str(&format!("; domain={}", val)),
-                "expires" => cookie.push_str(&format!("; expires={}", val)),
-                "secure" => if v.is_truthy() { cookie.push_str("; secure"); },
-                "httponly" => if v.is_truthy() { cookie.push_str("; HttpOnly"); },
-                "samesite" => cookie.push_str(&format!("; SameSite={}", val)),
-                _ => {}
+/// Format a unix timestamp as "D, d M Y H:i:s GMT" (UTC).
+fn cookie_gmt_date(t: i64) -> String {
+    let days = t.div_euclid(86400);
+    let secs = t.rem_euclid(86400);
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT", wd, d, months[(m - 1) as usize], y, secs / 3600, (secs / 60) % 60, secs % 60)
+}
+
+/// php_setcookie_common() + php_setcookie() (ext/standard/head.c)
+fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> Result<Value, VmError> {
+    let throw = |vm: &mut Vm, class: &[u8], msg: String| -> Result<Value, VmError> {
+        let exc = vm.create_exception(class, &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        Err(VmError { message: msg, line: vm.current_line })
+    };
+    let illegal = "\",\", \";\", \" \", \"\\t\", \"\\r\", \"\\n\", \"\\013\", or \"\\014\"";
+    let bad = |b: &[u8], with_eq: bool| b.iter().any(|&c| matches!(c, b',' | b';' | b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c) || (with_eq && c == b'='));
+    let name = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
+    let value: Option<Vec<u8>> = args.get(1).map(|v| vm.value_to_string(v).as_bytes().to_vec());
+    let mut expires: i64 = 0;
+    let mut path: Option<Vec<u8>> = None;
+    let mut domain: Option<Vec<u8>> = None;
+    let mut secure = false;
+    let mut httponly = false;
+    let mut samesite: Option<Vec<u8>> = None;
+    let mut partitioned = false;
+    match args.get(2).map(|v| v.deref()) {
+        Some(Value::Array(opts)) => {
+            if args.len() > 3 {
+                return throw(vm, b"ArgumentCountError", format!("{}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array", fname));
+            }
+            let entries: Vec<(ArrayKey, Value)> = opts.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (k, v) in entries {
+                let key = match k {
+                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    ArrayKey::Int(_) => return throw(vm, b"ValueError", format!("{}(): option array cannot have numeric keys", fname)),
+                };
+                match key.to_ascii_lowercase().as_slice() {
+                    b"expires" => expires = v.to_long(),
+                    b"path" => path = Some(vm.value_to_string(&v).as_bytes().to_vec()),
+                    b"domain" => domain = Some(vm.value_to_string(&v).as_bytes().to_vec()),
+                    b"secure" => secure = v.is_truthy(),
+                    b"httponly" => httponly = v.is_truthy(),
+                    b"samesite" => samesite = Some(vm.value_to_string(&v).as_bytes().to_vec()),
+                    b"partitioned" => partitioned = v.is_truthy(),
+                    _ => return throw(vm, b"ValueError", format!("{}(): option \"{}\" is invalid", fname, String::from_utf8_lossy(&key))),
+                }
             }
         }
-    } else if let Some(expires) = expires_or_opts {
-        let exp = expires.to_long();
-        if exp > 0 {
-            cookie.push_str(&format!("; expires=t{}", exp));
+        Some(v) => expires = v.to_long(),
+        None => {}
+    }
+    if let Some(v) = args.get(3) { path = Some(vm.value_to_string(v).as_bytes().to_vec()); }
+    if let Some(v) = args.get(4) { domain = Some(vm.value_to_string(v).as_bytes().to_vec()); }
+    if let Some(v) = args.get(5) { secure = v.is_truthy(); }
+    if let Some(v) = args.get(6) { httponly = v.is_truthy(); }
+
+    if name.is_empty() {
+        return throw(vm, b"ValueError", format!("{}(): Argument #1 ($name) must not be empty", fname));
+    }
+    if bad(&name, true) {
+        return throw(vm, b"ValueError", format!("{}(): Argument #1 ($name) cannot contain \"=\", {}", fname, illegal));
+    }
+    if is_raw {
+        if let Some(v) = &value {
+            if bad(v, false) {
+                return throw(vm, b"ValueError", format!("{}(): Argument #2 ($value) cannot contain {}", fname, illegal));
+            }
         }
     }
-    if headers_already_sent_error(_vm) {
+    if let Some(p) = &path {
+        if bad(p, false) {
+            return throw(vm, b"ValueError", format!("{}(): \"path\" option cannot contain {}", fname, illegal));
+        }
+    }
+    if let Some(d) = &domain {
+        if bad(d, false) {
+            return throw(vm, b"ValueError", format!("{}(): \"domain\" option cannot contain {}", fname, illegal));
+        }
+    }
+    if expires >= 253402300800 {
+        return throw(vm, b"ValueError", format!("{}(): \"expires\" option cannot have a year greater than 9999", fname));
+    }
+    if partitioned && !secure {
+        return throw(vm, b"ValueError", format!("{}(): \"partitioned\" option cannot be used without \"secure\" option", fname));
+    }
+    let mut buf: Vec<u8> = name.clone();
+    match &value {
+        None => buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0"),
+        Some(v) if v.is_empty() => buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0"),
+        Some(v) => {
+            buf.push(b'=');
+            if is_raw {
+                buf.extend_from_slice(v);
+            } else {
+                for &b in v {
+                    match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => buf.push(b),
+                        _ => buf.extend_from_slice(format!("%{:02X}", b).as_bytes()),
+                    }
+                }
+            }
+            if expires > 0 {
+                buf.extend_from_slice(b"; expires=");
+                buf.extend_from_slice(cookie_gmt_date(expires).as_bytes());
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                let diff = (expires - now).max(0);
+                buf.extend_from_slice(format!("; Max-Age={}", diff).as_bytes());
+            }
+        }
+    }
+    if let Some(p) = &path { if !p.is_empty() { buf.extend_from_slice(b"; path="); buf.extend_from_slice(p); } }
+    if let Some(d) = &domain { if !d.is_empty() { buf.extend_from_slice(b"; domain="); buf.extend_from_slice(d); } }
+    if secure { buf.extend_from_slice(b"; secure"); }
+    if httponly { buf.extend_from_slice(b"; HttpOnly"); }
+    if let Some(ss) = &samesite { if !ss.is_empty() { buf.extend_from_slice(b"; SameSite="); buf.extend_from_slice(ss); } }
+    if partitioned { buf.extend_from_slice(b"; Partitioned"); }
+    if headers_already_sent_error(vm) {
         return Ok(Value::False);
     }
     SENT_HEADERS.with(|h| {
-        h.borrow_mut().push((b"Set-Cookie".to_vec(), cookie.into_bytes()));
+        h.borrow_mut().push((b"Set-Cookie".to_vec(), buf));
     });
     Ok(Value::True)
+}
+
+fn setcookie_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    setcookie_common(vm, args, "setcookie", false)
+}
+
+fn setrawcookie_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    setcookie_common(vm, args, "setrawcookie", true)
 }
 fn headers_sent_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (file, line) = vm.output_start.clone().unwrap_or_default();
@@ -15835,53 +15937,95 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn gethostbyname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let host = args.first().unwrap_or(&Value::Null).to_php_string();
-    let host_str = host.to_string_lossy();
-    // Try DNS resolution
+fn host_arg(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Vec<u8>, VmError> {
+    let h = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
+    if h.contains(&0) {
+        let msg = format!("{}(): Argument #1 ($hostname) must not contain any null bytes", fname);
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    Ok(h)
+}
+
+fn resolve_ipv4(host: &[u8]) -> Vec<String> {
     use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:0", host_str);
+    let addr_str = format!("{}:0", String::from_utf8_lossy(host));
     match addr_str.to_socket_addrs() {
-        Ok(mut addrs) => {
-            // Return first IPv4 address found
-            for addr in &mut addrs {
-                if addr.is_ipv4() {
-                    return Ok(Value::String(PhpString::from_string(addr.ip().to_string())));
-                }
-            }
-            // No IPv4 found, return hostname unchanged (PHP behavior)
-            Ok(Value::String(host))
-        }
-        Err(_) => {
-            // On failure, PHP returns the hostname unchanged
-            Ok(Value::String(host))
-        }
+        Ok(addrs) => addrs.filter(|a| a.is_ipv4()).map(|a| a.ip().to_string()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
-fn gethostbynamel_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let host = args.first().unwrap_or(&Value::Null).to_php_string();
-    let host_str = host.to_string_lossy();
-    use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:0", host_str);
-    match addr_str.to_socket_addrs() {
-        Ok(addrs) => {
-            let mut result = PhpArray::new();
-            for addr in addrs {
-                if addr.is_ipv4() {
-                    result.push(Value::String(PhpString::from_string(addr.ip().to_string())));
-                }
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
-        }
-        Err(_) => Ok(Value::False),
+fn gethostbyname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let host = host_arg(vm, args, "gethostbyname")?;
+    if host.len() > 255 {
+        vm.emit_warning("gethostbyname(): Host name cannot be longer than 255 characters");
+        return Ok(Value::String(PhpString::from_vec(host)));
+    }
+    match resolve_ipv4(&host).into_iter().next() {
+        Some(ip) => Ok(Value::String(PhpString::from_string(ip))),
+        None => Ok(Value::String(PhpString::from_vec(host))),
     }
 }
 
-fn gethostbyaddr_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ip = args.first().unwrap_or(&Value::Null).to_php_string();
-    // Reverse DNS is complex; stub returning the IP itself
-    Ok(Value::String(ip))
+fn gethostbynamel_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let host = host_arg(vm, args, "gethostbynamel")?;
+    if host.len() > 255 {
+        vm.emit_warning("gethostbynamel(): Host name cannot be longer than 255 characters");
+        return Ok(Value::False);
+    }
+    let ips = resolve_ipv4(&host);
+    if ips.is_empty() {
+        // gethostbyname() failure
+        use std::net::ToSocketAddrs;
+        if format!("{}:0", String::from_utf8_lossy(&host)).to_socket_addrs().is_err() {
+            return Ok(Value::False);
+        }
+    }
+    let mut result = PhpArray::new();
+    for ip in ips {
+        result.push(Value::String(PhpString::from_string(ip)));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+fn gethostbyaddr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let addr = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
+    let s = String::from_utf8_lossy(&addr).to_string();
+    let ip: std::net::IpAddr = match s.parse() {
+        Ok(ip) if !addr.contains(&0) => ip,
+        _ => {
+            vm.emit_warning("gethostbyaddr(): Address is not a valid IPv4 or IPv6 address");
+            return Ok(Value::False);
+        }
+    };
+    // getnameinfo(NI_NAMEREQD); on failure PHP returns the address itself.
+    let name = unsafe {
+        let mut host = [0 as libc::c_char; 1025];
+        let rc = match ip {
+            std::net::IpAddr::V4(v4) => {
+                let mut sa: libc::sockaddr_in = std::mem::zeroed();
+                sa.sin_family = libc::AF_INET as libc::sa_family_t;
+                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
+                libc::getnameinfo(&sa as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    host.as_mut_ptr(), host.len() as libc::socklen_t, std::ptr::null_mut(), 0, libc::NI_NAMEREQD)
+            }
+            std::net::IpAddr::V6(v6) => {
+                let mut sa: libc::sockaddr_in6 = std::mem::zeroed();
+                sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                sa.sin6_addr.s6_addr = v6.octets();
+                libc::getnameinfo(&sa as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                    host.as_mut_ptr(), host.len() as libc::socklen_t, std::ptr::null_mut(), 0, libc::NI_NAMEREQD)
+            }
+        };
+        if rc == 0 {
+            Some(std::ffi::CStr::from_ptr(host.as_ptr()).to_bytes().to_vec())
+        } else {
+            None
+        }
+    };
+    Ok(Value::String(PhpString::from_vec(name.unwrap_or(addr))))
 }
 
 thread_local! {
