@@ -3516,38 +3516,32 @@ pub fn reflection_method_method(
             Some(create_reflection_class(vm, &declaring_canonical))
         }
         b"ispublic" => {
-            let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
+            let vis = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.visibility)
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Public { Value::True } else { Value::False })
         }
         b"isprotected" => {
-            let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
+            let vis = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.visibility)
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Protected { Value::True } else { Value::False })
         }
         b"isprivate" => {
-            let vis = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.visibility))
+            let vis = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.visibility)
                 .unwrap_or(Visibility::Public);
             Some(if vis == Visibility::Private { Value::True } else { Value::False })
         }
         b"isstatic" => {
-            let is_static = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_static))
+            let is_static = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.is_static)
                 .unwrap_or(false);
             Some(if is_static { Value::True } else { Value::False })
         }
         b"isabstract" => {
-            let is_abstract = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_abstract))
+            let is_abstract = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.is_abstract)
                 .unwrap_or(false);
             Some(if is_abstract { Value::True } else { Value::False })
         }
         b"isfinal" => {
-            let is_final = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.is_final))
+            let is_final = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.is_final)
                 .unwrap_or(false);
             Some(if is_final { Value::True } else { Value::False })
         }
@@ -3558,14 +3552,12 @@ pub fn reflection_method_method(
             Some(if method_lower.as_bytes() == b"__destruct" { Value::True } else { Value::False })
         }
         b"getmodifiers" => {
-            let mods = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(reflection_method_modifiers))
+            let mods = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| reflection_method_modifiers(m))
                 .unwrap_or(1); // default public
             Some(Value::Long(mods))
         }
         b"getnumberofparameters" => {
-            let method_def = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()));
+            let method_def = rmethod(vm, &class_lower, method_lower.as_bytes());
             let count = method_def.map(|m| {
                 let skip = if !m.is_static { 1u32 } else { 0u32 };
                 m.op_array.param_count.saturating_sub(skip)
@@ -3573,8 +3565,7 @@ pub fn reflection_method_method(
             Some(Value::Long(count as i64))
         }
         b"getnumberofrequiredparameters" => {
-            let method_def = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()));
+            let method_def = rmethod(vm, &class_lower, method_lower.as_bytes());
             // The compiler stores `required_param_count` as the count of
             // user-declared parameters without defaults — it does NOT include
             // the implicit `$this` slot. So we should NOT subtract for
@@ -3583,8 +3574,7 @@ pub fn reflection_method_method(
             Some(Value::Long(count as i64))
         }
         b"getparameters" => {
-            let method_data = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let method_data = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| (m.op_array.clone(), m.is_static));
             let params = if let Some((oa, is_static)) = method_data {
                 create_reflection_parameters_method(vm, &oa, is_static)
@@ -3594,14 +3584,14 @@ pub fn reflection_method_method(
             Some(params)
         }
         b"getreturntype" => {
-            let ret = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            // Tentative return types of internal methods are not "real".
+            let ret = rmethod(vm, &class_lower, method_lower.as_bytes())
+                .filter(|m| !m.op_array.internal_sig.map(|f| f.flags & crate::stubs::F_TENTATIVE != 0).unwrap_or(false))
                 .and_then(|m| m.op_array.return_type.as_ref())
                 .cloned();
             // Resolve `self` to the declaring class of the method, falling
             // back to the lookup class if declaring info is unavailable.
-            let scope: Vec<u8> = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let scope: Vec<u8> = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| {
                     let decl_lower: Vec<u8> = m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
                     rcls(vm, &decl_lower)
@@ -3617,26 +3607,24 @@ pub fn reflection_method_method(
             }
         }
         b"hasreturntype" => {
-            let has = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let has = rmethod(vm, &class_lower, method_lower.as_bytes())
+                .filter(|m| !m.op_array.internal_sig.map(|f| f.flags & crate::stubs::F_TENTATIVE != 0).unwrap_or(false))
                 .and_then(|m| m.op_array.return_type.as_ref())
                 .is_some();
             Some(if has { Value::True } else { Value::False })
         }
-        b"isuserdefined" => {
-            // A method is user-defined if its declaring class is user-defined.
-            // For builtin classes that have no user definition, return false.
-            let is_user = vm.classes.contains_key(class_lower.as_slice());
-            Some(if is_user { Value::True } else { Value::False })
-        }
-        b"isinternal" => {
-            let is_user = vm.classes.contains_key(class_lower.as_slice());
-            let is_builtin = vm.is_known_builtin_class(class_lower.as_slice());
-            Some(if !is_user && is_builtin { Value::True } else { Value::False })
+        b"isuserdefined" | b"isinternal" => {
+            // Internal methods (also when inherited by a user class) carry
+            // stub signatures; a Closure::__invoke trampoline is internal.
+            let internal = match rmethod(vm, &class_lower, method_lower.as_bytes()) {
+                Some(m) => m.op_array.internal_sig.is_some(),
+                None => !vm.classes.contains_key(class_lower.as_slice()),
+            };
+            let r = if method == b"isinternal" { internal } else { !internal };
+            Some(if r { Value::True } else { Value::False })
         }
         b"returnsreference" => {
-            let by_ref = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let by_ref = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| m.op_array.returns_by_ref)
                 .unwrap_or(false);
             Some(if by_ref { Value::True } else { Value::False })
@@ -3658,8 +3646,7 @@ pub fn reflection_method_method(
             if !is_user {
                 return Some(Value::False);
             }
-            let line = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()).map(|m| m.op_array.decl_line))
+            let line = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| m.op_array.decl_line)
                 .unwrap_or(0);
             Some(Value::Long(line as i64))
         }
@@ -3668,15 +3655,13 @@ pub fn reflection_method_method(
             if !is_user {
                 return Some(Value::False);
             }
-            let line = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let line = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| if m.op_array.end_line > 0 { m.op_array.end_line as i64 } else { m.op_array.decl_line as i64 })
                 .unwrap_or(0);
             if line > 0 { Some(Value::Long(line)) } else { Some(Value::False) }
         }
         b"getdoccomment" => {
-            let doc = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let doc = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .and_then(|m| m.doc_comment.as_ref())
                 .cloned();
             if let Some(doc) = doc {
@@ -3686,16 +3671,14 @@ pub fn reflection_method_method(
             }
         }
         b"isvariadic" => {
-            let is_variadic = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let is_variadic = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .and_then(|m| m.op_array.variadic_param)
                 .is_some();
             Some(if is_variadic { Value::True } else { Value::False })
         }
         b"isdeprecated" => {
             // Check for the #[\Deprecated] attribute on the method.
-            let has_dep = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let has_dep = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| {
                     m.attributes.iter().any(|a| {
                         let n = String::from_utf8_lossy(&a.name);
@@ -3756,11 +3739,15 @@ pub fn reflection_method_method(
             );
             Some(Value::Null)
         }
-        b"hastentativereturntype" => {
-            Some(Value::False)
-        }
-        b"gettentativereturntype" => {
-            Some(Value::Null)
+        b"hastentativereturntype" | b"gettentativereturntype" => {
+            let rt = rmethod(vm, &class_lower, method_lower.as_bytes())
+                .filter(|m| m.op_array.internal_sig.map(|f| f.flags & crate::stubs::F_TENTATIVE != 0).unwrap_or(false))
+                .and_then(|m| m.op_array.return_type.clone());
+            Some(match (method, rt) {
+                (b"hastentativereturntype", r) => if r.is_some() { Value::True } else { Value::False },
+                (_, Some(rt)) => create_reflection_type(vm, &rt),
+                (_, None) => Value::Null,
+            })
         }
         b"hasprototype" => {
             let method_lower_bytes = method_lower.as_bytes();
@@ -3792,8 +3779,7 @@ pub fn reflection_method_method(
             Some(if proto_exists { Value::True } else { Value::False })
         }
         b"isgenerator" => {
-            let is_gen = rcls(vm, &class_lower)
-                .and_then(|c| c.get_method(method_lower.as_bytes()))
+            let is_gen = rmethod(vm, &class_lower, method_lower.as_bytes())
                 .map(|m| m.op_array.is_generator)
                 .unwrap_or(false);
             Some(if is_gen { Value::True } else { Value::False })
@@ -6278,6 +6264,10 @@ pub fn reflection_parameter_method(
             Some(Value::False)
         }
         b"canbepassedbyvalue" => {
+            if let Some(f) = resolved_op_array.as_ref().and_then(|op| op.internal_sig) {
+                let by_ref_only = f.args.get(param_idx).map(|a| a.flags & crate::stubs::A_BY_REF != 0).unwrap_or(false);
+                return Some(if by_ref_only { Value::False } else { Value::True });
+            }
             if let Some(op_array) = resolved_op_array.as_ref() {
                 if type_idx < op_array.by_ref_params.len() && op_array.by_ref_params[type_idx] {
                     return Some(Value::False);
@@ -7718,6 +7708,28 @@ pub fn create_reflection_type_scoped(vm: &mut Vm, param_type: &ParamType, scope_
                     _ => expanded.push(t.clone()),
                 }
             }
+            // Zend orders union members: class types (as declared), then
+            // static, callable, object, array, string, int, float, bool, null.
+            expanded.sort_by_key(|t| match t {
+                ParamType::Simple(n) => match n.to_ascii_lowercase().as_slice() {
+                    b"static" => 1,
+                    b"callable" => 2,
+                    b"object" => 3,
+                    b"array" => 4,
+                    b"string" => 5,
+                    b"int" => 6,
+                    b"float" => 7,
+                    b"bool" => 8,
+                    b"false" => 9,
+                    b"true" => 10,
+                    b"void" => 11,
+                    b"never" => 12,
+                    b"null" => 13,
+                    b"mixed" => 14,
+                    _ => 0,
+                },
+                _ => 0,
+            });
             let types: &Vec<ParamType> = &expanded;
             // PHP normalizes `T|null` to nullable `?T` and exposes it as a
             // single ReflectionNamedType (not a union).
