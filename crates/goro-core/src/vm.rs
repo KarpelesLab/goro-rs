@@ -25116,7 +25116,7 @@ impl Vm {
                 }
 
                 OpCode::VarVarSet => {
-                    let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let name_val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, &op_array, op.line);
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string();
                     let name_bytes = name.as_bytes().to_vec();
