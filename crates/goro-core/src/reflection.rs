@@ -5012,22 +5012,11 @@ pub fn reflection_property_method(
             }
         }
         b"__tostring" => {
-            let prop = rcls(vm, &class_lower)
-                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                .cloned();
+            let prop = rprop(vm, &class_lower, prop_name.as_bytes()).cloned();
             if let Some(p) = prop {
-                let vis = match p.visibility {
-                    Visibility::Public => "public",
-                    Visibility::Protected => "protected",
-                    Visibility::Private => "private",
-                };
-                // PHP order: visibility modifier first, then 'static'.
-                let static_str = if p.is_static { " static" } else { "" };
-                let default_repr = reflection_repr_for_property_default(&p.default);
-                let s = format!("Property [ {}{} ${} = {} ]\n", vis, static_str, prop_name, default_repr);
-                Some(Value::String(PhpString::from_string(s)))
+                Some(Value::String(PhpString::from_string(property_string(vm, &p, ""))))
             } else {
-                Some(Value::String(PhpString::from_string(format!("Property [ ${} ]\n", prop_name))))
+                Some(Value::String(PhpString::from_string(format!("Property [ <dynamic> public ${} ]\n", prop_name))))
             }
         }
         _ => None,
