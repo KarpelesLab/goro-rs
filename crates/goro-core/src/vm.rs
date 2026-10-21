@@ -14362,7 +14362,10 @@ impl Vm {
                                 }
                             }
                         } else {
-                            let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                            let val = match &op.op1 {
+                                OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Reference(_))) => tmps[*t as usize].clone(),
+                                _ => self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line),
+                            };
                             if let Some(call) = self.pending_calls.last_mut() {
                                 call.args.push(val);
                             }
@@ -14475,6 +14478,12 @@ impl Vm {
                             let r = Rc::new(RefCell::new(current));
                             cvs[i] = Value::Reference(r.clone());
                             Value::Reference(r)
+                        }
+                    } else if let OperandType::Tmp(t) = &op.op1 {
+                        // Keep the Reference wrapper produced by ArrayGetRef & co.
+                        match tmps.get(*t as usize) {
+                            Some(v @ Value::Reference(_)) => v.clone(),
+                            _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                         }
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
@@ -17567,6 +17576,20 @@ impl Vm {
                             for (i, arg) in call.args.iter().enumerate() {
                                 if i < func_cvs.len() {
                                     func_cvs[i] = arg.clone();
+                                }
+                            }
+                        }
+
+                        // By-value array parameters get their own copy so writes in
+                        // the callee don't leak into the caller's array.
+                        for (ci, slot) in func_cvs.iter_mut().enumerate() {
+                            if user_fn.by_ref_params.get(ci).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            if let Value::Array(a) = slot {
+                                if Rc::strong_count(a) > 1 {
+                                    let copy = a.borrow().clone();
+                                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
                                 }
                             }
                         }

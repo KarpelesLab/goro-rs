@@ -87,6 +87,22 @@ fn hash_key(k: &ArrayKey) -> u64 {
     }
 }
 
+thread_local! {
+    /// Arrays currently being cloned (guards against cycles).
+    static CLONE_STACK: std::cell::RefCell<Vec<*const PhpArray>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Copy a nested array for PhpArray::clone; None means share it instead
+/// (cycle, or the array is currently mutably borrowed).
+fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Value> {
+    let ptr = a.as_ptr() as *const PhpArray;
+    if CLONE_STACK.with(|st| st.borrow().iter().any(|p| std::ptr::eq(*p, ptr))) {
+        return None;
+    }
+    let inner = a.try_borrow().ok()?;
+    Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(inner.clone()))))
+}
+
 impl Clone for PhpArray {
     fn clone(&self) -> Self {
         // Track memory for the cloned entries
@@ -94,8 +110,38 @@ impl Clone for PhpArray {
         if bytes > 0 {
             memory_alloc(bytes); // Track even if over limit - we're cloning existing data
         }
+        // Like zend_array_dup(): references held only by this array (rc=1)
+        // are copied as plain values, unless they point back at this array.
+        // Closure values (arrays holding captured variables) are copied as-is.
+        let self_ptr = self as *const PhpArray;
+        let is_closure = matches!(self.entries.first(), Some((_, Value::String(s)))
+            if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_"));
+        let entries = if is_closure {
+            self.entries.clone()
+        } else {
+            CLONE_STACK.with(|st| st.borrow_mut().push(self_ptr));
+            let e = self.entries.iter().map(|(k, v)| {
+                let v2 = match v {
+                    Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
+                        let inner = r.borrow();
+                        match &*inner {
+                            Value::Array(a) if std::ptr::eq(a.as_ptr() as *const PhpArray, self_ptr) => v.clone(),
+                            Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
+                            other => other.clone(),
+                        }
+                    }
+                    // Nested arrays are values: give the copy its own storage
+                    // (goro copies eagerly instead of refcounted copy-on-write).
+                    Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
+                    _ => v.clone(),
+                };
+                (k.clone(), v2)
+            }).collect();
+            CLONE_STACK.with(|st| { st.borrow_mut().pop(); });
+            e
+        };
         Self {
-            entries: self.entries.clone(),
+            entries,
             next_int_key: self.next_int_key,
             pointer: self.pointer,
             packed: self.packed,
