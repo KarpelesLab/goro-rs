@@ -194,8 +194,180 @@ pub(crate) fn rmethod<'a>(vm: &'a Vm, lower: &[u8], method: &[u8]) -> Option<&'a
     None
 }
 
-/// ReflectionClass constructor: sets up __reflection_target and name properties
+
+/// All methods of a class in function-table order, including those
+/// inherited from internal ancestors/interfaces (user `ClassEntry`s only
+/// carry methods inherited from user classes).
+pub(crate) fn rmethods<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::MethodDef> {
+    let lower = lower.to_ascii_lowercase();
+    let mut out: Vec<&'a crate::object::MethodDef> = Vec::new();
+    let ce = match rcls(vm, &lower) {
+        Some(c) => c,
+        None => return out,
+    };
+    out.extend(ce.methods.values());
+    if !vm.classes.contains_key(&lower) {
+        return out;
+    }
+    let mut pending: Vec<Vec<u8>> = Vec::new();
+    let mut cur: &crate::object::ClassEntry = ce;
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 64 { break; }
+        for i in &cur.interfaces {
+            pending.push(i.to_ascii_lowercase());
+        }
+        let p = match &cur.parent {
+            Some(p) => p.to_ascii_lowercase(),
+            None => break,
+        };
+        let pce = match rcls(vm, &p) {
+            Some(c) => c,
+            None => break,
+        };
+        if !vm.classes.contains_key(&p) {
+            for m in pce.methods.values() {
+                if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&m.name)) {
+                    out.push(m);
+                }
+            }
+        }
+        cur = pce;
+    }
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut idx = 0;
+    while idx < pending.len() && idx < 128 {
+        let i = pending[idx].clone();
+        idx += 1;
+        if seen.contains(&i) { continue; }
+        seen.push(i.clone());
+        if let Some(ice) = rcls(vm, &i) {
+            if !vm.classes.contains_key(&i) {
+                for m in ice.methods.values() {
+                    if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&m.name)) {
+                        out.push(m);
+                    }
+                }
+            }
+            for j in &ice.interfaces {
+                pending.push(j.to_ascii_lowercase());
+            }
+        }
+    }
+    out
+}
+
+
+
+/// Weak-mode scalar coercion of an argument to an internal parameter type
+/// (as the engine does before an internal function runs).
+pub(crate) fn coerce_scalar_for_type(v: &Value, ty: &str) -> Value {
+    if ty.is_empty() {
+        return v.clone();
+    }
+    let parts: Vec<String> = ty.trim_start_matches('?').split('|').map(|p| p.to_ascii_lowercase()).collect();
+    let has = |n: &str| parts.iter().any(|p| p == n || p == "mixed");
+    let accepted = match v {
+        Value::True | Value::False => has("bool") || (matches!(v, Value::True) && has("true")) || (matches!(v, Value::False) && has("false")),
+        Value::Long(_) => has("int") || has("float"),
+        Value::Double(_) => has("float"),
+        Value::String(_) => has("string"),
+        _ => true,
+    };
+    if accepted {
+        return v.clone();
+    }
+    match v {
+        Value::True | Value::False | Value::Long(_) | Value::Double(_) => {
+            if has("string") {
+                Value::String(v.to_php_string())
+            } else if has("int") {
+                Value::Long(v.to_long())
+            } else if has("float") {
+                Value::Double(v.to_double())
+            } else if has("bool") {
+                if v.is_truthy() { Value::True } else { Value::False }
+            } else {
+                v.clone()
+            }
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Run an internal constructor with its own call-stack frame
+/// (`Class->__construct(...)`), so exceptions it throws carry the frame in
+/// their trace like PHP's internal functions do.
+fn with_internal_ctor_frame(
+    vm: &mut Vm,
+    args: &[Value],
+    line: u32,
+    f: fn(&mut Vm, &[Value], u32) -> bool,
+) -> bool {
+    let cls = match args.first() {
+        Some(Value::Object(o)) => o.borrow().class_name.to_ascii_lowercase(),
+        _ => return f(vm, args, line),
+    };
+    // The frame names the internal class declaring the constructor.
+    let mut cur = cls;
+    let mut decl: Option<&'static str> = None;
+    for _ in 0..64 {
+        if !vm.classes.contains_key(&cur) {
+            decl = crate::stubs::find_method(&cur, b"__construct").map(|(c, _)| c.name);
+            break;
+        }
+        match vm.classes.get(&cur).and_then(|c| c.parent.clone()) {
+            Some(p) => cur = p.to_ascii_lowercase(),
+            None => break,
+        }
+    }
+    let decl = match decl {
+        Some(d) => d,
+        None => return f(vm, args, line),
+    };
+    let sig = crate::stubs::find_method(decl.as_bytes(), b"__construct").map(|(_, m)| m);
+    let frame_args: Vec<Value> = args
+        .iter()
+        .skip(1)
+        .enumerate()
+        .map(|(i, v)| match sig.and_then(|m| m.args.get(i)) {
+            Some(a) => coerce_scalar_for_type(v, a.ty),
+            None => v.clone(),
+        })
+        .collect();
+    vm.call_stack.push((format!("{}->__construct", decl), vm.current_file.clone(), line, frame_args, true));
+    let r = f(vm, args, line);
+    vm.call_stack.pop();
+    r
+}
+
 pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_class_construct_impl)
+}
+
+pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_method_construct_impl)
+}
+
+pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_function_construct_impl)
+}
+
+pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_property_construct_impl)
+}
+
+pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_parameter_construct_impl)
+}
+
+pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+    with_internal_ctor_frame(vm, args, line, reflection_class_constant_construct_impl)
+}
+
+/// ReflectionClass constructor: sets up __reflection_target and name properties
+fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -346,7 +518,7 @@ pub fn reflection_class_construct(vm: &mut Vm, args: &[Value], line: u32) -> boo
 }
 
 /// ReflectionMethod constructor
-pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -464,45 +636,46 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
         return false;
     }
 
-    if is_user_class {
-        // Check method exists in user class
-        let method_exists = rcls(vm, &class_lower)
-            .map(|c| c.get_method(&method_lower).is_some())
-            .unwrap_or(false);
-
-        if !method_exists {
-            let canonical_class = rcls(vm, &class_lower)
-                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                .unwrap_or(class_name.clone());
-            let err_msg = format!("Method {}::{}() does not exist", canonical_class, method_name);
-            let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
-            vm.current_exception = Some(exc);
-            return false;
-        }
-    }
-    // For built-in classes, we accept all method names without checking
-
-    let canonical_class = if is_user_class {
-        rcls(vm, &class_lower)
+    let found = rmethod(vm, &class_lower, &method_lower)
+        .map(|m| (String::from_utf8_lossy(&m.name).to_string(), m.declaring_class.clone()));
+    // Internal classes without stub data accept any method name.
+    let has_info = is_user_class || rcls(vm, &class_lower).is_some();
+    if found.is_none() && has_info && !(class_lower == b"closure" && method_lower == b"__invoke") {
+        let canonical_class = rcls(vm, &class_lower)
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
-            .unwrap_or(class_name.clone())
-    } else {
-        vm.builtin_canonical_name(&class_lower)
-    };
+            .unwrap_or(class_name.clone());
+        let err_msg = format!("Method {}::{}() does not exist", canonical_class, method_name);
+        let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
 
-    let canonical_method = if is_user_class {
-        rcls(vm, &class_lower)
-            .and_then(|c| c.get_method(&method_lower).map(|m| String::from_utf8_lossy(&m.name).to_string()))
-            .unwrap_or(method_name.clone())
-    } else {
-        method_name.clone()
+    let canonical_class = match &found {
+        Some((_, decl)) => rcls(vm, decl)
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(decl).to_string()),
+        None if is_user_class => rcls(vm, &class_lower)
+            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+            .unwrap_or(class_name.clone()),
+        None => vm.builtin_canonical_name(&class_lower),
+    };
+    let lookup_class = rcls(vm, &class_lower)
+        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+        .unwrap_or_else(|| canonical_class.clone());
+
+    let canonical_method = match &found {
+        Some((n, _)) => n.clone(),
+        None => method_name.clone(),
     };
 
     let mut obj = this.borrow_mut();
     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(canonical_method)));
     obj.set_property(b"class".to_vec(), Value::String(PhpString::from_string(canonical_class.clone())));
-    obj.set_property(b"__reflection_class".to_vec(), Value::String(PhpString::from_string(canonical_class)));
+    obj.set_property(b"__reflection_class".to_vec(), Value::String(PhpString::from_string(canonical_class.clone())));
     obj.set_property(b"__reflection_method".to_vec(), Value::String(PhpString::from_vec(method_lower)));
+    if !lookup_class.eq_ignore_ascii_case(&canonical_class) {
+        obj.set_property(b"__reflection_lookup_class".to_vec(), Value::String(PhpString::from_string(lookup_class)));
+    }
     if let Some(fn_str) = closure_fn {
         obj.set_property(b"__reflection_closure_fn".to_vec(), Value::String(fn_str));
     }
@@ -510,7 +683,7 @@ pub fn reflection_method_construct(vm: &mut Vm, args: &[Value], line: u32) -> bo
 }
 
 /// ReflectionFunction constructor
-pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -628,7 +801,7 @@ pub fn reflection_function_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
 }
 
 /// ReflectionProperty constructor
-pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -726,7 +899,7 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
 }
 
 /// ReflectionParameter constructor
-pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -> bool {
+fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -1004,7 +1177,7 @@ pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], _line: u32) -
 }
 
 /// ReflectionClassConstant constructor
-pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
+fn reflection_class_constant_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return true,
@@ -1326,9 +1499,10 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getconstructor" => {
-            if let Some(ce) = rcls(vm, &class_lower) {
-                if ce.get_method(b"__construct").is_some() {
-                    Some(create_reflection_method(vm, &target, "__construct"))
+            if rcls(vm, &class_lower).is_some() {
+                if let Some(decl) = rmethod(vm, &class_lower, b"__construct").map(|m| m.declaring_class.clone()) {
+                    let decl_name = rcls(vm, &decl).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| target.clone());
+                    Some(create_reflection_method(vm, &decl_name, "__construct"))
                 } else {
                     Some(Value::Null)
                 }
@@ -1652,9 +1826,7 @@ pub fn reflection_class_docall(
                     None => return Some(Value::Null),
                 };
                 let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                let has = rcls(vm, &class_lower)
-                    .map(|c| c.get_method(&method_lower).is_some())
-                    .unwrap_or(false);
+                let has = rmethod(vm, &class_lower, &method_lower).is_some();
                 // Closure::__invoke is implicitly defined.
                 let closure_has = class_lower == b"closure"
                     && matches!(method_lower.as_slice(), b"__invoke" | b"bindto" | b"call" | b"bind" | b"fromcallable");
@@ -1789,8 +1961,7 @@ pub fn reflection_class_docall(
                 let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
                 // Look up the method definition and, if found, use its
                 // `declaring_class` for the ReflectionMethod->$class field.
-                let method_meta = rcls(vm, &class_lower)
-                    .and_then(|c| c.get_method(&method_lower))
+                let method_meta = rmethod(vm, &class_lower, &method_lower)
                     .map(|m| (String::from_utf8_lossy(&m.name).to_string(),
                               m.declaring_class.clone()));
                 if let Some((canonical_method, declaring_lower)) = method_meta {
@@ -1841,8 +2012,8 @@ pub fn reflection_class_docall(
                 let filter = args.get(1).map(|v| if matches!(v, Value::Null) { -1 } else { v.to_long() }).unwrap_or(-1);
                 let mut result = PhpArray::new();
                 // Collect method info first to avoid borrow issues
-                let method_info: Vec<(String, String)> = if let Some(ce) = rcls(vm, &class_lower) {
-                    ce.methods.values().filter_map(|method_def| {
+                let method_info: Vec<(String, String)> = if rcls(vm, &class_lower).is_some() {
+                    rmethods(vm, &class_lower).into_iter().filter_map(|method_def| {
                         if filter != -1 {
                             let method_mod = reflection_method_modifiers_static(method_def);
                             if method_mod & filter == 0 {
