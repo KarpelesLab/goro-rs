@@ -6611,6 +6611,7 @@ pub fn reflection_generator_method(
             if let Value::Generator(g) = &target {
                 let gb = g.borrow();
                 let fn_name = String::from_utf8_lossy(&gb.op_array.name).to_string();
+                let closure_display = if gb.op_array.display_name.is_empty() { None } else { Some(String::from_utf8_lossy(&gb.op_array.display_name).to_string()) };
                 // Methods yield a ReflectionMethod.
                 let method_of = if gb.op_array.display_name.is_empty() { gb.op_array.scope_class.clone() } else { None };
                 drop(gb);
@@ -6623,9 +6624,16 @@ pub fn reflection_generator_method(
                 }
                 let obj_id = vm.alloc_object_id();
                 let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
-                let display = if fn_name.is_empty() { "{closure}".to_string() } else { fn_name.clone() };
+                let display = match &closure_display {
+                    Some(d) => d.clone(),
+                    None if fn_name.is_empty() => "{closure}".to_string(),
+                    None => fn_name.clone(),
+                };
                 rf_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(display)));
                 rf_obj.set_property(b"__reflection_target".to_vec(), Value::String(PhpString::from_string(fn_name.to_ascii_lowercase())));
+                if closure_display.is_some() {
+                    rf_obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+                }
                 return Some(Value::Object(Rc::new(RefCell::new(rf_obj))));
             }
             Some(Value::Null)
