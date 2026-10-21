@@ -945,11 +945,19 @@ fn default_display(oa: &OpArray, cv: u32) -> String {
         if !is_undef || k + 2 >= ops.len() {
             continue;
         }
+        // The Assign is the last one to the CV before the jump target (a
+        // RecvDefaultCheck may follow it).
         let i = match ops[k + 1].op2 {
             OperandType::JmpTarget(t)
                 if ops[k + 1].opcode == OpCode::JmpZ && t as usize > k + 2 =>
             {
-                t as usize - 1
+                match (k + 2..(t as usize).min(ops.len()))
+                    .rev()
+                    .find(|&j| ops[j].opcode == OpCode::Assign && ops[j].op1 == OperandType::Cv(cv))
+                {
+                    Some(j) => j,
+                    None => continue,
+                }
             }
             _ => continue,
         };

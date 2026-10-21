@@ -2964,7 +2964,16 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 }
                 // Also check parent constants (no filter applied to inherited
                 // for simplicity; PHP does filter these too though).
-                if filter == -1 {
+                if filter == -1 && is_internal_class(vm, &class_lower) {
+                    // An internal class inherits its parent's constants
+                    // before declaring its own.
+                    let mut merged = PhpArray::new();
+                    reflection_collect_parent_constants(vm, &class_lower, &mut merged);
+                    for (k, v) in result.iter() {
+                        merged.set(k.clone(), v.clone());
+                    }
+                    result = merged;
+                } else if filter == -1 {
                     reflection_collect_parent_constants(vm, &class_lower, &mut result);
                 }
                 Some(Value::Array(Rc::new(RefCell::new(result))))
@@ -7955,10 +7964,15 @@ pub(crate) fn eval_param_default_prelude(
         if after <= start || after > ops.len() {
             continue;
         }
-        let last = &ops[after - 1];
-        if last.opcode != OpCode::Assign || last.op1 != OperandType::Cv(cv_idx) {
+        // The Assign is the last one to the CV before `after` (a
+        // RecvDefaultCheck may follow it).
+        let Some(assign_at) = (start..after)
+            .rev()
+            .find(|&j| ops[j].opcode == OpCode::Assign && ops[j].op1 == OperandType::Cv(cv_idx))
+        else {
             continue;
-        }
+        };
+        let last = &ops[assign_at];
         let rebase = |o: OperandType| match o {
             OperandType::JmpTarget(t) if t as usize >= start => {
                 OperandType::JmpTarget(t - start as u32)
@@ -7966,7 +7980,7 @@ pub(crate) fn eval_param_default_prelude(
             o => o,
         };
         let mut sub = op_array.clone();
-        sub.ops = ops[start..after - 1]
+        sub.ops = ops[start..assign_at]
             .iter()
             .map(|o| Op {
                 opcode: o.opcode,
