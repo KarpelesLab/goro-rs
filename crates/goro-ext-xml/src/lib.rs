@@ -4,6 +4,7 @@ pub mod html;
 pub mod io;
 pub mod libxml;
 pub mod parser;
+pub mod relaxng;
 pub mod sax2;
 pub mod serialize;
 pub mod simplexml;

@@ -1306,13 +1306,60 @@ fn m_schema_validate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(b(r == 0))
 }
 
+/// dom_document_relaxNG_validate (relaxNGValidate / relaxNGValidateSource)
 fn m_relaxng_validate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
+    let file = !a.f.ends_with("Source");
+    let argname = if file { "filename" } else { "source" };
     a.count(vm, 1, 1)?;
-    let _src = a.str(vm, 0, "filename")?;
-    let _d = doc_node(vm, o)?;
-    warn(vm, "Invalid RelaxNG");
-    Ok(Value::False)
+    let source = a.str_bytes(vm, 0, argname)?;
+    if source.is_empty() {
+        throw_error(
+            vm,
+            b"ValueError",
+            &format!("{}(): Argument #1 (${}) must not be empty", a.f, argname),
+        );
+        return Err(());
+    }
+    let d = doc_node(vm, o)?;
+    let fname = a.f.clone();
+    let mut sink = |vm: &mut Vm, e: XmlError| {
+        crate::libxml::report(vm, &fname, &[e], crate::libxml::Style::Generic)
+    };
+    let schema = if file {
+        if source.contains(&0) {
+            throw_error(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($filename) must not contain any null bytes",
+                    a.f
+                ),
+            );
+            return Err(());
+        }
+        let src = String::from_utf8_lossy(&source).into_owned();
+        let path = match valid_file_path(&src) {
+            Some(p) => p,
+            None => {
+                warn(vm, "Invalid RelaxNG file source");
+                return Ok(Value::False);
+            }
+        };
+        crate::relaxng::parse_file(vm, &path, &mut sink)
+    } else {
+        crate::relaxng::parse_memory(vm, &source, &mut sink)
+    };
+    let schema = match schema {
+        Some(s) => s,
+        None => {
+            warn(vm, "Invalid RelaxNG");
+            return Ok(Value::False);
+        }
+    };
+    let (ret, errors) = crate::relaxng::validate_doc(&schema, d);
+    crate::libxml::report(vm, &a.f, &errors, crate::libxml::Style::Generic);
+    Ok(b(ret == 0))
 }
 
 pub fn c14n(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
