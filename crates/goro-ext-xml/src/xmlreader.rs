@@ -11,6 +11,8 @@ use crate::libxml::{self, Style};
 use crate::parser::{self, Parser, ParserState, PushState, SaxAttr, Sink, XmlError};
 use crate::sax2::TreeBuilder;
 use crate::tree::{self, NType, NodeId, NsId, Tree, XML_XML_NAMESPACE};
+use crate::valid::{Cx, Out};
+use crate::{relaxng, xmlschema};
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::object::{ClassEntry, NativeData, PhpObject};
 use goro_core::string::PhpString;
@@ -91,6 +93,19 @@ struct Shared {
     elem_started: bool,
     /// Elements written as `<x/>` (NODE_IS_EMPTY).
     empty: HashSet<NodeId>,
+    /// XSD validation plugged in the SAX stream (xmlSchemaSAXPlug).
+    xsd: Option<xmlschema::ValidCtxt>,
+}
+
+impl Shared {
+    /// Move the schema validator's diagnostics to the parser context so
+    /// that they come out in order with the parser's.
+    fn xsd_flush(&mut self, p: &mut ParserState) {
+        if let Some(v) = self.xsd.as_mut() {
+            let errs = v.take_errors();
+            p.errors.extend(errs);
+        }
+    }
 }
 
 struct ReaderSink {
@@ -107,8 +122,8 @@ impl Sink for ReaderSink {
             .tb
             .start_document(version, encoding, standalone)
     }
-    fn end_document(&mut self, encoding: Option<&str>) {
-        self.sh.borrow_mut().tb.end_document(encoding)
+    fn end_document_p(&mut self, p: &mut ParserState, encoding: Option<&str>) {
+        self.sh.borrow_mut().tb.end_document_p(p, encoding)
     }
     fn internal_subset(&mut self, name: Option<&str>, ext_id: Option<&str>, sys_id: Option<&str>) {
         self.sh
@@ -122,8 +137,12 @@ impl Sink for ReaderSink {
             .tb
             .external_subset(name, ext_id, sys_id)
     }
-    fn entity_decl(
+    fn wants_external_subset(&self) -> bool {
+        self.sh.borrow().tb.wants_external_subset()
+    }
+    fn entity_decl_p(
         &mut self,
+        p: &mut ParserState,
         name: &str,
         kind: parser::EntKind,
         public: Option<&str>,
@@ -134,10 +153,11 @@ impl Sink for ReaderSink {
         self.sh
             .borrow_mut()
             .tb
-            .entity_decl(name, kind, public, system, content, orig)
+            .entity_decl_p(p, name, kind, public, system, content, orig)
     }
-    fn unparsed_entity_decl(
+    fn unparsed_entity_decl_p(
         &mut self,
+        p: &mut ParserState,
         name: &str,
         public: Option<&str>,
         system: Option<&str>,
@@ -146,16 +166,25 @@ impl Sink for ReaderSink {
         self.sh
             .borrow_mut()
             .tb
-            .unparsed_entity_decl(name, public, system, notation)
+            .unparsed_entity_decl_p(p, name, public, system, notation)
     }
-    fn notation_decl(&mut self, name: &str, public: Option<&str>, system: Option<&str>) {
-        self.sh.borrow_mut().tb.notation_decl(name, public, system)
+    fn notation_decl_p(
+        &mut self,
+        p: &mut ParserState,
+        name: &str,
+        public: Option<&str>,
+        system: Option<&str>,
+    ) {
+        self.sh
+            .borrow_mut()
+            .tb
+            .notation_decl_p(p, name, public, system)
     }
-    fn element_decl(&mut self, decl: &parser::ElementDecl) {
-        self.sh.borrow_mut().tb.element_decl(decl)
+    fn element_decl_p(&mut self, p: &mut ParserState, decl: &parser::ElementDecl) {
+        self.sh.borrow_mut().tb.element_decl_p(p, decl)
     }
-    fn attribute_decl(&mut self, decl: &parser::AttrDeclInfo) {
-        self.sh.borrow_mut().tb.attribute_decl(decl)
+    fn attribute_decl_p(&mut self, p: &mut ParserState, decl: &parser::AttrDeclInfo) {
+        self.sh.borrow_mut().tb.attribute_decl_p(p, decl)
     }
     fn start_element(
         &mut self,
@@ -194,6 +223,25 @@ impl Sink for ReaderSink {
             }
         }
         sh.elem_started = true;
+        // xmlSchemaSAXHandleStartElementNs (after the tree builder)
+        if sh.xsd.is_some() {
+            let line = p.cur_line() as i32;
+            let bindings: Vec<(Option<String>, String)> = nsdecls.to_vec();
+            let sattrs: Vec<xmlschema::valid::StreamAttr> = attrs
+                .iter()
+                .map(|a| xmlschema::valid::StreamAttr {
+                    local: a.localname.clone(),
+                    ns: a.uri.clone(),
+                    value: a.value.clone(),
+                    node: None,
+                })
+                .collect();
+            let v = sh.xsd.as_mut().unwrap();
+            if v.start_element(localname, uri, line, None, bindings, sattrs) == -1 {
+                p.stop = true;
+            }
+            sh.xsd_flush(p);
+        }
     }
     fn end_element(
         &mut self,
@@ -202,19 +250,44 @@ impl Sink for ReaderSink {
         prefix: Option<&str>,
         uri: Option<&str>,
     ) {
-        self.sh
-            .borrow_mut()
-            .tb
-            .end_element(p, localname, prefix, uri)
+        let mut sh = self.sh.borrow_mut();
+        sh.tb.end_element(p, localname, prefix, uri);
+        if let Some(v) = sh.xsd.as_mut() {
+            if v.end_element() == -1 {
+                p.stop = true;
+            }
+            sh.xsd_flush(p);
+        }
     }
     fn characters(&mut self, p: &mut ParserState, text: &str) {
-        self.sh.borrow_mut().tb.characters(p, text)
+        let mut sh = self.sh.borrow_mut();
+        sh.tb.characters(p, text);
+        if let Some(v) = sh.xsd.as_mut() {
+            if v.characters(xmlschema::valid::TEXT_NODE, text) == -1 {
+                p.stop = true;
+            }
+            sh.xsd_flush(p);
+        }
     }
     fn ignorable_whitespace(&mut self, p: &mut ParserState, text: &str) {
-        self.sh.borrow_mut().tb.ignorable_whitespace(p, text)
+        let mut sh = self.sh.borrow_mut();
+        sh.tb.ignorable_whitespace(p, text);
+        if let Some(v) = sh.xsd.as_mut() {
+            if v.characters(xmlschema::valid::TEXT_NODE, text) == -1 {
+                p.stop = true;
+            }
+            sh.xsd_flush(p);
+        }
     }
     fn cdata_block(&mut self, p: &mut ParserState, text: &str) {
-        self.sh.borrow_mut().tb.cdata_block(p, text)
+        let mut sh = self.sh.borrow_mut();
+        sh.tb.cdata_block(p, text);
+        if let Some(v) = sh.xsd.as_mut() {
+            if v.characters(xmlschema::valid::CDATA_NODE, text) == -1 {
+                p.stop = true;
+            }
+            sh.xsd_flush(p);
+        }
     }
     fn comment(&mut self, p: &mut ParserState, text: &str) {
         self.sh.borrow_mut().tb.comment(p, text)
@@ -240,8 +313,20 @@ impl Sink for ReaderSink {
     fn current_element(&self) -> Option<(String, Option<String>)> {
         self.sh.borrow().tb.current_element()
     }
+    fn get_entity(
+        &mut self,
+        p: &mut ParserState,
+        name: &str,
+        ent: Option<&parser::PEntity>,
+        in_content: bool,
+    ) {
+        self.sh.borrow_mut().tb.get_entity(p, name, ent, in_content)
+    }
     fn error(&mut self, err: &XmlError) {
         self.sh.borrow_mut().tb.error(err)
+    }
+    fn wants_line_numbers(&self) -> bool {
+        self.sh.borrow().tb.wants_line_numbers()
     }
 }
 
@@ -302,16 +387,26 @@ struct Core {
     curnode: Cur,
     depth: i64,
     ents: Vec<NodeId>,
-    /// reader->validate (DTD)
-    validate: bool,
-    /// ctxt->validate
-    ctxt_validate: bool,
+    /// reader->validate
+    validate: VMode,
     loadsubset: u8,
-    /// Nodes the reader unlinked, with their parent and previous sibling,
-    /// while DTD validation is on (relinked to validate the whole document).
-    freed: Vec<(NodeId, Option<NodeId>, Option<NodeId>)>,
-    validated: bool,
+    /// RelaxNG: validation context, error count, element validated as a
+    /// whole (rngFullNode).
+    rng: Option<relaxng::ValidCtxt>,
+    rng_errors: i32,
+    rng_full: Option<NodeId>,
+    /// XSD: an error was seen (the context lives in the SAX plug).
+    xsd_errors: bool,
     errors: Vec<XmlError>,
+}
+
+/// xmlTextReaderValidate
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VMode {
+    None,
+    Dtd,
+    Rng,
+    Xsd,
 }
 
 impl Core {
@@ -326,10 +421,12 @@ impl Core {
         let options = options | parser::XML_PARSE_COMPACT;
         let mut tb = TreeBuilder::new(options);
         tb.url = url.clone();
+        tb.validator.streaming = true;
         let sh = Rc::new(RefCell::new(Shared {
             tb,
             elem_started: false,
             empty: HashSet::new(),
+            xsd: None,
         }));
         let mut src = src;
         // xmlTextReaderSetup: make sure 4 bytes are available
@@ -355,7 +452,11 @@ impl Core {
         if let Some(e) = encoding {
             eng.parser.switch_encoding(e);
         }
-        let validate = options & parser::XML_PARSE_DTDVALID != 0;
+        let validate = if options & parser::XML_PARSE_DTDVALID != 0 {
+            VMode::Dtd
+        } else {
+            VMode::None
+        };
         Core {
             eng,
             sh,
@@ -369,10 +470,11 @@ impl Core {
             depth: 0,
             ents: Vec::new(),
             validate,
-            ctxt_validate: validate,
             loadsubset,
-            freed: Vec::new(),
-            validated: false,
+            rng: None,
+            rng_errors: 0,
+            rng_full: None,
+            xsd_errors: false,
             errors: Vec::new(),
         }
     }
@@ -423,48 +525,7 @@ impl Core {
         let r = self.eng.parser.parse_chunk(&chunk, terminate);
         let errs = std::mem::take(&mut self.eng.parser.st.errors);
         self.errors.extend(errs);
-        if terminate {
-            self.finish_validation();
-        }
         r
-    }
-
-    /// DTD validation of the complete document (the walked nodes were kept).
-    fn finish_validation(&mut self) {
-        if !self.validate || !self.ctxt_validate || self.validated {
-            return;
-        }
-        self.validated = true;
-        if !self.well_formed() {
-            return;
-        }
-        let doc = self.sh.borrow().tb.doc;
-        let freed = std::mem::take(&mut self.freed);
-        if let Some(d) = doc {
-            // relink what the reader already released, validate, unlink again
-            tree::with(|t| {
-                for &(n, parent, prev) in freed.iter().rev() {
-                    match (prev, parent) {
-                        (Some(p), _) => t.insert_after_raw(p, n),
-                        (None, Some(par)) => match t.nodes[par].children {
-                            Some(first) => t.insert_before_raw(first, n),
-                            None => t.link_child_raw(par, n),
-                        },
-                        (None, None) => {}
-                    }
-                }
-            });
-            let errs = crate::valid::validate_document(d);
-            tree::with(|t| {
-                for &(n, _, _) in freed.iter() {
-                    t.unlink(n);
-                }
-            });
-            if errs.iter().any(|e| e.level >= parser::ERR_ERROR) {
-                self.st().valid = false;
-            }
-            self.errors.extend(errs);
-        }
     }
 
     fn ctxt_node(&self) -> Option<NodeId> {
@@ -579,14 +640,8 @@ impl Core {
 
     /// Unlink a node the reader is done with (xmlTextReaderFreeNode).
     fn free_node(&mut self, n: NodeId) {
-        let validating = self.validate && !self.validated;
         let mut empty = self.sh.borrow_mut();
         tree::with(|t| {
-            if validating {
-                self.freed.push((n, t.nodes[n].parent, t.nodes[n].prev));
-                t.unlink(n);
-                return;
-            }
             t.unlink(n);
             // Nothing refers to the released subtree any more: give its
             // slots back (xmlTextReaderFreeNode).
@@ -751,6 +806,9 @@ impl Core {
                 self.state = St::End;
                 return self.node_found(vm);
             }
+            if self.validate != VMode::None && ntype == NType::Element {
+                self.validate_pop();
+            }
             self.node = Some(nx);
             self.state = St::Element;
             // Cleanup of the old node
@@ -774,6 +832,9 @@ impl Core {
         {
             self.state = St::End;
             return self.node_found(vm);
+        }
+        if self.validate != VMode::None && ntype == NType::Element {
+            self.validate_pop();
         }
         self.node = parent;
         let ptype = parent.map(|p| tree::with(|t| t.nodes[p].t));
@@ -834,6 +895,8 @@ impl Core {
                         }
                     }
                 }
+            } else if t_ == NType::EntityRef && self.validate != VMode::None {
+                self.validate_entity(vm);
             }
         }
         if let Some(n) = self.node {
@@ -849,6 +912,22 @@ impl Core {
                         return self.get_next_node(vm, oldstate, olddepth, &mut oldnode);
                     }
                 }
+            }
+        }
+        if self.validate != VMode::None {
+            if let Some(n) = self.node {
+                let t_ = tree::with(|t| t.nodes[n].t);
+                if t_ == NType::Element && self.state != St::End && self.state != St::Backtrack {
+                    self.validate_push(vm);
+                } else if matches!(t_, NType::Text | NType::CData) {
+                    let c = tree::with(|t| t.nodes[n].content.clone());
+                    self.validate_cdata(&c);
+                }
+            }
+        }
+        if self.validate == VMode::Xsd && !self.xsd_errors {
+            if let Some(v) = self.sh.borrow().xsd.as_ref() {
+                self.xsd_errors = v.err() != 0;
             }
         }
         1
@@ -1571,9 +1650,9 @@ impl Core {
             }
             P_VALIDATE => {
                 opt(self, parser::XML_PARSE_DTDVALID, value);
-                self.ctxt_validate = value;
+                self.sh.borrow_mut().tb.validate = value;
                 if value {
-                    self.validate = true;
+                    self.validate = VMode::Dtd;
                 }
                 0
             }
@@ -1588,19 +1667,238 @@ impl Core {
 
     fn get_parser_prop(&self, prop: i64) -> i32 {
         match prop {
-            P_LOADDTD => (self.loadsubset != 0 || self.ctxt_validate) as i32,
+            P_LOADDTD => (self.loadsubset != 0 || self.ctxt_validate()) as i32,
             P_DEFAULTATTRS => (self.loadsubset & XML_COMPLETE_ATTRS != 0) as i32,
-            P_VALIDATE => self.validate as i32,
+            P_VALIDATE => (self.validate != VMode::None) as i32,
             P_SUBST_ENTITIES => self.eng.parser.st.replace_entities as i32,
             _ => -1,
         }
     }
 
+    /// ctxt->validate
+    fn ctxt_validate(&self) -> bool {
+        self.sh.borrow().tb.validate
+    }
+
+    /// xmlTextReaderIsValid
     fn is_valid(&self) -> bool {
-        if self.ctxt_validate {
+        match self.validate {
+            VMode::Rng => return self.rng_errors == 0,
+            VMode::Xsd => return !self.xsd_errors,
+            _ => {}
+        }
+        if self.ctxt_validate() {
             return self.eng.parser.st.valid;
         }
         false
+    }
+
+    /// Collect the RelaxNG validator's diagnostics.
+    fn rng_flush(&mut self) {
+        if let Some(r) = self.rng.as_mut() {
+            let errs = r.take_errors();
+            self.errors.extend(errs);
+        }
+    }
+
+    /// A DTD validation call on the parser's validation context
+    /// (ctxt->vctxt); diagnostics go through the parser context.
+    fn dtd_call(&mut self, f: impl FnOnce(&mut Cx) -> bool) {
+        let doc = match self.my_doc() {
+            Some(d) => d,
+            None => return,
+        };
+        let ok = {
+            let mut sh = self.sh.borrow_mut();
+            let st = &mut self.eng.parser.st;
+            tree::with(|t| {
+                let mut cx = Cx::new(t, &mut sh.tb.validator, Out::Parser(st), doc);
+                f(&mut cx)
+            })
+        };
+        if !ok {
+            self.eng.parser.st.valid = false;
+        }
+        let errs = std::mem::take(&mut self.eng.parser.st.errors);
+        self.errors.extend(errs);
+    }
+
+    fn dtd_validating(&self) -> bool {
+        self.validate == VMode::Dtd && self.ctxt_validate()
+    }
+
+    /// xmlTextReaderValidatePush
+    fn validate_push(&mut self, vm: &mut Vm) {
+        let node = match self.node {
+            Some(n) => n,
+            None => return,
+        };
+        if self.dtd_validating() {
+            let qname = tree::with(|t| match t.ns_prefix(t.nodes[node].ns) {
+                Some(p) => format!("{}:{}", p, t.nodes[node].name),
+                None => t.nodes[node].name.clone(),
+            });
+            self.dtd_call(|cx| cx.push_element(node, &qname));
+        }
+        if self.validate == VMode::Rng && self.rng.is_some() {
+            if self.rng_full.is_some() {
+                return;
+            }
+            let mut ret = self.rng.as_mut().unwrap().push_element(node);
+            if ret == 0 {
+                // this element requires a full tree
+                match self.expand(vm) {
+                    None => ret = -1,
+                    Some(n) => {
+                        ret = self.rng.as_mut().unwrap().full_element(n);
+                        self.rng_full = Some(n);
+                    }
+                }
+            }
+            if ret != 1 {
+                self.rng_errors += 1;
+            }
+            self.rng_flush();
+        }
+    }
+
+    /// xmlTextReaderValidateCData
+    fn validate_cdata(&mut self, data: &str) {
+        if self.dtd_validating() {
+            self.dtd_call(|cx| cx.push_cdata(data));
+        }
+        if self.validate == VMode::Rng && self.rng.is_some() {
+            if self.rng_full.is_some() {
+                return;
+            }
+            if self.rng.as_mut().unwrap().push_cdata(data) != 1 {
+                self.rng_errors += 1;
+            }
+            self.rng_flush();
+        }
+    }
+
+    /// xmlTextReaderValidatePop
+    fn validate_pop(&mut self) {
+        let node = match self.node {
+            Some(n) => n,
+            None => return,
+        };
+        if self.dtd_validating() {
+            self.dtd_call(|cx| cx.pop_element());
+        }
+        if self.validate == VMode::Rng && self.rng.is_some() {
+            if let Some(f) = self.rng_full {
+                if f == node {
+                    self.rng_full = None;
+                }
+                return;
+            }
+            if self.rng.as_mut().unwrap().pop_element(node) != 1 {
+                self.rng_errors += 1;
+            }
+            self.rng_flush();
+        }
+    }
+
+    /// xmlTextReaderValidateEntity: walk the content of an entity
+    /// reference (entities are not substituted) for the validation calls.
+    fn validate_entity(&mut self, vm: &mut Vm) {
+        let oldnode = match self.node {
+            Some(n) => n,
+            None => return,
+        };
+        let mut node = oldnode;
+        loop {
+            let (ty, children) = tree::with(|t| (t.nodes[node].t, t.nodes[node].children));
+            let mut skip_children = false;
+            if ty == NType::EntityRef {
+                let content = children.and_then(|e| {
+                    tree::with(|t| {
+                        if t.nodes[e].t == NType::EntityDecl {
+                            t.nodes[e].children
+                        } else {
+                            None
+                        }
+                    })
+                });
+                match content {
+                    Some(c) => {
+                        self.ents.push(node);
+                        node = c;
+                        if node == oldnode {
+                            break;
+                        }
+                        continue;
+                    }
+                    None => {
+                        // the error has probably been raised already
+                        if node == oldnode {
+                            break;
+                        }
+                        skip_children = true;
+                    }
+                }
+            } else if ty == NType::Element {
+                self.node = Some(node);
+                self.validate_push(vm);
+            } else if matches!(ty, NType::Text | NType::CData) {
+                let c = tree::with(|t| t.nodes[node].content.clone());
+                self.validate_cdata(&c);
+            }
+            if !skip_children {
+                // go to next node
+                if let Some(c) = children {
+                    node = c;
+                    if node == oldnode {
+                        break;
+                    }
+                    continue;
+                } else if ty == NType::Element {
+                    self.validate_pop();
+                }
+            }
+            if let Some(nx) = tree::with(|t| t.nodes[node].next) {
+                node = nx;
+                if node == oldnode {
+                    break;
+                }
+                continue;
+            }
+            let mut ended = false;
+            loop {
+                node = match tree::with(|t| t.nodes[node].parent) {
+                    Some(p) => p,
+                    None => {
+                        ended = true;
+                        break;
+                    }
+                };
+                let pty = tree::with(|t| t.nodes[node].t);
+                if pty == NType::Element {
+                    self.node = Some(node);
+                    self.validate_pop();
+                }
+                if pty == NType::EntityDecl {
+                    if let Some(&ent) = self.ents.last() {
+                        if tree::with(|t| t.nodes[ent].children) == Some(node) {
+                            node = self.ents.pop().unwrap();
+                        }
+                    }
+                }
+                if node == oldnode {
+                    break;
+                }
+                if let Some(nx) = tree::with(|t| t.nodes[node].next) {
+                    node = nx;
+                    break;
+                }
+            }
+            if ended || node == oldnode {
+                break;
+            }
+        }
+        self.node = Some(oldnode);
     }
 }
 
@@ -2391,6 +2689,99 @@ fn m_from_stream(vm: &mut Vm, a: &Args, called: &[u8]) -> R<Value> {
     Ok(new_instance(vm, called, core))
 }
 
+/// xmlTextReaderSchemaValidate
+fn set_schema(vm: &mut Vm, d: &XmlReaderData, fname: &str, xsd: Option<&str>) -> i32 {
+    {
+        let core = d.core.borrow();
+        let c = match core.as_ref() {
+            Some(c) => c,
+            None => return -1,
+        };
+        if xsd.is_some() && c.mode != Mode::Initial {
+            return -1;
+        }
+        // cleanup of the previous validation (xmlSchemaSAXUnplug)
+        if let Some(mut v) = c.sh.borrow_mut().xsd.take() {
+            v.stream_end();
+        }
+    }
+    let xsd = match xsd {
+        Some(x) => x,
+        None => return 0,
+    };
+    let (schema, errs) = xmlschema::Schema::parse_file(vm, xsd);
+    libxml::report(vm, fname, &errs, Style::Generic);
+    let schema = match schema {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut core = d.core.borrow_mut();
+    let c = match core.as_mut() {
+        Some(c) => c,
+        None => return -1,
+    };
+    let mut v = xmlschema::ValidCtxt::new(schema);
+    // xmlTextReaderLocator: the parser input's file name
+    v.filename = c
+        .eng
+        .parser
+        .st
+        .inputs
+        .first()
+        .and_then(|i| i.filename.clone());
+    v.stream_start();
+    c.sh.borrow_mut().xsd = Some(v);
+    c.xsd_errors = false;
+    c.validate = VMode::Xsd;
+    0
+}
+
+/// php_xmlreader_set_relaxng_schema + xmlTextReaderRelaxNGSetSchema
+fn set_relaxng(
+    vm: &mut Vm,
+    d: &XmlReaderData,
+    fname: &str,
+    source: Option<&[u8]>,
+    from_file: bool,
+) -> i32 {
+    let source = match source {
+        Some(s) => s,
+        None => {
+            // unset the associated relaxNG context and schema
+            if let Some(c) = d.core.borrow_mut().as_mut() {
+                c.rng = None;
+            }
+            return 0;
+        }
+    };
+    let mut sink = |vm: &mut Vm, e: XmlError| libxml::report(vm, fname, &[e], Style::Generic);
+    let schema = if from_file {
+        match resolve_file(&String::from_utf8_lossy(source)) {
+            (Some(path), _) => relaxng::parse_file(vm, &path, &mut sink),
+            (None, _) => None,
+        }
+    } else {
+        relaxng::parse_memory(vm, source, &mut sink)
+    };
+    let schema = match schema {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut core = d.core.borrow_mut();
+    let c = match core.as_mut() {
+        Some(c) => c,
+        None => return -1,
+    };
+    if c.mode != Mode::Initial {
+        return -1;
+    }
+    c.rng = Some(relaxng::ValidCtxt::new(schema));
+    c.rng_errors = 0;
+    c.rng_full = None;
+    c.validate = VMode::Rng;
+    0
+}
+
 fn need_loaded(vm: &mut Vm, d: &XmlReaderData, msg: &str) -> R<()> {
     if d.core.borrow().is_none() {
         throw(vm, b"Error", msg);
@@ -2605,20 +2996,18 @@ fn instance_method(vm: &mut Vm, a: &Args, m: &str, o: &Obj, d: &XmlReaderData) -
                 }
             }
             need_loaded(vm, d, "Schema must be set prior to reading")?;
-            let initial = d
-                .core
-                .borrow()
-                .as_ref()
-                .map(|c| c.mode == Mode::Initial)
-                .unwrap_or(false);
-            if source.is_none() && initial {
-                // unset the associated schema
-                return Ok(Value::True);
+            let ret = if m == "setSchema" {
+                let source = source.map(|b| String::from_utf8_lossy(&b).into_owned());
+                set_schema(vm, d, &f, source.as_deref())
+            } else {
+                set_relaxng(vm, d, &f, source.as_deref(), m == "setRelaxNGSchema")
+            };
+            if ret == 0 {
+                Ok(Value::True)
+            } else {
+                vm.emit_warning(&format!("{}(): Schema contains errors", f));
+                Ok(Value::False)
             }
-            // Schema validation (XSD / RelaxNG) is not available: the schema
-            // cannot be compiled.
-            vm.emit_warning(&format!("{}(): Schema contains errors", f));
-            Ok(Value::False)
         }
         "expand" => {
             a.count(vm, 0, 1)?;
