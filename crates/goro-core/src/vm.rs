@@ -24935,6 +24935,15 @@ impl Vm {
                             // Create a generator instead of executing
                             let mut generator =
                                 crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
+                            // A closure's generator keeps the Closure alive.
+                            if crate::closure::is_closure_fn_name(&user_fn.name) {
+                                let depth = self.call_stack.len();
+                                if let Some((d, _, c)) = self.closure_frames.last() {
+                                    if *d == depth {
+                                        generator.closure = c.upgrade().map(Value::Object);
+                                    }
+                                }
+                            }
                             // Store the args for func_get_args() support
                             generator.args =
                                 call.args[crate::internal_frames::implicit_args(&user_fn)

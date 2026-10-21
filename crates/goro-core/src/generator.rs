@@ -148,6 +148,8 @@ pub struct PhpGenerator {
     pub(crate) last_key: Value,
     /// Iterator state of the foreach loops running in the frame.
     pub(crate) fe: crate::vm::ForeachState,
+    /// The Closure whose body this generator runs (it keeps it alive).
+    pub(crate) closure: Option<Value>,
 }
 
 impl Drop for PhpGenerator {
@@ -255,6 +257,7 @@ impl PhpGenerator {
             last_value: Value::Null,
             last_key: Value::Null,
             fe: Default::default(),
+            closure: None,
         }
     }
 
@@ -364,6 +367,7 @@ impl PhpGenerator {
             .iter()
             .chain(self.pending_return.iter())
             .chain(self.pending_exception.iter())
+            .chain(self.closure.iter())
         {
             f(v);
         }
@@ -390,6 +394,7 @@ impl PhpGenerator {
         out.extend(self.yield_from_source.take());
         out.extend(self.pending_return.take());
         out.extend(self.pending_exception.take());
+        out.extend(self.closure.take());
         for c in std::mem::take(&mut self.saved_calls) {
             out.extend(c.args);
             out.extend(c.named_args.into_iter().map(|(_, v)| v));
@@ -584,6 +589,10 @@ impl PhpGenerator {
             }
             self.current_value = Value::Null;
             if freed {
+                // Destructors run from the frame that resumed the generator.
+                if let Some((_, line)) = vm.generator_caller.as_ref().filter(|c| c.1 > 0) {
+                    vm.current_line = *line;
+                }
                 vm.run_pending_destructors_pub();
             }
         }
