@@ -900,89 +900,128 @@ fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             / std::f64::consts::PI * 180.0,
     ))
 }
-fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let num_str = args.first().unwrap_or(&Value::Null).to_php_string();
-    let from_base = args.get(1).map(|v| v.to_long()).unwrap_or(10) as u32;
-    let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10) as u32;
-    if from_base < 2 || from_base > 36 {
-        let msg = "base_convert(): Argument #2 ($from_base) must be between 2 and 36 (inclusive)".to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
+/// Z_PARAM_STR for the base conversion functions: scalars convert, Stringable
+/// objects use __toString, anything else throws a TypeError.
+fn base_str_arg(vm: &mut Vm, val: &Value, func: &str, param: &str) -> Option<goro_core::string::PhpString> {
+    let v = val.deref();
+    match &v {
+        Value::Array(_) | Value::Resource(_) => {}
+        Value::Object(obj) => {
+            let lower: Vec<u8> = obj.borrow().class_name.to_ascii_lowercase();
+            let has = vm.classes.get(&lower).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+            if has {
+                return Some(vm.value_to_string(&v));
+            }
         }
-        vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        _ => return Some(v.to_php_string()),
     }
-    if to_base < 2 || to_base > 36 {
-        let msg = "base_convert(): Argument #3 ($to_base) must be between 2 and 36 (inclusive)".to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
-        }
-        vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
-    }
-    let input = num_str.to_string_lossy().to_lowercase();
-    // Strip known prefixes silently (0b, 0o, 0x, 0B, 0O, 0X)
-    let input = if input.starts_with("0b") && from_base == 2 {
-        input[2..].to_string()
-    } else if input.starts_with("0o") && from_base == 8 {
-        input[2..].to_string()
-    } else if input.starts_with("0x") && from_base == 16 {
-        input[2..].to_string()
-    } else {
-        input
-    };
-    // Strip invalid characters for the given base, emit deprecation if any were removed
-    let mut cleaned = String::new();
-    let mut had_invalid = false;
-    for c in input.chars() {
-        let digit_val = match c {
-            '0'..='9' => c as u32 - '0' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 10,
-            _ => from_base, // invalid
-        };
-        if digit_val < from_base {
-            cleaned.push(c);
-        } else {
-            had_invalid = true;
-        }
-    }
-    if had_invalid {
-        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
-    }
-    if cleaned.is_empty() {
-        return Ok(Value::String(goro_core::string::PhpString::from_string("0".to_string())));
-    }
-    // Parse cleaned string in from_base, convert to to_base
-    // Use u128 for larger range
-    let mut val: u128 = 0;
-    for c in cleaned.chars() {
-        let digit_val = match c {
-            '0'..='9' => c as u32 - '0' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 10,
-            _ => 0,
-        };
-        val = val.wrapping_mul(from_base as u128).wrapping_add(digit_val as u128);
-    }
-    let result = int_to_base_u128(val, to_base);
-    Ok(Value::String(goro_core::string::PhpString::from_string(
-        result,
-    )))
+    let tn = Vm::value_type_name(&v);
+    throw_math_type_error(vm, format!("{}(): Argument #1 (${}) must be of type string, {} given", func, param, tn));
+    None
 }
 
-fn int_to_base_u128(mut val: u128, base: u32) -> String {
-    if val == 0 {
-        return "0".to_string();
+/// Port of _php_math_basetozval().
+fn php_basetozval(vm: &mut Vm, s: &[u8], base: u32) -> Value {
+    let mut st = 0usize;
+    let mut e = s.len();
+    let is_space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    while st < e && is_space(s[st]) { st += 1; }
+    while st < e && is_space(s[e - 1]) { e -= 1; }
+    if e - st >= 2 && s[st] == b'0' {
+        let c1 = s[st + 1];
+        if (base == 16 && (c1 == b'x' || c1 == b'X'))
+            || (base == 8 && (c1 == b'o' || c1 == b'O'))
+            || (base == 2 && (c1 == b'b' || c1 == b'B'))
+        {
+            st += 2;
+        }
     }
+    let cutoff = i64::MAX / base as i64;
+    let cutlim = i64::MAX % base as i64;
+    let mut num: i64 = 0;
+    let mut fnum: f64 = 0.0;
+    let mut float_mode = false;
+    let mut invalid = 0;
+    for &ch in &s[st..e] {
+        let c = match ch {
+            b'0'..=b'9' => (ch - b'0') as i64,
+            b'A'..=b'Z' => (ch - b'A' + 10) as i64,
+            b'a'..=b'z' => (ch - b'a' + 10) as i64,
+            _ => { invalid += 1; continue; }
+        };
+        if c >= base as i64 {
+            invalid += 1;
+            continue;
+        }
+        if !float_mode {
+            if num < cutoff || (num == cutoff && c <= cutlim) {
+                num = num * base as i64 + c;
+                continue;
+            }
+            fnum = num as f64;
+            float_mode = true;
+        }
+        fnum = fnum * base as f64 + c as f64;
+    }
+    if invalid > 0 {
+        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
+    }
+    if float_mode { Value::Double(fnum) } else { Value::Long(num) }
+}
+
+fn php_longtobase(value: i64, base: u32) -> String {
     let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut result = Vec::new();
-    while val > 0 {
-        result.push(digits[(val % base as u128) as usize]);
-        val /= base as u128;
+    let mut v = value as u64;
+    let mut out = Vec::new();
+    loop {
+        out.push(digits[(v % base as u64) as usize]);
+        v /= base as u64;
+        if v == 0 { break; }
     }
-    result.reverse();
-    String::from_utf8(result).unwrap_or_default()
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let num_str = match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "base_convert", "num") {
+        Some(s) => s,
+        None => return Ok(Value::Null),
+    };
+    let from_base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
+    let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10);
+    for (n, b, name) in [(2, from_base, "from_base"), (3, to_base, "to_base")] {
+        if !(2..=36).contains(&b) {
+            let msg = format!("base_convert(): Argument #{} (${}) must be between 2 and 36 (inclusive)", n, name);
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Ok(Value::Null);
+        }
+    }
+    let to_base = to_base as u32;
+    let v = php_basetozval(vm, num_str.as_bytes(), from_base as u32);
+    let result = match v {
+        Value::Double(f) => {
+            let mut fvalue = f.floor();
+            if fvalue.is_infinite() {
+                let msg = format!("An infinite value cannot be converted to base {}", to_base);
+                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+                return Ok(Value::Null);
+            }
+            let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+            let mut out = Vec::new();
+            loop {
+                out.push(digits[(fvalue % to_base as f64) as usize]);
+                fvalue /= to_base as f64;
+                if !(out.len() < 64 && fvalue.abs() >= 1.0) { break; }
+            }
+            out.reverse();
+            String::from_utf8(out).unwrap_or_default()
+        }
+        Value::Long(n) => php_longtobase(n, to_base),
+        _ => String::new(),
+    };
+    Ok(Value::String(goro_core::string::PhpString::from_string(result)))
 }
 
 fn int_to_base(mut val: u64, base: u32) -> String {
@@ -999,100 +1038,21 @@ fn int_to_base(mut val: u64, base: u32) -> String {
     String::from_utf8(result).unwrap_or_default()
 }
 fn bindec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let input = s.to_string_lossy();
-    // Strip 0b/0B prefix
-    let trimmed = input.trim();
-    let stripped = if trimmed.starts_with("0b") || trimmed.starts_with("0B") {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
-    Ok(parse_base_string_strip(vm, stripped, 2))
+    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "bindec", "binary_string") {
+        Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 2)),
+        None => Ok(Value::Null),
+    }
 }
 fn octdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let input = s.to_string_lossy();
-    // Strip 0o/0O prefix
-    let trimmed = input.trim();
-    let stripped = if trimmed.starts_with("0o") || trimmed.starts_with("0O") {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
-    Ok(parse_base_string_strip(vm, stripped, 8))
+    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "octdec", "octal_string") {
+        Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 8)),
+        None => Ok(Value::Null),
+    }
 }
 fn hexdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let input = s.to_string_lossy();
-    // Strip 0x/0X prefix
-    let trimmed = input.trim();
-    let stripped = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
-    Ok(parse_base_string_strip(vm, stripped, 16))
-}
-
-/// Parse a string in the given base, stripping invalid chars with deprecation warning
-fn parse_base_string_strip(vm: &mut Vm, s: &str, base: u32) -> Value {
-    let trimmed = s.trim();
-    // Strip invalid characters
-    let mut cleaned = String::new();
-    let mut had_invalid = false;
-    for c in trimmed.chars() {
-        let digit_val = match c {
-            '0'..='9' => c as u32 - '0' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 10,
-            'A'..='Z' => c as u32 - 'A' as u32 + 10,
-            _ => base, // invalid
-        };
-        if digit_val < base {
-            cleaned.push(c);
-        } else {
-            had_invalid = true;
-        }
-    }
-    if had_invalid {
-        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
-    }
-    if cleaned.is_empty() {
-        return Value::Long(0);
-    }
-    parse_base_string(&cleaned, base)
-}
-
-/// Parse a string in the given base, returning Long if it fits, Double otherwise
-fn parse_base_string(s: &str, base: u32) -> Value {
-    // Try parsing as unsigned first (PHP treats these as unsigned)
-    let trimmed = s.trim();
-    match u64::from_str_radix(trimmed, base) {
-        Ok(n) => {
-            if n <= i64::MAX as u64 {
-                Value::Long(n as i64)
-            } else {
-                Value::Double(n as f64)
-            }
-        }
-        Err(_) => {
-            // Too large for u64, compute as float
-            let mut result: f64 = 0.0;
-            let base_f = base as f64;
-            for c in trimmed.chars() {
-                let digit = match c {
-                    '0'..='9' => c as u32 - '0' as u32,
-                    'a'..='f' => c as u32 - 'a' as u32 + 10,
-                    'A'..='F' => c as u32 - 'A' as u32 + 10,
-                    _ => break,
-                };
-                if digit >= base {
-                    break;
-                }
-                result = result * base_f + digit as f64;
-            }
-            Value::Double(result)
-        }
+    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "hexdec", "hex_string") {
+        Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 16)),
+        None => Ok(Value::Null),
     }
 }
 fn decbin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
