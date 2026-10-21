@@ -1029,6 +1029,49 @@ impl Vm {
         Ok(())
     }
 
+    /// The scalar parameter coercion of zend_parse_parameters for
+    /// extensions that parse their arguments themselves: `mask` is a
+    /// combination of the T_* type bits, `v` a non-null value. Ok(Some) is
+    /// the accepted (possibly coerced) value, Ok(None) a type error, Err(())
+    /// an exception raised meanwhile (e.g. by __toString or an error
+    /// handler).
+    #[allow(clippy::result_unit_err)]
+    pub fn zpp_coerce_scalar(
+        &mut self,
+        mask: u16,
+        v: &Value,
+        strict: bool,
+        line: u32,
+    ) -> Result<Option<Value>, ()> {
+        let mut v = v.deref();
+        let vt = match &v {
+            Value::Undef | Value::Null => T_NULL,
+            Value::False => T_FALSE,
+            Value::True => T_TRUE,
+            Value::Long(_) => T_INT,
+            Value::Double(_) => T_FLOAT,
+            Value::String(_) => T_STRING,
+            Value::Array(_) => T_ARRAY,
+            _ => T_OBJECT,
+        };
+        if mask & vt != 0 {
+            return Ok(Some(v));
+        }
+        if strict {
+            if vt == T_INT && mask & T_FLOAT != 0 {
+                if let Value::Long(n) = v {
+                    return Ok(Some(Value::Double(n as f64)));
+                }
+            }
+            return Ok(None);
+        }
+        match self.zpp_weak_coerce(mask, &mut v, line) {
+            Ok(true) => Ok(Some(v)),
+            Ok(false) => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+
     /// Store a coerced argument (see zpp_check about `orig`).
     fn zpp_set_arg(
         &self,
