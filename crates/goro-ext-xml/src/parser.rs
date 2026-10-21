@@ -1205,6 +1205,20 @@ impl<'a, S: Sink> Parser<'a, S> {
     /// Current character (decoded). Returns (char, len); invalid UTF-8 is
     /// reported once and the byte is treated as Latin-1.
     fn cur_char(&mut self) -> (u32, usize) {
+        if self.cur() == b'\r' {
+            // 2.11 End-of-Line Handling (xmlCurrentChar skips the CR of
+            // a CR LF pair as a side effect)
+            if self.nxt(1) == b'\n' {
+                self.skip(1);
+            }
+            return (0xA, 1);
+        }
+        self.cur_char_raw()
+    }
+
+    /// The current character without end-of-line translation (no side
+    /// effect on the position).
+    fn cur_char_raw(&mut self) -> (u32, usize) {
         let c = self.cur();
         if c < 0x80 {
             if c == 0 && self.at_end() {
@@ -1347,13 +1361,13 @@ impl<'a, S: Sink> Parser<'a, S> {
 
     fn parse_name_generic(&mut self, nc: bool) -> Option<String> {
         let start = self.pos();
-        let (c, l) = self.cur_char();
+        let (c, l) = self.cur_char_raw();
         if l == 0 || !is_name_start_char(c) || (nc && c == b':' as u32) {
             return None;
         }
         self.skip(l);
         loop {
-            let (c, l) = self.cur_char();
+            let (c, l) = self.cur_char_raw();
             if l == 0 || !is_name_char(c) || (nc && c == b':' as u32) {
                 break;
             }
@@ -1390,7 +1404,7 @@ impl<'a, S: Sink> Parser<'a, S> {
     fn parse_nmtoken(&mut self) -> Option<String> {
         let start = self.pos();
         loop {
-            let (c, l) = self.cur_char();
+            let (c, l) = self.cur_char_raw();
             if l == 0 || !is_name_char(c) {
                 break;
             }
