@@ -20252,6 +20252,15 @@ impl Vm {
                                         }
                                         return Err(VmError { message: msg, line: op.line });
                                     }
+                                    if let Some((exc_class, err_msg)) = self.enum_backed_table_error(&class_part) {
+                                        let exc = self.create_exception(exc_class, &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: err_msg, line: op.line });
+                                    }
                                     // For string-backed enums, convert arg to string for comparison
                                     let lookup_arg = if bt.eq_ignore_ascii_case(b"string") && !matches!(arg, Value::String(_)) {
                                         Value::String(arg.to_php_string())
@@ -20306,6 +20315,15 @@ impl Vm {
                                             }
                                             return Err(VmError { message: msg, line: op.line });
                                         }
+                                    }
+                                    if let Some((exc_class, err_msg)) = self.enum_backed_table_error(&class_part) {
+                                        let exc = self.create_exception(exc_class, &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: err_msg, line: op.line });
                                     }
                                     // For string-backed enums, convert arg to string
                                     let lookup_arg = if class.enum_backing_type.as_ref()
@@ -26610,6 +26628,20 @@ impl Vm {
                                     } else {
                                         None
                                     };
+                                    let table_error = if type_check_info.is_some() {
+                                        self.enum_backed_table_error(&class_lower)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some((exc_class, err_msg)) = table_error {
+                                        let exc = self.create_exception(exc_class, &err_msg, op.line);
+                                        self.current_exception = Some(exc);
+                                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError { message: err_msg, line: op.line });
+                                    }
                                     let type_error = if let Some((bt, case_val)) = type_check_info {
                                         // Resolve deferred constants before type checking
                                         let resolved_val = self.resolve_deferred_value(&case_val);

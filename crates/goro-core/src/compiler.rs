@@ -5871,20 +5871,8 @@ impl Compiler {
                             } else {
                                 Value::Null
                             };
-                            // Check for duplicate backing values
-                            if enum_backing_type.is_some() {
-                                for (existing_name, existing_val) in &class.enum_cases {
-                                    if existing_val.identical(&backing_value) {
-                                        return Err(CompileError {
-                                            message: format!("Duplicate value in enum {} for cases {} and {}",
-                                                String::from_utf8_lossy(name),
-                                                String::from_utf8_lossy(existing_name),
-                                                String::from_utf8_lossy(case_name)),
-                                            line: stmt.span.line,
-                                        });
-                                    }
-                                }
-                            }
+                            // Duplicate backing values are reported lazily, when the
+                            // enum's backing table is first built (zend_enum_build_backed_enum_table).
                             // Validate backing type matches
                             if let Some(bt) = &enum_backing_type {
                                 if bt.eq_ignore_ascii_case(b"int") && !matches!(backing_value, Value::Long(_) | Value::Null) {

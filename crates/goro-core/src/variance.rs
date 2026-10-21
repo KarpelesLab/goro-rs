@@ -1223,3 +1223,31 @@ impl Vm {
         None
     }
 }
+
+impl Vm {
+    /// zend_enum_build_backed_enum_table: validates the (lazily evaluated)
+    /// backing values of a backed enum. Returns (exception class, message).
+    pub(crate) fn enum_backed_table_error(&mut self, class_lower: &[u8]) -> Option<(&'static [u8], String)> {
+        let class = self.classes.get(class_lower)?.clone();
+        let bt = class.enum_backing_type.clone()?;
+        let mut seen: Vec<(Vec<u8>, Value)> = Vec::new();
+        for (case_name, raw) in &class.enum_cases {
+            let v = self.resolve_deferred_value(raw);
+            let ok = if bt.eq_ignore_ascii_case(b"int") {
+                matches!(v, Value::Long(_))
+            } else {
+                matches!(v, Value::String(_))
+            };
+            if !ok {
+                return Some((b"TypeError", format!("Enum case type {} does not match enum backing type {}",
+                    v.type_name(), String::from_utf8_lossy(&bt))));
+            }
+            if let Some((prev, _)) = seen.iter().find(|(_, pv)| pv.identical(&v)) {
+                return Some((b"Error", format!("Duplicate value in enum {} for cases {} and {}",
+                    String::from_utf8_lossy(&class.name), String::from_utf8_lossy(prev), String::from_utf8_lossy(case_name))));
+            }
+            seen.push((case_name.clone(), v));
+        }
+        None
+    }
+}
