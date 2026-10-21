@@ -496,18 +496,28 @@ impl Serializer {
     }
 
     fn serialize_object(&mut self, vm: &mut Vm, val: &Value, obj_in: &Rc<RefCell<PhpObject>>) {
-        // Lazy objects are initialized before serialization.
+        // Lazy objects: an initialized proxy serializes its instance;
+        // otherwise the object is initialized first, unless the class has
+        // __serialize() (which runs on the lazy object) or the object was
+        // created with SKIP_INITIALIZATION_ON_SERIALIZE.
         let mut obj = obj_in.clone();
-        let is_lazy = matches!(
-            obj.borrow().get_property(b"__lazy_state"),
-            Value::String(ref s) if s.as_bytes() == b"ghost" || s.as_bytes() == b"proxy"
-        );
-        if is_lazy {
-            vm.maybe_run_lazy_init(&obj);
-            if vm.current_exception.is_some() {
-                return;
+        let (lazy_state, has_real, flags) = {
+            let ob = obj.borrow();
+            (ob.get_property(b"__lazy_state"), ob.has_property(b"__lazy_real"), ob.get_property(b"__lazy_flags").to_long())
+        };
+        if let Value::String(st) = &lazy_state {
+            if st.as_bytes() == b"proxy" && has_real {
+                obj = vm.proxy_redirect(&obj);
+            } else if st.as_bytes() == b"ghost" || st.as_bytes() == b"proxy" {
+                let cl = lower(&obj.borrow().class_name);
+                if !has_magic_serialize(vm, &cl) && flags & 8 == 0 {
+                    vm.maybe_run_lazy_init(&obj);
+                    if vm.current_exception.is_some() {
+                        return;
+                    }
+                    obj = vm.proxy_redirect(&obj);
+                }
             }
-            obj = vm.proxy_redirect(&obj);
         }
         let val = &Value::Object(obj.clone());
         let class_name = obj.borrow().class_name.clone();
