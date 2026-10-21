@@ -2446,6 +2446,27 @@ impl Compiler {
                     if let Some(default_expr) = &param.default {
                         // Emit: if param is Undef, set to default
                         let default_val = func_compiler.compile_expr(default_expr)?;
+                        if !matches!(default_expr.kind, ExprKind::Null) {
+                            let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
+                            if let Some(Some(pti)) = func_compiler.op_array.param_types.get(pcv).cloned() {
+                                match Self::check_literal_default(&pti.param_type, default_expr) {
+                                    Err((tn, _)) => {
+                                        return Err(CompileError {
+                                            message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
+                                                String::from_utf8_lossy(&param.name),
+                                                crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
+                                            line: default_expr.span.line,
+                                        });
+                                    }
+                                    Ok(Some(widened)) => {
+                                        if let OperandType::Const(li) = default_val {
+                                            func_compiler.op_array.literals[li as usize] = widened;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                }
+                            }
+                        }
                         // Check if CV is Undef (null check + type check)
                         let null_idx = func_compiler.op_array.add_literal(Value::Undef);
                         let check_tmp = func_compiler.op_array.alloc_temp();
@@ -3489,6 +3510,15 @@ impl Compiler {
                             if let (Some(hint), Some(expr)) = (type_hint, default) {
                                 if matches!(expr.kind, ExprKind::Null) {
                                     // Check if the type includes null
+                                    if let TypeHint::Intersection(_) = hint {
+                                        let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                        let tstr = crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pt), None);
+                                        return Err(CompileError {
+                                            message: format!("Cannot use null as default value for property {}::${} of type {}",
+                                                String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(prop_name), tstr),
+                                            line: stmt.span.line,
+                                        });
+                                    }
                                     let type_allows_null = match hint {
                                         TypeHint::Nullable(_) => true,
                                         TypeHint::Simple(n) => {
@@ -3543,6 +3573,23 @@ impl Compiler {
                                             line: stmt.span.line,
                                         });
                                     }
+                                }
+                            }
+                            // zend_is_valid_default_value for literal defaults of typed properties
+                            let mut widened_default: Option<Value> = None;
+                            if let (Some(hint), Some(expr)) = (type_hint, default) {
+                                let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                match Self::check_literal_default(&pt, expr) {
+                                    Err((_, vn)) => {
+                                        let tstr = crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pt), None);
+                                        return Err(CompileError {
+                                            message: format!("Cannot use {} as default value for property {}::${} of type {}",
+                                                vn, String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(prop_name), tstr),
+                                            line: stmt.span.line,
+                                        });
+                                    }
+                                    Ok(Some(v)) => widened_default = Some(v),
+                                    Ok(None) => {}
                                 }
                             }
                             let default_val = if let Some(expr) = default {
@@ -3907,6 +3954,7 @@ impl Compiler {
                                     Value::Null
                                 }
                             };
+                            let default_val = widened_default.unwrap_or(default_val);
                             let vis = match visibility {
                                 Visibility::Public => ObjVisibility::Public,
                                 Visibility::Protected => ObjVisibility::Protected,
@@ -4931,6 +4979,27 @@ impl Compiler {
                                     if let Some(default_expr) = &param.default {
                                         let default_val =
                                             method_compiler.compile_expr(default_expr)?;
+                                        if !matches!(default_expr.kind, ExprKind::Null) {
+                                            let pcv = method_compiler.op_array.get_or_create_cv(&param.name) as usize;
+                                            if let Some(Some(pti)) = method_compiler.op_array.param_types.get(pcv).cloned() {
+                                                match Self::check_literal_default(&pti.param_type, default_expr) {
+                                                    Err((tn, _)) => {
+                                                        return Err(CompileError {
+                                                            message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
+                                                                String::from_utf8_lossy(&param.name),
+                                                                crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
+                                                            line: default_expr.span.line,
+                                                        });
+                                                    }
+                                                    Ok(Some(widened)) => {
+                                                        if let OperandType::Const(li) = default_val {
+                                                            method_compiler.op_array.literals[li as usize] = widened;
+                                                        }
+                                                    }
+                                                    Ok(None) => {}
+                                                }
+                                            }
+                                        }
                                         let undef_idx =
                                             method_compiler.op_array.add_literal(Value::Undef);
                                         let check_tmp = method_compiler.op_array.alloc_temp();
@@ -5531,6 +5600,31 @@ impl Compiler {
                                     _ => Value::Null,
                                 }
                             };
+                            let mut val = val;
+                            if let Some(hint) = const_type_hint.as_ref() {
+                                use crate::vm::variance::{TypeView, T_ANY, T_CALLABLE, T_NEVER, T_VOID};
+                                let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                let tv = TypeView::from_param_type(&pt);
+                                let tstr = crate::vm::variance::type_to_string(&tv, None);
+                                if tv.mask != T_ANY && tv.mask & (T_CALLABLE | T_VOID | T_NEVER) != 0 {
+                                    return Err(CompileError {
+                                        message: format!("Class constant {}::{} cannot have type {}",
+                                            String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(const_name), tstr),
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                match Self::check_literal_default(&pt, const_expr) {
+                                    Err((tn, _)) => {
+                                        return Err(CompileError {
+                                            message: format!("Cannot use {} as value for class constant {}::{} of type {}",
+                                                tn, String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(const_name), tstr),
+                                            line: stmt.span.line,
+                                        });
+                                    }
+                                    Ok(Some(v)) => val = v,
+                                    Ok(None) => {}
+                                }
+                            }
                             class.constants.insert(const_name.clone(), val);
                             // Store constant metadata (visibility, final)
                             let const_vis = match const_visibility {
@@ -9422,6 +9516,27 @@ impl Compiler {
                     // Compile default value
                     if let Some(default_expr) = &param.default {
                         let default_val = closure_compiler.compile_expr(default_expr)?;
+                        if !matches!(default_expr.kind, ExprKind::Null) {
+                            let pcv = closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
+                            if let Some(Some(pti)) = closure_compiler.op_array.param_types.get(pcv).cloned() {
+                                match Self::check_literal_default(&pti.param_type, default_expr) {
+                                    Err((tn, _)) => {
+                                        return Err(CompileError {
+                                            message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
+                                                String::from_utf8_lossy(&param.name),
+                                                crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
+                                            line: default_expr.span.line,
+                                        });
+                                    }
+                                    Ok(Some(widened)) => {
+                                        if let OperandType::Const(li) = default_val {
+                                            closure_compiler.op_array.literals[li as usize] = widened;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                }
+                            }
+                        }
                         let undef_idx = closure_compiler.op_array.add_literal(Value::Undef);
                         let check_tmp = closure_compiler.op_array.alloc_temp();
                         closure_compiler.op_array.emit(Op {
@@ -11313,6 +11428,40 @@ impl Compiler {
             | E::Spread(_) | E::Pipe { .. } | E::DynamicClassConstAccess { .. }
             | E::ThrowExpr(_) | E::Suppress(_) | E::FirstClassCallable(_) => false,
         }
+    }
+
+    /// zend_is_valid_default_value for a compile-time literal default value.
+    /// Ok(None): valid or not a literal; Ok(Some(v)): valid once widened to
+    /// float (use `v`); Err((type name, value name)) when invalid.
+    fn check_literal_default(pt: &ParamType, e: &Expr) -> Result<Option<Value>, (&'static str, &'static str)> {
+        use crate::vm::variance::{TypeView, T_ANY, T_ARRAY, T_DOUBLE, T_FALSE, T_LONG, T_NULL, T_STRING, T_TRUE};
+        let v = match Self::eval_const_expr(e) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let tv = TypeView::from_param_type(pt);
+        if tv.mask & T_ANY == T_ANY {
+            return Ok(None);
+        }
+        let (bit, tn, vn) = match &v {
+            Value::Null => (T_NULL, "null", "null"),
+            Value::False => (T_FALSE, "bool", "false"),
+            Value::True => (T_TRUE, "bool", "true"),
+            Value::Long(_) => (T_LONG, "int", "int"),
+            Value::Double(_) => (T_DOUBLE, "float", "float"),
+            Value::String(_) => (T_STRING, "string", "string"),
+            Value::Array(_) => (T_ARRAY, "array", "array"),
+            _ => return Ok(None),
+        };
+        if tv.mask & bit != 0 {
+            return Ok(None);
+        }
+        if let Value::Long(n) = v {
+            if tv.mask & T_DOUBLE != 0 {
+                return Ok(Some(Value::Double(n as f64)));
+            }
+        }
+        Err((tn, vn))
     }
 
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
