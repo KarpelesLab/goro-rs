@@ -100,7 +100,9 @@ fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Val
         return None;
     }
     let inner = a.try_borrow().ok()?;
-    Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(inner.clone()))))
+    Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+        inner.clone(),
+    ))))
 }
 
 impl Clone for PhpArray {
@@ -120,24 +122,34 @@ impl Clone for PhpArray {
             self.entries.clone()
         } else {
             CLONE_STACK.with(|st| st.borrow_mut().push(self_ptr));
-            let e = self.entries.iter().map(|(k, v)| {
-                let v2 = match v {
-                    Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
-                        let inner = r.borrow();
-                        match &*inner {
-                            Value::Array(a) if std::ptr::eq(a.as_ptr() as *const PhpArray, self_ptr) => v.clone(),
-                            Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
-                            other => other.clone(),
+            let e = self
+                .entries
+                .iter()
+                .map(|(k, v)| {
+                    let v2 = match v {
+                        Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
+                            let inner = r.borrow();
+                            match &*inner {
+                                Value::Array(a)
+                                    if std::ptr::eq(a.as_ptr() as *const PhpArray, self_ptr) =>
+                                {
+                                    v.clone()
+                                }
+                                Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
+                                other => other.clone(),
+                            }
                         }
-                    }
-                    // Nested arrays are values: give the copy its own storage
-                    // (goro copies eagerly instead of refcounted copy-on-write).
-                    Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
-                    _ => v.clone(),
-                };
-                (k.clone(), v2)
-            }).collect();
-            CLONE_STACK.with(|st| { st.borrow_mut().pop(); });
+                        // Nested arrays are values: give the copy its own storage
+                        // (goro copies eagerly instead of refcounted copy-on-write).
+                        Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
+                        _ => v.clone(),
+                    };
+                    (k.clone(), v2)
+                })
+                .collect();
+            CLONE_STACK.with(|st| {
+                st.borrow_mut().pop();
+            });
             e
         };
         Self {
@@ -194,7 +206,10 @@ impl PhpArray {
     }
 
     fn rebuild_index(&mut self) {
-        if self.packed || self.entries.len() < INDEX_THRESHOLD || self.entries.len() >= u32::MAX as usize / 4 {
+        if self.packed
+            || self.entries.len() < INDEX_THRESHOLD
+            || self.entries.len() >= u32::MAX as usize / 4
+        {
             self.index = Vec::new();
             return;
         }
@@ -232,7 +247,11 @@ impl PhpArray {
     }
 
     fn recompute_packed(&mut self) {
-        self.packed = self.entries.iter().enumerate().all(|(i, (k, _))| matches!(k, ArrayKey::Int(n) if *n == i as i64));
+        self.packed = self
+            .entries
+            .iter()
+            .enumerate()
+            .all(|(i, (k, _))| matches!(k, ArrayKey::Int(n) if *n == i as i64));
     }
 
     #[inline]
@@ -260,7 +279,9 @@ impl PhpArray {
                 i = (i + 1) & mask;
             }
         }
-        self.entries.iter().position(|(k, _)| matches!(k, ArrayKey::Int(n) if *n == key))
+        self.entries
+            .iter()
+            .position(|(k, _)| matches!(k, ArrayKey::Int(n) if *n == key))
     }
 
     #[inline]
@@ -285,7 +306,9 @@ impl PhpArray {
                 i = (i + 1) & mask;
             }
         }
-        self.entries.iter().position(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes() == key))
+        self.entries
+            .iter()
+            .position(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes() == key))
     }
 
     #[inline]
@@ -350,7 +373,11 @@ impl PhpArray {
     /// Silently ignores if memory limit is exceeded. Ignores key conflicts.
     pub fn push(&mut self, value: Value) {
         // nNextFreeElement == ZEND_LONG_MIN means no integer key used yet
-        let key = if self.next_int_key == i64::MIN { 0 } else { self.next_int_key };
+        let key = if self.next_int_key == i64::MIN {
+            0
+        } else {
+            self.next_int_key
+        };
         if !memory_alloc(Self::ENTRY_SIZE) {
             return; // Memory limit exceeded
         }
@@ -363,7 +390,11 @@ impl PhpArray {
     /// Returns Err("Cannot add element...") if the key is already occupied (PHP_INT_MAX overflow).
     pub fn try_push(&mut self, value: Value) -> Result<(), &'static str> {
         // Check if next_int_key is already occupied (happens after PHP_INT_MAX was used)
-        let key = if self.next_int_key == i64::MIN { 0 } else { self.next_int_key };
+        let key = if self.next_int_key == i64::MIN {
+            0
+        } else {
+            self.next_int_key
+        };
         let already_occupied = self.find_int(key).is_some();
         if already_occupied {
             return Err("Cannot add element to the array as the next element is already occupied");

@@ -1,3 +1,4 @@
+pub mod arrdiff;
 pub mod basedir_guard;
 pub mod crypt;
 mod crypt_blowfish_tables;
@@ -5,9 +6,9 @@ pub mod csv;
 pub mod filters;
 pub mod highlight;
 pub mod html;
-pub mod ini_parser;
-pub mod image;
 pub(crate) mod html_tables;
+pub mod image;
+pub mod ini_parser;
 pub mod math;
 pub mod misc;
 pub mod ob;
@@ -20,7 +21,6 @@ pub mod strings;
 pub mod type_funcs;
 pub mod url_scanner;
 pub mod zsort;
-pub mod arrdiff;
 
 // Alias for code referencing `stream_filters` (the gitignore unfortunately
 // matches anything starting with "stream").
@@ -90,7 +90,14 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"similar_text", b"string1", b"string2", b"percent");
     params!(b"soundex", b"string");
     params!(b"metaphone", b"string", b"max_phonemes");
-    params!(b"levenshtein", b"string1", b"string2", b"insertion_cost", b"replacement_cost", b"deletion_cost");
+    params!(
+        b"levenshtein",
+        b"string1",
+        b"string2",
+        b"insertion_cost",
+        b"replacement_cost",
+        b"deletion_cost"
+    );
     params!(b"str_contains", b"haystack", b"needle");
     params!(b"str_starts_with", b"haystack", b"prefix");
     params!(b"str_ends_with", b"haystack", b"suffix");
@@ -110,30 +117,77 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"implode", b"separator", b"array");
     params!(b"sprintf", b"format", b"values");
     params!(b"printf", b"format", b"values");
-    params!(b"substr_count", b"haystack", b"needle", b"offset", b"length");
-    params!(b"substr_replace", b"string", b"replace", b"offset", b"length");
-    params!(b"str_getcsv", b"string", b"separator", b"enclosure", b"escape");
+    params!(
+        b"substr_count",
+        b"haystack",
+        b"needle",
+        b"offset",
+        b"length"
+    );
+    params!(
+        b"substr_replace",
+        b"string",
+        b"replace",
+        b"offset",
+        b"length"
+    );
+    params!(
+        b"str_getcsv",
+        b"string",
+        b"separator",
+        b"enclosure",
+        b"escape"
+    );
     params!(b"nl2br", b"string", b"use_xhtml");
     params!(b"chunk_split", b"string", b"length", b"separator");
-    params!(b"wordwrap", b"string", b"width", b"break_str", b"cut_long_words");
+    params!(
+        b"wordwrap",
+        b"string",
+        b"width",
+        b"break_str",
+        b"cut_long_words"
+    );
     params!(b"ucfirst", b"string");
     params!(b"lcfirst", b"string");
     params!(b"ucwords", b"string", b"separators");
     params!(b"md5", b"string", b"binary");
     params!(b"sha1", b"string", b"binary");
     params!(b"crc32", b"string");
-    params!(b"number_format", b"num", b"decimals", b"decimal_separator", b"thousands_separator");
+    params!(
+        b"number_format",
+        b"num",
+        b"decimals",
+        b"decimal_separator",
+        b"thousands_separator"
+    );
     params!(b"ord", b"character");
     params!(b"chr", b"codepoint");
     params!(b"hex2bin", b"string");
     params!(b"bin2hex", b"string");
     params!(b"base64_encode", b"string");
     params!(b"base64_decode", b"string", b"strict");
-    params!(b"htmlspecialchars", b"string", b"flags", b"encoding", b"double_encode");
-    params!(b"htmlentities", b"string", b"flags", b"encoding", b"double_encode");
+    params!(
+        b"htmlspecialchars",
+        b"string",
+        b"flags",
+        b"encoding",
+        b"double_encode"
+    );
+    params!(
+        b"htmlentities",
+        b"string",
+        b"flags",
+        b"encoding",
+        b"double_encode"
+    );
     params!(b"htmlspecialchars_decode", b"string", b"flags");
     params!(b"html_entity_decode", b"string", b"flags", b"encoding");
-    params!(b"get_html_translation_table", b"table", b"flags", b"encoding");
+    params!(
+        b"get_html_translation_table",
+        b"table",
+        b"flags",
+        b"encoding"
+    );
     params!(b"strip_tags", b"string", b"allowed_tags");
     params!(b"addslashes", b"string");
     params!(b"stripslashes", b"string");
@@ -145,7 +199,13 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"rawurldecode", b"string");
     params!(b"urlencode", b"string");
     params!(b"urldecode", b"string");
-    params!(b"http_build_query", b"data", b"numeric_prefix", b"arg_separator", b"encoding_type");
+    params!(
+        b"http_build_query",
+        b"data",
+        b"numeric_prefix",
+        b"arg_separator",
+        b"encoding_type"
+    );
     params!(b"convert_uuencode", b"string");
     params!(b"convert_uudecode", b"string");
     params!(b"str_rot13", b"string");
@@ -176,8 +236,20 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"array_unique", b"array", b"flags");
     params!(b"array_flip", b"array");
     params!(b"array_reverse", b"array", b"preserve_keys");
-    params!(b"array_slice", b"array", b"offset", b"length", b"preserve_keys");
-    params!(b"array_splice", b"array", b"offset", b"length", b"replacement");
+    params!(
+        b"array_slice",
+        b"array",
+        b"offset",
+        b"length",
+        b"preserve_keys"
+    );
+    params!(
+        b"array_splice",
+        b"array",
+        b"offset",
+        b"length",
+        b"replacement"
+    );
     params!(b"array_search", b"needle", b"haystack", b"strict");
     params!(b"array_key_exists", b"key", b"array");
     params!(b"array_pop", b"array");
@@ -280,7 +352,12 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"is_numeric", b"value");
     params!(b"is_callable", b"value", b"syntax_only", b"callable_name");
     params!(b"is_a", b"object", b"class_name", b"allow_string");
-    params!(b"is_subclass_of", b"object_or_class", b"class_name", b"allow_string");
+    params!(
+        b"is_subclass_of",
+        b"object_or_class",
+        b"class_name",
+        b"allow_string"
+    );
     params!(b"isset", b"var");
     params!(b"unset", b"var");
     params!(b"empty", b"var");
@@ -329,12 +406,41 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"ob_flush");
 
     // PCRE functions
-    params!(b"preg_match", b"pattern", b"subject", b"matches", b"flags", b"offset");
-    params!(b"preg_match_all", b"pattern", b"subject", b"matches", b"flags", b"offset");
-    params!(b"preg_replace", b"pattern", b"replacement", b"subject", b"limit", b"count");
+    params!(
+        b"preg_match",
+        b"pattern",
+        b"subject",
+        b"matches",
+        b"flags",
+        b"offset"
+    );
+    params!(
+        b"preg_match_all",
+        b"pattern",
+        b"subject",
+        b"matches",
+        b"flags",
+        b"offset"
+    );
+    params!(
+        b"preg_replace",
+        b"pattern",
+        b"replacement",
+        b"subject",
+        b"limit",
+        b"count"
+    );
     params!(b"preg_split", b"pattern", b"subject", b"limit", b"flags");
     params!(b"preg_quote", b"str", b"delimiter");
-    params!(b"preg_replace_callback", b"pattern", b"callback", b"subject", b"limit", b"count", b"flags");
+    params!(
+        b"preg_replace_callback",
+        b"pattern",
+        b"callback",
+        b"subject",
+        b"limit",
+        b"count",
+        b"flags"
+    );
 
     // JSON
     params!(b"json_encode", b"value", b"flags", b"depth");
@@ -347,12 +453,27 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"microtime", b"as_float");
     params!(b"date", b"format", b"timestamp");
     params!(b"strtotime", b"datetime", b"baseTimestamp");
-    params!(b"mktime", b"hour", b"minute", b"second", b"month", b"day", b"year");
+    params!(
+        b"mktime", b"hour", b"minute", b"second", b"month", b"day", b"year"
+    );
     params!(b"gmdate", b"format", b"timestamp");
 
     // File functions
-    params!(b"file_get_contents", b"filename", b"use_include_path", b"context", b"offset", b"length");
-    params!(b"file_put_contents", b"filename", b"data", b"flags", b"context");
+    params!(
+        b"file_get_contents",
+        b"filename",
+        b"use_include_path",
+        b"context",
+        b"offset",
+        b"length"
+    );
+    params!(
+        b"file_put_contents",
+        b"filename",
+        b"data",
+        b"flags",
+        b"context"
+    );
     params!(b"file_exists", b"filename");
     params!(b"realpath", b"path");
     params!(b"dirname", b"path", b"levels");
@@ -371,9 +492,20 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"stream_supports_lock", b"stream");
     params!(b"stream_get_meta_data", b"stream");
     params!(b"stream_set_blocking", b"stream", b"enable");
-    params!(b"stream_set_timeout", b"stream", b"seconds", b"microseconds");
+    params!(
+        b"stream_set_timeout",
+        b"stream",
+        b"seconds",
+        b"microseconds"
+    );
     params!(b"stream_context_create", b"options", b"params");
-    params!(b"stream_copy_to_stream", b"from", b"to", b"length", b"offset");
+    params!(
+        b"stream_copy_to_stream",
+        b"from",
+        b"to",
+        b"length",
+        b"offset"
+    );
     params!(b"stream_get_contents", b"stream", b"length", b"offset");
 
     // Misc
@@ -399,10 +531,22 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"serialize", b"value");
     params!(b"unserialize", b"data", b"options");
     params!(b"error_reporting", b"error_level");
-    params!(b"error_log", b"message", b"message_type", b"destination", b"additional_headers");
+    params!(
+        b"error_log",
+        b"message",
+        b"message_type",
+        b"destination",
+        b"additional_headers"
+    );
 
     // File functions (additional)
-    params!(b"fopen", b"filename", b"mode", b"use_include_path", b"context");
+    params!(
+        b"fopen",
+        b"filename",
+        b"mode",
+        b"use_include_path",
+        b"context"
+    );
     params!(b"fclose", b"stream");
     params!(b"fread", b"stream", b"length");
     params!(b"fwrite", b"stream", b"data", b"length");
@@ -416,7 +560,13 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"unlink", b"filename", b"context");
     params!(b"rename", b"from", b"to", b"context");
     params!(b"copy", b"from", b"to", b"context");
-    params!(b"mkdir", b"directory", b"permissions", b"recursive", b"context");
+    params!(
+        b"mkdir",
+        b"directory",
+        b"permissions",
+        b"recursive",
+        b"context"
+    );
     params!(b"rmdir", b"directory", b"context");
     params!(b"glob", b"pattern", b"flags");
     params!(b"scandir", b"directory", b"sorting_order", b"context");

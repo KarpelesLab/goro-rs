@@ -132,10 +132,7 @@ fn handle_connection(
         .peer_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string());
-    let peer_port = stream
-        .peer_addr()
-        .map(|a| a.port())
-        .unwrap_or(0);
+    let peer_port = stream.peer_addr().map(|a| a.port()).unwrap_or(0);
 
     // Read the full request into a buffer, then split into request line,
     // headers, and body. Avoid try_clone(), which has been observed to
@@ -169,7 +166,13 @@ fn handle_connection(
         }
         // Safety: cap request size to avoid OOM
         if request_data.len() > 64 * 1024 {
-            return send_response(&mut stream, 413, "Payload Too Large", &[], b"Headers too large");
+            return send_response(
+                &mut stream,
+                413,
+                "Payload Too Large",
+                &[],
+                b"Headers too large",
+            );
         }
     }
     let hdr_end = headers_end.unwrap();
@@ -212,7 +215,10 @@ fn handle_connection(
 
     // Body (if Content-Length present, read remaining)
     let mut body: Vec<u8> = request_data[hdr_end..].to_vec();
-    if let Some(cl) = headers.get("content-length").and_then(|s| s.parse::<usize>().ok()) {
+    if let Some(cl) = headers
+        .get("content-length")
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         while body.len() < cl {
             let need = cl - body.len();
             let mut chunk = vec![0u8; need.min(4096)];
@@ -254,7 +260,13 @@ fn handle_connection(
         if decoded_path != "/" {
             script_name = decoded_path.clone();
         } else {
-            script_name = format!("/{}", router_path.file_name().unwrap_or_default().to_string_lossy());
+            script_name = format!(
+                "/{}",
+                router_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
         }
     } else {
         // Try to resolve URI to a real file, splitting the URI into
@@ -339,7 +351,11 @@ fn handle_connection(
                         .parent()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|| "/".to_string());
-                    let dir = if script_dir.is_empty() { "/".to_string() } else { script_dir };
+                    let dir = if script_dir.is_empty() {
+                        "/".to_string()
+                    } else {
+                        script_dir
+                    };
                     let dir_trim = dir.trim_end_matches('/');
                     if let Some(suffix) = decoded_path.strip_prefix(dir_trim) {
                         path_info = suffix.to_string();
@@ -404,7 +420,11 @@ fn handle_connection(
     );
 
     // PHP's cli-server emits HTTP/1.0 for fatal-error (500) responses.
-    let resp_proto = if status == 500 { "HTTP/1.0" } else { protocol.as_str() };
+    let resp_proto = if status == 500 {
+        "HTTP/1.0"
+    } else {
+        protocol.as_str()
+    };
     send_response_with_host_proto(
         &mut stream,
         status,
@@ -485,12 +505,24 @@ fn send_response_with_host_proto(
     let mut have_xpb = false;
     let mut have_conn = false;
     for (k, _v) in headers {
-        if k.eq_ignore_ascii_case(b"Content-Type") { have_ct = true; }
-        if k.eq_ignore_ascii_case(b"Content-Length") { have_cl = true; }
-        if k.eq_ignore_ascii_case(b"Host") { have_host = true; }
-        if k.eq_ignore_ascii_case(b"Date") { have_date = true; }
-        if k.eq_ignore_ascii_case(b"X-Powered-By") { have_xpb = true; }
-        if k.eq_ignore_ascii_case(b"Connection") { have_conn = true; }
+        if k.eq_ignore_ascii_case(b"Content-Type") {
+            have_ct = true;
+        }
+        if k.eq_ignore_ascii_case(b"Content-Length") {
+            have_cl = true;
+        }
+        if k.eq_ignore_ascii_case(b"Host") {
+            have_host = true;
+        }
+        if k.eq_ignore_ascii_case(b"Date") {
+            have_date = true;
+        }
+        if k.eq_ignore_ascii_case(b"X-Powered-By") {
+            have_xpb = true;
+        }
+        if k.eq_ignore_ascii_case(b"Connection") {
+            have_conn = true;
+        }
     }
     if !have_host && !host.is_empty() {
         // PHP cli-server emits the request's Host header value back. Defer
@@ -543,7 +575,13 @@ fn http_date() -> String {
     ];
     format!(
         "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        days[wday as usize], day, months[(month - 1) as usize], year, hour, min, sec
+        days[wday as usize],
+        day,
+        months[(month - 1) as usize],
+        year,
+        hour,
+        min,
+        sec
     )
 }
 
@@ -561,14 +599,23 @@ fn gm_time(secs: i64) -> (i32, i32, i32, i32, i32, i32, i32) {
     let mut year = 1970i32;
     while days >= 365 {
         let dy = if is_leap(year) { 366 } else { 365 };
-        if days >= dy { days -= dy; year += 1; } else { break; }
+        if days >= dy {
+            days -= dy;
+            year += 1;
+        } else {
+            break;
+        }
     }
     let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut m = 0i32;
     while m < 12 {
         let mut dm = month_days[m as usize] as i64;
-        if m == 1 && is_leap(year) { dm = 29; }
-        if days < dm { break; }
+        if m == 1 && is_leap(year) {
+            dm = 29;
+        }
+        if days < dm {
+            break;
+        }
         days -= dm;
         m += 1;
     }
@@ -702,10 +749,22 @@ fn execute_php_request(
     } else {
         format!("{}:{}", host, port)
     };
-    set_kv(&mut server, b"DOCUMENT_ROOT", doc_root.to_string_lossy().as_bytes());
+    set_kv(
+        &mut server,
+        b"DOCUMENT_ROOT",
+        doc_root.to_string_lossy().as_bytes(),
+    );
     set_kv(&mut server, b"REMOTE_ADDR", remote_addr.as_bytes());
-    set_kv(&mut server, b"REMOTE_PORT", remote_port.to_string().as_bytes());
-    set_kv(&mut server, b"SERVER_SOFTWARE", b"PHP/8.5.4 (Development Server)");
+    set_kv(
+        &mut server,
+        b"REMOTE_PORT",
+        remote_port.to_string().as_bytes(),
+    );
+    set_kv(
+        &mut server,
+        b"SERVER_SOFTWARE",
+        b"PHP/8.5.4 (Development Server)",
+    );
     set_kv(&mut server, b"SERVER_PROTOCOL", protocol.as_bytes());
     set_kv(&mut server, b"SERVER_NAME", host.as_bytes());
     set_kv(&mut server, b"SERVER_PORT", port.to_string().as_bytes());
@@ -732,7 +791,11 @@ fn execute_php_request(
     set_kv(&mut server, b"QUERY_STRING", query.as_bytes());
     set_kv(&mut server, b"HTTP_HOST", host_with_port.as_bytes());
     set_kv(&mut server, b"GATEWAY_INTERFACE", b"CGI/1.1");
-    set_kv(&mut server, b"REQUEST_TIME", &epoch_secs().to_string().into_bytes());
+    set_kv(
+        &mut server,
+        b"REQUEST_TIME",
+        &epoch_secs().to_string().into_bytes(),
+    );
     set_kv_float(&mut server, b"REQUEST_TIME_FLOAT", epoch_secs_f64());
 
     // HTTP_* from headers - iterate in insertion order
@@ -750,7 +813,10 @@ fn execute_php_request(
     }
     // Parse Authorization: Basic <base64> into PHP_AUTH_USER / PHP_AUTH_PW
     if let Some(auth) = headers.get("authorization") {
-        if let Some(b64) = auth.strip_prefix("Basic ").or_else(|| auth.strip_prefix("basic ")) {
+        if let Some(b64) = auth
+            .strip_prefix("Basic ")
+            .or_else(|| auth.strip_prefix("basic "))
+        {
             if let Some(decoded) = base64_decode(b64.trim()) {
                 if let Ok(s) = std::str::from_utf8(&decoded) {
                     if let Some(colon) = s.find(':') {
@@ -759,22 +825,34 @@ fn execute_php_request(
                     }
                 }
             }
-        } else if let Some(rest) = auth.strip_prefix("Digest ").or_else(|| auth.strip_prefix("digest ")) {
+        } else if let Some(rest) = auth
+            .strip_prefix("Digest ")
+            .or_else(|| auth.strip_prefix("digest "))
+        {
             set_kv(&mut server, b"PHP_AUTH_DIGEST", rest.as_bytes());
         }
     }
-    vm.set_global(b"_SERVER".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(server))));
+    vm.set_global(
+        b"_SERVER".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(server))),
+    );
 
     // Build $_GET
     let get_arr = parse_query_string(query);
-    vm.set_global(b"_GET".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(get_arr.clone()))));
+    vm.set_global(
+        b"_GET".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(get_arr.clone()))),
+    );
 
     // Build $_POST and $_FILES
     let mut post_arr = PhpArray::new();
     let mut files_arr = PhpArray::new();
     let ct = headers.get("content-type").cloned().unwrap_or_default();
     if method == "POST" {
-        if ct.to_ascii_lowercase().starts_with("application/x-www-form-urlencoded") {
+        if ct
+            .to_ascii_lowercase()
+            .starts_with("application/x-www-form-urlencoded")
+        {
             let body_str = String::from_utf8_lossy(body).to_string();
             post_arr = parse_query_string(&body_str);
         } else if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
@@ -786,8 +864,14 @@ fn execute_php_request(
             }
         }
     }
-    vm.set_global(b"_POST".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(post_arr.clone()))));
-    vm.set_global(b"_FILES".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(files_arr))));
+    vm.set_global(
+        b"_POST".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(post_arr.clone()))),
+    );
+    vm.set_global(
+        b"_FILES".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(files_arr))),
+    );
 
     // Build $_COOKIE
     let mut cookie_arr = PhpArray::new();
@@ -804,7 +888,12 @@ fn execute_php_request(
             }
         }
     }
-    vm.set_global(b"_COOKIE".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(cookie_arr.clone()))));
+    vm.set_global(
+        b"_COOKIE".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+            cookie_arr.clone(),
+        ))),
+    );
 
     // Build $_REQUEST = GET + POST + COOKIE (in that order)
     let mut request_arr = PhpArray::new();
@@ -817,7 +906,10 @@ fn execute_php_request(
     for (k, v) in cookie_arr.iter() {
         request_arr.set(k.clone(), v.clone());
     }
-    vm.set_global(b"_REQUEST".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(request_arr))));
+    vm.set_global(
+        b"_REQUEST".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(request_arr))),
+    );
 
     // $_ENV from env
     let mut env_arr = PhpArray::new();
@@ -827,7 +919,10 @@ fn execute_php_request(
             Value::String(PhpString::from_string(v)),
         );
     }
-    vm.set_global(b"_ENV".to_vec(), Value::Array(std::rc::Rc::new(std::cell::RefCell::new(env_arr))));
+    vm.set_global(
+        b"_ENV".to_vec(),
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(env_arr))),
+    );
 
     // Provide raw body as php://input -- not implemented yet but we can store
     // it on env so getenv("HTTP_RAW_POST_DATA") might work; we punt.
@@ -841,7 +936,11 @@ fn execute_php_request(
     let exec_result = vm.execute(&op_array);
     let output = vm.take_output();
     let response_code = goro_ext_standard::misc::take_response_code();
-    let status: u16 = if response_code > 0 { response_code as u16 } else { 200 };
+    let status: u16 = if response_code > 0 {
+        response_code as u16
+    } else {
+        200
+    };
     let response_headers: Vec<(Vec<u8>, Vec<u8>)> = goro_ext_standard::misc::take_sent_headers();
 
     if let Err(_e) = exec_result {
@@ -851,7 +950,10 @@ fn execute_php_request(
             if let Value::Object(obj) = &exc {
                 let obj = obj.borrow();
                 let class = String::from_utf8_lossy(&obj.class_name).to_string();
-                let msg = obj.get_property(b"message").to_php_string().to_string_lossy();
+                let msg = obj
+                    .get_property(b"message")
+                    .to_php_string()
+                    .to_string_lossy();
                 let line = obj.get_property(b"line").to_long();
                 let conn = goro_core::vm::Vm::exception_location_connector(&msg);
                 let fatal = format!(

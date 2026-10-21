@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use goro_core::ob::{ObKind, OBH_STDFLAGS, OB_OP_FINAL, OB_OP_FLUSH};
+use goro_core::ob::{OB_OP_FINAL, OB_OP_FLUSH, OBH_STDFLAGS, ObKind};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -118,7 +118,9 @@ struct Url {
 }
 
 fn ctrl(v: &[u8]) -> Vec<u8> {
-    v.iter().map(|&c| if c < 0x20 || c == 0x7f { b'_' } else { c }).collect()
+    v.iter()
+        .map(|&c| if c < 0x20 || c == 0x7f { b'_' } else { c })
+        .collect()
 }
 
 fn strcspn(s: &[u8], from: usize, to: usize, chars: &[u8]) -> usize {
@@ -134,7 +136,11 @@ fn strcspn(s: &[u8], from: usize, to: usize, chars: &[u8]) -> usize {
 fn parse_port_digits(d: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(d).ok()?;
     let n: i64 = s.parse().ok()?;
-    if (0..=65535).contains(&n) { Some(n as u16) } else { None }
+    if (0..=65535).contains(&n) {
+        Some(n as u16)
+    } else {
+        None
+    }
 }
 
 /// php_url_parse_ex
@@ -191,7 +197,11 @@ fn parse_url(str: &[u8]) -> Option<Url> {
                 ret.scheme = Some(ctrl(&str[s..e]));
                 if e + 2 < ue && str[e + 2] == b'/' {
                     s = e + 3;
-                    let is_file = ret.scheme.as_deref().map(|x| x.eq_ignore_ascii_case(b"file")).unwrap_or(false);
+                    let is_file = ret
+                        .scheme
+                        .as_deref()
+                        .map(|x| x.eq_ignore_ascii_case(b"file"))
+                        .unwrap_or(false);
                     if is_file && e + 3 < ue && str[e + 3] == b'/' {
                         if e + 5 < ue && str[e + 5] == b':' {
                             s = e + 4;
@@ -313,7 +323,13 @@ fn arg_separator(vm: &Vm) -> Vec<u8> {
 }
 
 /// append_modified_url
-fn append_modified_url(url: &[u8], dest: &mut Vec<u8>, url_app: &[u8], sep: &[u8], hosts: &[Vec<u8>]) {
+fn append_modified_url(
+    url: &[u8],
+    dest: &mut Vec<u8>,
+    url_app: &[u8],
+    sep: &[u8],
+    hosts: &[Vec<u8>],
+) {
     let parts = match parse_url(url) {
         Some(p) => p,
         None => {
@@ -387,7 +403,9 @@ fn http_host(vm: &Vm) -> Option<Vec<u8>> {
     let srv = vm.get_global(b"_SERVER")?.deref();
     if let Value::Array(a) = srv {
         let a = a.borrow();
-        if let Some(Value::String(h)) = a.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(b"HTTP_HOST"))) {
+        if let Some(Value::String(h)) = a.get(&goro_core::array::ArrayKey::String(
+            PhpString::from_bytes(b"HTTP_HOST"),
+        )) {
             let h = h.as_bytes();
             let h = match h.iter().position(|&c| c == b':') {
                 Some(p) => &h[..p],
@@ -427,7 +445,11 @@ fn check_host_whitelist(c: &Ctx, http_host: &Option<Vec<u8>>) -> bool {
 }
 
 fn tag_arg(c: &mut Ctx, quotes: bool, q: u8, sep: &[u8]) {
-    let f = c.lookup_data.as_ref().map(|l| l.eq_ignore_ascii_case(&c.arg)).unwrap_or(false);
+    let f = c
+        .lookup_data
+        .as_ref()
+        .map(|l| l.eq_ignore_ascii_case(&c.arg))
+        .unwrap_or(false);
     if quotes {
         c.result.push(q);
     }
@@ -493,7 +515,11 @@ fn mainloop(c: &mut Ctx, data: &[u8], sep: &[u8], host: &Option<Vec<u8>>) {
                     }
                     // handle_tag
                     c.tag = buf[start..x].to_ascii_lowercase();
-                    c.lookup_data = c.tags.iter().find(|(n, _)| *n == c.tag).map(|(_, a)| a.clone());
+                    c.lookup_data = c
+                        .tags
+                        .iter()
+                        .find(|(n, _)| *n == c.tag)
+                        .map(|(_, a)| a.clone());
                     let ok = c.lookup_data.is_some();
                     if ok {
                         c.tag_form = c.tag == b"form";
@@ -612,7 +638,9 @@ fn mainloop(c: &mut Ctx, data: &[u8], sep: &[u8], host: &Option<Vec<u8>>) {
                 }
                 if !matches!(ch, b' ' | b'\r' | b'\t' | b'\n' | b'>' | b'\'' | b'"') {
                     let mut y = x;
-                    while y < end && !matches!(buf[y], b' ' | b'\r' | b'\t' | b'\n' | b'>' | b'\'' | b'"') {
+                    while y < end
+                        && !matches!(buf[y], b' ' | b'\r' | b'\t' | b'\n' | b'>' | b'\'' | b'"')
+                    {
                         y += 1;
                     }
                     if y >= end {
@@ -636,7 +664,13 @@ fn mainloop(c: &mut Ctx, data: &[u8], sep: &[u8], host: &Option<Vec<u8>>) {
     c.buf = buf[start.min(end)..].to_vec();
 }
 
-fn url_adapt_ext(c: &mut Ctx, src: &[u8], do_flush: bool, sep: &[u8], host: &Option<Vec<u8>>) -> Vec<u8> {
+fn url_adapt_ext(
+    c: &mut Ctx,
+    src: &[u8],
+    do_flush: bool,
+    sep: &[u8],
+    host: &Option<Vec<u8>>,
+) -> Vec<u8> {
     mainloop(c, src, sep, host);
     let mut out = std::mem::take(&mut c.result);
     if do_flush {
@@ -703,7 +737,9 @@ fn html_escape(s: &[u8]) -> Vec<u8> {
                         if e[0] == b'#' {
                             e.len() > 1
                                 && (e[1..].iter().all(|x| x.is_ascii_digit())
-                                    || ((e[1] == b'x' || e[1] == b'X') && e.len() > 2 && e[2..].iter().all(|x| x.is_ascii_hexdigit())))
+                                    || ((e[1] == b'x' || e[1] == b'X')
+                                        && e.len() > 2
+                                        && e[2..].iter().all(|x| x.is_ascii_hexdigit())))
                         } else {
                             e.iter().all(|x| x.is_ascii_alphanumeric())
                         }
@@ -749,14 +785,20 @@ pub fn add_var(vm: &mut Vm, name: &[u8], value: &[u8], encode: bool, is_session:
             c.url_app.extend_from_slice(&sep);
         }
         let (sn, sv, hn, hv) = if encode {
-            (raw_url_encode(name), raw_url_encode(value), html_escape(name), html_escape(value))
+            (
+                raw_url_encode(name),
+                raw_url_encode(value),
+                html_escape(name),
+                html_escape(value),
+            )
         } else {
             (name.to_vec(), value.to_vec(), name.to_vec(), value.to_vec())
         };
         c.url_app.extend_from_slice(&sn);
         c.url_app.push(b'=');
         c.url_app.extend_from_slice(&sv);
-        c.form_app.extend_from_slice(b"<input type=\"hidden\" name=\"");
+        c.form_app
+            .extend_from_slice(b"<input type=\"hidden\" name=\"");
         c.form_app.extend_from_slice(&hn);
         c.form_app.extend_from_slice(b"\" value=\"");
         c.form_app.extend_from_slice(&hv);
@@ -764,8 +806,17 @@ pub fn add_var(vm: &mut Vm, name: &[u8], value: &[u8], encode: bool, is_session:
         start
     });
     if should_start {
-        let f: goro_core::ob::ObInternalFn = if is_session { session_handler } else { output_handler };
-        let h = Vm::ob_make_handler(b"URL-Rewriter".to_vec(), ObKind::Internal(f), 0, OBH_STDFLAGS);
+        let f: goro_core::ob::ObInternalFn = if is_session {
+            session_handler
+        } else {
+            output_handler
+        };
+        let h = Vm::ob_make_handler(
+            b"URL-Rewriter".to_vec(),
+            ObKind::Internal(f),
+            0,
+            OBH_STDFLAGS,
+        );
         vm.ob_handler_start(Some(h));
     }
 }
@@ -785,7 +836,11 @@ pub fn reset_var(vm: &mut Vm, name: &[u8], encode: bool, is_session: bool) -> bo
         if c.url_app.is_empty() {
             return true;
         }
-        let (sname, hname) = if encode { (raw_url_encode(name), html_escape(name)) } else { (name.to_vec(), name.to_vec()) };
+        let (sname, hname) = if encode {
+            (raw_url_encode(name), html_escape(name))
+        } else {
+            (name.to_vec(), name.to_vec())
+        };
         let mut url_app = sname.clone();
         url_app.push(b'=');
         let mut form_app = b"<input type=\"hidden\" name=\"".to_vec();
@@ -840,9 +895,17 @@ pub fn reset_var(vm: &mut Vm, name: &[u8], encode: bool, is_session: bool) -> bo
 
 /// php_url_scanner_adapt_single_url
 pub fn adapt_single_url(vm: &Vm, url: &[u8], name: &[u8], value: &[u8], encode: bool) -> Vec<u8> {
-    let mut app = if encode { raw_url_encode(name) } else { name.to_vec() };
+    let mut app = if encode {
+        raw_url_encode(name)
+    } else {
+        name.to_vec()
+    };
     app.push(b'=');
-    app.extend_from_slice(&if encode { raw_url_encode(value) } else { value.to_vec() });
+    app.extend_from_slice(&if encode {
+        raw_url_encode(value)
+    } else {
+        value.to_vec()
+    });
     let sep = arg_separator(vm);
     let hosts = with(true, |c| c.hosts.clone());
     let mut out = Vec::new();
@@ -852,7 +915,10 @@ pub fn adapt_single_url(vm: &Vm, url: &[u8], name: &[u8], value: &[u8], encode: 
 
 fn output_add_rewrite_var_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() != 2 {
-        let msg = format!("output_add_rewrite_var() expects exactly 2 arguments, {} given", args.len());
+        let msg = format!(
+            "output_add_rewrite_var() expects exactly 2 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Ok(Value::Null);
@@ -881,7 +947,10 @@ fn output_add_rewrite_var_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 
 fn output_reset_rewrite_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !args.is_empty() {
-        let msg = format!("output_reset_rewrite_vars() expects exactly 0 arguments, {} given", args.len());
+        let msg = format!(
+            "output_reset_rewrite_vars() expects exactly 0 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
         return Ok(Value::Null);
@@ -901,11 +970,17 @@ fn ini_hook(_vm: &mut Vm, key: &[u8], value: &Value) -> bool {
 }
 
 fn startup(vm: &mut Vm) {
-    let tags = vm.constants.get(b"url_rewriter.tags".as_slice()).map(|v| v.to_php_string().as_bytes().to_vec());
+    let tags = vm
+        .constants
+        .get(b"url_rewriter.tags".as_slice())
+        .map(|v| v.to_php_string().as_bytes().to_vec());
     if let Some(t) = tags {
         set_tags(false, &t);
     }
-    let hosts = vm.constants.get(b"url_rewriter.hosts".as_slice()).map(|v| v.to_php_string().as_bytes().to_vec());
+    let hosts = vm
+        .constants
+        .get(b"url_rewriter.hosts".as_slice())
+        .map(|v| v.to_php_string().as_bytes().to_vec());
     if let Some(h) = hosts {
         set_hosts(false, &h);
     }
@@ -916,9 +991,15 @@ pub fn register(vm: &mut Vm) {
     OUTPUT.with(|c| *c.borrow_mut() = Ctx::new(false, b"form="));
     vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
     vm.register_function(b"output_reset_rewrite_vars", output_reset_rewrite_vars_fn);
-    vm.constants.entry(b"url_rewriter.tags".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"form=")));
-    vm.constants.entry(b"url_rewriter.hosts".to_vec()).or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
-    vm.ini_set_hooks.insert(b"url_rewriter.tags".to_vec(), ini_hook);
-    vm.ini_set_hooks.insert(b"url_rewriter.hosts".to_vec(), ini_hook);
+    vm.constants
+        .entry(b"url_rewriter.tags".to_vec())
+        .or_insert_with(|| Value::String(PhpString::from_bytes(b"form=")));
+    vm.constants
+        .entry(b"url_rewriter.hosts".to_vec())
+        .or_insert_with(|| Value::String(PhpString::from_bytes(b"")));
+    vm.ini_set_hooks
+        .insert(b"url_rewriter.tags".to_vec(), ini_hook);
+    vm.ini_set_hooks
+        .insert(b"url_rewriter.hosts".to_vec(), ini_hook);
     vm.startup_hooks.push(startup);
 }

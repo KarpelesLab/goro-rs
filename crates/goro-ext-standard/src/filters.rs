@@ -52,11 +52,18 @@ pub enum BuiltinKind {
     /// string.strip_tags (allowed tags)
     StringStripTags { allowed: Vec<u8> },
     /// convert.base64-encode
-    ConvertBase64Encode { line_length: usize, line_break: Vec<u8> },
+    ConvertBase64Encode {
+        line_length: usize,
+        line_break: Vec<u8>,
+    },
     /// convert.base64-decode
     ConvertBase64Decode,
     /// convert.quoted-printable-encode
-    ConvertQpEncode { line_length: usize, line_break: Vec<u8>, binary: bool },
+    ConvertQpEncode {
+        line_length: usize,
+        line_break: Vec<u8>,
+        binary: bool,
+    },
     /// convert.quoted-printable-decode
     ConvertQpDecode,
     /// dechunk - HTTP chunked transfer decoding
@@ -218,12 +225,18 @@ fn lookup_array_int(v: &Value, key: &[u8], default: i64) -> i64 {
     match v {
         Value::Array(a) => {
             let a = a.borrow();
-            a.get(&ArrayKey::String(PhpString::from_bytes(key))).map(|v| v.to_long()).unwrap_or(default)
+            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
+                .map(|v| v.to_long())
+                .unwrap_or(default)
         }
         Value::Reference(r) => lookup_array_int(&r.borrow(), key, default),
         Value::Object(obj) => {
             let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) { default } else { v.to_long() }
+            if matches!(v, Value::Null | Value::Undef) {
+                default
+            } else {
+                v.to_long()
+            }
         }
         _ => default,
     }
@@ -239,7 +252,11 @@ fn lookup_array_str(v: &Value, key: &[u8]) -> Option<Vec<u8>> {
         Value::Reference(r) => lookup_array_str(&r.borrow(), key),
         Value::Object(obj) => {
             let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) { None } else { Some(v.to_php_string().as_bytes().to_vec()) }
+            if matches!(v, Value::Null | Value::Undef) {
+                None
+            } else {
+                Some(v.to_php_string().as_bytes().to_vec())
+            }
         }
         _ => None,
     }
@@ -249,12 +266,18 @@ fn lookup_array_bool(v: &Value, key: &[u8], default: bool) -> bool {
     match v {
         Value::Array(a) => {
             let a = a.borrow();
-            a.get(&ArrayKey::String(PhpString::from_bytes(key))).map(|v| v.to_bool()).unwrap_or(default)
+            a.get(&ArrayKey::String(PhpString::from_bytes(key)))
+                .map(|v| v.to_bool())
+                .unwrap_or(default)
         }
         Value::Reference(r) => lookup_array_bool(&r.borrow(), key, default),
         Value::Object(obj) => {
             let v = obj.borrow().get_property(key);
-            if matches!(v, Value::Null | Value::Undef) { default } else { v.to_bool() }
+            if matches!(v, Value::Null | Value::Undef) {
+                default
+            } else {
+                v.to_bool()
+            }
         }
         _ => default,
     }
@@ -282,12 +305,14 @@ pub fn builtin_for_name(name: &[u8], params: &Value) -> Option<BuiltinKind> {
         }),
         b"convert.base64-encode" => Some(BuiltinKind::ConvertBase64Encode {
             line_length: lookup_array_int(params, b"line-length", 0).max(0) as usize,
-            line_break: lookup_array_str(params, b"line-break-chars").unwrap_or_else(|| b"\r\n".to_vec()),
+            line_break: lookup_array_str(params, b"line-break-chars")
+                .unwrap_or_else(|| b"\r\n".to_vec()),
         }),
         b"convert.base64-decode" => Some(BuiltinKind::ConvertBase64Decode),
         b"convert.quoted-printable-encode" => Some(BuiltinKind::ConvertQpEncode {
             line_length: lookup_array_int(params, b"line-length", 76).max(0) as usize,
-            line_break: lookup_array_str(params, b"line-break-chars").unwrap_or_else(|| b"\r\n".to_vec()),
+            line_break: lookup_array_str(params, b"line-break-chars")
+                .unwrap_or_else(|| b"\r\n".to_vec()),
             binary: lookup_array_bool(params, b"binary", false),
         }),
         b"convert.quoted-printable-decode" => Some(BuiltinKind::ConvertQpDecode),
@@ -331,7 +356,9 @@ pub fn attach_filter(
         closed: false,
     };
     let rc = Rc::new(RefCell::new(inst));
-    FILTERS.with(|m| { m.borrow_mut().insert(fid, rc.clone()); });
+    FILTERS.with(|m| {
+        m.borrow_mut().insert(fid, rc.clone());
+    });
     STREAM_CHAINS.with(|m| {
         let mut m = m.borrow_mut();
         let chain = m.entry(stream_id).or_default();
@@ -388,9 +415,9 @@ pub fn is_filter_resource(fid: i64) -> bool {
 /// True iff at least one filter on `stream_id` matches `direction`.
 pub fn chain_has_direction(stream_id: i64, direction: i64) -> bool {
     STREAM_CHAINS.with(|m| {
-        m.borrow().get(&stream_id).is_some_and(|chain| {
-            chain.iter().any(|f| f.borrow().direction & direction != 0)
-        })
+        m.borrow()
+            .get(&stream_id)
+            .is_some_and(|chain| chain.iter().any(|f| f.borrow().direction & direction != 0))
     })
 }
 
@@ -403,7 +430,9 @@ pub fn chain_has_any(stream_id: i64) -> bool {
 /// Apply the write filter chain to `data` for the given stream. Returns
 /// the filtered output bytes ready to be physically written.
 pub fn apply_write_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
-    let chain = STREAM_CHAINS.with(|m| m.borrow().get(&stream_id).cloned()).unwrap_or_default();
+    let chain = STREAM_CHAINS
+        .with(|m| m.borrow().get(&stream_id).cloned())
+        .unwrap_or_default();
     let mut buf = data.to_vec();
     for f in &chain {
         let dir = f.borrow().direction;
@@ -417,7 +446,9 @@ pub fn apply_write_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
 
 /// Apply the read filter chain to `data`.
 pub fn apply_read_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
-    let chain = STREAM_CHAINS.with(|m| m.borrow().get(&stream_id).cloned()).unwrap_or_default();
+    let chain = STREAM_CHAINS
+        .with(|m| m.borrow().get(&stream_id).cloned())
+        .unwrap_or_default();
     let mut buf = data.to_vec();
     for f in &chain {
         let dir = f.borrow().direction;
@@ -433,11 +464,15 @@ pub fn apply_read_chain(vm: &mut Vm, stream_id: i64, data: &[u8]) -> Vec<u8> {
 /// pending output is returned. Direction (READ/WRITE) selects which side
 /// of the chain to flush.
 pub fn flush_chain(vm: &mut Vm, stream_id: i64, direction: i64) -> Vec<u8> {
-    let chain = STREAM_CHAINS.with(|m| m.borrow().get(&stream_id).cloned()).unwrap_or_default();
+    let chain = STREAM_CHAINS
+        .with(|m| m.borrow().get(&stream_id).cloned())
+        .unwrap_or_default();
     let mut buf = Vec::new();
     for f in &chain {
         let dir = f.borrow().direction;
-        if dir & direction == 0 { continue; }
+        if dir & direction == 0 {
+            continue;
+        }
         // Push prior output through, then emit closing exactly once per
         // filter (subsequent calls would re-invoke user `onClose`-like
         // logic, leading to infinite loops in read mode).
@@ -445,7 +480,9 @@ pub fn flush_chain(vm: &mut Vm, stream_id: i64, direction: i64) -> Vec<u8> {
             buf = run_filter(vm, f, &buf, false);
         }
         let already_closed = f.borrow().closed;
-        if already_closed { continue; }
+        if already_closed {
+            continue;
+        }
         let mut close_out = run_filter(vm, f, &[], true);
         f.borrow_mut().closed = true;
         buf.append(&mut close_out);
@@ -455,7 +492,12 @@ pub fn flush_chain(vm: &mut Vm, stream_id: i64, direction: i64) -> Vec<u8> {
 
 /// Drive a single filter instance over `input`. If `closing` is true,
 /// compressors/decoders should finalize.
-fn run_filter(vm: &mut Vm, f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool) -> Vec<u8> {
+fn run_filter(
+    vm: &mut Vm,
+    f: &Rc<RefCell<FilterInstance>>,
+    input: &[u8],
+    closing: bool,
+) -> Vec<u8> {
     // Built-in: dispatch on kind.
     let kind_opt = f.borrow().builtin.clone();
     if let Some(kind) = kind_opt {
@@ -465,7 +507,12 @@ fn run_filter(vm: &mut Vm, f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
     run_user_filter(vm, f, input, closing)
 }
 
-fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8], closing: bool) -> Vec<u8> {
+fn run_builtin(
+    f: &Rc<RefCell<FilterInstance>>,
+    kind: BuiltinKind,
+    input: &[u8],
+    closing: bool,
+) -> Vec<u8> {
     match kind {
         BuiltinKind::ZlibDeflate { level } => {
             let mut fi = f.borrow_mut();
@@ -484,7 +531,11 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
             loop {
                 let in_before = ctx.enc.total_in();
                 let out_before = ctx.enc.total_out();
-                let flush = if closing { flate2::FlushCompress::Finish } else { flate2::FlushCompress::None };
+                let flush = if closing {
+                    flate2::FlushCompress::Finish
+                } else {
+                    flate2::FlushCompress::None
+                };
                 let _ = ctx.enc.compress(&input[input_pos..], &mut buf, flush);
                 let consumed_in = (ctx.enc.total_in() - in_before) as usize;
                 let produced_out = (ctx.enc.total_out() - out_before) as usize;
@@ -512,7 +563,11 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
             let mut out = Vec::with_capacity(input.len() * 2 + 64);
             let mut input_pos = 0usize;
             let mut buf = [0u8; 4096];
-            let flush = if closing { flate2::FlushDecompress::Finish } else { flate2::FlushDecompress::Sync };
+            let flush = if closing {
+                flate2::FlushDecompress::Finish
+            } else {
+                flate2::FlushDecompress::Sync
+            };
             loop {
                 let in_before = ctx.dec.total_in();
                 let out_before = ctx.dec.total_out();
@@ -546,7 +601,11 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
             let mut out = Vec::with_capacity(input.len() + 128);
             let mut input_pos = 0usize;
             let mut buf = [0u8; 4096];
-            let action = if closing { bzip2::Action::Finish } else { bzip2::Action::Run };
+            let action = if closing {
+                bzip2::Action::Finish
+            } else {
+                bzip2::Action::Run
+            };
             loop {
                 let in_before = ctx.enc.total_in();
                 let out_before = ctx.enc.total_out();
@@ -604,12 +663,16 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
         }
         BuiltinKind::StringToUpper => {
             let mut out = Vec::with_capacity(input.len());
-            for &b in input { out.push(b.to_ascii_uppercase()); }
+            for &b in input {
+                out.push(b.to_ascii_uppercase());
+            }
             out
         }
         BuiltinKind::StringToLower => {
             let mut out = Vec::with_capacity(input.len());
-            for &b in input { out.push(b.to_ascii_lowercase()); }
+            for &b in input {
+                out.push(b.to_ascii_lowercase());
+            }
             out
         }
         BuiltinKind::StringRot13 => {
@@ -635,8 +698,11 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
             while i < data.len() {
                 let b = data[i];
                 if !in_tag {
-                    if b == b'<' { in_tag = true; }
-                    else { out.push(b); }
+                    if b == b'<' {
+                        in_tag = true;
+                    } else {
+                        out.push(b);
+                    }
                 } else if b == b'>' {
                     in_tag = false;
                 }
@@ -648,32 +714,39 @@ fn run_builtin(f: &Rc<RefCell<FilterInstance>>, kind: BuiltinKind, input: &[u8],
             }
             out
         }
-        BuiltinKind::ConvertBase64Encode { line_length, line_break } => {
-            base64_encode_streaming(f, input, closing, line_length, &line_break)
-        }
-        BuiltinKind::ConvertBase64Decode => {
-            base64_decode_streaming(f, input, closing)
-        }
-        BuiltinKind::ConvertQpEncode { line_length, line_break, binary } => {
-            qp_encode_streaming(f, input, closing, line_length, &line_break, binary)
-        }
-        BuiltinKind::ConvertQpDecode => {
-            qp_decode_streaming(f, input, closing)
-        }
-        BuiltinKind::Dechunk => {
-            dechunk_streaming(f, input, closing)
-        }
+        BuiltinKind::ConvertBase64Encode {
+            line_length,
+            line_break,
+        } => base64_encode_streaming(f, input, closing, line_length, &line_break),
+        BuiltinKind::ConvertBase64Decode => base64_decode_streaming(f, input, closing),
+        BuiltinKind::ConvertQpEncode {
+            line_length,
+            line_break,
+            binary,
+        } => qp_encode_streaming(f, input, closing, line_length, &line_break, binary),
+        BuiltinKind::ConvertQpDecode => qp_decode_streaming(f, input, closing),
+        BuiltinKind::Dechunk => dechunk_streaming(f, input, closing),
         BuiltinKind::Consumed => input.to_vec(),
     }
 }
 
-fn base64_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool, line_length: usize, line_break: &[u8]) -> Vec<u8> {
+fn base64_encode_streaming(
+    f: &Rc<RefCell<FilterInstance>>,
+    input: &[u8],
+    closing: bool,
+    line_length: usize,
+    line_break: &[u8],
+) -> Vec<u8> {
     let mut fi = f.borrow_mut();
     // Accumulate full triplets; carry over any partial.
     let mut data = std::mem::take(&mut fi.leftover);
     data.extend_from_slice(input);
     let mut out = Vec::with_capacity(data.len() * 4 / 3 + 16);
-    let take_len = if closing { data.len() } else { (data.len() / 3) * 3 };
+    let take_len = if closing {
+        data.len()
+    } else {
+        (data.len() / 3) * 3
+    };
     let to_encode = &data[..take_len];
     let encoded = base64_encode_no_wrap(to_encode, closing);
     // Apply line wrapping if requested.
@@ -691,7 +764,9 @@ fn base64_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
         fi.col += encoded.len();
     }
     fi.leftover = data[take_len..].to_vec();
-    if closing { fi.leftover.clear(); }
+    if closing {
+        fi.leftover.clear();
+    }
     out
 }
 
@@ -727,7 +802,11 @@ fn base64_encode_no_wrap(input: &[u8], finish: bool) -> String {
     out
 }
 
-fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool) -> Vec<u8> {
+fn base64_decode_streaming(
+    f: &Rc<RefCell<FilterInstance>>,
+    input: &[u8],
+    closing: bool,
+) -> Vec<u8> {
     let mut fi = f.borrow_mut();
     let mut data = std::mem::take(&mut fi.leftover);
     // Skip whitespace, accept only valid base64 characters.
@@ -737,7 +816,11 @@ fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
             _ => {}
         }
     }
-    let chunks = if closing { data.len().div_ceil(4) } else { data.len() / 4 };
+    let chunks = if closing {
+        data.len().div_ceil(4)
+    } else {
+        data.len() / 4
+    };
     let consume = chunks * 4;
     let consume = consume.min(data.len());
     let mut out = Vec::with_capacity(consume * 3 / 4 + 4);
@@ -753,21 +836,30 @@ fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
                 b'0'..=b'9' => (c - b'0' + 52) as u32,
                 b'+' => 62,
                 b'/' => 63,
-                b'=' => { padcount += 1; 0 }
+                b'=' => {
+                    padcount += 1;
+                    0
+                }
                 _ => 0,
             };
             n = (n << 6) | v;
         }
         out.push(((n >> 16) & 0xff) as u8);
-        if padcount < 2 { out.push(((n >> 8) & 0xff) as u8); }
-        if padcount < 1 { out.push((n & 0xff) as u8); }
+        if padcount < 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if padcount < 1 {
+            out.push((n & 0xff) as u8);
+        }
         i += 4;
     }
     if closing && i < consume {
         // Trailing partial group (no padding): decode whatever's there.
         let rem = &data[i..consume];
         let mut buf = rem.to_vec();
-        while !buf.len().is_multiple_of(4) { buf.push(b'='); }
+        while !buf.len().is_multiple_of(4) {
+            buf.push(b'=');
+        }
         let mut n: u32 = 0;
         let mut padcount = 0u32;
         for &c in &buf {
@@ -777,20 +869,38 @@ fn base64_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closin
                 b'0'..=b'9' => (c - b'0' + 52) as u32,
                 b'+' => 62,
                 b'/' => 63,
-                b'=' => { padcount += 1; 0 }
+                b'=' => {
+                    padcount += 1;
+                    0
+                }
                 _ => 0,
             };
             n = (n << 6) | v;
         }
         out.push(((n >> 16) & 0xff) as u8);
-        if padcount < 2 { out.push(((n >> 8) & 0xff) as u8); }
-        if padcount < 1 { out.push((n & 0xff) as u8); }
+        if padcount < 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if padcount < 1 {
+            out.push((n & 0xff) as u8);
+        }
     }
-    fi.leftover = if closing { Vec::new() } else { data[consume..].to_vec() };
+    fi.leftover = if closing {
+        Vec::new()
+    } else {
+        data[consume..].to_vec()
+    };
     out
 }
 
-fn qp_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool, line_length: usize, line_break: &[u8], _binary: bool) -> Vec<u8> {
+fn qp_encode_streaming(
+    f: &Rc<RefCell<FilterInstance>>,
+    input: &[u8],
+    closing: bool,
+    line_length: usize,
+    line_break: &[u8],
+    _binary: bool,
+) -> Vec<u8> {
     // PHP's quoted-printable encoder is line-aware: it preserves SP/HT
     // bytes (encoded as themselves) inside a line, but escapes them as
     // =20/=09 when they would otherwise appear at the end of a line
@@ -803,7 +913,11 @@ fn qp_encode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: b
     let mut out = Vec::with_capacity(data.len() * 2);
     // PHP's line_length includes the trailing `=` soft-break marker; the
     // effective content limit per line is line_length - 1.
-    let max_col = if line_length == 0 { 75 } else { line_length.saturating_sub(1) };
+    let max_col = if line_length == 0 {
+        75
+    } else {
+        line_length.saturating_sub(1)
+    };
     let mut col = fi.col;
     let mut i = 0;
     let n = data.len();
@@ -927,7 +1041,9 @@ fn qp_decode_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: b
             i += 1;
         }
     }
-    if closing { fi.leftover.clear(); }
+    if closing {
+        fi.leftover.clear();
+    }
     out
 }
 
@@ -991,15 +1107,23 @@ fn dechunk_streaming(f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: boo
             }
             DechunkState::AfterChunk => {
                 // Consume optional CRLF after chunk body.
-                if i >= n { break; }
-                if data[i] == b'\r' && i + 1 < n && data[i + 1] == b'\n' { i += 2; }
-                else if data[i] == b'\n' { i += 1; }
+                if i >= n {
+                    break;
+                }
+                if data[i] == b'\r' && i + 1 < n && data[i + 1] == b'\n' {
+                    i += 2;
+                } else if data[i] == b'\n' {
+                    i += 1;
+                }
                 fi.dechunk_state = DechunkState::Header;
             }
         }
     }
-    if closing { fi.leftover.clear(); }
-    else { fi.leftover = data[i..].to_vec(); }
+    if closing {
+        fi.leftover.clear();
+    } else {
+        fi.leftover = data[i..].to_vec();
+    }
     out
 }
 
@@ -1015,7 +1139,12 @@ fn find_line_end(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-fn run_user_filter(vm: &mut Vm, f: &Rc<RefCell<FilterInstance>>, input: &[u8], closing: bool) -> Vec<u8> {
+fn run_user_filter(
+    vm: &mut Vm,
+    f: &Rc<RefCell<FilterInstance>>,
+    input: &[u8],
+    closing: bool,
+) -> Vec<u8> {
     let obj = match f.borrow().user_obj.clone() {
         Some(o) => o,
         None => return input.to_vec(),
@@ -1065,8 +1194,14 @@ thread_local! {
 }
 
 fn new_brigade() -> i64 {
-    let id = NEXT_BRIGADE_ID.with(|c| { let n = c.get(); c.set(n + 1); n });
-    BUCKET_BRIGADES.with(|m| { m.borrow_mut().insert(id, Vec::new()); });
+    let id = NEXT_BRIGADE_ID.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    });
+    BUCKET_BRIGADES.with(|m| {
+        m.borrow_mut().insert(id, Vec::new());
+    });
     id
 }
 
@@ -1081,7 +1216,11 @@ fn push_bucket(brigade: i64, data: Vec<u8>) {
 fn pop_bucket(brigade: i64) -> Option<Vec<u8>> {
     BUCKET_BRIGADES.with(|m| {
         m.borrow_mut().get_mut(&brigade).and_then(|b| {
-            if b.is_empty() { None } else { Some(b.remove(0)) }
+            if b.is_empty() {
+                None
+            } else {
+                Some(b.remove(0))
+            }
         })
     })
 }
@@ -1102,7 +1241,10 @@ fn drain_brigade(brigade: i64) -> Vec<u8> {
 
 /// PHP function: stream_bucket_make_writeable($brigade): ?object
 /// Returns an object with `data`, `datalen`, `eof` properties or null.
-pub fn stream_bucket_make_writeable(vm: &mut Vm, args: &[Value]) -> Result<Value, goro_core::vm::VmError> {
+pub fn stream_bucket_make_writeable(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, goro_core::vm::VmError> {
     let id = args.first().map(|v| v.to_long()).unwrap_or(0);
     match pop_bucket(id) {
         Some(data) => {
@@ -1131,7 +1273,10 @@ pub fn stream_bucket_append(_vm: &mut Vm, args: &[Value]) -> Result<Value, goro_
 }
 
 /// PHP function: stream_bucket_prepend($brigade, $bucket): void
-pub fn stream_bucket_prepend(_vm: &mut Vm, args: &[Value]) -> Result<Value, goro_core::vm::VmError> {
+pub fn stream_bucket_prepend(
+    _vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, goro_core::vm::VmError> {
     let id = args.first().map(|v| v.to_long()).unwrap_or(0);
     let bucket = args.get(1).cloned().unwrap_or(Value::Null);
     if let Value::Object(obj) = bucket {

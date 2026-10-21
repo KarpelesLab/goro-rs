@@ -154,7 +154,8 @@ fn validate_format(fmt: &CStr, num_vars: i32) -> Result<i32, String> {
         }
 
         match fmt.at(ch) {
-            b'n' | b'd' | b'D' | b'i' | b'o' | b'x' | b'X' | b'u' | b'f' | b'e' | b'E' | b'g' | b's' | b'c' => {}
+            b'n' | b'd' | b'D' | b'i' | b'o' | b'x' | b'X' | b'u' | b'f' | b'e' | b'E' | b'g'
+            | b's' | b'c' => {}
             b'[' => {
                 let bad_set = || "Unmatched [ in format string".to_string();
                 if fmt.at(p) == 0 {
@@ -223,7 +224,9 @@ fn validate_format(fmt: &CStr, num_vars: i32) -> Result<i32, String> {
     for i in 0..num_vars.max(0) as usize {
         let n = nassign.get(i).copied().unwrap_or(0);
         if n > 1 {
-            return Err("Variable is assigned by multiple \"%n$\" conversion specifiers".to_string());
+            return Err(
+                "Variable is assigned by multiple \"%n$\" conversion specifiers".to_string(),
+            );
         } else if xpg_size == 0 && n == 0 {
             return Err("Variable is not assigned by any conversion specifiers".to_string());
         }
@@ -240,7 +243,11 @@ struct CharSet {
 /// Port of `BuildCharSet`; `format` points just after the '['. Returns the
 /// charset and the format position after the closing ']'.
 fn build_char_set(fmt: &CStr, mut format: usize) -> (CharSet, usize) {
-    let mut cset = CharSet { exclude: false, chars: Vec::new(), ranges: Vec::new() };
+    let mut cset = CharSet {
+        exclude: false,
+        chars: Vec::new(),
+        ranges: Vec::new(),
+    };
     let f = |i: usize| fmt.at(i);
     if f(format) == b'^' {
         cset.exclude = true;
@@ -304,7 +311,11 @@ fn c_strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
         neg = buf[i] == b'-';
         i += 1;
     }
-    if base == 16 && i + 1 < buf.len() && buf[i] == b'0' && (buf[i + 1] == b'x' || buf[i + 1] == b'X') {
+    if base == 16
+        && i + 1 < buf.len()
+        && buf[i] == b'0'
+        && (buf[i + 1] == b'x' || buf[i + 1] == b'X')
+    {
         if i + 2 < buf.len() && (buf[i + 2] as char).is_ascii_hexdigit() {
             i += 2;
         }
@@ -716,7 +727,9 @@ fn php_sscanf_internal(string: &[u8], format: &[u8], vars: &[Value]) -> ScanResu
                         b'e' | b'E' => {
                             // An exponent is not allowed until there has been at least one digit.
                             if flags & (SCAN_NODIGITS | SCAN_EXPOK) == SCAN_EXPOK {
-                                flags = (flags & !(SCAN_EXPOK | SCAN_PTOK)) | SCAN_SIGNOK | SCAN_NODIGITS;
+                                flags = (flags & !(SCAN_EXPOK | SCAN_PTOK))
+                                    | SCAN_SIGNOK
+                                    | SCAN_NODIGITS;
                                 true
                             } else {
                                 false
@@ -813,25 +826,44 @@ fn zend_strtod(buf: &[u8]) -> f64 {
 fn throw(vm: &mut Vm, class: &[u8], msg: String) -> VmError {
     let exc = vm.create_exception(class, &msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 /// `Z_PARAM_STRING` coercion for a required string parameter.
-pub(crate) fn zpp_string(vm: &mut Vm, func: &str, argnum: usize, pname: &str, val: &Value) -> Result<PhpString, VmError> {
+pub(crate) fn zpp_string(
+    vm: &mut Vm,
+    func: &str,
+    argnum: usize,
+    pname: &str,
+    val: &Value,
+) -> Result<PhpString, VmError> {
     let v = val.deref();
     match &v {
         Value::String(s) => Ok(s.clone()),
-        Value::Long(_) | Value::Double(_) | Value::True | Value::False => Ok(vm.value_to_string(&v)),
+        Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+            Ok(vm.value_to_string(&v))
+        }
         Value::Null | Value::Undef => {
             let line = vm.current_line;
             vm.emit_deprecated_at(
-                &format!("{}(): Passing null to parameter #{} (${}) of type string is deprecated", func, argnum, pname),
+                &format!(
+                    "{}(): Passing null to parameter #{} (${}) of type string is deprecated",
+                    func, argnum, pname
+                ),
                 line,
             );
             Ok(PhpString::from_bytes(b""))
         }
         Value::Object(obj) => {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             let has_tostring = vm
                 .classes
                 .get(&class_lower)
@@ -849,7 +881,10 @@ pub(crate) fn zpp_string(vm: &mut Vm, func: &str, argnum: usize, pname: &str, va
                 );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                Err(VmError { message: msg, line: vm.current_line })
+                Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                })
             }
         }
         _ => {
@@ -862,7 +897,10 @@ pub(crate) fn zpp_string(vm: &mut Vm, func: &str, argnum: usize, pname: &str, va
             );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -903,7 +941,10 @@ pub fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         let exc = vm.throw_type_error(msg.clone());
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let format = zpp_string(vm, "fscanf", 2, "format", &args[1])?;
     // zend_fetch_resource2(..., "File-Handle", ...)
@@ -911,7 +952,10 @@ pub fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "fscanf(): supplied resource is not a valid File-Handle resource".to_string();
         let exc = vm.throw_type_error(msg.clone());
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let line = match crate::misc::stream_get_line(vm, "fscanf", &handle, None) {
         Some(l) => l,

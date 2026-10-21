@@ -64,7 +64,11 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) }
+        if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            Node::Alt(alts)
+        }
     }
     fn parse_seq(&mut self) -> Node {
         let mut items = Vec::new();
@@ -76,7 +80,11 @@ impl<'a> Parser<'a> {
             }
             items.push(self.parse_postfix());
         }
-        if items.len() == 1 { items.pop().unwrap() } else { Node::Seq(items) }
+        if items.len() == 1 {
+            items.pop().unwrap()
+        } else {
+            Node::Seq(items)
+        }
     }
     fn parse_num(&mut self) -> u32 {
         let mut n = 0u32;
@@ -172,7 +180,11 @@ impl<'a> Parser<'a> {
                     }
                     seq.push(Node::Set(set));
                 }
-                if seq.len() == 1 { seq.pop().unwrap() } else { Node::Seq(seq) }
+                if seq.len() == 1 {
+                    seq.pop().unwrap()
+                } else {
+                    Node::Seq(seq)
+                }
             }
             b'[' => {
                 self.p += 1;
@@ -241,7 +253,11 @@ pub fn parse_definitions(text: &str) -> HashMap<String, Node> {
         let body = line[eq + 1..].trim();
         let body = body.strip_suffix(';').unwrap_or(body);
         let node = {
-            let mut p = Parser { s: body.as_bytes(), p: 0, defs: &defs };
+            let mut p = Parser {
+                s: body.as_bytes(),
+                p: 0,
+                defs: &defs,
+            };
             p.parse_alt()
         };
         defs.insert(name, node);
@@ -250,7 +266,11 @@ pub fn parse_definitions(text: &str) -> HashMap<String, Node> {
 }
 
 pub fn parse_expr(expr: &str, defs: &HashMap<String, Node>) -> Node {
-    let mut p = Parser { s: expr.as_bytes(), p: 0, defs };
+    let mut p = Parser {
+        s: expr.as_bytes(),
+        p: 0,
+        defs,
+    };
     p.parse_alt()
 }
 
@@ -376,7 +396,13 @@ impl Scanner {
         for (e, idx) in accepts {
             accept_of[e] = Some(idx);
         }
-        let mut sc = Scanner { nfa, accept_of, dstates: Vec::new(), dmap: HashMap::new(), start: 0 };
+        let mut sc = Scanner {
+            nfa,
+            accept_of,
+            dstates: Vec::new(),
+            dmap: HashMap::new(),
+            start: 0,
+        };
         let closure = sc.closure(vec![start]);
         sc.start = sc.intern(closure);
         sc
@@ -407,7 +433,11 @@ impl Scanner {
         }
         let accept = set.iter().filter_map(|&s| self.accept_of[s]).min();
         let id = self.dstates.len() as u32;
-        self.dstates.push(DState { nfa_states: set.clone(), accept, next: Box::new([UNCOMPUTED; 256]) });
+        self.dstates.push(DState {
+            nfa_states: set.clone(),
+            accept,
+            next: Box::new([UNCOMPUTED; 256]),
+        });
         self.dmap.insert(set, id);
         id
     }

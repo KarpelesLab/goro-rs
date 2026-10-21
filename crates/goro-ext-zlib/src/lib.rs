@@ -48,88 +48,212 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"inflate_get_read_len", inflate_get_read_len_fn);
     vm.register_function(b"inflate_get_status", inflate_get_status_fn);
 
-    vm.builtin_param_names.insert(b"gzcompress".to_vec(), vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()]);
-    vm.builtin_param_names.insert(b"gzuncompress".to_vec(), vec![b"data".to_vec(), b"max_length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzdeflate".to_vec(), vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()]);
-    vm.builtin_param_names.insert(b"gzinflate".to_vec(), vec![b"data".to_vec(), b"max_length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzencode".to_vec(), vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()]);
-    vm.builtin_param_names.insert(b"gzdecode".to_vec(), vec![b"data".to_vec(), b"max_length".to_vec()]);
-    vm.builtin_param_names.insert(b"zlib_encode".to_vec(), vec![b"data".to_vec(), b"encoding".to_vec(), b"level".to_vec()]);
-    vm.builtin_param_names.insert(b"zlib_decode".to_vec(), vec![b"data".to_vec(), b"max_length".to_vec()]);
-    vm.builtin_param_names.insert(b"zlib_get_coding_type".to_vec(), vec![]);
+    vm.builtin_param_names.insert(
+        b"gzcompress".to_vec(),
+        vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzuncompress".to_vec(),
+        vec![b"data".to_vec(), b"max_length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzdeflate".to_vec(),
+        vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzinflate".to_vec(),
+        vec![b"data".to_vec(), b"max_length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzencode".to_vec(),
+        vec![b"data".to_vec(), b"level".to_vec(), b"encoding".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzdecode".to_vec(),
+        vec![b"data".to_vec(), b"max_length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"zlib_encode".to_vec(),
+        vec![b"data".to_vec(), b"encoding".to_vec(), b"level".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"zlib_decode".to_vec(),
+        vec![b"data".to_vec(), b"max_length".to_vec()],
+    );
+    vm.builtin_param_names
+        .insert(b"zlib_get_coding_type".to_vec(), vec![]);
 
-    vm.builtin_param_names.insert(b"gzopen".to_vec(), vec![b"filename".to_vec(), b"mode".to_vec(), b"use_include_path".to_vec()]);
-    vm.builtin_param_names.insert(b"gzclose".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzread".to_vec(), vec![b"stream".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzwrite".to_vec(), vec![b"stream".to_vec(), b"data".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzputs".to_vec(), vec![b"stream".to_vec(), b"data".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzgets".to_vec(), vec![b"stream".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"gzgetc".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzeof".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzrewind".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzseek".to_vec(), vec![b"stream".to_vec(), b"offset".to_vec(), b"whence".to_vec()]);
-    vm.builtin_param_names.insert(b"gztell".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzpassthru".to_vec(), vec![b"stream".to_vec()]);
-    vm.builtin_param_names.insert(b"gzfile".to_vec(), vec![b"filename".to_vec(), b"use_include_path".to_vec()]);
-    vm.builtin_param_names.insert(b"readgzfile".to_vec(), vec![b"filename".to_vec(), b"use_include_path".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"gzopen".to_vec(),
+        vec![
+            b"filename".to_vec(),
+            b"mode".to_vec(),
+            b"use_include_path".to_vec(),
+        ],
+    );
+    vm.builtin_param_names
+        .insert(b"gzclose".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"gzread".to_vec(),
+        vec![b"stream".to_vec(), b"length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzwrite".to_vec(),
+        vec![b"stream".to_vec(), b"data".to_vec(), b"length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzputs".to_vec(),
+        vec![b"stream".to_vec(), b"data".to_vec(), b"length".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"gzgets".to_vec(),
+        vec![b"stream".to_vec(), b"length".to_vec()],
+    );
+    vm.builtin_param_names
+        .insert(b"gzgetc".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"gzeof".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"gzrewind".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"gzseek".to_vec(),
+        vec![b"stream".to_vec(), b"offset".to_vec(), b"whence".to_vec()],
+    );
+    vm.builtin_param_names
+        .insert(b"gztell".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"gzpassthru".to_vec(), vec![b"stream".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"gzfile".to_vec(),
+        vec![b"filename".to_vec(), b"use_include_path".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"readgzfile".to_vec(),
+        vec![b"filename".to_vec(), b"use_include_path".to_vec()],
+    );
 
-    vm.builtin_param_names.insert(b"deflate_init".to_vec(), vec![b"encoding".to_vec(), b"options".to_vec()]);
-    vm.builtin_param_names.insert(b"deflate_add".to_vec(), vec![b"context".to_vec(), b"data".to_vec(), b"flush_mode".to_vec()]);
-    vm.builtin_param_names.insert(b"inflate_init".to_vec(), vec![b"encoding".to_vec(), b"options".to_vec()]);
-    vm.builtin_param_names.insert(b"inflate_add".to_vec(), vec![b"context".to_vec(), b"data".to_vec(), b"flush_mode".to_vec()]);
-    vm.builtin_param_names.insert(b"inflate_get_read_len".to_vec(), vec![b"context".to_vec()]);
-    vm.builtin_param_names.insert(b"inflate_get_status".to_vec(), vec![b"context".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"deflate_init".to_vec(),
+        vec![b"encoding".to_vec(), b"options".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"deflate_add".to_vec(),
+        vec![
+            b"context".to_vec(),
+            b"data".to_vec(),
+            b"flush_mode".to_vec(),
+        ],
+    );
+    vm.builtin_param_names.insert(
+        b"inflate_init".to_vec(),
+        vec![b"encoding".to_vec(), b"options".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"inflate_add".to_vec(),
+        vec![
+            b"context".to_vec(),
+            b"data".to_vec(),
+            b"flush_mode".to_vec(),
+        ],
+    );
+    vm.builtin_param_names
+        .insert(b"inflate_get_read_len".to_vec(), vec![b"context".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"inflate_get_status".to_vec(), vec![b"context".to_vec()]);
 
-    vm.constants.insert(b"ZLIB_ENCODING_RAW".to_vec(), Value::Long(-15));
-    vm.constants.insert(b"ZLIB_ENCODING_DEFLATE".to_vec(), Value::Long(15));
-    vm.constants.insert(b"ZLIB_ENCODING_GZIP".to_vec(), Value::Long(31));
+    vm.constants
+        .insert(b"ZLIB_ENCODING_RAW".to_vec(), Value::Long(-15));
+    vm.constants
+        .insert(b"ZLIB_ENCODING_DEFLATE".to_vec(), Value::Long(15));
+    vm.constants
+        .insert(b"ZLIB_ENCODING_GZIP".to_vec(), Value::Long(31));
     vm.constants.insert(b"FORCE_GZIP".to_vec(), Value::Long(31));
-    vm.constants.insert(b"FORCE_DEFLATE".to_vec(), Value::Long(15));
-    vm.constants.insert(b"ZLIB_NO_FLUSH".to_vec(), Value::Long(0));
-    vm.constants.insert(b"ZLIB_PARTIAL_FLUSH".to_vec(), Value::Long(1));
-    vm.constants.insert(b"ZLIB_SYNC_FLUSH".to_vec(), Value::Long(2));
-    vm.constants.insert(b"ZLIB_FULL_FLUSH".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"FORCE_DEFLATE".to_vec(), Value::Long(15));
+    vm.constants
+        .insert(b"ZLIB_NO_FLUSH".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"ZLIB_PARTIAL_FLUSH".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"ZLIB_SYNC_FLUSH".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"ZLIB_FULL_FLUSH".to_vec(), Value::Long(3));
     vm.constants.insert(b"ZLIB_FINISH".to_vec(), Value::Long(4));
     vm.constants.insert(b"ZLIB_BLOCK".to_vec(), Value::Long(5));
     vm.constants.insert(b"ZLIB_OK".to_vec(), Value::Long(0));
-    vm.constants.insert(b"ZLIB_STREAM_END".to_vec(), Value::Long(1));
-    vm.constants.insert(b"ZLIB_NEED_DICT".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"ZLIB_STREAM_END".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"ZLIB_NEED_DICT".to_vec(), Value::Long(2));
     vm.constants.insert(b"ZLIB_ERRNO".to_vec(), Value::Long(-1));
-    vm.constants.insert(b"ZLIB_STREAM_ERROR".to_vec(), Value::Long(-2));
-    vm.constants.insert(b"ZLIB_DATA_ERROR".to_vec(), Value::Long(-3));
-    vm.constants.insert(b"ZLIB_MEM_ERROR".to_vec(), Value::Long(-4));
-    vm.constants.insert(b"ZLIB_BUF_ERROR".to_vec(), Value::Long(-5));
-    vm.constants.insert(b"ZLIB_VERSION_ERROR".to_vec(), Value::Long(-6));
-    vm.constants.insert(b"ZLIB_FILTERED".to_vec(), Value::Long(1));
-    vm.constants.insert(b"ZLIB_HUFFMAN_ONLY".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"ZLIB_STREAM_ERROR".to_vec(), Value::Long(-2));
+    vm.constants
+        .insert(b"ZLIB_DATA_ERROR".to_vec(), Value::Long(-3));
+    vm.constants
+        .insert(b"ZLIB_MEM_ERROR".to_vec(), Value::Long(-4));
+    vm.constants
+        .insert(b"ZLIB_BUF_ERROR".to_vec(), Value::Long(-5));
+    vm.constants
+        .insert(b"ZLIB_VERSION_ERROR".to_vec(), Value::Long(-6));
+    vm.constants
+        .insert(b"ZLIB_FILTERED".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"ZLIB_HUFFMAN_ONLY".to_vec(), Value::Long(2));
     vm.constants.insert(b"ZLIB_RLE".to_vec(), Value::Long(3));
     vm.constants.insert(b"ZLIB_FIXED".to_vec(), Value::Long(4));
-    vm.constants.insert(b"ZLIB_DEFAULT_STRATEGY".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"ZLIB_DEFAULT_STRATEGY".to_vec(), Value::Long(0));
     // ZLIB_VERNUM: zlib 1.2.11 = 0x12b0
-    vm.constants.insert(b"ZLIB_VERNUM".to_vec(), Value::Long(0x12b0));
-    vm.constants.insert(b"ZLIB_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"1.2.11")));
+    vm.constants
+        .insert(b"ZLIB_VERNUM".to_vec(), Value::Long(0x12b0));
+    vm.constants.insert(
+        b"ZLIB_VERSION".to_vec(),
+        Value::String(PhpString::from_bytes(b"1.2.11")),
+    );
 }
 
 fn comp(level: i64) -> Compression {
-    if level == -1 { Compression::default() } else { Compression::new(level.clamp(0, 9) as u32) }
+    if level == -1 {
+        Compression::default()
+    } else {
+        Compression::new(level.clamp(0, 9) as u32)
+    }
 }
 
 fn validate_level(vm: &mut Vm, func_name: &str, level: i64) -> Result<bool, VmError> {
     if !(-1..=9).contains(&level) {
-        let msg = format!("{}(): Argument #2 ($level) must be between -1 and 9", func_name);
+        let msg = format!(
+            "{}(): Argument #2 ($level) must be between -1 and 9",
+            func_name
+        );
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(true)
 }
 
-fn validate_encoding(vm: &mut Vm, func_name: &str, encoding: i64, arg_num: u32) -> Result<bool, VmError> {
+fn validate_encoding(
+    vm: &mut Vm,
+    func_name: &str,
+    encoding: i64,
+    arg_num: u32,
+) -> Result<bool, VmError> {
     if encoding != 31 && encoding != 15 && encoding != -15 {
-        let msg = format!("{}(): Argument #{} ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE", func_name, arg_num);
+        let msg = format!(
+            "{}(): Argument #{} ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE",
+            func_name, arg_num
+        );
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(true)
 }
@@ -178,7 +302,10 @@ fn gzuncompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "gzuncompress(): Argument #2 ($max_length) must be greater than or equal to 0";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     let bytes = data.as_bytes();
     if bytes.is_empty() || bytes.len() < 2 {
@@ -212,7 +339,10 @@ fn gzinflate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "gzinflate(): Argument #2 ($max_length) must be greater than or equal to 0";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     let bytes = data.as_bytes();
     if bytes.is_empty() {
@@ -225,7 +355,14 @@ fn gzinflate(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Decompress with optional limit. zlib_header=true means zlib stream, false=raw deflate.
 /// Returns warning + false on errors. If max_length is too small to fit decompressed data,
 /// returns "insufficient memory" warning.
-fn decompress_with_limit(vm: &mut Vm, input: &[u8], max: i64, fname: &str, zlib_header: bool, _gzip: bool) -> Result<Value, VmError> {
+fn decompress_with_limit(
+    vm: &mut Vm,
+    input: &[u8],
+    max: i64,
+    fname: &str,
+    zlib_header: bool,
+    _gzip: bool,
+) -> Result<Value, VmError> {
     let mut dec = Decompress::new(zlib_header);
     let mut out = Vec::new();
     let max_out = if max > 0 { max as usize } else { usize::MAX };
@@ -304,9 +441,21 @@ fn gzencode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let c = comp(level);
     let b = data.as_bytes();
     let result: Result<Vec<u8>, _> = match encoding {
-        31 => { let mut e = GzEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
-        15 => { let mut e = ZlibEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
-        -15 => { let mut e = DeflateEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
+        31 => {
+            let mut e = GzEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
+        15 => {
+            let mut e = ZlibEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
+        -15 => {
+            let mut e = DeflateEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
         _ => return Ok(Value::False),
     };
     match result {
@@ -326,7 +475,10 @@ fn gzdecode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut dec = GzDecoder::new(bytes);
     match read_limited(&mut dec, max) {
         Ok(d) => Ok(Value::String(PhpString::from_vec(d))),
-        Err(_) => { vm.emit_warning("gzdecode(): data error"); Ok(Value::False) }
+        Err(_) => {
+            vm.emit_warning("gzdecode(): data error");
+            Ok(Value::False)
+        }
     }
 }
 
@@ -341,9 +493,21 @@ fn zlib_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let c = comp(level);
     let b = data.as_bytes();
     let result: Result<Vec<u8>, _> = match encoding {
-        31 => { let mut e = GzEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
-        15 => { let mut e = ZlibEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
-        -15 => { let mut e = DeflateEncoder::new(Vec::new(), c); e.write_all(b).ok(); e.finish() }
+        31 => {
+            let mut e = GzEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
+        15 => {
+            let mut e = ZlibEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
+        -15 => {
+            let mut e = DeflateEncoder::new(Vec::new(), c);
+            e.write_all(b).ok();
+            e.finish()
+        }
         _ => return Ok(Value::False),
     };
     match result {
@@ -362,11 +526,15 @@ fn zlib_decode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Try gzip
     if b.len() >= 2 && b[0] == 0x1f && b[1] == 0x8b {
-        if let Ok(d) = read_limited(&mut GzDecoder::new(b), max) { return Ok(Value::String(PhpString::from_vec(d))); }
+        if let Ok(d) = read_limited(&mut GzDecoder::new(b), max) {
+            return Ok(Value::String(PhpString::from_vec(d)));
+        }
     }
     // Try zlib
     if b.len() >= 2 && (b[0] & 0x0F) == 8 {
-        if let Ok(d) = read_limited(&mut ZlibDecoder::new(b), max) { return Ok(Value::String(PhpString::from_vec(d))); }
+        if let Ok(d) = read_limited(&mut ZlibDecoder::new(b), max) {
+            return Ok(Value::String(PhpString::from_vec(d)));
+        }
     }
     // Try raw deflate
     if let Ok(d) = read_limited(&mut DeflateDecoder::new(b), max) {
@@ -439,21 +607,40 @@ fn alloc_gz_id() -> i64 {
 }
 
 fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    let mode_str = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let mode_str = args
+        .get(1)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "r".to_string());
 
     // php://output and similar non-seekable streams are not supported by zlib wrapper.
-    if filename.starts_with("php://output") || filename.starts_with("php://stdout") || filename.starts_with("php://stderr") || filename.starts_with("php://input") {
-        vm.emit_warning(&format!("gzopen({}): could not make seekable - {}", filename, filename));
+    if filename.starts_with("php://output")
+        || filename.starts_with("php://stdout")
+        || filename.starts_with("php://stderr")
+        || filename.starts_with("php://input")
+    {
+        vm.emit_warning(&format!(
+            "gzopen({}): could not make seekable - {}",
+            filename, filename
+        ));
         return Ok(Value::False);
     }
 
     // Parse mode: extract r/w and optional compression level
-    let mode_clean: String = mode_str.chars().filter(|&c| c != 'b' && c != 't' && c != 'f' && c != 'h').collect();
+    let mode_clean: String = mode_str
+        .chars()
+        .filter(|&c| c != 'b' && c != 't' && c != 'f' && c != 'h')
+        .collect();
 
     // Check for r+/w+ (not allowed for gzip)
     if mode_clean.contains('+') {
-        vm.emit_warning("gzopen(): Cannot open a zlib stream for reading and writing at the same time!");
+        vm.emit_warning(
+            "gzopen(): Cannot open a zlib stream for reading and writing at the same time!",
+        );
         return Ok(Value::False);
     }
 
@@ -464,11 +651,15 @@ fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stripped_e: String = mode_clean.chars().filter(|&c| c != 'e').collect();
     let had_e = stripped_e.len() != mode_clean.len();
     let is_read = stripped_e.starts_with('r');
-    let is_write = stripped_e.starts_with('w') || stripped_e.starts_with('a') || stripped_e.starts_with('x');
+    let is_write =
+        stripped_e.starts_with('w') || stripped_e.starts_with('a') || stripped_e.starts_with('x');
 
     if !is_read && !is_write {
         if had_e {
-            vm.emit_warning(&format!("gzopen({}): Failed to open stream: `{}' is not a valid mode for fopen", filename, mode_str));
+            vm.emit_warning(&format!(
+                "gzopen({}): Failed to open stream: `{}' is not a valid mode for fopen",
+                filename, mode_str
+            ));
         } else {
             vm.emit_warning("gzopen(): gzopen failed");
         }
@@ -476,7 +667,8 @@ fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Extract compression level from mode string (e.g., "w9", "w1")
-    let level_from_mode: i64 = mode_clean.chars()
+    let level_from_mode: i64 = mode_clean
+        .chars()
         .find(|c| c.is_ascii_digit())
         .map(|c| c as i64 - '0' as i64)
         .unwrap_or(-1);
@@ -499,21 +691,32 @@ fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     data
                 };
                 GZ_HANDLES.with(|handles| {
-                    handles.borrow_mut().insert(gid, GzHandle::Reader {
-                        decompressed,
-                        pos: 0,
-                        eof: false,
-                        is_writer: false,
-                    });
+                    handles.borrow_mut().insert(
+                        gid,
+                        GzHandle::Reader {
+                            decompressed,
+                            pos: 0,
+                            eof: false,
+                            is_writer: false,
+                        },
+                    );
                 });
                 goro_core::value::register_resource(gid, b"stream");
-                goro_core::value::register_close_hook(gid, Box::new(move || {
-                    GZ_HANDLES.with(|handles| { handles.borrow_mut().remove(&gid); });
-                }));
+                goro_core::value::register_close_hook(
+                    gid,
+                    Box::new(move || {
+                        GZ_HANDLES.with(|handles| {
+                            handles.borrow_mut().remove(&gid);
+                        });
+                    }),
+                );
                 Ok(Value::Resource(gid))
             }
             Err(_) => {
-                vm.emit_warning(&format!("gzopen({}): Failed to open stream: No such file or directory", filename));
+                vm.emit_warning(&format!(
+                    "gzopen({}): Failed to open stream: No such file or directory",
+                    filename
+                ));
                 Ok(Value::False)
             }
         }
@@ -521,25 +724,34 @@ fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Write mode - check parent dir exists
         if let Some(parent) = std::path::Path::new(&filename).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                vm.emit_warning(&format!("gzopen({}): Failed to open stream: No such file or directory", filename));
+                vm.emit_warning(&format!(
+                    "gzopen({}): Failed to open stream: No such file or directory",
+                    filename
+                ));
                 return Ok(Value::False);
             }
         }
         let gid = alloc_gz_id();
         GZ_HANDLES.with(|handles| {
-            handles.borrow_mut().insert(gid, GzHandle::Writer {
-                path: filename.to_string(),
-                buffer: Vec::new(),
-                pos: 0,
-                level: comp(level_from_mode),
-                plain: level_from_mode == 0,
-            });
+            handles.borrow_mut().insert(
+                gid,
+                GzHandle::Writer {
+                    path: filename.to_string(),
+                    buffer: Vec::new(),
+                    pos: 0,
+                    level: comp(level_from_mode),
+                    plain: level_from_mode == 0,
+                },
+            );
         });
         goro_core::value::register_resource(gid, b"stream");
         // Register a close hook so fclose() flushes the gz writer to disk.
-        goro_core::value::register_close_hook(gid, Box::new(move || {
-            flush_gz_handle(gid);
-        }));
+        goro_core::value::register_close_hook(
+            gid,
+            Box::new(move || {
+                flush_gz_handle(gid);
+            }),
+        );
         Ok(Value::Resource(gid))
     }
 }
@@ -548,7 +760,14 @@ fn gzopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn flush_gz_handle(gid: i64) {
     let handle = GZ_HANDLES.with(|handles| handles.borrow_mut().remove(&gid));
     if let Some(handle) = handle {
-        if let GzHandle::Writer { path, buffer, level, plain, .. } = handle {
+        if let GzHandle::Writer {
+            path,
+            buffer,
+            level,
+            plain,
+            ..
+        } = handle
+        {
             if plain {
                 let _ = std::fs::write(&path, &buffer);
             } else {
@@ -564,10 +783,16 @@ fn flush_gz_handle(gid: i64) {
 
 fn require_open_resource(vm: &mut Vm, gid: i64, fname: &str) -> Result<bool, VmError> {
     if !goro_core::value::is_open_resource(gid) {
-        let msg = format!("{}(): Argument #1 ($stream) must be an open stream resource", fname);
+        let msg = format!(
+            "{}(): Argument #1 ($stream) must be an open stream resource",
+            fname
+        );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(true)
 }
@@ -597,7 +822,13 @@ fn gzread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     GZ_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
-            if let GzHandle::Reader { decompressed, pos, eof, .. } = handle {
+            if let GzHandle::Reader {
+                decompressed,
+                pos,
+                eof,
+                ..
+            } = handle
+            {
                 if *pos >= decompressed.len() {
                     *eof = true;
                     return Ok(Value::String(PhpString::from_bytes(b"")));
@@ -674,7 +905,13 @@ fn gzgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     GZ_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
-            if let GzHandle::Reader { decompressed, pos, eof, .. } = handle {
+            if let GzHandle::Reader {
+                decompressed,
+                pos,
+                eof,
+                ..
+            } = handle
+            {
                 if *pos >= decompressed.len() {
                     *eof = true;
                     return Ok(Value::False);
@@ -719,7 +956,13 @@ fn gzgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     GZ_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
-            if let GzHandle::Reader { decompressed, pos, eof, .. } = handle {
+            if let GzHandle::Reader {
+                decompressed,
+                pos,
+                eof,
+                ..
+            } = handle
+            {
                 if *pos >= decompressed.len() {
                     *eof = true;
                     return Ok(Value::False);
@@ -747,11 +990,20 @@ fn gzeof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
             match handle {
-                GzHandle::Reader { decompressed, pos, eof, .. } => {
+                GzHandle::Reader {
+                    decompressed,
+                    pos,
+                    eof,
+                    ..
+                } => {
                     if *pos >= decompressed.len() {
                         *eof = true;
                     }
-                    if *eof { Ok(Value::True) } else { Ok(Value::False) }
+                    if *eof {
+                        Ok(Value::True)
+                    } else {
+                        Ok(Value::False)
+                    }
                 }
                 GzHandle::Writer { .. } => Ok(Value::False),
             }
@@ -801,7 +1053,12 @@ fn gzseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
             match handle {
-                GzHandle::Reader { decompressed, pos, eof, .. } => {
+                GzHandle::Reader {
+                    decompressed,
+                    pos,
+                    eof,
+                    ..
+                } => {
                     let new_pos = match whence {
                         0 => offset,
                         1 => *pos as i64 + offset,
@@ -865,7 +1122,13 @@ fn gzpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = GZ_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&gid) {
-            if let GzHandle::Reader { decompressed, pos, eof, .. } = handle {
+            if let GzHandle::Reader {
+                decompressed,
+                pos,
+                eof,
+                ..
+            } = handle
+            {
                 if *pos >= decompressed.len() {
                     *eof = true;
                     return None;
@@ -892,12 +1155,19 @@ fn gzpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
 
     let data = match std::fs::read(&filename) {
         Ok(d) => d,
         Err(_) => {
-            vm.emit_warning(&format!("gzfile({}): Failed to open stream: No such file or directory", filename));
+            vm.emit_warning(&format!(
+                "gzfile({}): Failed to open stream: No such file or directory",
+                filename
+            ));
             return Ok(Value::False);
         }
     };
@@ -922,9 +1192,11 @@ fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Find next newline
         let end = match decompressed[start..].iter().position(|&b| b == b'\n') {
             Some(pos) => start + pos + 1, // include the newline
-            None => len,                   // no more newlines
+            None => len,                  // no more newlines
         };
-        result.push(Value::String(PhpString::from_vec(decompressed[start..end].to_vec())));
+        result.push(Value::String(PhpString::from_vec(
+            decompressed[start..end].to_vec(),
+        )));
         start = end;
     }
 
@@ -932,12 +1204,19 @@ fn gzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn readgzfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
 
     let data = match std::fs::read(&filename) {
         Ok(d) => d,
         Err(_) => {
-            vm.emit_warning(&format!("readgzfile({}): Failed to open stream: No such file or directory", filename));
+            vm.emit_warning(&format!(
+                "readgzfile({}): Failed to open stream: No such file or directory",
+                filename
+            ));
             return Ok(Value::False);
         }
     };
@@ -1033,10 +1312,14 @@ fn parse_gzip_header(buf: &[u8]) -> Option<usize> {
     let mut pos = 10;
     // FEXTRA
     if flg & 0x04 != 0 {
-        if buf.len() < pos + 2 { return None; }
+        if buf.len() < pos + 2 {
+            return None;
+        }
         let xlen = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
         pos += 2;
-        if buf.len() < pos + xlen { return None; }
+        if buf.len() < pos + xlen {
+            return None;
+        }
         pos += xlen;
     }
     // FNAME
@@ -1057,7 +1340,9 @@ fn parse_gzip_header(buf: &[u8]) -> Option<usize> {
     }
     // FHCRC
     if flg & 0x02 != 0 {
-        if buf.len() < pos + 2 { return None; }
+        if buf.len() < pos + 2 {
+            return None;
+        }
         pos += 2;
     }
     Some(pos)
@@ -1077,22 +1362,37 @@ fn extract_dictionary(vm: &mut Vm, fname: &str, value: &Value) -> Result<Option<
                         let msg = "Object of class stdClass could not be converted to string";
                         let exc = vm.create_exception(b"Error", msg, 0);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                        return Err(VmError {
+                            message: msg.to_string(),
+                            line: vm.current_line,
+                        });
                     }
                     _ => {
                         let s = v.to_php_string();
                         let b = s.as_bytes();
                         if b.is_empty() {
-                            let msg = format!("{}(): Argument #2 ($options) must not contain empty strings", fname);
+                            let msg = format!(
+                                "{}(): Argument #2 ($options) must not contain empty strings",
+                                fname
+                            );
                             let exc = vm.create_exception(b"ValueError", &msg, 0);
                             vm.current_exception = Some(exc);
-                            return Err(VmError { message: msg, line: vm.current_line });
+                            return Err(VmError {
+                                message: msg,
+                                line: vm.current_line,
+                            });
                         }
                         if b.contains(&0) {
-                            let msg = format!("{}(): Argument #2 ($options) must not contain strings with null bytes", fname);
+                            let msg = format!(
+                                "{}(): Argument #2 ($options) must not contain strings with null bytes",
+                                fname
+                            );
                             let exc = vm.create_exception(b"ValueError", &msg, 0);
                             vm.current_exception = Some(exc);
-                            return Err(VmError { message: msg, line: vm.current_line });
+                            return Err(VmError {
+                                message: msg,
+                                line: vm.current_line,
+                            });
                         }
                         out.extend_from_slice(b);
                         out.push(0);
@@ -1121,7 +1421,10 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
     let mut level = -1i64;
@@ -1133,13 +1436,30 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match opts {
             Value::Array(arr) => {
                 let arr = arr.borrow();
-                level_val = arr.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(b"level"))).cloned();
-                memory_val = arr.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(b"memory"))).cloned();
-                dict_val = arr.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(b"dictionary"))).cloned();
+                level_val = arr
+                    .get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
+                        b"level",
+                    )))
+                    .cloned();
+                memory_val = arr
+                    .get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
+                        b"memory",
+                    )))
+                    .cloned();
+                dict_val = arr
+                    .get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
+                        b"dictionary",
+                    )))
+                    .cloned();
             }
             Value::Object(obj) => {
                 let obj = obj.borrow();
-                let find = |name: &[u8]| obj.properties.iter().find(|(k, _)| k.as_slice() == name).map(|(_, v)| v.clone());
+                let find = |name: &[u8]| {
+                    obj.properties
+                        .iter()
+                        .find(|(k, _)| k.as_slice() == name)
+                        .map(|(_, v)| v.clone())
+                };
                 level_val = find(b"level");
                 memory_val = find(b"memory");
                 dict_val = find(b"dictionary");
@@ -1156,7 +1476,10 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "deflate_init(): \"level\" option must be between -1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
         if let Some(v) = memory_val {
@@ -1165,7 +1488,10 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "deflate_init(): \"memory\" option must be between 1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
         if let Some(v) = dict_val {
@@ -1180,11 +1506,14 @@ fn deflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let cid = alloc_ctx_id();
     DEFLATE_CONTEXTS.with(|ctxs| {
-        ctxs.borrow_mut().insert(cid, DeflateContext {
-            encoding,
-            compress,
-            finished: false,
-        });
+        ctxs.borrow_mut().insert(
+            cid,
+            DeflateContext {
+                encoding,
+                compress,
+                finished: false,
+            },
+        );
     });
     goro_core::value::register_resource(cid, b"zlib.deflate");
     Ok(Value::Resource(cid))
@@ -1199,19 +1528,25 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
     // Check if this is a valid resource (not a generic file resource)
     let rtype = goro_core::value::resource_type_of(cid);
     if rtype.as_deref() != Some(b"zlib.deflate") {
-        let msg = "deflate_add(): Argument #1 ($context) must be of type DeflateContext, resource given";
+        let msg =
+            "deflate_add(): Argument #1 ($context) must be of type DeflateContext, resource given";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
-    
     DEFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
         let mut ctxs = ctxs.borrow_mut();
         if let Some(ctx) = ctxs.get_mut(&cid) {
@@ -1246,7 +1581,12 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         if flush == FlushCompress::None && total_in >= input.len() {
                             break;
                         }
-                        if (flush == FlushCompress::Sync || flush == FlushCompress::Partial || flush == FlushCompress::Full) && total_in >= input.len() && produced < chunk.len() {
+                        if (flush == FlushCompress::Sync
+                            || flush == FlushCompress::Partial
+                            || flush == FlushCompress::Full)
+                            && total_in >= input.len()
+                            && produced < chunk.len()
+                        {
                             break;
                         }
                         continue;
@@ -1272,10 +1612,14 @@ fn deflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn inflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let encoding = args.first().map(|v| v.to_long()).unwrap_or(15);
     if encoding != 31 && encoding != 15 && encoding != -15 {
-        let msg = "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE";
+        let msg =
+            "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
     let mut dictionary: Option<Vec<u8>> = None;
@@ -1283,11 +1627,17 @@ fn inflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let dict_val: Option<Value> = match opts {
             Value::Array(arr) => {
                 let arr = arr.borrow();
-                arr.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(b"dictionary"))).cloned()
+                arr.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
+                    b"dictionary",
+                )))
+                .cloned()
             }
             Value::Object(obj) => {
                 let obj = obj.borrow();
-                obj.properties.iter().find(|(k, _)| k.as_slice() == b"dictionary").map(|(_, v)| v.clone())
+                obj.properties
+                    .iter()
+                    .find(|(k, _)| k.as_slice() == b"dictionary")
+                    .map(|(_, v)| v.clone())
             }
             _ => None,
         };
@@ -1303,18 +1653,21 @@ fn inflate_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let cid = alloc_ctx_id();
     INFLATE_CONTEXTS.with(|ctxs| {
-        ctxs.borrow_mut().insert(cid, InflateContext {
-            encoding,
-            decompress,
-            total_read: 0,
-            status: 0,
-            dictionary,
-            pending_dict_apply,
-            gz_header_buf: Vec::new(),
-            gz_header_done: encoding != 31,
-            gz_header_consumed: 0,
-            gz_trailer_remaining: if encoding == 31 { 8 } else { 0 },
-        });
+        ctxs.borrow_mut().insert(
+            cid,
+            InflateContext {
+                encoding,
+                decompress,
+                total_read: 0,
+                status: 0,
+                dictionary,
+                pending_dict_apply,
+                gz_header_buf: Vec::new(),
+                gz_header_done: encoding != 31,
+                gz_header_consumed: 0,
+                gz_trailer_remaining: if encoding == 31 { 8 } else { 0 },
+            },
+        );
     });
     goro_core::value::register_resource(cid, b"zlib.inflate");
     Ok(Value::Resource(cid))
@@ -1329,18 +1682,24 @@ fn inflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "inflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
     let rtype = goro_core::value::resource_type_of(cid);
     if rtype.as_deref() != Some(b"zlib.inflate") {
-        let msg = "inflate_add(): Argument #1 ($context) must be of type InflateContext, resource given";
+        let msg =
+            "inflate_add(): Argument #1 ($context) must be of type InflateContext, resource given";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
-    
     INFLATE_CONTEXTS.with(|ctxs| -> Result<Value, VmError> {
         let mut ctxs = ctxs.borrow_mut();
         if let Some(ctx) = ctxs.get_mut(&cid) {
@@ -1432,7 +1791,11 @@ fn inflate_add_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let mut chunk = vec![0u8; 16384];
                 let in_before = ctx.decompress.total_in();
                 let out_before = ctx.decompress.total_out();
-                let in_slice = if total_consumed >= input.len() { &[] } else { &input[total_consumed..] };
+                let in_slice = if total_consumed >= input.len() {
+                    &[]
+                } else {
+                    &input[total_consumed..]
+                };
                 let res = ctx.decompress.decompress(in_slice, &mut chunk, flush);
                 let consumed = (ctx.decompress.total_in() - in_before) as usize;
                 let produced = (ctx.decompress.total_out() - out_before) as usize;
@@ -1488,8 +1851,14 @@ fn inflate_get_read_len_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         if let Some(ctx) = ctxs.get(&cid) {
             // Return total_in from decompress + header overhead (bytes actually consumed)
             let extra = ctx.gz_header_consumed as u64;
-            let trailer = if ctx.encoding == 31 && ctx.status == 1 { 8 } else { 0 };
-            Ok(Value::Long((ctx.decompress.total_in() + extra + trailer) as i64))
+            let trailer = if ctx.encoding == 31 && ctx.status == 1 {
+                8
+            } else {
+                0
+            };
+            Ok(Value::Long(
+                (ctx.decompress.total_in() + extra + trailer) as i64,
+            ))
         } else {
             Ok(Value::False)
         }

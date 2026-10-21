@@ -120,14 +120,20 @@ fn arg_addrinfo_id(arg: Option<&Value>) -> Option<i64> {
 fn throw_value_error(vm: &mut Vm, msg: &str) -> VmError {
     let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 /// Throw a TypeError exception
 fn throw_type_error(vm: &mut Vm, msg: &str) -> VmError {
     let exc = vm.create_exception(b"TypeError", msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 /// Register all socket extension functions and constants
@@ -189,40 +195,66 @@ pub fn register(vm: &mut Vm) {
     vm.constants.insert(b"SOCK_STREAM".to_vec(), Value::Long(1));
     vm.constants.insert(b"SOCK_DGRAM".to_vec(), Value::Long(2));
     vm.constants.insert(b"SOCK_RAW".to_vec(), Value::Long(3));
-    vm.constants.insert(b"SOCK_SEQPACKET".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"SOCK_SEQPACKET".to_vec(), Value::Long(5));
     vm.constants.insert(b"SOCK_RDM".to_vec(), Value::Long(4));
     vm.constants.insert(b"SOL_SOCKET".to_vec(), Value::Long(1));
     vm.constants.insert(b"SOL_TCP".to_vec(), Value::Long(6));
     vm.constants.insert(b"SOL_UDP".to_vec(), Value::Long(17));
-    vm.constants.insert(b"SO_REUSEADDR".to_vec(), Value::Long(2));
-    vm.constants.insert(b"SO_KEEPALIVE".to_vec(), Value::Long(9));
-    vm.constants.insert(b"SO_BROADCAST".to_vec(), Value::Long(6));
-    vm.constants.insert(b"SO_RCVTIMEO".to_vec(), Value::Long(20));
-    vm.constants.insert(b"SO_SNDTIMEO".to_vec(), Value::Long(21));
+    vm.constants
+        .insert(b"SO_REUSEADDR".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"SO_KEEPALIVE".to_vec(), Value::Long(9));
+    vm.constants
+        .insert(b"SO_BROADCAST".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"SO_RCVTIMEO".to_vec(), Value::Long(20));
+    vm.constants
+        .insert(b"SO_SNDTIMEO".to_vec(), Value::Long(21));
     vm.constants.insert(b"SO_RCVBUF".to_vec(), Value::Long(8));
     vm.constants.insert(b"SO_SNDBUF".to_vec(), Value::Long(7));
     vm.constants.insert(b"TCP_NODELAY".to_vec(), Value::Long(1));
-    vm.constants.insert(b"MSG_DONTWAIT".to_vec(), Value::Long(64));
+    vm.constants
+        .insert(b"MSG_DONTWAIT".to_vec(), Value::Long(64));
     vm.constants.insert(b"MSG_PEEK".to_vec(), Value::Long(2));
-    vm.constants.insert(b"PHP_NORMAL_READ".to_vec(), Value::Long(1));
-    vm.constants.insert(b"PHP_BINARY_READ".to_vec(), Value::Long(2));
-    vm.constants.insert(b"SOCKET_EINTR".to_vec(), Value::Long(4));
-    vm.constants.insert(b"SOCKET_EACCES".to_vec(), Value::Long(13));
-    vm.constants.insert(b"SOCKET_EAGAIN".to_vec(), Value::Long(11));
-    vm.constants.insert(b"SOCKET_EWOULDBLOCK".to_vec(), Value::Long(11));
-    vm.constants.insert(b"SOCKET_ECONNREFUSED".to_vec(), Value::Long(111));
-    vm.constants.insert(b"SOCKET_ETIMEDOUT".to_vec(), Value::Long(110));
-    vm.constants.insert(b"SOCKET_ECONNRESET".to_vec(), Value::Long(104));
-    vm.constants.insert(b"SOCKET_EINVAL".to_vec(), Value::Long(22));
-    vm.constants.insert(b"SOCKET_ENOTCONN".to_vec(), Value::Long(107));
-    vm.constants.insert(b"SOCKET_EPIPE".to_vec(), Value::Long(32));
-    vm.constants.insert(b"SOCKET_EBADF".to_vec(), Value::Long(9));
-    vm.constants.insert(b"SOCKET_EMFILE".to_vec(), Value::Long(24));
-    vm.constants.insert(b"SOCKET_ENOBUFS".to_vec(), Value::Long(105));
-    vm.constants.insert(b"SOCKET_EADDRINUSE".to_vec(), Value::Long(98));
-    vm.constants.insert(b"SOCKET_EADDRNOTAVAIL".to_vec(), Value::Long(99));
-    vm.constants.insert(b"SOCKET_EAFNOSUPPORT".to_vec(), Value::Long(97));
-    vm.constants.insert(b"SOCKET_EPROTONOSUPPORT".to_vec(), Value::Long(93));
+    vm.constants
+        .insert(b"PHP_NORMAL_READ".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"PHP_BINARY_READ".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"SOCKET_EINTR".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"SOCKET_EACCES".to_vec(), Value::Long(13));
+    vm.constants
+        .insert(b"SOCKET_EAGAIN".to_vec(), Value::Long(11));
+    vm.constants
+        .insert(b"SOCKET_EWOULDBLOCK".to_vec(), Value::Long(11));
+    vm.constants
+        .insert(b"SOCKET_ECONNREFUSED".to_vec(), Value::Long(111));
+    vm.constants
+        .insert(b"SOCKET_ETIMEDOUT".to_vec(), Value::Long(110));
+    vm.constants
+        .insert(b"SOCKET_ECONNRESET".to_vec(), Value::Long(104));
+    vm.constants
+        .insert(b"SOCKET_EINVAL".to_vec(), Value::Long(22));
+    vm.constants
+        .insert(b"SOCKET_ENOTCONN".to_vec(), Value::Long(107));
+    vm.constants
+        .insert(b"SOCKET_EPIPE".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"SOCKET_EBADF".to_vec(), Value::Long(9));
+    vm.constants
+        .insert(b"SOCKET_EMFILE".to_vec(), Value::Long(24));
+    vm.constants
+        .insert(b"SOCKET_ENOBUFS".to_vec(), Value::Long(105));
+    vm.constants
+        .insert(b"SOCKET_EADDRINUSE".to_vec(), Value::Long(98));
+    vm.constants
+        .insert(b"SOCKET_EADDRNOTAVAIL".to_vec(), Value::Long(99));
+    vm.constants
+        .insert(b"SOCKET_EAFNOSUPPORT".to_vec(), Value::Long(97));
+    vm.constants
+        .insert(b"SOCKET_EPROTONOSUPPORT".to_vec(), Value::Long(93));
 
     // Shutdown constants
     vm.constants.insert(b"SHUT_RD".to_vec(), Value::Long(0));
@@ -231,45 +263,72 @@ pub fn register(vm: &mut Vm) {
 
     // Missing socket constants
     vm.constants.insert(b"IPPROTO_IP".to_vec(), Value::Long(0));
-    vm.constants.insert(b"IPPROTO_IPV6".to_vec(), Value::Long(41));
+    vm.constants
+        .insert(b"IPPROTO_IPV6".to_vec(), Value::Long(41));
     vm.constants.insert(b"MSG_OOB".to_vec(), Value::Long(1));
-    vm.constants.insert(b"MSG_WAITALL".to_vec(), Value::Long(256));
+    vm.constants
+        .insert(b"MSG_WAITALL".to_vec(), Value::Long(256));
     vm.constants.insert(b"MSG_EOF".to_vec(), Value::Long(512));
-    vm.constants.insert(b"MSG_DONTROUTE".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"MSG_DONTROUTE".to_vec(), Value::Long(4));
     vm.constants.insert(b"SO_TYPE".to_vec(), Value::Long(3));
     vm.constants.insert(b"SO_LINGER".to_vec(), Value::Long(13));
     vm.constants.insert(b"SO_ERROR".to_vec(), Value::Long(4));
-    vm.constants.insert(b"SO_REUSEPORT".to_vec(), Value::Long(15));
-    vm.constants.insert(b"SO_OOBINLINE".to_vec(), Value::Long(10));
-    vm.constants.insert(b"IP_MULTICAST_LOOP".to_vec(), Value::Long(34));
-    vm.constants.insert(b"IP_MULTICAST_TTL".to_vec(), Value::Long(33));
-    vm.constants.insert(b"IP_MULTICAST_IF".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"SO_REUSEPORT".to_vec(), Value::Long(15));
+    vm.constants
+        .insert(b"SO_OOBINLINE".to_vec(), Value::Long(10));
+    vm.constants
+        .insert(b"IP_MULTICAST_LOOP".to_vec(), Value::Long(34));
+    vm.constants
+        .insert(b"IP_MULTICAST_TTL".to_vec(), Value::Long(33));
+    vm.constants
+        .insert(b"IP_MULTICAST_IF".to_vec(), Value::Long(32));
     vm.constants.insert(b"IP_TOS".to_vec(), Value::Long(1));
     vm.constants.insert(b"IP_TTL".to_vec(), Value::Long(2));
-    vm.constants.insert(b"IPV6_MULTICAST_LOOP".to_vec(), Value::Long(19));
-    vm.constants.insert(b"IPV6_MULTICAST_HOPS".to_vec(), Value::Long(18));
-    vm.constants.insert(b"IPV6_MULTICAST_IF".to_vec(), Value::Long(17));
-    vm.constants.insert(b"IPV6_V6ONLY".to_vec(), Value::Long(26));
-    vm.constants.insert(b"MCAST_JOIN_GROUP".to_vec(), Value::Long(42));
-    vm.constants.insert(b"MCAST_LEAVE_GROUP".to_vec(), Value::Long(45));
-    vm.constants.insert(b"MCAST_BLOCK_SOURCE".to_vec(), Value::Long(43));
-    vm.constants.insert(b"MCAST_UNBLOCK_SOURCE".to_vec(), Value::Long(44));
-    vm.constants.insert(b"MCAST_JOIN_SOURCE_GROUP".to_vec(), Value::Long(46));
-    vm.constants.insert(b"MCAST_LEAVE_SOURCE_GROUP".to_vec(), Value::Long(47));
-    vm.constants.insert(b"STREAM_IPPROTO_IP".to_vec(), Value::Long(0));
-    vm.constants.insert(b"STREAM_IPPROTO_TCP".to_vec(), Value::Long(6));
-    vm.constants.insert(b"STREAM_IPPROTO_UDP".to_vec(), Value::Long(17));
-    vm.constants.insert(b"STREAM_IPPROTO_ICMP".to_vec(), Value::Long(1));
-    vm.constants.insert(b"STREAM_IPPROTO_RAW".to_vec(), Value::Long(255));
+    vm.constants
+        .insert(b"IPV6_MULTICAST_LOOP".to_vec(), Value::Long(19));
+    vm.constants
+        .insert(b"IPV6_MULTICAST_HOPS".to_vec(), Value::Long(18));
+    vm.constants
+        .insert(b"IPV6_MULTICAST_IF".to_vec(), Value::Long(17));
+    vm.constants
+        .insert(b"IPV6_V6ONLY".to_vec(), Value::Long(26));
+    vm.constants
+        .insert(b"MCAST_JOIN_GROUP".to_vec(), Value::Long(42));
+    vm.constants
+        .insert(b"MCAST_LEAVE_GROUP".to_vec(), Value::Long(45));
+    vm.constants
+        .insert(b"MCAST_BLOCK_SOURCE".to_vec(), Value::Long(43));
+    vm.constants
+        .insert(b"MCAST_UNBLOCK_SOURCE".to_vec(), Value::Long(44));
+    vm.constants
+        .insert(b"MCAST_JOIN_SOURCE_GROUP".to_vec(), Value::Long(46));
+    vm.constants
+        .insert(b"MCAST_LEAVE_SOURCE_GROUP".to_vec(), Value::Long(47));
+    vm.constants
+        .insert(b"STREAM_IPPROTO_IP".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"STREAM_IPPROTO_TCP".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"STREAM_IPPROTO_UDP".to_vec(), Value::Long(17));
+    vm.constants
+        .insert(b"STREAM_IPPROTO_ICMP".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"STREAM_IPPROTO_RAW".to_vec(), Value::Long(255));
 
     // AI_* flags for addrinfo
     vm.constants.insert(b"AI_PASSIVE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"AI_CANONNAME".to_vec(), Value::Long(2));
-    vm.constants.insert(b"AI_NUMERICHOST".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"AI_CANONNAME".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"AI_NUMERICHOST".to_vec(), Value::Long(4));
     vm.constants.insert(b"AI_V4MAPPED".to_vec(), Value::Long(8));
     vm.constants.insert(b"AI_ALL".to_vec(), Value::Long(16));
-    vm.constants.insert(b"AI_ADDRCONFIG".to_vec(), Value::Long(32));
-    vm.constants.insert(b"AI_NUMERICSERV".to_vec(), Value::Long(1024));
+    vm.constants
+        .insert(b"AI_ADDRCONFIG".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"AI_NUMERICSERV".to_vec(), Value::Long(1024));
 }
 
 /// socket_create(int $domain, int $type, int $protocol): Socket|false
@@ -344,10 +403,16 @@ fn socket_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// socket_connect(Socket $socket, string $address, ?int $port = null): bool
 fn socket_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
-        let msg = format!("socket_connect() expects at least 2 arguments, {} given", args.len());
+        let msg = format!(
+            "socket_connect() expects at least 2 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let socket_id = match arg_socket_id(args.first()) {
         Some(s) => s,
@@ -364,7 +429,9 @@ fn socket_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let is_inet = SOCKETS.with(|s| {
         matches!(
             s.borrow().get(&socket_id),
-            Some(SocketHandle::TcpClient(_)) | Some(SocketHandle::TcpServer(_)) | Some(SocketHandle::Udp(_))
+            Some(SocketHandle::TcpClient(_))
+                | Some(SocketHandle::TcpServer(_))
+                | Some(SocketHandle::Udp(_))
         )
     });
 
@@ -416,7 +483,7 @@ fn socket_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 vm.emit_warning(&format!(
                     "socket_connect(): unable to connect [{}]: {}",
                     map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                    errno_to_string(map_io_error(&e))
                 ));
                 Ok(Value::False)
             }
@@ -440,7 +507,7 @@ fn socket_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 vm.emit_warning(&format!(
                                     "socket_connect(): unable to connect [{}]: {}",
                                     map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                                    errno_to_string(map_io_error(&e))
                                 ));
                                 Ok(Value::False)
                             }
@@ -456,7 +523,7 @@ fn socket_connect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     vm.emit_warning(&format!(
                         "socket_connect(): unable to connect [{}]: {}",
                         map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                        errno_to_string(map_io_error(&e))
                     ));
                     Ok(Value::False)
                 }
@@ -495,9 +562,7 @@ fn socket_bind(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let addr_str = format!("{}:{}", address, port_u16);
 
     // Determine if socket is UDP or TCP-stream
-    let is_udp = SOCKETS.with(|s| {
-        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Udp(_)))
-    });
+    let is_udp = SOCKETS.with(|s| matches!(s.borrow().get(&socket_id), Some(SocketHandle::Udp(_))));
 
     if is_udp {
         match UdpSocket::bind(&addr_str) {
@@ -513,7 +578,7 @@ fn socket_bind(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 vm.emit_warning(&format!(
                     "socket_bind(): unable to bind address [{}]: {}",
                     map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                    errno_to_string(map_io_error(&e))
                 ));
                 Ok(Value::False)
             }
@@ -533,7 +598,7 @@ fn socket_bind(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 vm.emit_warning(&format!(
                     "socket_bind(): unable to bind address [{}]: {}",
                     map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                    errno_to_string(map_io_error(&e))
                 ));
                 Ok(Value::False)
             }
@@ -548,9 +613,8 @@ fn socket_listen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => return Ok(Value::False),
     };
 
-    let exists = SOCKETS.with(|s| {
-        matches!(s.borrow().get(&socket_id), Some(SocketHandle::TcpServer(_)))
-    });
+    let exists =
+        SOCKETS.with(|s| matches!(s.borrow().get(&socket_id), Some(SocketHandle::TcpServer(_))));
 
     if exists {
         set_last_error(0);
@@ -590,8 +654,7 @@ fn socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(stream) => {
             let id = alloc_socket_id_via_vm(vm);
             SOCKETS.with(|s| {
-                s.borrow_mut()
-                    .insert(id, SocketHandle::TcpClient(stream));
+                s.borrow_mut().insert(id, SocketHandle::TcpClient(stream));
             });
             set_last_error(0);
             Ok(make_socket_object(id))
@@ -601,7 +664,7 @@ fn socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_accept(): unable to accept incoming connection [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -685,7 +748,11 @@ fn socket_read(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_read(): unable to read from socket [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_read(): unable to read from socket [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -731,7 +798,11 @@ fn socket_write(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_write(): unable to write to socket [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_write(): unable to write to socket [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -787,7 +858,11 @@ fn socket_send(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_send(): unable to send data [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_send(): unable to send data [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -850,7 +925,11 @@ fn socket_recv(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_recv(): unable to receive data [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_recv(): unable to receive data [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -887,9 +966,15 @@ fn socket_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     _ => "mixed",
                 };
                 let msg = if optname == SO_RCVTIMEO {
-                    format!("socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_RCVTIMEO, {} given", type_name)
+                    format!(
+                        "socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_RCVTIMEO, {} given",
+                        type_name
+                    )
                 } else {
-                    format!("socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_SNDTIMEO, {} given", type_name)
+                    format!(
+                        "socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_SNDTIMEO, {} given",
+                        type_name
+                    )
                 };
                 return Err(throw_type_error(vm, &msg));
             }
@@ -897,7 +982,9 @@ fn socket_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Validate "sec" key exists
         if let Value::Array(arr) = &optval {
             let arr_ref = arr.borrow();
-            let sec_val = arr_ref.get(&ArrayKey::String(PhpString::from_bytes(b"sec"))).cloned();
+            let sec_val = arr_ref
+                .get(&ArrayKey::String(PhpString::from_bytes(b"sec")))
+                .cloned();
             if sec_val.is_none() {
                 return Err(throw_value_error(
                     vm,
@@ -908,7 +995,10 @@ fn socket_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Some(Value::Object(o)) = &sec_val {
                 let class_name = String::from_utf8_lossy(&o.borrow().class_name).into_owned();
                 drop(arr_ref);
-                vm.emit_warning(&format!("Object of class {} could not be converted to int", class_name));
+                vm.emit_warning(&format!(
+                    "Object of class {} could not be converted to int",
+                    class_name
+                ));
             }
         }
     } else if level == SOL_SOCKET && optname == SO_LINGER {
@@ -924,7 +1014,10 @@ fn socket_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Object(_) => "stdClass",
                     _ => "mixed",
                 };
-                let msg = format!("socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_LINGER, {} given", type_name);
+                let msg = format!(
+                    "socket_set_option(): Argument #4 ($value) must be of type array when argument #3 ($option) is SO_LINGER, {} given",
+                    type_name
+                );
                 return Err(throw_type_error(vm, &msg));
             }
         }
@@ -983,7 +1076,7 @@ fn socket_set_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_set_option(): Unable to set socket option [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1003,7 +1096,12 @@ fn set_socket_option(
         SocketHandle::TcpClient(s) => s.as_raw_fd(),
         SocketHandle::TcpServer(s) => s.as_raw_fd(),
         SocketHandle::Udp(s) => s.as_raw_fd(),
-        SocketHandle::Closed => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "closed")),
+        SocketHandle::Closed => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "closed",
+            ));
+        }
     };
 
     if level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO) {
@@ -1144,7 +1242,7 @@ fn socket_get_option(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_get_option(): Unable to get socket option [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1159,11 +1257,19 @@ fn get_socket_option(handle: &SocketHandle, level: i64, optname: i64) -> std::io
         SocketHandle::TcpClient(s) => s.as_raw_fd(),
         SocketHandle::TcpServer(s) => s.as_raw_fd(),
         SocketHandle::Udp(s) => s.as_raw_fd(),
-        SocketHandle::Closed => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "closed")),
+        SocketHandle::Closed => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "closed",
+            ));
+        }
     };
 
     if level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO) {
-        let mut timeval = libc::timeval { tv_sec: 0, tv_usec: 0 };
+        let mut timeval = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let mut len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
 
         let ret = unsafe {
@@ -1191,7 +1297,10 @@ fn get_socket_option(handle: &SocketHandle, level: i64, optname: i64) -> std::io
             Err(std::io::Error::last_os_error())
         }
     } else if level == SOL_SOCKET && optname == SO_LINGER {
-        let mut linger_val = libc::linger { l_onoff: 0, l_linger: 0 };
+        let mut linger_val = libc::linger {
+            l_onoff: 0,
+            l_linger: 0,
+        };
         let mut len = std::mem::size_of::<libc::linger>() as libc::socklen_t;
 
         let ret = unsafe {
@@ -1241,11 +1350,7 @@ fn get_socket_option(handle: &SocketHandle, level: i64, optname: i64) -> std::io
 }
 
 #[cfg(not(unix))]
-fn get_socket_option(
-    _handle: &SocketHandle,
-    _level: i64,
-    _optname: i64,
-) -> std::io::Result<Value> {
+fn get_socket_option(_handle: &SocketHandle, _level: i64, _optname: i64) -> std::io::Result<Value> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "socket_get_option not supported on this platform",
@@ -1270,7 +1375,11 @@ fn socket_strerror(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !((i32::MIN as i64)..=(i32::MAX as i64)).contains(&errno) {
         return Err(throw_value_error(
             vm,
-            &format!("socket_strerror(): Argument #1 ($error_code) must be between {} and {}", i32::MIN, i32::MAX),
+            &format!(
+                "socket_strerror(): Argument #1 ($error_code) must be between {} and {}",
+                i32::MIN,
+                i32::MAX
+            ),
         ));
     }
     let msg = errno_to_string(errno);
@@ -1286,10 +1395,15 @@ fn socket_set_nonblock(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Check if closed
     let is_closed = SOCKETS.with(|s| {
-        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Closed)) || !s.borrow().contains_key(&socket_id)
+        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Closed))
+            || !s.borrow().contains_key(&socket_id)
     });
     if is_closed {
-        let exc = vm.create_exception(b"Error", "socket_set_nonblock(): Argument #1 ($socket) has already been closed", vm.current_line);
+        let exc = vm.create_exception(
+            b"Error",
+            "socket_set_nonblock(): Argument #1 ($socket) has already been closed",
+            vm.current_line,
+        );
         vm.current_exception = Some(exc);
         return Err(VmError {
             message: "socket already closed".to_string(),
@@ -1320,7 +1434,7 @@ fn socket_set_nonblock(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_set_nonblock(): unable to set non-blocking mode [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1335,10 +1449,15 @@ fn socket_set_block(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     let is_closed = SOCKETS.with(|s| {
-        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Closed)) || !s.borrow().contains_key(&socket_id)
+        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Closed))
+            || !s.borrow().contains_key(&socket_id)
     });
     if is_closed {
-        let exc = vm.create_exception(b"Error", "socket_set_block(): Argument #1 ($socket) has already been closed", vm.current_line);
+        let exc = vm.create_exception(
+            b"Error",
+            "socket_set_block(): Argument #1 ($socket) has already been closed",
+            vm.current_line,
+        );
         vm.current_exception = Some(exc);
         return Err(VmError {
             message: "socket already closed".to_string(),
@@ -1369,7 +1488,7 @@ fn socket_set_block(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_set_block(): unable to set blocking mode [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1419,7 +1538,7 @@ fn socket_getpeername(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_getpeername(): unable to retrieve peer name [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1471,7 +1590,7 @@ fn socket_getsockname(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_getsockname(): unable to retrieve socket name [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1520,7 +1639,7 @@ fn socket_shutdown(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.emit_warning(&format!(
                 "socket_shutdown(): Unable to shutdown socket [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1572,7 +1691,11 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut except_fds: Vec<(i64, i32)> = Vec::new();
 
         // Type-check the read array
-        let collect_fds = |arg: Option<&Value>, label: &str, fds: &mut Vec<(i64, i32)>, vm: &mut Vm| -> Result<(), VmError> {
+        let collect_fds = |arg: Option<&Value>,
+                           label: &str,
+                           fds: &mut Vec<(i64, i32)>,
+                           vm: &mut Vm|
+         -> Result<(), VmError> {
             if let Some(arg_val) = arg {
                 let val = arg_val.deref();
                 if let Value::Array(arr) = &val {
@@ -1584,7 +1707,9 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 let b = obj.borrow();
                                 if b.class_name == b"Socket" {
                                     Some(b.object_id as i64)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                             Value::Long(n) => Some(*n),
                             _ => None,
@@ -1601,27 +1726,38 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     let b = o.borrow();
                                     return Err(throw_type_error(
                                         vm,
-                                        &format!("socket_select(): Argument #{} ({}) must only have elements of type Socket, {} given",
-                                            match label { "read" => 1, "write" => 2, _ => 3 },
+                                        &format!(
+                                            "socket_select(): Argument #{} ({}) must only have elements of type Socket, {} given",
+                                            match label {
+                                                "read" => 1,
+                                                "write" => 2,
+                                                _ => 3,
+                                            },
                                             label,
-                                            String::from_utf8_lossy(&b.class_name)),
+                                            String::from_utf8_lossy(&b.class_name)
+                                        ),
                                     ));
                                 }
                                 _ => "mixed",
                             };
                             return Err(throw_type_error(
                                 vm,
-                                &format!("socket_select(): Argument #{} (${}) must only have elements of type Socket, {} given",
-                                    match label { "read" => 1, "write" => 2, _ => 3 },
+                                &format!(
+                                    "socket_select(): Argument #{} (${}) must only have elements of type Socket, {} given",
+                                    match label {
+                                        "read" => 1,
+                                        "write" => 2,
+                                        _ => 3,
+                                    },
                                     label,
-                                    type_name),
+                                    type_name
+                                ),
                             ));
                         }
                         let sid = sid_opt.unwrap();
                         let exists = SOCKETS.with(|s| {
                             let sockets = s.borrow();
                             if let Some(handle) = sockets.get(&sid) {
-                                
                                 match handle {
                                     SocketHandle::TcpClient(s) => Some(s.as_raw_fd()),
                                     SocketHandle::TcpServer(s) => Some(s.as_raw_fd()),
@@ -1650,7 +1786,10 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if s < 0 {
                 let err = std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid argument");
                 set_last_error(map_io_error(&err));
-                vm.emit_warning(&format!("socket_select(): Unable to select [{}]: Invalid argument", map_io_error(&err)));
+                vm.emit_warning(&format!(
+                    "socket_select(): Unable to select [{}]: Invalid argument",
+                    map_io_error(&err)
+                ));
                 return Ok(Value::False);
             }
         }
@@ -1667,19 +1806,25 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             for &(_, fd) in &read_fds {
                 if fd >= 0 && fd < libc::FD_SETSIZE as i32 {
                     libc::FD_SET(fd, &mut read_set);
-                    if fd > max_fd { max_fd = fd; }
+                    if fd > max_fd {
+                        max_fd = fd;
+                    }
                 }
             }
             for &(_, fd) in &write_fds {
                 if fd >= 0 && fd < libc::FD_SETSIZE as i32 {
                     libc::FD_SET(fd, &mut write_set);
-                    if fd > max_fd { max_fd = fd; }
+                    if fd > max_fd {
+                        max_fd = fd;
+                    }
                 }
             }
             for &(_, fd) in &except_fds {
                 if fd >= 0 && fd < libc::FD_SETSIZE as i32 {
                     libc::FD_SET(fd, &mut except_set);
-                    if fd > max_fd { max_fd = fd; }
+                    if fd > max_fd {
+                        max_fd = fd;
+                    }
                 }
             }
 
@@ -1696,21 +1841,40 @@ fn socket_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
             let ret = libc::select(
                 max_fd + 1,
-                if read_fds.is_empty() { std::ptr::null_mut() } else { &mut read_set },
-                if write_fds.is_empty() { std::ptr::null_mut() } else { &mut write_set },
-                if except_fds.is_empty() { std::ptr::null_mut() } else { &mut except_set },
+                if read_fds.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    &mut read_set
+                },
+                if write_fds.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    &mut write_set
+                },
+                if except_fds.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    &mut except_set
+                },
                 timeout_ptr,
             );
 
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
                 set_last_error(map_io_error(&err));
-                vm.emit_warning(&format!("socket_select(): Unable to select [{}]: {}", map_io_error(&err), err));
+                vm.emit_warning(&format!(
+                    "socket_select(): Unable to select [{}]: {}",
+                    map_io_error(&err),
+                    err
+                ));
                 return Ok(Value::False);
             }
 
             // Update arrays
-            let write_into = |arg: Option<&Value>, fds: &[(i64, i32)], set: &libc::fd_set, _vm: &mut Vm| {
+            let write_into = |arg: Option<&Value>,
+                              fds: &[(i64, i32)],
+                              set: &libc::fd_set,
+                              _vm: &mut Vm| {
                 if let Some(val) = arg {
                     if let Value::Reference(rc) = val {
                         let mut arr = PhpArray::new();
@@ -1822,7 +1986,7 @@ fn socket_create_listen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             vm.emit_warning(&format!(
                 "socket_create_listen(): unable to bind to given address [{}]: {}",
                 map_io_error(&e),
-            errno_to_string(map_io_error(&e))
+                errno_to_string(map_io_error(&e))
             ));
             Ok(Value::False)
         }
@@ -1855,7 +2019,12 @@ fn socket_create_pair_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
     let mut fds: [i32; 2] = [0, 0];
     let result = unsafe {
-        libc::socketpair(domain as i32, sock_type as i32, protocol as i32, fds.as_mut_ptr())
+        libc::socketpair(
+            domain as i32,
+            sock_type as i32,
+            protocol as i32,
+            fds.as_mut_ptr(),
+        )
     };
     if result != 0 {
         let e = std::io::Error::last_os_error();
@@ -1918,14 +2087,17 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         .first()
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
-    let service = args.get(1).map(|v| {
-        let v = v.deref();
-        if matches!(v, Value::Null | Value::Undef) {
-            None
-        } else {
-            Some(v.to_php_string().to_string_lossy())
-        }
-    }).unwrap_or(None);
+    let service = args
+        .get(1)
+        .map(|v| {
+            let v = v.deref();
+            if matches!(v, Value::Null | Value::Undef) {
+                None
+            } else {
+                Some(v.to_php_string().to_string_lossy())
+            }
+        })
+        .unwrap_or(None);
 
     let mut family: i32 = 0;
     let mut socktype: i32 = 0;
@@ -1958,7 +2130,10 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     let cn = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
                     return Err(throw_type_error(
                         vm,
-                        &format!("socket_addrinfo_lookup(): Argument #3 ($hints) \"{}\" key must be of type int, {} given", k, cn),
+                        &format!(
+                            "socket_addrinfo_lookup(): Argument #3 ($hints) \"{}\" key must be of type int, {} given",
+                            k, cn
+                        ),
                     ));
                 }
                 let n = val.to_long();
@@ -1976,7 +2151,10 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         if n < 0 || n > i32::MAX as i64 {
                             return Err(throw_value_error(
                                 vm,
-                                &format!("socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_socktype\" key must be between 0 and {}", i32::MAX),
+                                &format!(
+                                    "socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_socktype\" key must be between 0 and {}",
+                                    i32::MAX
+                                ),
                             ));
                         }
                         socktype = n as i32;
@@ -1985,7 +2163,10 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         if n < 0 || n > i32::MAX as i64 {
                             return Err(throw_value_error(
                                 vm,
-                                &format!("socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_protocol\" key must be between 0 and {}", i32::MAX),
+                                &format!(
+                                    "socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_protocol\" key must be between 0 and {}",
+                                    i32::MAX
+                                ),
                             ));
                         }
                         protocol = n as i32;
@@ -1994,7 +2175,10 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         if n < 0 || n > i32::MAX as i64 {
                             return Err(throw_value_error(
                                 vm,
-                                &format!("socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_flags\" key must be between 0 and {}", i32::MAX),
+                                &format!(
+                                    "socket_addrinfo_lookup(): Argument #3 ($hints) \"ai_flags\" key must be between 0 and {}",
+                                    i32::MAX
+                                ),
                             ));
                         }
                         flags = n as i32;
@@ -2006,7 +2190,10 @@ fn socket_addrinfo_lookup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     }
 
     // Default service to 0 if not given
-    let port: u16 = service.as_deref().and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+    let port: u16 = service
+        .as_deref()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
 
     // Resolve via std::net
     let addr_iter = match std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)) {
@@ -2059,7 +2246,11 @@ fn socket_addrinfo_connect_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     if fd < 0 {
         let e = std::io::Error::last_os_error();
         set_last_error(map_io_error(&e));
-        vm.emit_warning(&format!("socket_addrinfo_connect(): Unable to connect [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+        vm.emit_warning(&format!(
+            "socket_addrinfo_connect(): Unable to connect [{}]: {}",
+            map_io_error(&e),
+            errno_to_string(map_io_error(&e))
+        ));
         return Ok(Value::False);
     }
 
@@ -2090,20 +2281,29 @@ fn socket_addrinfo_connect_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         }
         _ => {
             unsafe { libc::close(fd) };
-            Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported socktype"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unsupported socktype",
+            ))
         }
     };
 
     match result {
         Ok(handle) => {
             let sid = alloc_socket_id_via_vm(vm);
-            SOCKETS.with(|s| { s.borrow_mut().insert(sid, handle); });
+            SOCKETS.with(|s| {
+                s.borrow_mut().insert(sid, handle);
+            });
             set_last_error(0);
             Ok(make_socket_object(sid))
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_addrinfo_connect(): Unable to connect [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_addrinfo_connect(): Unable to connect [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -2130,19 +2330,28 @@ fn socket_addrinfo_bind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             Ok(s) => Ok(SocketHandle::Udp(s)),
             Err(e) => Err(e),
         },
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported socktype")),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Unsupported socktype",
+        )),
     };
 
     match result {
         Ok(handle) => {
             let sid = alloc_socket_id_via_vm(vm);
-            SOCKETS.with(|s| { s.borrow_mut().insert(sid, handle); });
+            SOCKETS.with(|s| {
+                s.borrow_mut().insert(sid, handle);
+            });
             set_last_error(0);
             Ok(make_socket_object(sid))
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_addrinfo_bind(): Unable to bind [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_addrinfo_bind(): Unable to bind [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
@@ -2154,10 +2363,22 @@ fn socket_addrinfo_explain_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
         Some(a) => a,
         None => {
             let mut result = PhpArray::new();
-            result.set(ArrayKey::String(PhpString::from_bytes(b"ai_flags")), Value::Long(0));
-            result.set(ArrayKey::String(PhpString::from_bytes(b"ai_family")), Value::Long(0));
-            result.set(ArrayKey::String(PhpString::from_bytes(b"ai_socktype")), Value::Long(0));
-            result.set(ArrayKey::String(PhpString::from_bytes(b"ai_protocol")), Value::Long(0));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"ai_flags")),
+                Value::Long(0),
+            );
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"ai_family")),
+                Value::Long(0),
+            );
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"ai_socktype")),
+                Value::Long(0),
+            );
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"ai_protocol")),
+                Value::Long(0),
+            );
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
         }
     };
@@ -2169,16 +2390,37 @@ fn socket_addrinfo_explain_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     };
 
     let mut result = PhpArray::new();
-    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_flags")), Value::Long(entry.flags as i64));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_family")), Value::Long(entry.family as i64));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_socktype")), Value::Long(entry.socktype as i64));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_protocol")), Value::Long(entry.protocol as i64));
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"ai_flags")),
+        Value::Long(entry.flags as i64),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"ai_family")),
+        Value::Long(entry.family as i64),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"ai_socktype")),
+        Value::Long(entry.socktype as i64),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"ai_protocol")),
+        Value::Long(entry.protocol as i64),
+    );
 
     // ai_addr
     let mut addr_arr = PhpArray::new();
-    addr_arr.set(ArrayKey::String(PhpString::from_bytes(b"sin_port")), Value::Long(entry.addr.port() as i64));
-    addr_arr.set(ArrayKey::String(PhpString::from_bytes(b"sin_addr")), Value::String(PhpString::from_string(entry.addr.ip().to_string())));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"ai_addr")), Value::Array(Rc::new(RefCell::new(addr_arr))));
+    addr_arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"sin_port")),
+        Value::Long(entry.addr.port() as i64),
+    );
+    addr_arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"sin_addr")),
+        Value::String(PhpString::from_string(entry.addr.ip().to_string())),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"ai_addr")),
+        Value::Array(Rc::new(RefCell::new(addr_arr))),
+    );
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
@@ -2203,9 +2445,7 @@ fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let port_arg = args.get(5);
 
     // Determine if AF_UNIX vs AF_INET to validate
-    let is_udp = SOCKETS.with(|s| {
-        matches!(s.borrow().get(&socket_id), Some(SocketHandle::Udp(_)))
-    });
+    let is_udp = SOCKETS.with(|s| matches!(s.borrow().get(&socket_id), Some(SocketHandle::Udp(_))));
 
     // Unix socket path validation
     if port_arg.is_none() || matches!(port_arg, Some(Value::Null) | Some(Value::Undef)) {
@@ -2213,7 +2453,10 @@ fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if address.len() >= 108 {
             return Err(throw_value_error(
                 vm,
-                &format!("socket_sendto(): Argument #5 ($address) must be less than {}", 108),
+                &format!(
+                    "socket_sendto(): Argument #5 ($address) must be less than {}",
+                    108
+                ),
             ));
         }
     } else {
@@ -2239,7 +2482,10 @@ fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if let Some(SocketHandle::Udp(sock)) = sockets.get(&socket_id) {
                         sock.send_to(send_bytes, addr)
                     } else {
-                        Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Not a UDP socket"))
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "Not a UDP socket",
+                        ))
                     }
                 });
                 match result {
@@ -2249,7 +2495,11 @@ fn socket_sendto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     Err(e) => {
                         set_last_error(map_io_error(&e));
-                        vm.emit_warning(&format!("socket_sendto(): Unable to send data [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+                        vm.emit_warning(&format!(
+                            "socket_sendto(): Unable to send data [{}]: {}",
+                            map_io_error(&e),
+                            errno_to_string(map_io_error(&e))
+                        ));
                         return Ok(Value::False);
                     }
                 }
@@ -2289,7 +2539,10 @@ fn socket_recvfrom_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Err(e) => Err(e),
                 }
             }
-            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid socket")),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid socket",
+            )),
         }
     });
 
@@ -2303,7 +2556,8 @@ fn socket_recvfrom_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Some(addr) = addr {
                 if let Some(r) = name_ref {
                     if let Value::Reference(rc) = r {
-                        *rc.borrow_mut() = Value::String(PhpString::from_string(addr.ip().to_string()));
+                        *rc.borrow_mut() =
+                            Value::String(PhpString::from_string(addr.ip().to_string()));
                     }
                 }
                 if let Some(r) = port_ref {
@@ -2317,14 +2571,22 @@ fn socket_recvfrom_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             set_last_error(map_io_error(&e));
-            vm.emit_warning(&format!("socket_recvfrom(): unable to receive data [{}]: {}", map_io_error(&e), errno_to_string(map_io_error(&e))));
+            vm.emit_warning(&format!(
+                "socket_recvfrom(): unable to receive data [{}]: {}",
+                map_io_error(&e),
+                errno_to_string(map_io_error(&e))
+            ));
             Ok(Value::False)
         }
     }
 }
 
 fn socket_cmsg_space_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let _level = if !args.is_empty() { args[0].to_long() } else { 0 };
+    let _level = if !args.is_empty() {
+        args[0].to_long()
+    } else {
+        0
+    };
     let _type_ = if args.len() > 1 { args[1].to_long() } else { 0 };
     Ok(Value::Long(0))
 }

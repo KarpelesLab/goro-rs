@@ -1,7 +1,7 @@
 //! Port of timelib parse_date.re: strtotime() parser and parse_from_format().
 
 use super::dow::{date_from_isodate, daynr_from_weeknr};
-use super::regex::{parse_definitions, parse_expr, Scanner as ReScanner};
+use super::regex::{Scanner as ReScanner, parse_definitions, parse_expr};
 use super::tm2unixtime::do_normalize;
 use super::tz::parse_tzfile;
 use super::unixtime2tm::update_from_sse;
@@ -222,11 +222,17 @@ const RULES: &[(&str, Rule)] = &[
     ("weekdayof", Rule::WeekdayOf),
     ("timetiny12 | timeshort12 | timelong12", Rule::Time12),
     ("mssqltime", Rule::MssqlTime),
-    ("timetiny24 | timeshort24 | timelong24 | iso8601long", Rule::Time24),
+    (
+        "timetiny24 | timeshort24 | timelong24 | iso8601long",
+        Rule::Time24,
+    ),
     ("gnunocolon", Rule::GnuNoColon),
     ("iso8601nocolon", Rule::Iso8601NoColon),
     ("americanshort | american", Rule::American),
-    ("iso8601date4 | iso8601dateslash | dateslash", Rule::IsoDate4),
+    (
+        "iso8601date4 | iso8601dateslash | dateslash",
+        Rule::IsoDate4,
+    ),
     ("iso8601date2", Rule::IsoDate2),
     ("iso8601datex", Rule::IsoDateX),
     ("gnudateshorter", Rule::GnuDateShorter),
@@ -253,8 +259,14 @@ const RULES: &[(&str, Rule)] = &[
     ("relativetext", Rule::RelativeText),
     ("monthfull | monthabbr", Rule::MonthText),
     ("tzcorrection | tz", Rule::TzCorrection),
-    ("dateshortwithtimeshort12 | dateshortwithtimelong12", Rule::DateShortWithTime12),
-    ("dateshortwithtimeshort | dateshortwithtimelong | dateshortwithtimelongtz", Rule::DateShortWithTime24),
+    (
+        "dateshortwithtimeshort12 | dateshortwithtimelong12",
+        Rule::DateShortWithTime12,
+    ),
+    (
+        "dateshortwithtimeshort | dateshortwithtimelong | dateshortwithtimelongtz",
+        Rule::DateShortWithTime24,
+    ),
     ("relative", Rule::Relative),
     ("[.,]", Rule::Punct),
     ("space", Rule::Space),
@@ -302,7 +314,11 @@ impl<'a> Ptr<'a> {
         self.p += 1;
     }
     pub fn rest(&self) -> &'a [u8] {
-        if self.p >= self.s.len() { &[] } else { &self.s[self.p..] }
+        if self.p >= self.s.len() {
+            &[]
+        } else {
+            &self.s[self.p..]
+        }
     }
 }
 
@@ -318,11 +334,21 @@ struct State {
 impl State {
     fn add_error(&mut self, code: i32, msg: &str) {
         let ch = *self.str.get(self.tok).unwrap_or(&0);
-        self.errors.error_messages.push(ErrorMessage { error_code: code, position: self.tok as i32, character: ch, message: msg.to_string() });
+        self.errors.error_messages.push(ErrorMessage {
+            error_code: code,
+            position: self.tok as i32,
+            character: ch,
+            message: msg.to_string(),
+        });
     }
     fn add_warning(&mut self, code: i32, msg: &str) {
         let ch = *self.str.get(self.tok).unwrap_or(&0);
-        self.errors.warning_messages.push(ErrorMessage { error_code: code, position: self.tok as i32, character: ch, message: msg.to_string() });
+        self.errors.warning_messages.push(ErrorMessage {
+            error_code: code,
+            position: self.tok as i32,
+            character: ch,
+            message: msg.to_string(),
+        });
     }
 }
 
@@ -392,7 +418,10 @@ fn strtod_prefix(s: &[u8]) -> f64 {
             end += 1;
         }
     }
-    std::str::from_utf8(&s[..end]).ok().and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0)
+    std::str::from_utf8(&s[..end])
+        .ok()
+        .and_then(|x| x.parse::<f64>().ok())
+        .unwrap_or(0.0)
 }
 
 fn timelib_meridian(ptr: &mut Ptr, h: i64) -> i64 {
@@ -486,7 +515,11 @@ fn skip_day_suffix(ptr: &mut Ptr) {
     }
     let a = ptr.c().to_ascii_lowercase();
     let b = ptr.at(1).to_ascii_lowercase();
-    if (a == b'n' && b == b'd') || (a == b'r' && b == b'd') || (a == b's' && b == b't') || (a == b't' && b == b'h') {
+    if (a == b'n' && b == b'd')
+        || (a == b'r' && b == b'd')
+        || (a == b's' && b == b't')
+        || (a == b't' && b == b'h')
+    {
         ptr.p += 2;
     }
 }
@@ -751,7 +784,10 @@ fn eat_until_separator(ptr: &mut Ptr) {
 
 pub fn lookup_relunit(ptr: &mut Ptr) -> Option<(i32, i64)> {
     let begin = ptr.p;
-    while !matches!(ptr.c(), 0 | b' ' | b',' | b'\t' | b';' | b':' | b'/' | b'.' | b'-' | b'(' | b')') {
+    while !matches!(
+        ptr.c(),
+        0 | b' ' | b',' | b'\t' | b';' | b':' | b'/' | b'.' | b'-' | b'(' | b')'
+    ) {
         ptr.adv();
     }
     let word = &ptr.s[begin..ptr.p];
@@ -763,7 +799,12 @@ pub fn lookup_relunit(ptr: &mut Ptr) -> Option<(i32, i64)> {
     None
 }
 
-fn add_with_overflow(errs: &mut Vec<(i32, &'static str)>, e: &mut i64, amount: i64, multiplier: i64) {
+fn add_with_overflow(
+    errs: &mut Vec<(i32, &'static str)>,
+    e: &mut i64,
+    amount: i64,
+    multiplier: i64,
+) {
     let prod = amount.wrapping_mul(multiplier);
     match e.checked_add(prod) {
         Some(v) => *e = v,
@@ -782,7 +823,14 @@ fn unhave_time(t: &mut Time) {
     t.us = 0;
 }
 
-fn set_relative(ptr: &mut Ptr, amount: i64, behavior: i32, t: &mut Time, errs: &mut Vec<(i32, &'static str)>, keep_time: bool) {
+fn set_relative(
+    ptr: &mut Ptr,
+    amount: i64,
+    behavior: i32,
+    t: &mut Time,
+    errs: &mut Vec<(i32, &'static str)>,
+    keep_time: bool,
+) {
     let (unit, mult) = match lookup_relunit(ptr) {
         Some(x) => x,
         None => return,
@@ -801,7 +849,10 @@ fn set_relative(ptr: &mut Ptr, amount: i64, behavior: i32, t: &mut Time, errs: &
             if !keep_time {
                 unhave_time(t);
             }
-            t.relative.d = t.relative.d.wrapping_add((if amount > 0 { amount - 1 } else { amount }).wrapping_mul(7));
+            t.relative.d = t
+                .relative
+                .d
+                .wrapping_add((if amount > 0 { amount - 1 } else { amount }).wrapping_mul(7));
             t.relative.weekday = mult as i32;
             t.relative.weekday_behavior = behavior;
         }
@@ -819,7 +870,11 @@ fn set_relative(ptr: &mut Ptr, amount: i64, behavior: i32, t: &mut Time, errs: &
 }
 
 /// abbr_search: returns (abbr, type(dst), gmtoffset, full_tz_name)
-pub fn abbr_search(word: &[u8], gmtoffset: i64, isdst: i32) -> Option<(&'static str, i32, i32, Option<&'static str>)> {
+pub fn abbr_search(
+    word: &[u8],
+    gmtoffset: i64,
+    isdst: i32,
+) -> Option<(&'static str, i32, i32, Option<&'static str>)> {
     if eq_ci(word, b"utc") || eq_ci(word, b"gmt") {
         return Some(("utc", 0, 0, Some("UTC")));
     }
@@ -938,7 +993,11 @@ pub fn parse_zone(ptr: &mut Ptr, dst: &mut i32, t: &mut Time, tz_not_found: &mut
         }
         ptr.adv();
     }
-    if ptr.c() == b'G' && ptr.at(1) == b'M' && ptr.at(2) == b'T' && (ptr.at(3) == b'+' || ptr.at(3) == b'-') {
+    if ptr.c() == b'G'
+        && ptr.at(1) == b'M'
+        && ptr.at(2) == b'T'
+        && (ptr.at(3) == b'+' || ptr.at(3) == b'-')
+    {
         ptr.p += 3;
     }
     let retval = if ptr.c() == b'+' {
@@ -1006,7 +1065,8 @@ fn scan(s: &mut State, input_len: usize) -> Step {
         if cursor > input_len {
             return Step::Eoi;
         }
-        let (rule_idx, end) = with_scanner(|sc| sc.longest_match(&s.str, cursor)).unwrap_or((RULES.len() - 1, cursor + 1));
+        let (rule_idx, end) = with_scanner(|sc| sc.longest_match(&s.str, cursor))
+            .unwrap_or((RULES.len() - 1, cursor + 1));
         let rule = RULES[rule_idx].1;
         s.cur = end;
         let tok: Vec<u8> = s.str[s.tok..s.cur].to_vec();
@@ -1083,7 +1143,10 @@ fn scan(s: &mut State, input_len: usize) -> Step {
                     s.time.dst = dst;
                 }
                 if tz_not_found {
-                    s.add_error(ERR_TZID_NOT_FOUND, "The timezone could not be found in the database");
+                    s.add_error(
+                        ERR_TZID_NOT_FOUND,
+                        "The timezone could not be found in the database",
+                    );
                 }
             }};
         }
@@ -1579,7 +1642,12 @@ pub fn strtotime(input: &[u8]) -> (Time, ErrorContainer) {
     let mut errors = ErrorContainer::default();
     if e - (s0 as isize) < 0 {
         let mut t = Time::new();
-        errors.error_messages.push(ErrorMessage { error_code: ERR_EMPTY_STRING, position: 0, character: 0, message: "Empty string".to_string() });
+        errors.error_messages.push(ErrorMessage {
+            error_code: ERR_EMPTY_STRING,
+            position: 0,
+            character: 0,
+            message: "Empty string".to_string(),
+        });
         t.y = UNSET;
         t.d = UNSET;
         t.m = UNSET;
@@ -1610,7 +1678,13 @@ pub fn strtotime(input: &[u8]) -> (Time, ErrorContainer) {
     t.is_localtime = 0;
     t.zone_type = 0;
     t.relative.days = UNSET;
-    let mut st = State { str: buf, tok: 0, cur: 0, errors, time: t };
+    let mut st = State {
+        str: buf,
+        tok: 0,
+        cur: 0,
+        errors,
+        time: t,
+    };
     let input_len = slice.len();
     while let Step::Continue = scan(&mut st, input_len) {}
     if st.time.have_time != 0 && !valid_time(st.time.h, st.time.i, st.time.s) {
@@ -1758,21 +1832,39 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
         macro_rules! check_number {
             () => {
                 if !ptr.c().is_ascii_digit() {
-                    add_pbf_error(&mut errors, ERR_UNEXPECTED_DATA, "Unexpected data found.", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_UNEXPECTED_DATA,
+                        "Unexpected data found.",
+                        string,
+                        begin,
+                    );
                 }
             };
         }
         macro_rules! check_signed_number {
             () => {
                 if !ptr.c().is_ascii_digit() && ptr.c() != b'+' && ptr.c() != b'-' {
-                    add_pbf_error(&mut errors, ERR_UNEXPECTED_DATA, "Unexpected data found.", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_UNEXPECTED_DATA,
+                        "Unexpected data found.",
+                        string,
+                        begin,
+                    );
                 }
             };
         }
         match lookup_format(fc(fi)) {
             Fmt::TextualDay => match lookup_relunit(&mut ptr) {
                 None => {
-                    add_pbf_error(&mut errors, ERR_NO_TEXTUAL_DAY, "A textual day could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TEXTUAL_DAY,
+                        "A textual day could not be found",
+                        string,
+                        begin,
+                    );
                 }
                 Some((_, mult)) => {
                     t.have_relative = 1;
@@ -1785,7 +1877,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 t.d = get_nr(&mut ptr, 2);
                 if t.d == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_DAY, "A two digit day could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_DAY,
+                        "A two digit day could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                 }
@@ -1794,11 +1892,23 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             Fmt::DayOfYear => {
                 check_number!();
                 if t.y == UNSET {
-                    add_pbf_error(&mut errors, ERR_MERIDIAN_BEFORE_HOUR, "A 'day of year' can only come after a year has been found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_MERIDIAN_BEFORE_HOUR,
+                        "A 'day of year' can only come after a year has been found",
+                        string,
+                        begin,
+                    );
                 }
                 let tmp = get_nr(&mut ptr, 3);
                 if tmp == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_THREE_DIGIT_DAY_OF_YEAR, "A three digit day-of-year could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_THREE_DIGIT_DAY_OF_YEAR,
+                        "A three digit day-of-year could not be found",
+                        string,
+                        begin,
+                    );
                 } else if t.y != UNSET {
                     t.have_date = 1;
                     t.m = 1;
@@ -1810,7 +1920,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 t.m = get_nr(&mut ptr, 2);
                 if t.m == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_MONTH, "A two digit month could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_MONTH,
+                        "A two digit month could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                 }
@@ -1818,7 +1934,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             Fmt::TextualMonth => {
                 let tmp = lookup_month(&mut ptr);
                 if tmp == 0 {
-                    add_pbf_error(&mut errors, ERR_NO_TEXTUAL_MONTH, "A textual month could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TEXTUAL_MONTH,
+                        "A textual month could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                     t.m = tmp;
@@ -1829,7 +1951,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 let (y, len) = get_nr_ex(&mut ptr, 2);
                 t.y = y;
                 if y == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_YEAR, "A two digit year could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_YEAR,
+                        "A two digit year could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                     process_year(&mut t.y, len);
@@ -1839,7 +1967,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 t.y = get_nr(&mut ptr, 4);
                 if t.y == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_FOUR_DIGIT_YEAR, "A four digit year could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_FOUR_DIGIT_YEAR,
+                        "A four digit year could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                 }
@@ -1851,7 +1985,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                     add_pbf_error(&mut errors, c, m, string, begin);
                 }
                 if t.y == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_FOUR_DIGIT_YEAR, "An expanded digit year could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_FOUR_DIGIT_YEAR,
+                        "An expanded digit year could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_date = 1;
                 }
@@ -1860,9 +2000,21 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 t.h = get_nr(&mut ptr, 2);
                 if t.h == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_HOUR, "A two digit hour could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_HOUR,
+                        "A two digit hour could not be found",
+                        string,
+                        begin,
+                    );
                 } else if t.h > 12 {
-                    add_pbf_error(&mut errors, ERR_HOUR_LARGER_THAN_12, "Hour cannot be higher than 12", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_HOUR_LARGER_THAN_12,
+                        "Hour cannot be higher than 12",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_time = 1;
                 }
@@ -1871,18 +2023,36 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 t.h = get_nr(&mut ptr, 2);
                 if t.h == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_HOUR, "A two digit hour could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_HOUR,
+                        "A two digit hour could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_time = 1;
                 }
             }
             Fmt::Meridian => {
                 if t.h == UNSET {
-                    add_pbf_error(&mut errors, ERR_MERIDIAN_BEFORE_HOUR, "Meridian can only come after an hour has been found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_MERIDIAN_BEFORE_HOUR,
+                        "Meridian can only come after an hour has been found",
+                        string,
+                        begin,
+                    );
                 }
                 let tmp = timelib_meridian_with_check(&mut ptr, t.h);
                 if tmp == UNSET {
-                    add_pbf_error(&mut errors, ERR_NO_MERIDIAN, "A meridian could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_MERIDIAN,
+                        "A meridian could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_time = 1;
                     if t.h != UNSET {
@@ -1894,7 +2064,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 let (min, length) = get_nr_ex(&mut ptr, 2);
                 if min == UNSET || length != 2 {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_MINUTE, "A two digit minute could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_MINUTE,
+                        "A two digit minute could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_time = 1;
                     t.i = min;
@@ -1904,7 +2080,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 check_number!();
                 let (sec, length) = get_nr_ex(&mut ptr, 2);
                 if sec == UNSET || length != 2 {
-                    add_pbf_error(&mut errors, ERR_NO_TWO_DIGIT_SECOND, "A two digit second could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_TWO_DIGIT_SECOND,
+                        "A two digit second could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_time = 1;
                     t.s = sec;
@@ -1915,7 +2097,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 let tptr = ptr.p;
                 let f = get_nr(&mut ptr, 6);
                 if f == UNSET || ptr.p - tptr < 1 {
-                    add_pbf_error(&mut errors, ERR_NO_SIX_DIGIT_MICROSECOND, "A six digit microsecond could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_SIX_DIGIT_MICROSECOND,
+                        "A six digit microsecond could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.us = (f as f64 * 10f64.powi(6 - (ptr.p - tptr) as i32)) as i64;
                 }
@@ -1925,7 +2113,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 let tptr = ptr.p;
                 let f = get_nr(&mut ptr, 3);
                 if f == UNSET || ptr.p - tptr < 1 {
-                    add_pbf_error(&mut errors, ERR_NO_THREE_DIGIT_MILLISECOND, "A three digit millisecond could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_THREE_DIGIT_MILLISECOND,
+                        "A three digit millisecond could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.us = (f as f64 * 10f64.powi(3 - (ptr.p - tptr) as i32) * 1000.0) as i64;
                 }
@@ -1947,14 +2141,26 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             }
             Fmt::AnySeparator => {
                 if lookup_format(ptr.c()) != Fmt::Separator {
-                    add_pbf_error(&mut errors, ERR_NO_SEP_SYMBOL, "The separation symbol ([;:/.,-]) could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_SEP_SYMBOL,
+                        "The separation symbol ([;:/.,-]) could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     ptr.adv();
                 }
             }
             Fmt::Separator => {
                 if ptr.c() != fc(fi) {
-                    add_pbf_error(&mut errors, ERR_NO_SEP_SYMBOL, "The separation symbol could not be found", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_NO_SEP_SYMBOL,
+                        "The separation symbol could not be found",
+                        string,
+                        begin,
+                    );
                 } else {
                     ptr.adv();
                 }
@@ -1964,11 +2170,23 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             Fmt::RandomChar => ptr.adv(),
             Fmt::Escape => {
                 if fc(fi + 1) == 0 {
-                    add_pbf_error(&mut errors, ERR_EXPECTED_ESCAPE_CHAR, "Escaped character expected", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_EXPECTED_ESCAPE_CHAR,
+                        "Escaped character expected",
+                        string,
+                        begin,
+                    );
                 } else {
                     fi += 1;
                     if ptr.c() != fc(fi) {
-                        add_pbf_error(&mut errors, ERR_NO_ESCAPED_CHAR, "The escaped character could not be found", string, begin);
+                        add_pbf_error(
+                            &mut errors,
+                            ERR_NO_ESCAPED_CHAR,
+                            "The escaped character could not be found",
+                            string,
+                            begin,
+                        );
                     } else {
                         ptr.adv();
                     }
@@ -1985,14 +2203,26 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                     t.dst = dst;
                 }
                 if tz_not_found {
-                    add_pbf_error(&mut errors, ERR_TZID_NOT_FOUND, "The timezone could not be found in the database", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_TZID_NOT_FOUND,
+                        "The timezone could not be found in the database",
+                        string,
+                        begin,
+                    );
                 } else {
                     t.have_zone = 1;
                 }
             }
             Fmt::Literal => {
                 if fc(fi) != ptr.c() {
-                    add_pbf_error(&mut errors, ERR_WRONG_FORMAT_SEP, "The format separator does not match", string, begin);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_WRONG_FORMAT_SEP,
+                        "The format separator does not match",
+                        string,
+                        begin,
+                    );
                 }
                 ptr.adv();
             }
@@ -2001,9 +2231,21 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
     }
     if ptr.c() != 0 {
         if allow_extra {
-            add_pbf_warning(&mut errors, WARN_TRAILING_DATA, "Trailing data", string, ptr.p);
+            add_pbf_warning(
+                &mut errors,
+                WARN_TRAILING_DATA,
+                "Trailing data",
+                string,
+                ptr.p,
+            );
         } else {
-            add_pbf_error(&mut errors, ERR_TRAILING_DATA, "Trailing data", string, ptr.p);
+            add_pbf_error(
+                &mut errors,
+                ERR_TRAILING_DATA,
+                "Trailing data",
+                string,
+                ptr.p,
+            );
         }
     }
     if fc(fi) != 0 {
@@ -2014,7 +2256,13 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
                 Fmt::ResetAllWhenNotSet => time_reset_unset_fields(&mut t),
                 Fmt::AllowExtra => {}
                 _ => {
-                    add_pbf_error(&mut errors, ERR_DATA_MISSING, "Not enough data available to satisfy format", string, ptr.p);
+                    add_pbf_error(
+                        &mut errors,
+                        ERR_DATA_MISSING,
+                        "Not enough data available to satisfy format",
+                        string,
+                        ptr.p,
+                    );
                     done = true;
                 }
             }
@@ -2035,25 +2283,68 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             t.us = 0;
         }
     }
-    if t.y != UNSET && (iso_week_of_year != UNSET || iso_year != UNSET || iso_day_of_week != UNSET) {
-        add_pbf_error(&mut errors, ERR_MIX_ISO_WITH_NATURAL, "Mixing of ISO dates with natural dates is not allowed", string, ptr.p);
+    if t.y != UNSET && (iso_week_of_year != UNSET || iso_year != UNSET || iso_day_of_week != UNSET)
+    {
+        add_pbf_error(
+            &mut errors,
+            ERR_MIX_ISO_WITH_NATURAL,
+            "Mixing of ISO dates with natural dates is not allowed",
+            string,
+            ptr.p,
+        );
     }
     if iso_year != UNSET && (t.y != UNSET || t.m != UNSET || t.d != UNSET) {
-        add_pbf_error(&mut errors, ERR_MIX_ISO_WITH_NATURAL, "Mixing of ISO dates with natural dates is not allowed", string, ptr.p);
+        add_pbf_error(
+            &mut errors,
+            ERR_MIX_ISO_WITH_NATURAL,
+            "Mixing of ISO dates with natural dates is not allowed",
+            string,
+            ptr.p,
+        );
     }
     if iso_year != UNSET {
-        let (y, m, d) = date_from_isodate(iso_year, if iso_week_of_year == UNSET { 1 } else { iso_week_of_year }, if iso_day_of_week == UNSET { 1 } else { iso_day_of_week });
+        let (y, m, d) = date_from_isodate(
+            iso_year,
+            if iso_week_of_year == UNSET {
+                1
+            } else {
+                iso_week_of_year
+            },
+            if iso_day_of_week == UNSET {
+                1
+            } else {
+                iso_day_of_week
+            },
+        );
         t.y = y;
         t.m = m;
         t.d = d;
     } else if iso_week_of_year != UNSET || iso_day_of_week != UNSET {
-        add_pbf_warning(&mut errors, WARN_INVALID_DATE, "The parsed date was invalid", string, ptr.p);
+        add_pbf_warning(
+            &mut errors,
+            WARN_INVALID_DATE,
+            "The parsed date was invalid",
+            string,
+            ptr.p,
+        );
     }
     if t.h != UNSET && t.i != UNSET && t.s != UNSET && !valid_time(t.h, t.i, t.s) {
-        add_pbf_warning(&mut errors, WARN_INVALID_TIME, "The parsed time was invalid", string, ptr.p);
+        add_pbf_warning(
+            &mut errors,
+            WARN_INVALID_TIME,
+            "The parsed time was invalid",
+            string,
+            ptr.p,
+        );
     }
     if t.y != UNSET && t.m != UNSET && t.d != UNSET && !valid_date(t.y, t.m, t.d) {
-        add_pbf_warning(&mut errors, WARN_INVALID_DATE, "The parsed date was invalid", string, ptr.p);
+        add_pbf_warning(
+            &mut errors,
+            WARN_INVALID_DATE,
+            "The parsed date was invalid",
+            string,
+            ptr.p,
+        );
     }
     (t, errors)
 }
@@ -2066,7 +2357,13 @@ pub fn fill_holes(parsed: &mut Time, now: &Time, options: u32) {
         parsed.s = 0;
         parsed.us = 0;
     }
-    if parsed.y != UNSET || parsed.m != UNSET || parsed.d != UNSET || parsed.h != UNSET || parsed.i != UNSET || parsed.s != UNSET {
+    if parsed.y != UNSET
+        || parsed.m != UNSET
+        || parsed.d != UNSET
+        || parsed.h != UNSET
+        || parsed.i != UNSET
+        || parsed.s != UNSET
+    {
         if parsed.us == UNSET {
             parsed.us = 0;
         }

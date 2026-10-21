@@ -3,7 +3,7 @@
 
 use super::common::*;
 use super::mobile::ucs_to_jis;
-use super::sjis::{ucs_to_jisx0213, X0213};
+use super::sjis::{X0213, ucs_to_jisx0213};
 use super::tables::cp932_table::*;
 use super::tables::filt_cjk::mblen_table_eucjp;
 use super::tables::unicode_table_cp932_ext::*;
@@ -71,7 +71,11 @@ fn mb_eucjp_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
             /* Kana */
             let c2 = input[p];
             p += 1;
-            out.push(if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { MBFL_BAD_INPUT });
+            out.push(if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                MBFL_BAD_INPUT
+            });
         } else if c == 0x8F {
             /* JISX 0212 */
             if e - p >= 2 {
@@ -125,7 +129,11 @@ fn mb_wchar_to_eucjp(input: &[u32], buf: &mut ConvBuf, _end: bool) {
         } else if s < 0x8080 {
             buf.add2((((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
         } else {
-            buf.add3(0x8F, (((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
+            buf.add3(
+                0x8F,
+                (((s >> 8) & 0xFF) | 0x80) as u8,
+                ((s & 0xFF) | 0x80) as u8,
+            );
         }
     }
 }
@@ -161,7 +169,8 @@ fn mb_eucjpwin_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                 let mut w = row12(s);
                 if w == 0 {
                     if s >= cp932ext1_ucs_table_min as u32 && s < cp932ext1_ucs_table_max as u32 {
-                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize] as u32;
+                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize]
+                            as u32;
                     } else if s < jisx0208_ucs_table_size as u32 {
                         w = jisx0208_ucs_table[s as usize] as u32;
                     } else if s >= 84 * 94 {
@@ -175,7 +184,11 @@ fn mb_eucjpwin_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
         } else if c == 0x8E && p < e {
             let c2 = input[p];
             p += 1;
-            out.push(if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { MBFL_BAD_INPUT });
+            out.push(if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                MBFL_BAD_INPUT
+            });
         } else if c == 0x8F && p < e {
             let c2 = input[p];
             p += 1;
@@ -254,7 +267,9 @@ fn mb_wchar_to_eucjpwin(input: &[u32], buf: &mut ConvBuf, _end: bool) {
                 if s == 0 {
                     for i in 0..(cp932ext1_ucs_table_max - cp932ext1_ucs_table_min) as usize {
                         if cp932ext1_ucs_table[i] as u32 == w {
-                            s = ((((i / 94) + (cp932ext1_ucs_table_min as usize / 94) + 0x21) << 8) + (i % 94) + 0x21) as u32;
+                            s = ((((i / 94) + (cp932ext1_ucs_table_min as usize / 94) + 0x21) << 8)
+                                + (i % 94)
+                                + 0x21) as u32;
                             break;
                         }
                     }
@@ -279,7 +294,11 @@ fn mb_wchar_to_eucjpwin(input: &[u32], buf: &mut ConvBuf, _end: bool) {
         } else if s < 0x8080 {
             buf.add2((((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
         } else {
-            buf.add3(0x8F, (((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
+            buf.add3(
+                0x8F,
+                (((s >> 8) & 0xFF) | 0x80) as u8,
+                ((s & 0xFF) | 0x80) as u8,
+            );
         }
     }
 }
@@ -315,11 +334,15 @@ fn mb_cp51932_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                 let mut w = row12(s);
                 if w == 0 {
                     if s >= cp932ext1_ucs_table_min as u32 && s < cp932ext1_ucs_table_max as u32 {
-                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize] as u32;
+                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize]
+                            as u32;
                     } else if s < jisx0208_ucs_table_size as u32 {
                         w = jisx0208_ucs_table[s as usize] as u32;
-                    } else if s >= cp932ext2_ucs_table_min as u32 && s < cp932ext2_ucs_table_max as u32 {
-                        w = cp932ext2_ucs_table[(s - cp932ext2_ucs_table_min as u32) as usize] as u32;
+                    } else if s >= cp932ext2_ucs_table_min as u32
+                        && s < cp932ext2_ucs_table_max as u32
+                    {
+                        w = cp932ext2_ucs_table[(s - cp932ext2_ucs_table_min as u32) as usize]
+                            as u32;
                     }
                 }
                 out.push(if w == 0 { MBFL_BAD_INPUT } else { w });
@@ -329,7 +352,11 @@ fn mb_cp51932_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
         } else if c == 0x8E && p < e {
             let c2 = input[p];
             p += 1;
-            out.push(if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { MBFL_BAD_INPUT });
+            out.push(if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                MBFL_BAD_INPUT
+            });
         } else {
             out.push(MBFL_BAD_INPUT);
         }
@@ -458,11 +485,21 @@ fn mb_eucjp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
             /* Kana */
             let c2 = input[p];
             p += 1;
-            out.push(if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { MBFL_BAD_INPUT });
+            out.push(if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                MBFL_BAD_INPUT
+            });
         } else if c == 0x8F && p < e {
             let c2 = input[p];
             p += 1;
-            if (c2 == 0xA1 || (0xA3..=0xA5).contains(&c2) || c2 == 0xA8 || (0xAC..=0xAF).contains(&c2) || (0xEE..=0xFE).contains(&c2)) && p < e {
+            if (c2 == 0xA1
+                || (0xA3..=0xA5).contains(&c2)
+                || c2 == 0xA8
+                || (0xAC..=0xAF).contains(&c2)
+                || (0xEE..=0xFE).contains(&c2))
+                && p < e
+            {
                 let c3 = input[p];
                 p += 1;
                 if c3 < 0xA1 || c3 == 0xFF {
@@ -471,7 +508,12 @@ fn mb_eucjp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                 }
                 let s1 = c2 as u32 - 0xA1;
                 let s2 = c3 as u32 - 0xA1;
-                if ((s1 <= 4 && s1 != 1) || s1 == 7 || (11..=14).contains(&s1) || (77..94).contains(&s1)) && s2 < 94 {
+                if ((s1 <= 4 && s1 != 1)
+                    || s1 == 7
+                    || (11..=14).contains(&s1)
+                    || (77..94).contains(&s1))
+                    && s2 < 94
+                {
                     let mut k: i32 = 0;
                     while k < jisx0213_p2_ofst_len {
                         if s1 == jisx0213_p2_ofst[k as usize] as u32 {
@@ -487,7 +529,8 @@ fn mb_eucjp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
 
                     /* Check for Japanese chars in CJK Unified Ideographs ext B (U+2XXXX) */
                     if w == 0 {
-                        let k = mbfl_bisec_srch2(s as i32, &jisx0213_jis_u5_key, jisx0213_u5_tbl_len);
+                        let k =
+                            mbfl_bisec_srch2(s as i32, &jisx0213_jis_u5_key, jisx0213_u5_tbl_len);
                         if k >= 0 {
                             w = jisx0213_jis_u5_tbl[k as usize] as u32 + 0x20000;
                         }

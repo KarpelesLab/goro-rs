@@ -81,7 +81,10 @@ struct Sv {
 
 impl Sv {
     fn s(b: &[u8]) -> Sv {
-        Sv { v: Value::String(PhpString::from_bytes(b)), is_number: false }
+        Sv {
+            v: Value::String(PhpString::from_bytes(b)),
+            is_number: false,
+        }
     }
     fn empty() -> Sv {
         Sv::s(b"")
@@ -101,7 +104,27 @@ struct Scanner<'a> {
 }
 
 fn is_label_char(c: u8) -> bool {
-    !matches!(c, b'=' | b'\n' | b'\r' | b'\t' | b';' | b'&' | b'|' | b'^' | b'$' | b'~' | b'(' | b')' | b'{' | b'}' | b'!' | b'"' | b'[' | b']' | 0)
+    !matches!(
+        c,
+        b'=' | b'\n'
+            | b'\r'
+            | b'\t'
+            | b';'
+            | b'&'
+            | b'|'
+            | b'^'
+            | b'$'
+            | b'~'
+            | b'('
+            | b')'
+            | b'{'
+            | b'}'
+            | b'!'
+            | b'"'
+            | b'['
+            | b']'
+            | 0
+    )
 }
 
 impl<'a> Scanner<'a> {
@@ -125,9 +148,33 @@ impl<'a> Scanner<'a> {
     fn tok(&self, t: Tok, text: &[u8]) -> (Tok, Sv) {
         if self.mode == SCANNER_TYPED && matches!(self.st, St::Value | St::Raw) {
             match t {
-                Tok::BoolTrue => return (t, Sv { v: Value::True, is_number: false }),
-                Tok::BoolFalse => return (t, Sv { v: Value::False, is_number: false }),
-                Tok::Null => return (t, Sv { v: Value::Null, is_number: false }),
+                Tok::BoolTrue => {
+                    return (
+                        t,
+                        Sv {
+                            v: Value::True,
+                            is_number: false,
+                        },
+                    );
+                }
+                Tok::BoolFalse => {
+                    return (
+                        t,
+                        Sv {
+                            v: Value::False,
+                            is_number: false,
+                        },
+                    );
+                }
+                Tok::Null => {
+                    return (
+                        t,
+                        Sv {
+                            v: Value::Null,
+                            is_number: false,
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -214,11 +261,7 @@ impl<'a> Scanner<'a> {
             // both alternatives match; longest wins
             return 3;
         }
-        if c != b'{' && c != 0 {
-            2
-        } else {
-            0
-        }
+        if c != b'{' && c != 0 { 2 } else { 0 }
     }
     fn m_chars_plus(&self, p: usize, plain: impl Fn(u8) -> bool, backslash_any: bool) -> usize {
         let mut e = p;
@@ -251,13 +294,45 @@ impl<'a> Scanner<'a> {
         e - p
     }
     fn m_value_chars(&self, p: usize) -> usize {
-        self.m_chars_plus(p, |c| !matches!(c, b'$' | b'=' | b' ' | b'\t' | b'\n' | b'\r' | b';' | b'&' | b'|' | b'^' | b'~' | b'(' | b')' | b'!' | b'"' | b'\'' | 0), false)
+        self.m_chars_plus(
+            p,
+            |c| {
+                !matches!(
+                    c,
+                    b'$' | b'='
+                        | b' '
+                        | b'\t'
+                        | b'\n'
+                        | b'\r'
+                        | b';'
+                        | b'&'
+                        | b'|'
+                        | b'^'
+                        | b'~'
+                        | b'('
+                        | b')'
+                        | b'!'
+                        | b'"'
+                        | b'\''
+                        | 0
+                )
+            },
+            false,
+        )
     }
     fn m_fallback_chars(&self, p: usize) -> usize {
-        self.m_chars_plus(p, |c| !matches!(c, b'$' | b'\n' | b'\r' | b';' | b'"' | b'\'' | b'}' | b'\\'), true)
+        self.m_chars_plus(
+            p,
+            |c| !matches!(c, b'$' | b'\n' | b'\r' | b';' | b'"' | b'\'' | b'}' | b'\\'),
+            true,
+        )
     }
     fn m_section_value_chars(&self, p: usize) -> usize {
-        self.m_chars_plus(p, |c| !matches!(c, b'$' | b'\n' | b'\r' | b';' | b'"' | b'\'' | b']' | b'\\'), true)
+        self.m_chars_plus(
+            p,
+            |c| !matches!(c, b'$' | b'\n' | b'\r' | b';' | b'"' | b'\'' | b']' | b'\\'),
+            true,
+        )
     }
 
     fn eat_ws_lead_trail(text: &[u8], trail_extra: Option<u8>) -> &[u8] {
@@ -266,7 +341,10 @@ impl<'a> Scanner<'a> {
         while s < e && matches!(text[s], b' ' | b'\t') {
             s += 1;
         }
-        while e > s && (matches!(text[e - 1], b'\n' | b'\r' | b'\t' | b' ') || Some(text[e - 1]) == trail_extra) {
+        while e > s
+            && (matches!(text[e - 1], b'\n' | b'\r' | b'\t' | b' ')
+                || Some(text[e - 1]) == trail_extra)
+        {
             e -= 1;
         }
         &text[s..e]
@@ -365,7 +443,12 @@ impl<'a> Scanner<'a> {
                     cand(t + 1, 5, &mut best);
                 }
             }
-            if matches!(st, DoubleQuotes | SectionValue | Value | Offset | VarFallback) && c0 == b'$' && self.at(start + 1) == b'{' {
+            if matches!(
+                st,
+                DoubleQuotes | SectionValue | Value | Offset | VarFallback
+            ) && c0 == b'$'
+                && self.at(start + 1) == b'{'
+            {
                 cand(2, 6, &mut best);
             }
             if st == VarName && c0 == b':' && self.at(start + 1) == b'-' {
@@ -530,8 +613,8 @@ impl<'a> Scanner<'a> {
                         let c = self.at(cur);
                         cur += 1;
                         let stop = match c {
-                            b'=' | b'\n' | b'\r' | b'\t' | b';' | b'&' | b'|' | b'^' | b'$' | b'~' | b'(' | b')'
-                            | b'{' | b'}' | b'!' | b'"' | b'[' | b']' => true,
+                            b'=' | b'\n' | b'\r' | b'\t' | b';' | b'&' | b'|' | b'^' | b'$'
+                            | b'~' | b'(' | b')' | b'{' | b'}' | b'!' | b'"' | b'[' | b']' => true,
                             b':' => self.at(cur) == b'-',
                             _ => false,
                         };
@@ -587,7 +670,8 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos = cur;
                     let e = sc.unwrap_or(cur);
-                    let mut v = Self::eat_ws_lead_trail(&self.d[start..e.max(start)], None).to_vec();
+                    let mut v =
+                        Self::eat_ws_lead_trail(&self.d[start..e.max(start)], None).to_vec();
                     if v.len() > 1 && v[0] == b'"' && v[v.len() - 1] == b'"' {
                         v = v[1..v.len() - 1].to_vec();
                     }
@@ -637,7 +721,10 @@ impl<'a> Scanner<'a> {
                                 if s < self.d.len() {
                                     let esc = self.at(s);
                                     s += 1;
-                                    if esc == b'"' && (s >= self.d.len() || matches!(self.at(s), b'\n' | b'\r')) {
+                                    if esc == b'"'
+                                        && (s >= self.d.len()
+                                            || matches!(self.at(s), b'\n' | b'\r'))
+                                    {
                                         s -= 1;
                                         break;
                                     }
@@ -649,7 +736,13 @@ impl<'a> Scanner<'a> {
                     self.pos = s;
                     let raw = self.d[start..s].to_vec();
                     let v = self.escape_string(&raw, b'"');
-                    return (Tok::QuotedString, Sv { v: goro_core::value::Value::String(PhpString::from_vec(v)), is_number: false });
+                    return (
+                        Tok::QuotedString,
+                        Sv {
+                            v: goro_core::value::Value::String(PhpString::from_vec(v)),
+                            is_number: false,
+                        },
+                    );
                 }
                 29 => return self.tok(Tok::Whitespace, text),
                 30 => continue,
@@ -718,7 +811,10 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn concat(a: Sv, b: Sv) -> Sv {
         let mut s = a.bytes();
         s.extend_from_slice(&b.bytes());
-        Sv { v: Value::String(PhpString::from_vec(s)), is_number: a.is_number }
+        Sv {
+            v: Value::String(PhpString::from_vec(s)),
+            is_number: a.is_number,
+        }
     }
 
     fn get_constant(&mut self, name: Sv) -> Sv {
@@ -732,7 +828,10 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             if let Some(c) = self.vm.constants.get(&n) {
                 let s = c.to_php_string();
-                return Sv { v: Value::String(s), is_number: false };
+                return Sv {
+                    v: Value::String(s),
+                    is_number: false,
+                };
             }
         }
         name
@@ -741,16 +840,25 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn get_var(&mut self, name: &[u8], fallback: Option<Sv>) -> Sv {
         // Configuration directives (ini settings share goro's constant table;
         // directive names are lowercase, constants conventionally are not).
-        if name.iter().any(|c| c.is_ascii_lowercase() || *c == b':' || *c == b'.') {
+        if name
+            .iter()
+            .any(|c| c.is_ascii_lowercase() || *c == b':' || *c == b'.')
+        {
             if let Some(v) = self.vm.constants.get(name) {
-                return Sv { v: Value::String(v.to_php_string()), is_number: false };
+                return Sv {
+                    v: Value::String(v.to_php_string()),
+                    is_number: false,
+                };
             }
         }
         if let Ok(e) = std::env::var(String::from_utf8_lossy(name).as_ref()) {
             return Sv::s(e.as_bytes());
         }
         match fallback {
-            Some(f) => Sv { v: Value::String(PhpString::from_vec(f.bytes())), is_number: false },
+            Some(f) => Sv {
+                v: Value::String(PhpString::from_vec(f.bytes())),
+                is_number: false,
+            },
             None => Sv::empty(),
         }
     }
@@ -768,7 +876,11 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             Tok::Fallback => {
                 self.next();
-                let fb = if self.starts_var_string() { self.var_string_list(true)? } else { Sv::empty() };
+                let fb = if self.starts_var_string() {
+                    self.var_string_list(true)?
+                } else {
+                    Sv::empty()
+                };
                 if *self.peek() != Tok::Ch(b'}') {
                     return self.error(&["'}'"]).map(|_| Sv::empty());
                 }
@@ -797,13 +909,26 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.next();
                     return Ok(acc);
                 }
-                _ => return self.error(&["TC_DOLLAR_CURLY", "TC_QUOTED_STRING", "'\"'"]).map(|_| Sv::empty()),
+                _ => {
+                    return self
+                        .error(&["TC_DOLLAR_CURLY", "TC_QUOTED_STRING", "'\"'"])
+                        .map(|_| Sv::empty());
+                }
             }
         }
     }
 
     fn starts_var_string(&mut self) -> bool {
-        matches!(self.peek(), Tok::DollarCurly | Tok::Constant | Tok::Raw | Tok::Number | Tok::Str | Tok::Whitespace | Tok::Ch(b'"'))
+        matches!(
+            self.peek(),
+            Tok::DollarCurly
+                | Tok::Constant
+                | Tok::Raw
+                | Tok::Number
+                | Tok::Str
+                | Tok::Whitespace
+                | Tok::Ch(b'"')
+        )
     }
 
     /// var_string_list (constants resolved) or var_string_list_section (literal).
@@ -821,7 +946,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 Tok::Constant => {
                     let (_, v) = self.next();
-                    if resolve_constants { self.get_constant(v) } else { v }
+                    if resolve_constants {
+                        self.get_constant(v)
+                    } else {
+                        v
+                    }
                 }
                 Tok::Number => {
                     let (_, mut v) = self.next();
@@ -877,7 +1006,10 @@ impl<'a, 'b> Parser<'a, 'b> {
             _ => 0,
         };
         if self.sc.mode == SCANNER_TYPED {
-            Sv { v: Value::Long(r as i64), is_number: false }
+            Sv {
+                v: Value::Long(r as i64),
+                is_number: false,
+            }
         } else {
             Sv::s(r.to_string().as_bytes())
         }
@@ -969,7 +1101,10 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn pop_entry(&mut self, key: &[u8], value: Value, offset: Option<Value>) {
         let k = if !(key.len() > 1 && key[0] == b'0') {
-            match std::str::from_utf8(key).ok().and_then(|s| s.parse::<i64>().ok()) {
+            match std::str::from_utf8(key)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+            {
                 Some(n) => ArrayKey::Int(n),
                 None => ArrayKey::String(PhpString::from_bytes(key)),
             }
@@ -1009,7 +1144,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 Tok::Section => {
                     self.next();
-                    let name = if self.starts_var_string() { self.var_string_list(false)? } else { Sv::empty() };
+                    let name = if self.starts_var_string() {
+                        self.var_string_list(false)?
+                    } else {
+                        Sv::empty()
+                    };
                     if *self.peek() != Tok::Ch(b']') {
                         return self.error(&[]);
                     }
@@ -1029,7 +1168,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 Tok::Offset => {
                     let (_, name) = self.next();
-                    let off = if self.starts_var_string() { self.var_string_list(true)? } else { Sv::empty() };
+                    let off = if self.starts_var_string() {
+                        self.var_string_list(true)?
+                    } else {
+                        Sv::empty()
+                    };
                     if *self.peek() != Tok::Ch(b']') {
                         return self.error(&[]);
                     }
@@ -1049,13 +1192,26 @@ impl<'a, 'b> Parser<'a, 'b> {
 
 /// Parse INI data into an array (php_simple_ini_parser_cb /
 /// php_ini_parser_cb_with_sections). Returns false on a syntax error.
-pub fn parse_ini(vm: &mut Vm, data: &[u8], process_sections: bool, mode: i64, filename: &str) -> Value {
+pub fn parse_ini(
+    vm: &mut Vm,
+    data: &[u8],
+    process_sections: bool,
+    mode: i64,
+    filename: &str,
+) -> Value {
     if !matches!(mode, SCANNER_NORMAL | SCANNER_RAW | SCANNER_TYPED) {
         vm.emit_warning("Invalid scanner mode");
         return Value::False;
     }
     let mut p = Parser {
-        sc: Scanner { d: data, pos: 0, st: St::Initial, stack: Vec::new(), lineno: 1, mode },
+        sc: Scanner {
+            d: data,
+            pos: 0,
+            st: St::Initial,
+            stack: Vec::new(),
+            lineno: 1,
+            mode,
+        },
         la: None,
         vm,
         filename: filename.to_string(),

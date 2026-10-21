@@ -94,11 +94,11 @@ enum Charset {
     Cp866,
     Koi8r,
     MacRoman,
-    Big5,        // partial: ASCII only
-    Big5HkScs,   // partial: ASCII only
-    Gb2312,      // partial: ASCII only
-    Sjis,        // partial: ASCII only
-    EucJp,       // partial: ASCII only
+    Big5,      // partial: ASCII only
+    Big5HkScs, // partial: ASCII only
+    Gb2312,    // partial: ASCII only
+    Sjis,      // partial: ASCII only
+    EucJp,     // partial: ASCII only
 }
 
 impl Charset {
@@ -387,10 +387,7 @@ fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
                 } else {
                     let n1 = bytes[i + 1];
                     let n2 = bytes[i + 2];
-                    (
-                        Some(((b as u32) << 16) | ((n1 as u32) << 8) | n2 as u32),
-                        3,
-                    )
+                    (Some(((b as u32) << 16) | ((n1 as u32) << 8) | n2 as u32), 3)
                 }
             } else if b != 0xA0 && b != 0xFF {
                 (Some(b as u32), 1)
@@ -512,9 +509,7 @@ fn pick_encode_table(doctype: i64, all_entities: bool) -> &'static [(u32, &'stat
     if !all_entities {
         // htmlspecialchars: only the basic 5 (with or without apos depending on doctype)
         match doctype {
-            ENT_HTML_DOC_XHTML | ENT_HTML_DOC_XML1 | ENT_HTML_DOC_HTML5 => {
-                BASIC_ENTS_APOS_ENCODE
-            }
+            ENT_HTML_DOC_XHTML | ENT_HTML_DOC_XML1 | ENT_HTML_DOC_HTML5 => BASIC_ENTS_APOS_ENCODE,
             _ => BASIC_ENTS_ENCODE,
         }
     } else {
@@ -705,8 +700,7 @@ fn encode_html(
         // advances past it. Detect that here before anything else so we don't
         // accidentally encode the inner `#` / `;` / digits.
         if cp == 0x26 && !double_encode {
-            if let Some(ent_len) =
-                existing_entity_len(input, i, cs, doctype, substitute_disallowed)
+            if let Some(ent_len) = existing_entity_len(input, i, cs, doctype, substitute_disallowed)
             {
                 out.extend_from_slice(&input[i..i + ent_len]);
                 i += ent_len;
@@ -753,8 +747,7 @@ fn encode_html(
         //   non-unicode-compat with all_entities: cp was mapped via uni table.
         //   otherwise (partial multi-byte, or htmlspecialchars on non-unicode-compat
         //   single-byte): we only trust values <= 0x7D as Unicode codepoints.
-        let unicode_known =
-            matches!(cs, Charset::Utf8 | Charset::Iso88591) || uses_uni_table;
+        let unicode_known = matches!(cs, Charset::Utf8 | Charset::Iso88591) || uses_uni_table;
         let is_disallowed = substitute_disallowed
             && (unicode_known || cp <= 0x7D)
             && !unicode_cp_is_allowed(cp, doctype);
@@ -804,7 +797,10 @@ fn existing_entity_len(
     // Numeric: &#... or &#x...
     if rest[0] == b'#' {
         let mut k = 1;
-        let hex = rest.get(1).map(|&b| b == b'x' || b == b'X').unwrap_or(false);
+        let hex = rest
+            .get(1)
+            .map(|&b| b == b'x' || b == b'X')
+            .unwrap_or(false);
         if hex {
             k = 2;
         }
@@ -1038,7 +1034,11 @@ fn decode_html(input: &[u8], cs: Charset, flags: i64, all_entities: bool) -> Vec
         };
 
         let ok = emit_cp(&mut out, cp, cs);
-        let ok2 = if cp2 != 0 { emit_cp(&mut out, cp2, cs) } else { true };
+        let ok2 = if cp2 != 0 {
+            emit_cp(&mut out, cp2, cs)
+        } else {
+            true
+        };
         if !ok || !ok2 {
             // Couldn't represent — bail and leave the original `&...;` literal.
             // Roll back any partial emission of cp1.

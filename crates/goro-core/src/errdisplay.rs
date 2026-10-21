@@ -4,14 +4,17 @@
 use crate::vm::Vm;
 
 fn ini_str(vm: &Vm, key: &[u8]) -> Option<String> {
-    vm.constants.get(key).map(|v| v.to_php_string().to_string_lossy())
+    vm.constants
+        .get(key)
+        .map(|v| v.to_php_string().to_string_lossy())
 }
 
 fn ini_bool(vm: &Vm, key: &[u8]) -> bool {
     match ini_str(vm, key) {
         Some(s) => {
             let l = s.trim().to_ascii_lowercase();
-            matches!(l.as_str(), "1" | "on" | "yes" | "true") || l.parse::<i64>().map(|n| n != 0).unwrap_or(false)
+            matches!(l.as_str(), "1" | "on" | "yes" | "true")
+                || l.parse::<i64>().map(|n| n != 0).unwrap_or(false)
         }
         None => false,
     }
@@ -37,7 +40,9 @@ pub fn escape_html(s: &str) -> String {
 fn split_docref(msg: &str) -> Option<(&str, &str, &str)> {
     let b = msg.as_bytes();
     let mut i = 0;
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b':' || b[i] == b'\\') {
+    while i < b.len()
+        && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b':' || b[i] == b'\\')
+    {
         i += 1;
     }
     if i == 0 || i >= b.len() || b[i] != b'(' {
@@ -85,7 +90,8 @@ impl Vm {
             } else if let Some((name, origin, rest)) = split_docref(msg) {
                 let root = ini_str(self, b"docref_root").unwrap_or_default();
                 if !root.is_empty() {
-                    let mut docref = format!("function.{}", name.replace('_', "-").to_ascii_lowercase());
+                    let mut docref =
+                        format!("function.{}", name.replace('_', "-").to_ascii_lowercase());
                     let ext = ini_str(self, b"docref_ext").unwrap_or_default();
                     if !ext.is_empty() {
                         docref.push_str(&ext);
@@ -109,7 +115,10 @@ impl Vm {
                 prepend, kind, body, file, line, append
             )
         } else {
-            format!("{}\n{}: {} in {} on line {}\n{}", prepend, kind, msg, file, line, append)
+            format!(
+                "{}\n{}: {} in {} on line {}\n{}",
+                prepend, kind, msg, file, line, append
+            )
         };
         if mode == 2 {
             use std::io::Write;

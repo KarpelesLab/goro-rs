@@ -53,7 +53,15 @@ pub enum RegEnc {
 
 impl RegEnc {
     fn is_unicode(self) -> bool {
-        matches!(self, RegEnc::Utf8 | RegEnc::Utf16Be | RegEnc::Utf16Le | RegEnc::Utf32Be | RegEnc::Utf32Le | RegEnc::Latin1)
+        matches!(
+            self,
+            RegEnc::Utf8
+                | RegEnc::Utf16Be
+                | RegEnc::Utf16Le
+                | RegEnc::Utf32Be
+                | RegEnc::Utf32Le
+                | RegEnc::Latin1
+        )
     }
 
     /// Length in bytes of the character starting at s[p]
@@ -78,7 +86,11 @@ impl RegEnc {
             }
             RegEnc::Utf16Be | RegEnc::Utf16Le => {
                 if p + 1 < s.len() {
-                    let u = if self == RegEnc::Utf16Be { ((c as u32) << 8) | s[p + 1] as u32 } else { ((s[p + 1] as u32) << 8) | c as u32 };
+                    let u = if self == RegEnc::Utf16Be {
+                        ((c as u32) << 8) | s[p + 1] as u32
+                    } else {
+                        ((s[p + 1] as u32) << 8) | c as u32
+                    };
                     if (0xD800..0xDC00).contains(&u) { 4 } else { 2 }
                 } else {
                     1
@@ -102,7 +114,9 @@ impl RegEnc {
                 }
             }
             RegEnc::Big5 | RegEnc::EucKr | RegEnc::EucCn => {
-                if (0xA1..=0xFE).contains(&c) || (self == RegEnc::Big5 && (0x81..=0xFE).contains(&c)) {
+                if (0xA1..=0xFE).contains(&c)
+                    || (self == RegEnc::Big5 && (0x81..=0xFE).contains(&c))
+                {
                     2
                 } else {
                     1
@@ -127,8 +141,17 @@ impl RegEnc {
             RegEnc::Utf8 => match b.len() {
                 1 => b[0] as u32,
                 2 => (((b[0] & 0x1F) as u32) << 6) | (b[1] & 0x3F) as u32,
-                3 => (((b[0] & 0x0F) as u32) << 12) | (((b[1] & 0x3F) as u32) << 6) | (b[2] & 0x3F) as u32,
-                _ => (((b[0] & 0x07) as u32) << 18) | (((b[1] & 0x3F) as u32) << 12) | (((b[2] & 0x3F) as u32) << 6) | (b[3] & 0x3F) as u32,
+                3 => {
+                    (((b[0] & 0x0F) as u32) << 12)
+                        | (((b[1] & 0x3F) as u32) << 6)
+                        | (b[2] & 0x3F) as u32
+                }
+                _ => {
+                    (((b[0] & 0x07) as u32) << 18)
+                        | (((b[1] & 0x3F) as u32) << 12)
+                        | (((b[2] & 0x3F) as u32) << 6)
+                        | (b[3] & 0x3F) as u32
+                }
             },
             RegEnc::Utf16Be | RegEnc::Utf16Le => {
                 let unit = |i: usize| -> u32 {
@@ -210,9 +233,9 @@ enum Ctype {
     Alnum,
     Ascii,
     Any,
-    Hex,      // \h
+    Hex,                  // \h
     Gc(&'static [usize]), // Unicode general categories (prop indices)
-    Range(u32, u32), // script ranges etc.
+    Range(u32, u32),      // script ranges etc.
     Ranges(&'static [(u32, u32)]),
 }
 
@@ -221,10 +244,19 @@ fn is_space_code(c: u32) -> bool {
 }
 
 fn is_pc(c: u32) -> bool {
-    matches!(c, 0x5F | 0x203F | 0x2040 | 0x2054 | 0xFE33 | 0xFE34 | 0xFE4D..=0xFE4F | 0xFF3F)
+    matches!(
+        c,
+        0x5F | 0x203F | 0x2040 | 0x2054 | 0xFE33 | 0xFE34 | 0xFE4D..=0xFE4F | 0xFF3F
+    )
 }
 
-const LETTER: &[usize] = &[unicode::UC_LU, unicode::UC_LL, unicode::UC_LT, unicode::UC_LM, unicode::UC_LO];
+const LETTER: &[usize] = &[
+    unicode::UC_LU,
+    unicode::UC_LL,
+    unicode::UC_LT,
+    unicode::UC_LM,
+    unicode::UC_LO,
+];
 
 fn uni_is(c: u32, props: &[usize]) -> bool {
     unicode::is_prop(c, props)
@@ -235,7 +267,9 @@ fn ctype_match(ct: Ctype, c: u32, enc: RegEnc) -> bool {
     if !enc.is_unicode() && !ascii {
         // Legacy multibyte encodings: multibyte characters are word/graph/print
         return match ct {
-            Ctype::Word | Ctype::Graph | Ctype::Print | Ctype::Any => c > 0xFF || enc == RegEnc::Koi8 || enc == RegEnc::Koi8R || enc == RegEnc::SingleByte,
+            Ctype::Word | Ctype::Graph | Ctype::Print | Ctype::Any => {
+                c > 0xFF || enc == RegEnc::Koi8 || enc == RegEnc::Koi8R || enc == RegEnc::SingleByte
+            }
             Ctype::Gc(_) | Ctype::Range(..) | Ctype::Ranges(_) => false,
             _ => false,
         };
@@ -286,7 +320,16 @@ fn ctype_match(ct: Ctype, c: u32, enc: RegEnc) -> bool {
                 (c as u8).is_ascii_alphanumeric() || c == b'_' as u32
             } else {
                 uni_is(c, LETTER)
-                    || uni_is(c, &[unicode::UC_MN, unicode::UC_MC, unicode::UC_ME, unicode::UC_ND, unicode::UC_NL])
+                    || uni_is(
+                        c,
+                        &[
+                            unicode::UC_MN,
+                            unicode::UC_MC,
+                            unicode::UC_ME,
+                            unicode::UC_ND,
+                            unicode::UC_NL,
+                        ],
+                    )
                     || is_pc(c)
             }
         }
@@ -302,7 +345,9 @@ fn ctype_match(ct: Ctype, c: u32, enc: RegEnc) -> bool {
             if ascii {
                 (0x21..0x7F).contains(&c)
             } else {
-                !is_space_code(c) && !uni_is(c, &[unicode::UC_C, 11 /* Cn */, 9 /* Cs */]) && !(0x80..0xA0).contains(&c)
+                !is_space_code(c)
+                    && !uni_is(c, &[unicode::UC_C, 11 /* Cn */, 9 /* Cs */])
+                    && !(0x80..0xA0).contains(&c)
             }
         }
         Ctype::Print => {
@@ -339,7 +384,11 @@ fn posix_bracket(name: &str) -> Option<Ctype> {
 }
 
 fn property(name: &str) -> Option<Ctype> {
-    let n: String = name.chars().filter(|c| *c != '_' && *c != ' ' && *c != '-').collect::<String>().to_ascii_lowercase();
+    let n: String = name
+        .chars()
+        .filter(|c| *c != '_' && *c != ' ' && *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
     use unicode::*;
     Some(match n.as_str() {
         "alnum" => Ctype::Alnum,
@@ -385,17 +434,89 @@ fn property(name: &str) -> Option<Ctype> {
         "co" | "privateuse" => Ctype::Gc(&[10]),
         "cn" | "unassigned" => Ctype::Gc(&[11]),
         "cs" | "surrogate" => Ctype::Gc(&[9]),
-        "hiragana" => Ctype::Ranges(&[(0x3041, 0x3096), (0x309D, 0x309F), (0x1B001, 0x1B11E), (0x1F200, 0x1F200)]),
-        "katakana" => Ctype::Ranges(&[(0x30A1, 0x30FA), (0x30FD, 0x30FF), (0x31F0, 0x31FF), (0x32D0, 0x32FE), (0x3300, 0x3357), (0xFF66, 0xFF6F), (0xFF71, 0xFF9D), (0x1B000, 0x1B000)]),
-        "han" => Ctype::Ranges(&[(0x2E80, 0x2E99), (0x2E9B, 0x2EF3), (0x2F00, 0x2FD5), (0x3005, 0x3005), (0x3007, 0x3007), (0x3021, 0x3029), (0x3038, 0x303B), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFA6D), (0xFA70, 0xFAD9), (0x20000, 0x2FA1D), (0x30000, 0x3134A)]),
-        "latin" => Ctype::Ranges(&[(0x41, 0x5A), (0x61, 0x7A), (0xAA, 0xAA), (0xBA, 0xBA), (0xC0, 0xD6), (0xD8, 0xF6), (0xF8, 0x2B8), (0x2E0, 0x2E4), (0x1D00, 0x1D25), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F), (0xA722, 0xA7FF), (0xFF21, 0xFF3A), (0xFF41, 0xFF5A)]),
+        "hiragana" => Ctype::Ranges(&[
+            (0x3041, 0x3096),
+            (0x309D, 0x309F),
+            (0x1B001, 0x1B11E),
+            (0x1F200, 0x1F200),
+        ]),
+        "katakana" => Ctype::Ranges(&[
+            (0x30A1, 0x30FA),
+            (0x30FD, 0x30FF),
+            (0x31F0, 0x31FF),
+            (0x32D0, 0x32FE),
+            (0x3300, 0x3357),
+            (0xFF66, 0xFF6F),
+            (0xFF71, 0xFF9D),
+            (0x1B000, 0x1B000),
+        ]),
+        "han" => Ctype::Ranges(&[
+            (0x2E80, 0x2E99),
+            (0x2E9B, 0x2EF3),
+            (0x2F00, 0x2FD5),
+            (0x3005, 0x3005),
+            (0x3007, 0x3007),
+            (0x3021, 0x3029),
+            (0x3038, 0x303B),
+            (0x3400, 0x4DBF),
+            (0x4E00, 0x9FFF),
+            (0xF900, 0xFA6D),
+            (0xFA70, 0xFAD9),
+            (0x20000, 0x2FA1D),
+            (0x30000, 0x3134A),
+        ]),
+        "latin" => Ctype::Ranges(&[
+            (0x41, 0x5A),
+            (0x61, 0x7A),
+            (0xAA, 0xAA),
+            (0xBA, 0xBA),
+            (0xC0, 0xD6),
+            (0xD8, 0xF6),
+            (0xF8, 0x2B8),
+            (0x2E0, 0x2E4),
+            (0x1D00, 0x1D25),
+            (0x1E00, 0x1EFF),
+            (0x2C60, 0x2C7F),
+            (0xA722, 0xA7FF),
+            (0xFF21, 0xFF3A),
+            (0xFF41, 0xFF5A),
+        ]),
         "greek" => Ctype::Ranges(&[(0x370, 0x3FF), (0x1F00, 0x1FFF)]),
-        "cyrillic" => Ctype::Ranges(&[(0x400, 0x52F), (0x1C80, 0x1C88), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)]),
-        "arabic" => Ctype::Ranges(&[(0x600, 0x6FF), (0x750, 0x77F), (0x8A0, 0x8FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)]),
+        "cyrillic" => Ctype::Ranges(&[
+            (0x400, 0x52F),
+            (0x1C80, 0x1C88),
+            (0x2DE0, 0x2DFF),
+            (0xA640, 0xA69F),
+        ]),
+        "arabic" => Ctype::Ranges(&[
+            (0x600, 0x6FF),
+            (0x750, 0x77F),
+            (0x8A0, 0x8FF),
+            (0xFB50, 0xFDFF),
+            (0xFE70, 0xFEFF),
+        ]),
         "hebrew" => Ctype::Ranges(&[(0x591, 0x5F4), (0xFB1D, 0xFB4F)]),
-        "hangul" => Ctype::Ranges(&[(0x1100, 0x11FF), (0x3131, 0x318E), (0xA960, 0xA97F), (0xAC00, 0xD7A3), (0xD7B0, 0xD7FF), (0xFFA0, 0xFFDC)]),
+        "hangul" => Ctype::Ranges(&[
+            (0x1100, 0x11FF),
+            (0x3131, 0x318E),
+            (0xA960, 0xA97F),
+            (0xAC00, 0xD7A3),
+            (0xD7B0, 0xD7FF),
+            (0xFFA0, 0xFFDC),
+        ]),
         "thai" => Ctype::Range(0xE01, 0xE5B),
-        "common" => Ctype::Ranges(&[(0x0, 0x40), (0x5B, 0x60), (0x7B, 0xA9), (0xAB, 0xB9), (0xBB, 0xBF), (0xD7, 0xD7), (0xF7, 0xF7), (0x2000, 0x206F), (0x3000, 0x3004), (0xFF01, 0xFF20)]),
+        "common" => Ctype::Ranges(&[
+            (0x0, 0x40),
+            (0x5B, 0x60),
+            (0x7B, 0xA9),
+            (0xAB, 0xB9),
+            (0xBB, 0xBF),
+            (0xD7, 0xD7),
+            (0xF7, 0xF7),
+            (0x2000, 0x206F),
+            (0x3000, 0x3004),
+            (0xFF01, 0xFF20),
+        ]),
         _ => return None,
     })
 }
@@ -414,11 +535,15 @@ pub struct CharClass {
 impl CharClass {
     fn matches_raw(&self, c: u32, enc: RegEnc) -> bool {
         let mut m = self.ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi)
-            || self.ctypes.iter().any(|&(ct, neg)| ctype_match(ct, c, enc) != neg)
+            || self
+                .ctypes
+                .iter()
+                .any(|&(ct, neg)| ctype_match(ct, c, enc) != neg)
             || self.subs.iter().any(|s| s.matches_raw(c, enc));
         if !self.and.is_empty() {
             // Intersection: the class is (own items, if any) && each operand
-            let has_own = !self.ranges.is_empty() || !self.ctypes.is_empty() || !self.subs.is_empty();
+            let has_own =
+                !self.ranges.is_empty() || !self.ctypes.is_empty() || !self.subs.is_empty();
             if !has_own {
                 m = true;
             }
@@ -495,9 +620,19 @@ enum Node {
     Alt(Vec<Node>),
     /// Group; capture number assigned in parse order (0 = none)
     Group(Box<Node>, usize),
-    Repeat { node: Box<Node>, min: u32, max: Option<u32>, greedy: bool, possessive: bool },
+    Repeat {
+        node: Box<Node>,
+        min: u32,
+        max: Option<u32>,
+        greedy: bool,
+        possessive: bool,
+    },
     Atomic(Box<Node>),
-    Look { node: Box<Node>, ahead: bool, negate: bool },
+    Look {
+        node: Box<Node>,
+        ahead: bool,
+        negate: bool,
+    },
     Backref(Vec<usize>, bool),
     /// Backref by provisional number (resolved after parsing)
     BackrefNum(usize, bool),
@@ -574,7 +709,14 @@ impl<'a> Parser<'a> {
         }
         loop {
             match self.peek() {
-                Some(c) if c == b' ' as u32 || c == b'\t' as u32 || c == b'\n' as u32 || c == b'\r' as u32 || c == 0x0C || c == 0x0B => {
+                Some(c)
+                    if c == b' ' as u32
+                        || c == b'\t' as u32
+                        || c == b'\n' as u32
+                        || c == b'\r' as u32
+                        || c == 0x0C
+                        || c == 0x0B =>
+                {
                     self.pos += 1;
                 }
                 Some(c) if c == b'#' as u32 => {
@@ -719,7 +861,9 @@ impl<'a> Parser<'a> {
         let mut v: u64 = 0;
         while let Some(c) = self.peek() {
             if (b'0' as u32..=b'9' as u32).contains(&c) {
-                v = v.saturating_mul(10).saturating_add((c - b'0' as u32) as u64);
+                v = v
+                    .saturating_mul(10)
+                    .saturating_add((c - b'0' as u32) as u64);
                 self.pos += 1;
             } else {
                 break;
@@ -796,12 +940,21 @@ impl<'a> Parser<'a> {
                 if self.peek() == Some(b'?' as u32) {
                     self.pos += 1;
                     greedy = false;
-                } else if self.peek() == Some(b'+' as u32) && c != b'{' as u32 && self.is_ruby_like() {
+                } else if self.peek() == Some(b'+' as u32)
+                    && c != b'{' as u32
+                    && self.is_ruby_like()
+                {
                     self.pos += 1;
                     possessive = true;
                 }
             }
-            atom = reduce_nested_quantifier(Node::Repeat { node: Box::new(atom), min, max, greedy, possessive });
+            atom = reduce_nested_quantifier(Node::Repeat {
+                node: Box::new(atom),
+                min,
+                max,
+                greedy,
+                possessive,
+            });
         }
     }
 
@@ -826,11 +979,19 @@ impl<'a> Parser<'a> {
 
     fn validate_name(&self, name: &[u32]) -> Result<(), ParseError> {
         let first = name[0];
-        let ok_first = !(b'0' as u32..=b'9' as u32).contains(&first) && first != b'-' as u32 && first != b'+' as u32;
-        let ok_rest = name.iter().all(|&c| c >= 0x80 || (c as u8).is_ascii_alphanumeric() || c == b'_' as u32);
+        let ok_first = !(b'0' as u32..=b'9' as u32).contains(&first)
+            && first != b'-' as u32
+            && first != b'+' as u32;
+        let ok_rest = name
+            .iter()
+            .all(|&c| c >= 0x80 || (c as u8).is_ascii_alphanumeric() || c == b'_' as u32);
         if !ok_first || !ok_rest {
             let nb = String::from_utf8_lossy(&name_bytes(name, self.enc)).to_string();
-            if !ok_first && name.iter().all(|&c| (b'0' as u32..=b'9' as u32).contains(&c) || c == b'-' as u32 || c == b'+' as u32) {
+            if !ok_first
+                && name.iter().all(|&c| {
+                    (b'0' as u32..=b'9' as u32).contains(&c) || c == b'-' as u32 || c == b'+' as u32
+                })
+            {
                 return Err(ParseError(format!("invalid group name <{}>", nb)));
             }
             return Err(ParseError(format!("invalid char in group name <{}>", nb)));
@@ -850,8 +1011,16 @@ impl<'a> Parser<'a> {
                 Ok(Some(Node::Class(Box::new(cc), ci)))
             }
             '.' => Ok(Some(Node::Any(opts & OPT_MULTILINE != 0))),
-            '^' => Ok(Some(Node::Anchor(if opts & OPT_SINGLELINE != 0 { Anchor::BeginBuf } else { Anchor::BeginLine }))),
-            '$' => Ok(Some(Node::Anchor(if opts & OPT_SINGLELINE != 0 { Anchor::SemiEndBuf } else { Anchor::EndLine }))),
+            '^' => Ok(Some(Node::Anchor(if opts & OPT_SINGLELINE != 0 {
+                Anchor::BeginBuf
+            } else {
+                Anchor::BeginLine
+            }))),
+            '$' => Ok(Some(Node::Anchor(if opts & OPT_SINGLELINE != 0 {
+                Anchor::SemiEndBuf
+            } else {
+                Anchor::EndLine
+            }))),
             '*' | '+' | '?' => err("target of repeat operator is not specified"),
             '{' => {
                 self.pos -= 1;
@@ -880,7 +1049,11 @@ impl<'a> Parser<'a> {
                 '=' | '!' => {
                     let body = self.parse_alt(&mut inner_opts, true)?;
                     self.expect_close()?;
-                    return Ok(Node::Look { node: Box::new(body), ahead: true, negate: ch == '!' });
+                    return Ok(Node::Look {
+                        node: Box::new(body),
+                        ahead: true,
+                        negate: ch == '!',
+                    });
                 }
                 '>' => {
                     let body = self.parse_alt(&mut inner_opts, true)?;
@@ -904,7 +1077,11 @@ impl<'a> Parser<'a> {
                     if char_length(&body).is_none() && alt_lengths(&body).is_none() {
                         return err("invalid pattern in look-behind");
                     }
-                    return Ok(Node::Look { node: Box::new(body), ahead: false, negate });
+                    return Ok(Node::Look {
+                        node: Box::new(body),
+                        ahead: false,
+                        negate,
+                    });
                 }
                 '<' | '\'' => {
                     let close = if ch == '<' { b'>' as u32 } else { b'\'' as u32 };
@@ -931,11 +1108,35 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         match char::from_u32(c).unwrap_or('\0') {
                             '-' => neg = true,
-                            'i' => o = if neg { o & !OPT_IGNORECASE } else { o | OPT_IGNORECASE },
+                            'i' => {
+                                o = if neg {
+                                    o & !OPT_IGNORECASE
+                                } else {
+                                    o | OPT_IGNORECASE
+                                }
+                            }
                             'x' => o = if neg { o & !OPT_EXTEND } else { o | OPT_EXTEND },
-                            'm' if self.syntax == Syntax::Ruby => o = if neg { o & !OPT_MULTILINE } else { o | OPT_MULTILINE },
-                            'm' => o = if neg { o | OPT_SINGLELINE } else { o & !OPT_SINGLELINE },
-                            's' if self.syntax != Syntax::Ruby => o = if neg { o & !OPT_MULTILINE } else { o | OPT_MULTILINE },
+                            'm' if self.syntax == Syntax::Ruby => {
+                                o = if neg {
+                                    o & !OPT_MULTILINE
+                                } else {
+                                    o | OPT_MULTILINE
+                                }
+                            }
+                            'm' => {
+                                o = if neg {
+                                    o | OPT_SINGLELINE
+                                } else {
+                                    o & !OPT_SINGLELINE
+                                }
+                            }
+                            's' if self.syntax != Syntax::Ruby => {
+                                o = if neg {
+                                    o & !OPT_MULTILINE
+                                } else {
+                                    o | OPT_MULTILINE
+                                }
+                            }
                             ':' => break,
                             ')' => {
                                 // handled by try_option_only_group normally
@@ -974,7 +1175,11 @@ impl<'a> Parser<'a> {
         let mut v: u32 = 0;
         let mut n = 0;
         while n < max {
-            match self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(16)) {
+            match self
+                .peek()
+                .and_then(char::from_u32)
+                .and_then(|c| c.to_digit(16))
+            {
                 Some(d) => {
                     v = v.wrapping_mul(16) + d;
                     self.pos += 1;
@@ -1033,7 +1238,11 @@ impl<'a> Parser<'a> {
                 let save = self.pos;
                 let mut v = 0u32;
                 for _ in 0..4 {
-                    match self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(16)) {
+                    match self
+                        .peek()
+                        .and_then(char::from_u32)
+                        .and_then(|c| c.to_digit(16))
+                    {
                         Some(d) => {
                             v = v * 16 + d;
                             self.pos += 1;
@@ -1112,13 +1321,22 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
         }
-        let name: String = self.p[start..self.pos].iter().filter_map(|&c| char::from_u32(c)).collect();
+        let name: String = self.p[start..self.pos]
+            .iter()
+            .filter_map(|&c| char::from_u32(c))
+            .collect();
         if !self.eat('}') {
-            return Err(ParseError(format!("invalid character property name {{{}}}", name)));
+            return Err(ParseError(format!(
+                "invalid character property name {{{}}}",
+                name
+            )));
         }
         match property(&name) {
             Some(ct) => Ok((ct, neg)),
-            None => Err(ParseError(format!("invalid character property name {{{}}}", name))),
+            None => Err(ParseError(format!(
+                "invalid character property name {{{}}}",
+                name
+            ))),
         }
     }
 
@@ -1147,7 +1365,10 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         let ch = char::from_u32(c).unwrap_or('\0');
         if let Some((ct, neg)) = self.ctype_escape(ch)? {
-            let cc = CharClass { ctypes: vec![(ct, neg)], ..Default::default() };
+            let cc = CharClass {
+                ctypes: vec![(ct, neg)],
+                ..Default::default()
+            };
             return Ok(Some(Node::Class(Box::new(cc), false)));
         }
         match ch {
@@ -1160,7 +1381,10 @@ impl<'a> Parser<'a> {
             'K' => return Ok(Some(Node::Keep)),
             'R' => {
                 // (?>\r\n|[\n\v\f\r\x85  ])
-                let cc = CharClass { ranges: vec![(0x0A, 0x0D), (0x85, 0x85), (0x2028, 0x2029)], ..Default::default() };
+                let cc = CharClass {
+                    ranges: vec![(0x0A, 0x0D), (0x85, 0x85), (0x2028, 0x2029)],
+                    ..Default::default()
+                };
                 return Ok(Some(Node::Atomic(Box::new(Node::Alt(vec![
                     Node::Seq(vec![Node::Char(0x0D, false), Node::Char(0x0A, false)]),
                     Node::Class(Box::new(cc), false),
@@ -1169,30 +1393,63 @@ impl<'a> Parser<'a> {
             'N' => return Ok(Some(Node::Any(false))),
             'O' => return Ok(Some(Node::Any(true))),
             'X' => {
-                let nonmark = CharClass { ctypes: vec![(Ctype::Gc(&[unicode::UC_MN, unicode::UC_MC, unicode::UC_ME]), true)], ..Default::default() };
-                let mark = CharClass { ctypes: vec![(Ctype::Gc(&[unicode::UC_MN, unicode::UC_MC, unicode::UC_ME]), false)], ..Default::default() };
+                let nonmark = CharClass {
+                    ctypes: vec![(
+                        Ctype::Gc(&[unicode::UC_MN, unicode::UC_MC, unicode::UC_ME]),
+                        true,
+                    )],
+                    ..Default::default()
+                };
+                let mark = CharClass {
+                    ctypes: vec![(
+                        Ctype::Gc(&[unicode::UC_MN, unicode::UC_MC, unicode::UC_ME]),
+                        false,
+                    )],
+                    ..Default::default()
+                };
                 return Ok(Some(Node::Atomic(Box::new(Node::Alt(vec![
                     Node::Seq(vec![Node::Char(0x0D, false), Node::Char(0x0A, false)]),
                     Node::Seq(vec![
                         Node::Class(Box::new(nonmark), false),
-                        Node::Repeat { node: Box::new(Node::Class(Box::new(mark), false)), min: 0, max: None, greedy: true, possessive: false },
+                        Node::Repeat {
+                            node: Box::new(Node::Class(Box::new(mark), false)),
+                            min: 0,
+                            max: None,
+                            greedy: true,
+                            possessive: false,
+                        },
                     ]),
                     Node::Any(true),
                 ])))));
             }
             'k' if self.peek() == Some(b'<' as u32) || self.peek() == Some(b'\'' as u32) => {
-                let close = if self.peek() == Some(b'<' as u32) { b'>' as u32 } else { b'\'' as u32 };
+                let close = if self.peek() == Some(b'<' as u32) {
+                    b'>' as u32
+                } else {
+                    b'\'' as u32
+                };
                 self.pos += 1;
                 let name = self.parse_group_name(close)?;
-                let all_digits = name.iter().all(|&c| (b'0' as u32..=b'9' as u32).contains(&c));
+                let all_digits = name
+                    .iter()
+                    .all(|&c| (b'0' as u32..=b'9' as u32).contains(&c));
                 if all_digits {
-                    let n: usize = name.iter().fold(0usize, |a, &c| a.saturating_mul(10).saturating_add((c - b'0' as u32) as usize));
+                    let n: usize = name.iter().fold(0usize, |a, &c| {
+                        a.saturating_mul(10)
+                            .saturating_add((c - b'0' as u32) as usize)
+                    });
                     self.has_numbered_backref = true;
                     return Ok(Some(Node::BackrefNum(n, ci)));
                 }
                 if name[0] == b'-' as u32 || name[0] == b'+' as u32 {
-                    let n: usize = name[1..].iter().fold(0usize, |a, &c| a * 10 + (c.wrapping_sub(b'0' as u32)) as usize);
-                    let target = if name[0] == b'-' as u32 { self.ngroups + 1 - n.min(self.ngroups + 1) } else { self.ngroups + n };
+                    let n: usize = name[1..].iter().fold(0usize, |a, &c| {
+                        a * 10 + (c.wrapping_sub(b'0' as u32)) as usize
+                    });
+                    let target = if name[0] == b'-' as u32 {
+                        self.ngroups + 1 - n.min(self.ngroups + 1)
+                    } else {
+                        self.ngroups + n
+                    };
                     self.has_numbered_backref = true;
                     return Ok(Some(Node::BackrefNum(target, ci)));
                 }
@@ -1266,8 +1523,14 @@ impl<'a> Parser<'a> {
                 left.negated = false;
                 let mut right = self.parse_class_rest(opts)?;
                 right.negated = false;
-                let mut res = CharClass { negated, ..Default::default() };
-                let left_empty = left.ranges.is_empty() && left.ctypes.is_empty() && left.subs.is_empty() && left.and.is_empty();
+                let mut res = CharClass {
+                    negated,
+                    ..Default::default()
+                };
+                let left_empty = left.ranges.is_empty()
+                    && left.ctypes.is_empty()
+                    && left.subs.is_empty()
+                    && left.and.is_empty();
                 if !left_empty {
                     res.and.push(left);
                 }
@@ -1290,7 +1553,10 @@ impl<'a> Parser<'a> {
                 prev = None;
                 continue;
             }
-            if c == b'-' as u32 && prev.is_some() && self.peek_at(1).map(|n| n != b']' as u32).unwrap_or(false) {
+            if c == b'-' as u32
+                && prev.is_some()
+                && self.peek_at(1).map(|n| n != b']' as u32).unwrap_or(false)
+            {
                 // Range
                 self.pos += 1;
                 let lo = prev.unwrap();
@@ -1385,7 +1651,10 @@ impl<'a> Parser<'a> {
         // immediate ']' (empty right operand)
         if self.peek() == Some(b']' as u32) {
             self.pos += 1;
-            return Ok(CharClass { negated: true, ..Default::default() });
+            return Ok(CharClass {
+                negated: true,
+                ..Default::default()
+            });
         }
         if self.peek() == Some(b'^' as u32) {
             // a literal '^' here would be odd; treat as negation like Oniguruma does not; keep literal
@@ -1427,7 +1696,10 @@ impl<'a> Parser<'a> {
                 prev = None;
                 continue;
             }
-            if c == b'-' as u32 && prev.is_some() && self.peek_at(1).map(|n| n != b']' as u32).unwrap_or(false) {
+            if c == b'-' as u32
+                && prev.is_some()
+                && self.peek_at(1).map(|n| n != b']' as u32).unwrap_or(false)
+            {
                 self.pos += 1;
                 let lo = prev.unwrap();
                 let hi_c = self.peek().unwrap();
@@ -1515,12 +1787,26 @@ const PLAIN_FLAG: usize = 1 << 40;
 
 /// `(?:x+)+` => `x+`, `(?:x*)+` => `x*`, ... (greedy, non-capturing only)
 fn reduce_nested_quantifier(n: Node) -> Node {
-    if let Node::Repeat { node, min, max, greedy: true, possessive: false } = &n {
+    if let Node::Repeat {
+        node,
+        min,
+        max,
+        greedy: true,
+        possessive: false,
+    } = &n
+    {
         let inner = match &**node {
             Node::Group(b, 0) => &**b,
             other => other,
         };
-        if let Node::Repeat { node: inode, min: imin, max: imax, greedy: true, possessive: false } = inner {
+        if let Node::Repeat {
+            node: inode,
+            min: imin,
+            max: imax,
+            greedy: true,
+            possessive: false,
+        } = inner
+        {
             let outer = (*min, *max);
             let inn = (*imin, *imax);
             let star = (0u32, None);
@@ -1528,13 +1814,22 @@ fn reduce_nested_quantifier(n: Node) -> Node {
             let opt = (0u32, Some(1u32));
             let result = if outer == plus && inn == plus {
                 Some(plus)
-            } else if (outer == star || outer == plus || outer == opt) && (inn == star || inn == plus || inn == opt) && !(outer == opt && inn == opt) {
+            } else if (outer == star || outer == plus || outer == opt)
+                && (inn == star || inn == plus || inn == opt)
+                && !(outer == opt && inn == opt)
+            {
                 Some(star)
             } else {
                 None
             };
             if let Some((mn, mx)) = result {
-                return Node::Repeat { node: inode.clone(), min: mn, max: mx, greedy: true, possessive: false };
+                return Node::Repeat {
+                    node: inode.clone(),
+                    min: mn,
+                    max: mx,
+                    greedy: true,
+                    possessive: false,
+                };
             }
         }
     }
@@ -1586,7 +1881,13 @@ fn alt_lengths(n: &Node) -> Option<Vec<usize>> {
 
 fn nullable(n: &Node) -> bool {
     match n {
-        Node::Empty | Node::Anchor(_) | Node::Keep | Node::Look { .. } | Node::Backref(..) | Node::BackrefNum(..) | Node::BackrefName(..) => true,
+        Node::Empty
+        | Node::Anchor(_)
+        | Node::Keep
+        | Node::Look { .. }
+        | Node::Backref(..)
+        | Node::BackrefNum(..)
+        | Node::BackrefName(..) => true,
         Node::Char(..) | Node::Any(_) | Node::Class(..) => false,
         Node::Seq(v) => v.iter().all(nullable),
         Node::Alt(v) => v.iter().any(nullable),
@@ -1674,10 +1975,22 @@ impl Compiler {
             Node::Seq(v) => {
                 for (i, x) in v.iter().enumerate() {
                     let next = v.get(i + 1);
-                    if let (Some(nx), Node::Repeat { node, min, max: None, greedy: true, possessive: false }) = (next, x) {
+                    if let (
+                        Some(nx),
+                        Node::Repeat {
+                            node,
+                            min,
+                            max: None,
+                            greedy: true,
+                            possessive: false,
+                        },
+                    ) = (next, x)
+                    {
                         // automatic possessivation a*b ==> (?>a*)b
                         if *min <= 1 && is_strict_real_node(node) {
-                            if let (Some(a), Some(b)) = (head_literal(node, false), head_literal(nx, false)) {
+                            if let (Some(a), Some(b)) =
+                                (head_literal(node, false), head_literal(nx, false))
+                            {
                                 if is_exclusive(&a, &b, self.enc) {
                                     self.next_exact = next_head_exact(nx);
                                     self.compile(&Node::Atomic(Box::new(x.clone())));
@@ -1718,9 +2031,21 @@ impl Compiler {
                     self.compile(b);
                 }
             }
-            Node::Repeat { node, min, max, greedy, possessive } => {
+            Node::Repeat {
+                node,
+                min,
+                max,
+                greedy,
+                possessive,
+            } => {
                 if *possessive {
-                    let inner = Node::Repeat { node: node.clone(), min: *min, max: *max, greedy: true, possessive: false };
+                    let inner = Node::Repeat {
+                        node: node.clone(),
+                        min: *min,
+                        max: *max,
+                        greedy: true,
+                        possessive: false,
+                    };
                     self.compile(&Node::Atomic(Box::new(inner)));
                     return;
                 }
@@ -1731,7 +2056,11 @@ impl Compiler {
                 match max {
                     None => {
                         let can_empty = nullable(node);
-                        let head = if *greedy && !can_empty { head_literal(node, true).and_then(|h| h.exact_char()) } else { None };
+                        let head = if *greedy && !can_empty {
+                            head_literal(node, true).and_then(|h| h.exact_char())
+                        } else {
+                            None
+                        };
                         let l = self.emit(Inst::Split(0, 0));
                         let reg = if can_empty {
                             let r = self.nloops;
@@ -1767,7 +2096,11 @@ impl Compiler {
                         }
                         let end = self.prog.len();
                         for s in splits {
-                            self.prog[s] = if *greedy { Inst::Split(s + 1, end) } else { Inst::Split(end, s + 1) };
+                            self.prog[s] = if *greedy {
+                                Inst::Split(s + 1, end)
+                            } else {
+                                Inst::Split(end, s + 1)
+                            };
                         }
                     }
                 }
@@ -1782,7 +2115,11 @@ impl Compiler {
                 self.prog[at] = Inst::Atomic(start);
                 self.prog[skip] = Inst::Jmp(after);
             }
-            Node::Look { node, ahead, negate } => {
+            Node::Look {
+                node,
+                ahead,
+                negate,
+            } => {
                 if *ahead {
                     let at = self.emit(Inst::Look(0, true, *negate, vec![]));
                     let skip = self.emit(Inst::Jmp(0));
@@ -1861,7 +2198,11 @@ fn head_literal(n: &Node, exact: bool) -> Option<HeadLit<'_>> {
         Node::Seq(v) => v.first().and_then(|x| head_literal(x, exact)),
         Node::Group(b, _) | Node::Atomic(b) => head_literal(b, exact),
         Node::Repeat { node, min, .. } if *min > 0 => head_literal(node, exact),
-        Node::Look { node, ahead: true, negate: false } => head_literal(node, exact),
+        Node::Look {
+            node,
+            ahead: true,
+            negate: false,
+        } => head_literal(node, exact),
         _ => None,
     }
 }
@@ -1882,7 +2223,8 @@ fn is_strict_real_node(n: &Node) -> bool {
 fn is_exclusive(a: &HeadLit, b: &HeadLit, enc: RegEnc) -> bool {
     match (a, b) {
         (HeadLit::Char(x, false), HeadLit::Char(y, false)) => x != y,
-        (HeadLit::Class(cc, false), HeadLit::Char(y, false)) | (HeadLit::Char(y, false), HeadLit::Class(cc, false)) => !cc.matches(*y, false, enc),
+        (HeadLit::Class(cc, false), HeadLit::Char(y, false))
+        | (HeadLit::Char(y, false), HeadLit::Class(cc, false)) => !cc.matches(*y, false, enc),
         _ => false,
     }
 }
@@ -1896,19 +2238,56 @@ fn strip_group(n: &Node) -> &Node {
 
 /// Resolve capture numbering: when named groups exist, plain groups do
 /// not capture and named groups are renumbered in order.
-fn resolve(n: Node, map: &dyn Fn(usize) -> usize, names: &[(Vec<u8>, Vec<usize>)], has_names: bool) -> Result<Node, ParseError> {
+fn resolve(
+    n: Node,
+    map: &dyn Fn(usize) -> usize,
+    names: &[(Vec<u8>, Vec<usize>)],
+    has_names: bool,
+) -> Result<Node, ParseError> {
     Ok(match n {
-        Node::Seq(v) => Node::Seq(v.into_iter().map(|x| resolve(x, map, names, has_names)).collect::<Result<_, _>>()?),
-        Node::Alt(v) => Node::Alt(v.into_iter().map(|x| resolve(x, map, names, has_names)).collect::<Result<_, _>>()?),
+        Node::Seq(v) => Node::Seq(
+            v.into_iter()
+                .map(|x| resolve(x, map, names, has_names))
+                .collect::<Result<_, _>>()?,
+        ),
+        Node::Alt(v) => Node::Alt(
+            v.into_iter()
+                .map(|x| resolve(x, map, names, has_names))
+                .collect::<Result<_, _>>()?,
+        ),
         Node::Group(b, num) => {
             let plain = num & PLAIN_FLAG != 0;
             let raw = num & !PLAIN_FLAG;
-            let newnum = if num == 0 || (plain && has_names) { 0 } else { map(raw) };
+            let newnum = if num == 0 || (plain && has_names) {
+                0
+            } else {
+                map(raw)
+            };
             Node::Group(Box::new(resolve(*b, map, names, has_names)?), newnum)
         }
-        Node::Repeat { node, min, max, greedy, possessive } => Node::Repeat { node: Box::new(resolve(*node, map, names, has_names)?), min, max, greedy, possessive },
+        Node::Repeat {
+            node,
+            min,
+            max,
+            greedy,
+            possessive,
+        } => Node::Repeat {
+            node: Box::new(resolve(*node, map, names, has_names)?),
+            min,
+            max,
+            greedy,
+            possessive,
+        },
         Node::Atomic(b) => Node::Atomic(Box::new(resolve(*b, map, names, has_names)?)),
-        Node::Look { node, ahead, negate } => Node::Look { node: Box::new(resolve(*node, map, names, has_names)?), ahead, negate },
+        Node::Look {
+            node,
+            ahead,
+            negate,
+        } => Node::Look {
+            node: Box::new(resolve(*node, map, names, has_names)?),
+            ahead,
+            negate,
+        },
         Node::BackrefNum(n, ci) => {
             if has_names {
                 return err("numbered backref/call is not allowed. (use name)");
@@ -1917,7 +2296,12 @@ fn resolve(n: Node, map: &dyn Fn(usize) -> usize, names: &[(Vec<u8>, Vec<usize>)
         }
         Node::BackrefName(name, ci) => match names.iter().find(|(nm, _)| *nm == name) {
             Some((_, nums)) => Node::Backref(nums.clone(), ci),
-            None => return Err(ParseError(format!("undefined name <{}> reference", String::from_utf8_lossy(&name)))),
+            None => {
+                return Err(ParseError(format!(
+                    "undefined name <{}> reference",
+                    String::from_utf8_lossy(&name)
+                )));
+            }
         },
         other => other,
     })
@@ -1979,8 +2363,21 @@ fn translate_basic(codes: &[u32], syntax: Syntax) -> Vec<u32> {
 
 pub fn compile(pattern: &[u8], options: u32, enc: RegEnc, syntax: Syntax) -> Result<Regex, String> {
     let (codes, _) = enc.decode_all(pattern);
-    let codes = if matches!(syntax, Syntax::PosixBasic | Syntax::Grep | Syntax::Emacs) { translate_basic(&codes, syntax) } else { codes };
-    let mut parser = Parser { p: &codes, pos: 0, enc, syntax, ngroups: 0, names: Vec::new(), has_numbered_backref: false, depth: 0 };
+    let codes = if matches!(syntax, Syntax::PosixBasic | Syntax::Grep | Syntax::Emacs) {
+        translate_basic(&codes, syntax)
+    } else {
+        codes
+    };
+    let mut parser = Parser {
+        p: &codes,
+        pos: 0,
+        enc,
+        syntax,
+        ngroups: 0,
+        names: Vec::new(),
+        has_numbered_backref: false,
+        depth: 0,
+    };
     let mut opts = options;
     let ast = parser.parse_alt(&mut opts, false).map_err(|e| e.0)?;
     if parser.pos < codes.len() {
@@ -1995,7 +2392,10 @@ pub fn compile(pattern: &[u8], options: u32, enc: RegEnc, syntax: Syntax) -> Res
         }
         (parser.names.len(), m)
     } else {
-        ((0..=parser.ngroups).count() - 1, (0..=parser.ngroups).collect())
+        (
+            (0..=parser.ngroups).count() - 1,
+            (0..=parser.ngroups).collect(),
+        )
     };
     // names -> group numbers (merged duplicates, in first-definition order)
     let mut names: Vec<(Vec<u8>, Vec<usize>)> = Vec::new();
@@ -2026,7 +2426,13 @@ pub fn compile(pattern: &[u8], options: u32, enc: RegEnc, syntax: Syntax) -> Res
     }
     let ast = resolve(ast, &|raw| mapping[raw], &names, has_names).map_err(|e| e.0)?;
     let anchored_start = starts_with_begin_buf(&ast);
-    let mut c = Compiler { prog: Vec::new(), classes: Vec::new(), nloops: 0, enc, next_exact: None };
+    let mut c = Compiler {
+        prog: Vec::new(),
+        classes: Vec::new(),
+        nloops: 0,
+        enc,
+        next_exact: None,
+    };
     c.compile(&ast);
     c.emit(Inst::Match);
     Ok(Regex {
@@ -2197,7 +2603,8 @@ impl<'a> Exec<'a> {
                 Inst::SplitExact(a, b, c) => {
                     if pos < codes.len() && codes[pos] == *c {
                         stack.push(Frame::Alt(*b, pos));
-                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit {
+                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit
+                        {
                             return Err(MatchError::StackLimit);
                         }
                         ip = *a;
@@ -2209,7 +2616,8 @@ impl<'a> Exec<'a> {
                 Inst::SplitPeek(a, b, c) => {
                     if pos < codes.len() && codes[pos] == *c {
                         stack.push(Frame::Alt(*b, pos));
-                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit {
+                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit
+                        {
                             return Err(MatchError::StackLimit);
                         }
                     }
@@ -2341,7 +2749,9 @@ impl<'a> Exec<'a> {
                         None => {
                             if depth == 0 {
                                 self.retries += 1;
-                                if self.limits.retry_limit > 0 && self.retries > self.limits.retry_limit {
+                                if self.limits.retry_limit > 0
+                                    && self.retries > self.limits.retry_limit
+                                {
                                     return Err(MatchError::RetryLimit);
                                 }
                             }
@@ -2349,7 +2759,8 @@ impl<'a> Exec<'a> {
                         }
                         Some(Frame::Alt(i, p)) => {
                             self.retries += 1;
-                            if self.limits.retry_limit > 0 && self.retries > self.limits.retry_limit {
+                            if self.limits.retry_limit > 0 && self.retries > self.limits.retry_limit
+                            {
                                 return Err(MatchError::RetryLimit);
                             }
                             ip = i;
@@ -2444,7 +2855,13 @@ impl Regex {
         nums.last().copied()
     }
 
-    fn exec_at(&self, codes: &[u32], start: usize, at: usize, limits: &Limits) -> Result<Option<(Vec<Option<usize>>, usize)>, MatchError> {
+    fn exec_at(
+        &self,
+        codes: &[u32],
+        start: usize,
+        at: usize,
+        limits: &Limits,
+    ) -> Result<Option<(Vec<Option<usize>>, usize)>, MatchError> {
         let mut ex = Exec {
             re: self,
             codes,
@@ -2474,12 +2891,22 @@ impl Regex {
     }
 
     /// onig_search: find the first match starting at byte `start` or later.
-    pub fn search(&self, subject: &[u8], start: usize, limits: &Limits) -> Result<Option<Region>, MatchError> {
+    pub fn search(
+        &self,
+        subject: &[u8],
+        start: usize,
+        limits: &Limits,
+    ) -> Result<Option<Region>, MatchError> {
         let s = self.prepare(subject);
         self.search_prepared(&s, start, limits)
     }
 
-    pub fn search_prepared(&self, s: &Subject, start: usize, limits: &Limits) -> Result<Option<Region>, MatchError> {
+    pub fn search_prepared(
+        &self,
+        s: &Subject,
+        start: usize,
+        limits: &Limits,
+    ) -> Result<Option<Region>, MatchError> {
         let start_idx = match s.offs.binary_search(&start) {
             Ok(i) => i,
             Err(i) => i,
@@ -2498,7 +2925,12 @@ impl Regex {
     }
 
     /// onig_match: match anchored at byte `at`. Returns the region.
-    pub fn match_at(&self, subject: &[u8], at: usize, limits: &Limits) -> Result<Option<Region>, MatchError> {
+    pub fn match_at(
+        &self,
+        subject: &[u8],
+        at: usize,
+        limits: &Limits,
+    ) -> Result<Option<Region>, MatchError> {
         let (codes, offs) = self.enc.decode_all(subject);
         let idx = match offs.binary_search(&at) {
             Ok(i) => i,

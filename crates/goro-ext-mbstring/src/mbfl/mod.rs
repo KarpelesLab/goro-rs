@@ -10,18 +10,18 @@
 //! decoder in a loop until the input is exhausted.
 #![allow(non_upper_case_globals, clippy::all)]
 
-pub mod tables;
-pub mod common;
 pub mod basic;
-pub mod singlebyte;
+pub mod chinese;
+pub mod common;
+pub mod eucjp;
 pub mod iso2022;
+pub mod mobile;
+pub mod singlebyte;
+pub mod sjis;
+pub mod tables;
+pub mod transfer;
 pub mod unicode;
 pub mod utf7;
-pub mod transfer;
-pub mod chinese;
-pub mod mobile;
-pub mod sjis;
-pub mod eucjp;
 pub mod utf8_mobile;
 
 /// Codepoint used to mark an invalid byte sequence in decoded text.
@@ -141,7 +141,13 @@ pub struct ConvBuf {
 
 impl ConvBuf {
     pub fn new(initsize: usize, replacement_char: u32, error_mode: u8) -> ConvBuf {
-        ConvBuf { out: Vec::with_capacity(initsize), state: 0, errors: 0, replacement_char, error_mode }
+        ConvBuf {
+            out: Vec::with_capacity(initsize),
+            state: 0,
+            errors: 0,
+            replacement_char,
+            error_mode,
+        }
     }
     #[inline]
     pub fn add(&mut self, c: u8) {
@@ -462,7 +468,13 @@ pub fn preferred_mime_name(enc: &Encoding) -> Option<&'static str> {
 }
 
 /// C: `mb_fast_convert`. Returns the converted bytes and the error count.
-pub fn fast_convert(input: &[u8], from: &Encoding, to: &Encoding, repl_char: u32, error_mode: u8) -> (Vec<u8>, usize) {
+pub fn fast_convert(
+    input: &[u8],
+    from: &Encoding,
+    to: &Encoding,
+    repl_char: u32,
+    error_mode: u8,
+) -> (Vec<u8>, usize) {
     // Transfer encodings operate on raw bytes (C: mb_fast_convert)
     let (from, to): (&Encoding, &Encoding) = if matches!(to.no, EncNo::Base64 | EncNo::Qprint) {
         (&basic::ENC_8BIT, to)

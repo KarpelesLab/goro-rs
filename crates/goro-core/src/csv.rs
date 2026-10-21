@@ -290,9 +290,21 @@ mod tests {
 
     #[test]
     fn basic() {
-        assert_eq!(php_fgetcsv(b"a,b,c\n".to_vec(), b',', b'"', Some(b'\\'), None), Some(s(&["a", "b", "c"])));
-        assert_eq!(php_fgetcsv(b"\n".to_vec(), b',', b'"', Some(b'\\'), None), None);
-        assert_eq!(php_fgetcsv(b"\"a\"\"b\",c".to_vec(), b',', b'"', Some(b'\\'), None), Some(s(&["a\"b", "c"])));
-        assert_eq!(php_fgetcsv(b"a\tb\t\t \n".to_vec(), b'\t', b'"', Some(b'\\'), None), Some(s(&["a", "b", "", " "])));
+        assert_eq!(
+            php_fgetcsv(b"a,b,c\n".to_vec(), b',', b'"', Some(b'\\'), None),
+            Some(s(&["a", "b", "c"]))
+        );
+        assert_eq!(
+            php_fgetcsv(b"\n".to_vec(), b',', b'"', Some(b'\\'), None),
+            None
+        );
+        assert_eq!(
+            php_fgetcsv(b"\"a\"\"b\",c".to_vec(), b',', b'"', Some(b'\\'), None),
+            Some(s(&["a\"b", "c"]))
+        );
+        assert_eq!(
+            php_fgetcsv(b"a\tb\t\t \n".to_vec(), b'\t', b'"', Some(b'\\'), None),
+            Some(s(&["a", "b", "", " "]))
+        );
     }
 }

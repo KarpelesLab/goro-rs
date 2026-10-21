@@ -3,7 +3,9 @@
 use super::basic::push_utf8;
 use super::common::*;
 use super::mobile::*;
-use super::tables::filt_utf8::{mblen_table_utf8, mbfl_docomo2uni_pua, mbfl_kddi2uni_pua, mbfl_kddi2uni_pua_b, mbfl_sb2uni_pua};
+use super::tables::filt_utf8::{
+    mbfl_docomo2uni_pua, mbfl_kddi2uni_pua, mbfl_kddi2uni_pua_b, mbfl_sb2uni_pua, mblen_table_utf8,
+};
 use super::*;
 
 fn conv_map_tbl(c: u32, n: usize, map: &[[u16; 3]]) -> Option<u32> {
@@ -27,7 +29,13 @@ fn conv_r_map_tbl(c: u32, n: usize, map: &[[u16; 3]]) -> Option<u32> {
     None
 }
 
-fn mobile_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, emoji_map: &[[u16; 3]], convert_emoji: fn(i32, &mut i32) -> i32, n: usize) {
+fn mobile_utf8_to_wchar(
+    input: &[u8],
+    out: &mut Vec<u32>,
+    emoji_map: &[[u16; 3]],
+    convert_emoji: fn(i32, &mut i32) -> i32,
+    n: usize,
+) {
     let e = input.len();
     let mut p = 0usize;
     while p < e {
@@ -50,7 +58,11 @@ fn mobile_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, emoji_map: &[[u16; 3]]
         } else if (0xE0..=0xEF).contains(&c) {
             if e - p < 2 {
                 out.push(MBFL_BAD_INPUT);
-                if p < e && (c != 0xE0 || input[p] >= 0xA0) && (c != 0xED || input[p] < 0xA0) && (input[p] & 0xC0) == 0x80 {
+                if p < e
+                    && (c != 0xE0 || input[p] >= 0xA0)
+                    && (c != 0xED || input[p] < 0xA0)
+                    && (input[p] & 0xC0) == 0x80
+                {
                     p += 1;
                     if p < e && (input[p] & 0xC0) == 0x80 {
                         p += 1;
@@ -77,7 +89,10 @@ fn mobile_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, emoji_map: &[[u16; 3]]
                 out.push(MBFL_BAD_INPUT);
                 if p < e {
                     let c2 = input[p];
-                    if (c == 0xF0 && c2 >= 0x90) || (c == 0xF4 && c2 < 0x90) || (0xF1..=0xF3).contains(&c) {
+                    if (c == 0xF0 && c2 >= 0x90)
+                        || (c == 0xF4 && c2 < 0x90)
+                        || (0xF1..=0xF3).contains(&c)
+                    {
                         while p < e && (input[p] & 0xC0) == 0x80 {
                             p += 1;
                         }
@@ -102,7 +117,10 @@ fn mobile_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, emoji_map: &[[u16; 3]]
                 p -= 1;
                 continue;
             } else {
-                s = (((c & 0x7) as u32) << 18) | (((c2 & 0x3F) as u32) << 12) | (((c3 & 0x3F) as u32) << 6) | (c4 & 0x3F) as u32;
+                s = (((c & 0x7) as u32) << 18)
+                    | (((c2 & 0x3F) as u32) << 12)
+                    | (((c3 & 0x3F) as u32) << 6)
+                    | (c4 & 0x3F) as u32;
             }
         } else {
             out.push(MBFL_BAD_INPUT);
@@ -122,16 +140,40 @@ fn mobile_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, emoji_map: &[[u16; 3]]
 }
 
 fn mb_utf8_docomo_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
-    mobile_utf8_to_wchar(input, out, &mbfl_docomo2uni_pua, mbfilter_sjis_emoji_docomo2unicode, 4)
+    mobile_utf8_to_wchar(
+        input,
+        out,
+        &mbfl_docomo2uni_pua,
+        mbfilter_sjis_emoji_docomo2unicode,
+        4,
+    )
 }
 fn mb_utf8_kddi_a_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
-    mobile_utf8_to_wchar(input, out, &mbfl_kddi2uni_pua, mbfilter_sjis_emoji_kddi2unicode, 7)
+    mobile_utf8_to_wchar(
+        input,
+        out,
+        &mbfl_kddi2uni_pua,
+        mbfilter_sjis_emoji_kddi2unicode,
+        7,
+    )
 }
 fn mb_utf8_kddi_b_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
-    mobile_utf8_to_wchar(input, out, &mbfl_kddi2uni_pua_b, mbfilter_sjis_emoji_kddi2unicode, 8)
+    mobile_utf8_to_wchar(
+        input,
+        out,
+        &mbfl_kddi2uni_pua_b,
+        mbfilter_sjis_emoji_kddi2unicode,
+        8,
+    )
 }
 fn mb_utf8_sb_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
-    mobile_utf8_to_wchar(input, out, &mbfl_sb2uni_pua, mbfilter_sjis_emoji_sb2unicode, 6)
+    mobile_utf8_to_wchar(
+        input,
+        out,
+        &mbfl_sb2uni_pua,
+        mbfilter_sjis_emoji_sb2unicode,
+        6,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -141,7 +183,14 @@ enum Vendor {
     Sb,
 }
 
-fn wchar_to_utf8_mobile(vendor: Vendor, input: &[u32], buf: &mut ConvBuf, emoji_map: &[[u16; 3]], n: usize, error_handler: FromWcharFn) {
+fn wchar_to_utf8_mobile(
+    vendor: Vendor,
+    input: &[u32],
+    buf: &mut ConvBuf,
+    emoji_map: &[[u16; 3]],
+    n: usize,
+    error_handler: FromWcharFn,
+) {
     let len = input.len();
     let mut i = 0usize;
     let tables = match vendor {
@@ -181,7 +230,11 @@ fn wchar_to_utf8_mobile(vendor: Vendor, input: &[u32], buf: &mut ConvBuf, emoji_
                         if w2 >= nflags(b'B') && w2 <= nflags(b'U') {
                             for k in 0..10 {
                                 if w == nflags(nflags_s[k][0]) && w2 == nflags(nflags_s[k][1]) {
-                                    s = if vendor == Vendor::Kddi { nflags_code_kddi[k] } else { nflags_code_sb[k] } as u32;
+                                    s = if vendor == Vendor::Kddi {
+                                        nflags_code_kddi[k]
+                                    } else {
+                                        nflags_code_sb[k]
+                                    } as u32;
                                     break 'kuten;
                                 }
                             }
@@ -212,16 +265,44 @@ fn wchar_to_utf8_mobile(vendor: Vendor, input: &[u32], buf: &mut ConvBuf, emoji_
 }
 
 fn mb_wchar_to_utf8_docomo(input: &[u32], buf: &mut ConvBuf, _end: bool) {
-    wchar_to_utf8_mobile(Vendor::Docomo, input, buf, &mbfl_docomo2uni_pua, 4, mb_wchar_to_utf8_docomo)
+    wchar_to_utf8_mobile(
+        Vendor::Docomo,
+        input,
+        buf,
+        &mbfl_docomo2uni_pua,
+        4,
+        mb_wchar_to_utf8_docomo,
+    )
 }
 fn mb_wchar_to_utf8_kddi_a(input: &[u32], buf: &mut ConvBuf, _end: bool) {
-    wchar_to_utf8_mobile(Vendor::Kddi, input, buf, &mbfl_kddi2uni_pua, 7, mb_wchar_to_utf8_kddi_a)
+    wchar_to_utf8_mobile(
+        Vendor::Kddi,
+        input,
+        buf,
+        &mbfl_kddi2uni_pua,
+        7,
+        mb_wchar_to_utf8_kddi_a,
+    )
 }
 fn mb_wchar_to_utf8_kddi_b(input: &[u32], buf: &mut ConvBuf, _end: bool) {
-    wchar_to_utf8_mobile(Vendor::Kddi, input, buf, &mbfl_kddi2uni_pua_b, 8, mb_wchar_to_utf8_kddi_b)
+    wchar_to_utf8_mobile(
+        Vendor::Kddi,
+        input,
+        buf,
+        &mbfl_kddi2uni_pua_b,
+        8,
+        mb_wchar_to_utf8_kddi_b,
+    )
 }
 fn mb_wchar_to_utf8_sb(input: &[u32], buf: &mut ConvBuf, _end: bool) {
-    wchar_to_utf8_mobile(Vendor::Sb, input, buf, &mbfl_sb2uni_pua, 6, mb_wchar_to_utf8_sb)
+    wchar_to_utf8_mobile(
+        Vendor::Sb,
+        input,
+        buf,
+        &mbfl_sb2uni_pua,
+        6,
+        mb_wchar_to_utf8_sb,
+    )
 }
 
 fn mb_cut_utf8(s: &[u8], from: usize, len: usize) -> Vec<u8> {
@@ -292,4 +373,9 @@ pub static ENC_UTF8_SB: Encoding = Encoding {
     cut: Some(mb_cut_utf8),
 };
 
-pub static ENCODINGS: &[&Encoding] = &[&ENC_UTF8_DOCOMO, &ENC_UTF8_KDDI_A, &ENC_UTF8_KDDI_B, &ENC_UTF8_SB];
+pub static ENCODINGS: &[&Encoding] = &[
+    &ENC_UTF8_DOCOMO,
+    &ENC_UTF8_KDDI_A,
+    &ENC_UTF8_KDDI_B,
+    &ENC_UTF8_SB,
+];

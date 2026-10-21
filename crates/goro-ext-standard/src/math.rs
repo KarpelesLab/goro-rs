@@ -96,10 +96,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"lcg_value", lcg_value_fn);
 
     // Register parameter types for strict_types enforcement on builtins
-    let num = || Some(ParamType::Union(vec![
-        ParamType::Simple(b"int".to_vec()),
-        ParamType::Simple(b"float".to_vec()),
-    ]));
+    let num = || {
+        Some(ParamType::Union(vec![
+            ParamType::Simple(b"int".to_vec()),
+            ParamType::Simple(b"float".to_vec()),
+        ]))
+    };
     let i = || Some(ParamType::Simple(b"int".to_vec()));
     let f = || Some(ParamType::Simple(b"float".to_vec()));
     let s = || Some(ParamType::Simple(b"string".to_vec()));
@@ -137,12 +139,24 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"is_nan", vec![f()]);
     vm.register_builtin_param_types(b"is_infinite", vec![f()]);
     vm.register_builtin_param_types(b"is_finite", vec![f()]);
-    let ns = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"string".to_vec()))));
+    let ns = || {
+        Some(ParamType::Nullable(Box::new(ParamType::Simple(
+            b"string".to_vec(),
+        ))))
+    };
     vm.register_builtin_param_types(b"number_format", vec![f(), i(), ns(), ns()]);
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
     // These validate their own arguments (check_math_num_arg/check_int_arg) and
     // emit the null / float-to-int deprecations themselves.
-    for name in [&b"abs"[..], b"ceil", b"floor", b"round", b"decbin", b"decoct", b"dechex"] {
+    for name in [
+        &b"abs"[..],
+        b"ceil",
+        b"floor",
+        b"round",
+        b"decbin",
+        b"decoct",
+        b"dechex",
+    ] {
         vm.builtin_self_coercing.insert(name.to_vec());
     }
 }
@@ -155,11 +169,20 @@ fn throw_math_type_error(vm: &mut Vm, message: String) {
 
 /// Check math function argument for null deprecation warning or type error.
 /// Returns true if processing should continue (value was acceptable), false if error was thrown.
-fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
+fn check_math_num_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_name: &str,
+    param_num: u32,
+) -> Result<bool, VmError> {
     match val {
         Value::Null => {
             vm.emit_deprecated_at(
-                &format!("{}(): Passing null to parameter #{} (${}) of type int|float is deprecated", func_name, param_num, param_name),
+                &format!(
+                    "{}(): Passing null to parameter #{} (${}) of type int|float is deprecated",
+                    func_name, param_num, param_name
+                ),
                 vm.current_line,
             );
             Ok(true)
@@ -176,7 +199,13 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
                 // In PHP 8, typed parameters (int|float) only accept fully numeric strings
                 // Non-numeric and leading-numeric strings throw TypeError
                 let type_name = Vm::value_type_name(val);
-                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+                throw_math_type_error(
+                    vm,
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type int|float, {} given",
+                        func_name, param_num, param_name, type_name
+                    ),
+                );
                 Ok(false)
             }
         }
@@ -186,7 +215,13 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
         }
         _ => {
             let type_name = Vm::value_type_name(val);
-            throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int|float, {} given", func_name, param_num, param_name, type_name));
+            throw_math_type_error(
+                vm,
+                format!(
+                    "{}(): Argument #{} (${}) must be of type int|float, {} given",
+                    func_name, param_num, param_name, type_name
+                ),
+            );
             Ok(false)
         }
     }
@@ -195,12 +230,21 @@ fn check_math_num_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &st
 /// Check math function argument for int type only.
 /// In PHP 8, floats that fit in int are silently coerced. Floats with fractional parts
 /// emit a deprecation. Very large floats that don't fit throw TypeError.
-fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<bool, VmError> {
+fn check_int_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_name: &str,
+    param_num: u32,
+) -> Result<bool, VmError> {
     match val {
         Value::Null => {
             // null is accepted with deprecation in PHP 8.1+
             vm.emit_deprecated_at(
-                &format!("{}(): Passing null to parameter #{} (${}) of type int is deprecated", func_name, param_num, param_name),
+                &format!(
+                    "{}(): Passing null to parameter #{} (${}) of type int is deprecated",
+                    func_name, param_num, param_name
+                ),
                 vm.current_line,
             );
             Ok(true)
@@ -215,17 +259,25 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
             // So we reject any float >= 2^63 or < -2^63
             let upper_bound = 9223372036854775808.0_f64; // 2^63
             let lower_bound = -9223372036854775808.0_f64; // -2^63
-            let fits_in_int = !f.is_nan() && !f.is_infinite()
-                && *f >= lower_bound
-                && *f < upper_bound;
+            let fits_in_int =
+                !f.is_nan() && !f.is_infinite() && *f >= lower_bound && *f < upper_bound;
             if !fits_in_int {
                 let type_name = Vm::value_type_name(val);
-                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+                throw_math_type_error(
+                    vm,
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type int, {} given",
+                        func_name, param_num, param_name, type_name
+                    ),
+                );
                 Ok(false)
             } else {
                 if f.fract() != 0.0 {
                     vm.emit_deprecated_at(
-                        &format!("Implicit conversion from float {} to int loses precision", goro_core::value::format_php_float(*f)),
+                        &format!(
+                            "Implicit conversion from float {} to int loses precision",
+                            goro_core::value::format_php_float(*f)
+                        ),
                         vm.current_line,
                     );
                 }
@@ -240,14 +292,23 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
                     // Float string with fractional part - deprecated
                     let str_val = s.to_string_lossy();
                     vm.emit_deprecated_at(
-                        &format!("Implicit conversion from float-string \"{}\" to int loses precision", str_val),
+                        &format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            str_val
+                        ),
                         vm.current_line,
                     );
                 }
                 Ok(true)
             } else {
                 let type_name = Vm::value_type_name(val);
-                throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+                throw_math_type_error(
+                    vm,
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type int, {} given",
+                        func_name, param_num, param_name, type_name
+                    ),
+                );
                 Ok(false)
             }
         }
@@ -257,7 +318,13 @@ fn check_int_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, pa
         }
         _ => {
             let type_name = Vm::value_type_name(val);
-            throw_math_type_error(vm, format!("{}(): Argument #{} (${}) must be of type int, {} given", func_name, param_num, param_name, type_name));
+            throw_math_type_error(
+                vm,
+                format!(
+                    "{}(): Argument #{} (${}) must be of type int, {} given",
+                    func_name, param_num, param_name, type_name
+                ),
+            );
             Ok(false)
         }
     }
@@ -356,10 +423,13 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 } else {
                     let class = goro_core::value::display_class_name(&obj_ref.class_name);
                     drop(obj_ref);
-                    throw_math_type_error(vm, format!(
-                        "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given",
-                        class
-                    ));
+                    throw_math_type_error(
+                        vm,
+                        format!(
+                            "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given",
+                            class
+                        ),
+                    );
                     return Ok(Value::Null);
                 }
             }
@@ -372,8 +442,13 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             other => {
                 let tn = Vm::value_type_name(other);
-                throw_math_type_error(vm, format!(
-                    "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given", tn));
+                throw_math_type_error(
+                    vm,
+                    format!(
+                        "round(): Argument #3 ($mode) must be of type RoundingMode|int, {} given",
+                        tn
+                    ),
+                );
                 return Ok(Value::Null);
             }
         }
@@ -387,10 +462,22 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
     let places: i32 = if precision >= 0 {
-        if precision > i32::MAX as i64 { i32::MAX } else { precision as i32 }
-    } else if precision < i32::MIN as i64 { i32::MIN } else { precision as i32 };
+        if precision > i32::MAX as i64 {
+            i32::MAX
+        } else {
+            precision as i32
+        }
+    } else if precision < i32::MIN as i64 {
+        i32::MIN
+    } else {
+        precision as i32
+    };
     // Integers with non-negative precision need no rounding.
-    if matches!(val.deref(), Value::Long(_) | Value::True | Value::False | Value::Null) && places >= 0 {
+    if matches!(
+        val.deref(),
+        Value::Long(_) | Value::True | Value::False | Value::Null
+    ) && places >= 0
+    {
         return Ok(Value::Double(f));
     }
     if let Value::String(s) = val.deref() {
@@ -407,33 +494,77 @@ fn php_intpow10(power: i32) -> f64 {
     if !(0..=22).contains(&power) {
         return 10f64.powf(power as f64);
     }
-    const POWERS: [f64; 23] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
-        1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22];
+    const POWERS: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
     POWERS[power as usize]
 }
 
 fn php_round_helper(integral: f64, value: f64, exponent: f64, places: i32, mode: i64) -> f64 {
     let value_abs = value.abs();
-    let basic = || if places > 0 {
-        ((integral + 0.5f64.copysign(integral)) / exponent).abs()
-    } else {
-        ((integral + 0.5f64.copysign(integral)) * exponent).abs()
+    let basic = || {
+        if places > 0 {
+            ((integral + 0.5f64.copysign(integral)) / exponent).abs()
+        } else {
+            ((integral + 0.5f64.copysign(integral)) * exponent).abs()
+        }
     };
-    let zero = || if places > 0 { (integral / exponent).abs() } else { (integral * exponent).abs() };
+    let zero = || {
+        if places > 0 {
+            (integral / exponent).abs()
+        } else {
+            (integral * exponent).abs()
+        }
+    };
     match mode {
-        1 => if value_abs >= basic() { integral + 1f64.copysign(integral) } else { integral },
-        2 => if value_abs > basic() { integral + 1f64.copysign(integral) } else { integral },
-        5 => if value > 0.0 && value_abs > zero() { integral + 1.0 } else { integral },
-        6 => if value < 0.0 && value_abs > zero() { integral - 1.0 } else { integral },
+        1 => {
+            if value_abs >= basic() {
+                integral + 1f64.copysign(integral)
+            } else {
+                integral
+            }
+        }
+        2 => {
+            if value_abs > basic() {
+                integral + 1f64.copysign(integral)
+            } else {
+                integral
+            }
+        }
+        5 => {
+            if value > 0.0 && value_abs > zero() {
+                integral + 1.0
+            } else {
+                integral
+            }
+        }
+        6 => {
+            if value < 0.0 && value_abs > zero() {
+                integral - 1.0
+            } else {
+                integral
+            }
+        }
         7 => integral,
-        8 => if value_abs > zero() { integral + 1f64.copysign(integral) } else { integral },
+        8 => {
+            if value_abs > zero() {
+                integral + 1f64.copysign(integral)
+            } else {
+                integral
+            }
+        }
         3 | 4 => {
             let edge = basic();
             if value_abs > edge {
                 integral + 1f64.copysign(integral)
             } else if value_abs == edge {
                 let even = integral % 2.0 == 0.0;
-                if (mode == 3) != even { integral + 1f64.copysign(integral) } else { integral }
+                if (mode == 3) != even {
+                    integral + 1f64.copysign(integral)
+                } else {
+                    integral
+                }
             } else {
                 integral
             }
@@ -447,17 +578,36 @@ pub fn php_math_round(value: f64, places: i32, mode: i64) -> f64 {
     if !value.is_finite() || value == 0.0 {
         return value;
     }
-    let places = if places < i32::MIN + 1 { i32::MIN + 1 } else { places };
+    let places = if places < i32::MIN + 1 {
+        i32::MIN + 1
+    } else {
+        places
+    };
     let exponent = php_intpow10(places.abs());
     let (mut tmp_value, tmp_value2);
     if value >= 0.0 {
-        tmp_value = (if places > 0 { value * exponent } else { value / exponent }).floor();
+        tmp_value = (if places > 0 {
+            value * exponent
+        } else {
+            value / exponent
+        })
+        .floor();
         tmp_value2 = tmp_value + 1.0;
     } else {
-        tmp_value = (if places > 0 { value * exponent } else { value / exponent }).ceil();
+        tmp_value = (if places > 0 {
+            value * exponent
+        } else {
+            value / exponent
+        })
+        .ceil();
         tmp_value2 = tmp_value - 1.0;
     }
-    if (if places > 0 { tmp_value2 / exponent } else { tmp_value2 * exponent }) == value {
+    if (if places > 0 {
+        tmp_value2 / exponent
+    } else {
+        tmp_value2 * exponent
+    }) == value
+    {
         tmp_value = tmp_value2;
     }
     if tmp_value.abs() >= 1e16 {
@@ -465,7 +615,11 @@ pub fn php_math_round(value: f64, places: i32, mode: i64) -> f64 {
     }
     tmp_value = php_round_helper(tmp_value, value, exponent, places, mode);
     if places.abs() < 23 {
-        if places > 0 { tmp_value / exponent } else { tmp_value * exponent }
+        if places > 0 {
+            tmp_value / exponent
+        } else {
+            tmp_value * exponent
+        }
     } else {
         let s = format!("{:15.6}e{}", tmp_value, -(places as i64));
         match s.trim().parse::<f64>() {
@@ -480,7 +634,10 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "max() expects at least 1 argument, 0 given".to_string();
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     if args.len() == 1 {
@@ -488,10 +645,14 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Value::Array(arr) = &args[0] {
             let arr = arr.borrow();
             if arr.is_empty() {
-                let msg = "max(): Argument #1 ($value) must contain at least one element".to_string();
+                let msg =
+                    "max(): Argument #1 ($value) must contain at least one element".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             let mut max_val = Value::Null;
             let mut first = true;
@@ -504,10 +665,16 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(max_val);
         } else {
             let type_name = Vm::value_type_name(&args[0]);
-            let msg = format!("max(): Argument #1 ($value) must be of type array, {} given", type_name);
+            let msg = format!(
+                "max(): Argument #1 ($value) must be of type array, {} given",
+                type_name
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
 
@@ -525,17 +692,24 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "min() expects at least 1 argument, 0 given".to_string();
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     if args.len() == 1 {
         if let Value::Array(arr) = &args[0] {
             let arr = arr.borrow();
             if arr.is_empty() {
-                let msg = "min(): Argument #1 ($value) must contain at least one element".to_string();
+                let msg =
+                    "min(): Argument #1 ($value) must contain at least one element".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             let mut min_val = Value::Null;
             let mut first = true;
@@ -548,10 +722,16 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(min_val);
         } else {
             let type_name = Vm::value_type_name(&args[0]);
-            let msg = format!("min(): Argument #1 ($value) must be of type array, {} given", type_name);
+            let msg = format!(
+                "min(): Argument #1 ($value) must be of type array, {} given",
+                type_name
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
 
@@ -574,13 +754,19 @@ fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = format!("pow() expects exactly 2 arguments, {} given", args.len());
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let base = &args[0];
     let exp = &args[1];
     // If either operand is a GMP object, route through the extension's operator
     // overloading so pow(gmp, n) / pow(n, gmp) returns a GMP object (matching PHP).
-    let is_gmp_obj = vm.object_is_operator_type.map(|f| f(base) || f(exp)).unwrap_or(false);
+    let is_gmp_obj = vm
+        .object_is_operator_type
+        .map(|f| f(base) || f(exp))
+        .unwrap_or(false);
     if is_gmp_obj {
         if let Some(op_fn) = vm.object_do_operation {
             if let Some(result) = op_fn(vm, "**", base, exp) {
@@ -592,16 +778,26 @@ fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             let msg = stripped.to_string();
                             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                             vm.current_exception = Some(exc);
-                            Err(VmError { message: msg, line: vm.current_line })
+                            Err(VmError {
+                                message: msg,
+                                line: vm.current_line,
+                            })
                         } else if let Some(stripped) = e.strip_prefix("\x01D\x01") {
                             let msg = stripped.to_string();
-                            let exc = vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
+                            let exc =
+                                vm.create_exception(b"DivisionByZeroError", &msg, vm.current_line);
                             vm.current_exception = Some(exc);
-                            Err(VmError { message: msg, line: vm.current_line })
+                            Err(VmError {
+                                message: msg,
+                                line: vm.current_line,
+                            })
                         } else {
                             let exc = vm.create_exception(b"TypeError", &e, vm.current_line);
                             vm.current_exception = Some(exc);
-                            Err(VmError { message: e, line: vm.current_line })
+                            Err(VmError {
+                                message: e,
+                                line: vm.current_line,
+                            })
                         }
                     }
                 };
@@ -624,13 +820,19 @@ fn intdiv(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "Division by zero";
         let exc = vm.create_exception(b"DivisionByZeroError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     if a == i64::MIN && b == -1 {
         let msg = "Division of PHP_INT_MIN by -1 is not an integer";
         let exc = vm.create_exception(b"ArithmeticError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     Ok(Value::Long(a / b))
 }
@@ -654,33 +856,50 @@ fn clamp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = format!("clamp() expects exactly 3 arguments, {} given", args.len());
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let value = &args[0];
     let min = &args[1];
     let max = &args[2];
 
     // Check for NaN in min/max
-    if let Value::Double(f) = min { if f.is_nan() {
-        let msg = "clamp(): Argument #2 ($min) must not be NAN".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
-    }}
-    if let Value::Double(f) = max { if f.is_nan() {
-        let msg = "clamp(): Argument #3 ($max) must not be NAN".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
-    }}
+    if let Value::Double(f) = min {
+        if f.is_nan() {
+            let msg = "clamp(): Argument #2 ($min) must not be NAN".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    }
+    if let Value::Double(f) = max {
+        if f.is_nan() {
+            let msg = "clamp(): Argument #3 ($max) must not be NAN".to_string();
+            let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    }
 
     // Compare min > max
     let cmp_min_max = Vm::php_compare_values(min, max);
     if cmp_min_max == std::cmp::Ordering::Greater {
-        let msg = "clamp(): Argument #2 ($min) must be smaller than or equal to argument #3 ($max)".to_string();
+        let msg = "clamp(): Argument #2 ($min) must be smaller than or equal to argument #3 ($max)"
+            .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     // clamp: if value < min, return min; if value > max, return max; else return value
@@ -749,14 +968,20 @@ fn array_sum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Object(obj) => {
                     let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
                     vm.emit_warning_at(
-                        &format!("array_sum(): Addition is not supported on type {}", class_name),
+                        &format!(
+                            "array_sum(): Addition is not supported on type {}",
+                            class_name
+                        ),
                         vm.current_line,
                     );
                 }
                 _ => {
                     let type_name = Vm::value_type_name(&val);
                     vm.emit_warning_at(
-                        &format!("array_sum(): Addition is not supported on type {}", type_name),
+                        &format!(
+                            "array_sum(): Addition is not supported on type {}",
+                            type_name
+                        ),
                         vm.current_line,
                     );
                 }
@@ -802,8 +1027,8 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    let exists = vm.functions.contains_key(&name_lower)
-        || vm.user_functions.contains_key(&name_lower);
+    let exists =
+        vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower);
     Ok(if exists { Value::True } else { Value::False })
 }
 
@@ -850,7 +1075,10 @@ fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "log(): Argument #2 ($base) must be greater than 0";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg.into(), line: vm.current_line })
+            Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            })
         }
         Some(1.0) => {
             // Division by zero in log would return NaN/Inf, but PHP throws ValueError
@@ -886,29 +1114,32 @@ fn hypot(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn deg2rad_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(
-        args.first()
-            .unwrap_or(&Value::Null)
-            .to_double()
-            / 180.0 * std::f64::consts::PI,
+        args.first().unwrap_or(&Value::Null).to_double() / 180.0 * std::f64::consts::PI,
     ))
 }
 fn rad2deg_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(
-        args.first()
-            .unwrap_or(&Value::Null)
-            .to_double()
-            / std::f64::consts::PI * 180.0,
+        args.first().unwrap_or(&Value::Null).to_double() / std::f64::consts::PI * 180.0,
     ))
 }
 /// Z_PARAM_STR for the base conversion functions: scalars convert, Stringable
 /// objects use __toString, anything else throws a TypeError.
-fn base_str_arg(vm: &mut Vm, val: &Value, func: &str, param: &str) -> Option<goro_core::string::PhpString> {
+fn base_str_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func: &str,
+    param: &str,
+) -> Option<goro_core::string::PhpString> {
     let v = val.deref();
     match &v {
         Value::Array(_) | Value::Resource(_) => {}
         Value::Object(obj) => {
             let lower: Vec<u8> = obj.borrow().class_name.to_ascii_lowercase();
-            let has = vm.classes.get(&lower).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+            let has = vm
+                .classes
+                .get(&lower)
+                .map(|c| c.get_method(b"__tostring").is_some())
+                .unwrap_or(false);
             if has {
                 return Some(vm.value_to_string(&v));
             }
@@ -916,7 +1147,13 @@ fn base_str_arg(vm: &mut Vm, val: &Value, func: &str, param: &str) -> Option<gor
         _ => return Some(v.to_php_string()),
     }
     let tn = Vm::value_type_name(&v);
-    throw_math_type_error(vm, format!("{}(): Argument #1 (${}) must be of type string, {} given", func, param, tn));
+    throw_math_type_error(
+        vm,
+        format!(
+            "{}(): Argument #1 (${}) must be of type string, {} given",
+            func, param, tn
+        ),
+    );
     None
 }
 
@@ -925,8 +1162,12 @@ fn php_basetozval(vm: &mut Vm, s: &[u8], base: u32) -> Value {
     let mut st = 0usize;
     let mut e = s.len();
     let is_space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
-    while st < e && is_space(s[st]) { st += 1; }
-    while st < e && is_space(s[e - 1]) { e -= 1; }
+    while st < e && is_space(s[st]) {
+        st += 1;
+    }
+    while st < e && is_space(s[e - 1]) {
+        e -= 1;
+    }
     if e - st >= 2 && s[st] == b'0' {
         let c1 = s[st + 1];
         if (base == 16 && (c1 == b'x' || c1 == b'X'))
@@ -947,7 +1188,10 @@ fn php_basetozval(vm: &mut Vm, s: &[u8], base: u32) -> Value {
             b'0'..=b'9' => (ch - b'0') as i64,
             b'A'..=b'Z' => (ch - b'A' + 10) as i64,
             b'a'..=b'z' => (ch - b'a' + 10) as i64,
-            _ => { invalid += 1; continue; }
+            _ => {
+                invalid += 1;
+                continue;
+            }
         };
         if c >= base as i64 {
             invalid += 1;
@@ -964,9 +1208,16 @@ fn php_basetozval(vm: &mut Vm, s: &[u8], base: u32) -> Value {
         fnum = fnum * base as f64 + c as f64;
     }
     if invalid > 0 {
-        vm.emit_deprecated_at("Invalid characters passed for attempted conversion, these have been ignored", vm.current_line);
+        vm.emit_deprecated_at(
+            "Invalid characters passed for attempted conversion, these have been ignored",
+            vm.current_line,
+        );
     }
-    if float_mode { Value::Double(fnum) } else { Value::Long(num) }
+    if float_mode {
+        Value::Double(fnum)
+    } else {
+        Value::Long(num)
+    }
 }
 
 fn php_longtobase(value: i64, base: u32) -> String {
@@ -976,14 +1227,21 @@ fn php_longtobase(value: i64, base: u32) -> String {
     loop {
         out.push(digits[(v % base as u64) as usize]);
         v /= base as u64;
-        if v == 0 { break; }
+        if v == 0 {
+            break;
+        }
     }
     out.reverse();
     String::from_utf8(out).unwrap_or_default()
 }
 
 fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let num_str = match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "base_convert", "num") {
+    let num_str = match base_str_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "base_convert",
+        "num",
+    ) {
         Some(s) => s,
         None => return Ok(Value::Null),
     };
@@ -991,7 +1249,10 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let to_base = args.get(2).map(|v| v.to_long()).unwrap_or(10);
     for (n, b, name) in [(2, from_base, "from_base"), (3, to_base, "to_base")] {
         if !(2..=36).contains(&b) {
-            let msg = format!("base_convert(): Argument #{} (${}) must be between 2 and 36 (inclusive)", n, name);
+            let msg = format!(
+                "base_convert(): Argument #{} (${}) must be between 2 and 36 (inclusive)",
+                n, name
+            );
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
             return Ok(Value::Null);
@@ -1013,7 +1274,9 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             loop {
                 out.push(digits[(fvalue % to_base as f64) as usize]);
                 fvalue /= to_base as f64;
-                if !(out.len() < 64 && fvalue.abs() >= 1.0) { break; }
+                if !(out.len() < 64 && fvalue.abs() >= 1.0) {
+                    break;
+                }
             }
             out.reverse();
             String::from_utf8(out).unwrap_or_default()
@@ -1021,23 +1284,40 @@ fn base_convert_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Long(n) => php_longtobase(n, to_base),
         _ => String::new(),
     };
-    Ok(Value::String(goro_core::string::PhpString::from_string(result)))
+    Ok(Value::String(goro_core::string::PhpString::from_string(
+        result,
+    )))
 }
 
 fn bindec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "bindec", "binary_string") {
+    match base_str_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "bindec",
+        "binary_string",
+    ) {
         Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 2)),
         None => Ok(Value::Null),
     }
 }
 fn octdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "octdec", "octal_string") {
+    match base_str_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "octdec",
+        "octal_string",
+    ) {
         Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 8)),
         None => Ok(Value::Null),
     }
 }
 fn hexdec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    match base_str_arg(vm, args.first().unwrap_or(&Value::Null), "hexdec", "hex_string") {
+    match base_str_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        "hexdec",
+        "hex_string",
+    ) {
         Some(s) => Ok(php_basetozval(vm, s.as_bytes(), 16)),
         None => Ok(Value::Null),
     }
@@ -1134,14 +1414,20 @@ fn array_product(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Object(obj) => {
                     let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
                     vm.emit_warning_at(
-                        &format!("array_product(): Multiplication is not supported on type {}", class_name),
+                        &format!(
+                            "array_product(): Multiplication is not supported on type {}",
+                            class_name
+                        ),
                         vm.current_line,
                     );
                 }
                 _ => {
                     let type_name = Vm::value_type_name(&val);
                     vm.emit_warning_at(
-                        &format!("array_product(): Multiplication is not supported on type {}", type_name),
+                        &format!(
+                            "array_product(): Multiplication is not supported on type {}",
+                            type_name
+                        ),
                         vm.current_line,
                     );
                 }
@@ -1258,7 +1544,9 @@ fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
 
     // For integer values with no decimals, format without going through float
-    let formatted = if decimals_raw >= 0 && let Value::Long(n) = val {
+    let formatted = if decimals_raw >= 0
+        && let Value::Long(n) = val
+    {
         if decimals > 0 {
             format!("{}.{}", n, "0".repeat(decimals))
         } else {
@@ -1339,8 +1627,12 @@ fn c_strtol(s: &[u8], base: i64) -> i64 {
         i += 1;
     }
     let mut base = base;
-    let has_hex_prefix = |i: usize| i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X')
-        && s.get(i + 2).map(|c| c.is_ascii_hexdigit()).unwrap_or(false);
+    let has_hex_prefix = |i: usize| {
+        i + 1 < s.len()
+            && s[i] == b'0'
+            && (s[i + 1] == b'x' || s[i + 1] == b'X')
+            && s.get(i + 2).map(|c| c.is_ascii_hexdigit()).unwrap_or(false)
+    };
     if base == 0 {
         if has_hex_prefix(i) {
             base = 16;
@@ -1377,7 +1669,11 @@ fn c_strtol(s: &[u8], base: i64) -> i64 {
         i += 1;
     }
     if neg {
-        if overflow || acc > i64::MAX as i128 + 1 { i64::MIN } else { (-acc) as i64 }
+        if overflow || acc > i64::MAX as i128 + 1 {
+            i64::MIN
+        } else {
+            (-acc) as i64
+        }
     } else if overflow || acc > i64::MAX as i128 {
         i64::MAX
     } else {
@@ -1392,7 +1688,10 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::String(s) if base != 10 => s.as_bytes().to_vec(),
         Value::Object(obj) => {
             let cn = goro_core::value::display_class_name(&obj.borrow().class_name);
-            vm.emit_warning(&format!("Object of class {} could not be converted to int", cn));
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to int",
+                cn
+            ));
             return Ok(Value::Long(1));
         }
         _ => return Ok(Value::Long(val.to_long())),
@@ -1404,8 +1703,14 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let rest = &s[t..];
         if rest.len() > 2 {
-            let off = if rest[0] == b'-' || rest[0] == b'+' { 1 } else { 0 };
-            if rest[off] == b'0' && (rest.get(off + 1) == Some(&b'b') || rest.get(off + 1) == Some(&b'B')) {
+            let off = if rest[0] == b'-' || rest[0] == b'+' {
+                1
+            } else {
+                0
+            };
+            if rest[off] == b'0'
+                && (rest.get(off + 1) == Some(&b'b') || rest.get(off + 1) == Some(&b'B'))
+            {
                 let mut tmp = Vec::new();
                 if off == 1 {
                     tmp.push(rest[0]);
@@ -1502,7 +1807,10 @@ fn srand_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check for MT_RAND_PHP mode deprecation (second argument = 1)
     if let Some(mode) = args.get(1) {
         if mode.to_long() == 1 {
-            vm.emit_deprecated_at("The MT_RAND_PHP variant of Mt19937 is deprecated", vm.current_line);
+            vm.emit_deprecated_at(
+                "The MT_RAND_PHP variant of Mt19937 is deprecated",
+                vm.current_line,
+            );
         }
     }
     // srand/mt_srand is a no-op in our implementation since we use the system RNG

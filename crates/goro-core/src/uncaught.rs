@@ -9,7 +9,11 @@ use crate::vm::{Vm, VmError};
 
 impl Vm {
     /// Format an exception's "trace" property like Exception::getTraceAsString().
-    pub fn format_exception_trace_value(trace_val: &Value, fallback_trace: &str, max_len: usize) -> String {
+    pub fn format_exception_trace_value(
+        trace_val: &Value,
+        fallback_trace: &str,
+        max_len: usize,
+    ) -> String {
         if let Value::Array(arr) = trace_val {
             let arr = arr.borrow();
             let mut lines = Vec::new();
@@ -18,7 +22,12 @@ impl Vm {
             for (_key, frame_val) in arr.iter() {
                 if let Value::Array(frame) = frame_val {
                     let frame = frame.borrow();
-                    let get_s = |k: &[u8]| frame.get(&key(k)).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+                    let get_s = |k: &[u8]| {
+                        frame
+                            .get(&key(k))
+                            .map(|v| v.to_php_string().to_string_lossy())
+                            .unwrap_or_default()
+                    };
                     let file = get_s(b"file");
                     let line = frame.get(&key(b"line")).map(|v| v.to_long()).unwrap_or(0);
                     let function = get_s(b"function");
@@ -39,7 +48,10 @@ impl Vm {
                     } else {
                         format!("{}({})", file, line)
                     };
-                    lines.push(format!("#{} {}: {}{}{}({})", idx, loc, class, type_str, function, args_str));
+                    lines.push(format!(
+                        "#{} {}: {}{}{}({})",
+                        idx, loc, class, type_str, function, args_str
+                    ));
                 }
                 idx += 1;
             }
@@ -61,15 +73,30 @@ impl Vm {
                 {
                     let obj_ref = obj.borrow();
                     let class = crate::value::display_class_name(&obj_ref.class_name);
-                    let msg_str = obj_ref.get_property(b"message").to_php_string().to_string_lossy();
+                    let msg_str = obj_ref
+                        .get_property(b"message")
+                        .to_php_string()
+                        .to_string_lossy();
                     let has_file = obj_ref.has_property(b"file");
                     let has_line = obj_ref.has_property(b"line");
-                    let exc_file = obj_ref.get_property(b"file").to_php_string().to_string_lossy();
+                    let exc_file = obj_ref
+                        .get_property(b"file")
+                        .to_php_string()
+                        .to_string_lossy();
                     let exc_line = obj_ref.get_property(b"line").to_long();
-                    let file_str = if has_file { exc_file } else { self.current_file.clone() };
-                    let line_num = if has_line && exc_line >= 0 { exc_line as u32 } else { e.line };
+                    let file_str = if has_file {
+                        exc_file
+                    } else {
+                        self.current_file.clone()
+                    };
+                    let line_num = if has_line && exc_line >= 0 {
+                        exc_line as u32
+                    } else {
+                        e.line
+                    };
                     let exc_trace = obj_ref.get_property(b"trace");
-                    let trace_str = Self::format_exception_trace_value(&exc_trace, &stack_trace, max_len);
+                    let trace_str =
+                        Self::format_exception_trace_value(&exc_trace, &stack_trace, max_len);
                     chain.push((class, msg_str, file_str, line_num, trace_str));
                     let mut prev = obj_ref.get_property(b"previous").clone();
                     for _ in 0..100 {
@@ -77,13 +104,24 @@ impl Vm {
                         if let Value::Object(prev_obj) = &prev {
                             let prev_ref = prev_obj.borrow();
                             let pc = crate::value::display_class_name(&prev_ref.class_name);
-                            let pm = prev_ref.get_property(b"message").to_php_string().to_string_lossy();
-                            let pf = prev_ref.get_property(b"file").to_php_string().to_string_lossy();
+                            let pm = prev_ref
+                                .get_property(b"message")
+                                .to_php_string()
+                                .to_string_lossy();
+                            let pf = prev_ref
+                                .get_property(b"file")
+                                .to_php_string()
+                                .to_string_lossy();
                             let pl = prev_ref.get_property(b"line").to_long();
-                            let pf_str = if pf.is_empty() || pf == "Unknown" { self.current_file.clone() } else { pf };
+                            let pf_str = if pf.is_empty() || pf == "Unknown" {
+                                self.current_file.clone()
+                            } else {
+                                pf
+                            };
                             let pl_num = if pl > 0 { pl as u32 } else { 0 };
                             let pt = prev_ref.get_property(b"trace");
-                            let pt_str = Self::format_exception_trace_value(&pt, &stack_trace, max_len);
+                            let pt_str =
+                                Self::format_exception_trace_value(&pt, &stack_trace, max_len);
                             chain.push((pc, pm, pf_str, pl_num, pt_str));
                             next_prev = prev_ref.get_property(b"previous").clone();
                         } else {
@@ -93,13 +131,22 @@ impl Vm {
                     }
                 }
                 let first = &chain[0];
-                let thrown_file = if first.2.is_empty() { "Unknown".to_string() } else { first.2.clone() };
+                let thrown_file = if first.2.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    first.2.clone()
+                };
                 let thrown_line = first.3;
                 let mut fatal = String::new();
-                for (i, (class, msg_str, file_str, line_num, trace_str)) in chain.iter().rev().enumerate() {
+                for (i, (class, msg_str, file_str, line_num, trace_str)) in
+                    chain.iter().rev().enumerate()
+                {
                     let head = if i == 0 { "Uncaught " } else { "\n\nNext " };
                     if msg_str.is_empty() {
-                        fatal.push_str(&format!("{}{} in {}:{}\nStack trace:\n{}", head, class, file_str, line_num, trace_str));
+                        fatal.push_str(&format!(
+                            "{}{} in {}:{}\nStack trace:\n{}",
+                            head, class, file_str, line_num, trace_str
+                        ));
                     } else {
                         fatal.push_str(&format!(
                             "{}{}: {}{}{}:{}\nStack trace:\n{}",

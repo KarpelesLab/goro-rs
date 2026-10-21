@@ -66,13 +66,28 @@ impl Parser {
             match &tokens[i].kind {
                 TokenKind::OpenBrace => depth += 1,
                 TokenKind::CloseBrace => depth -= 1,
-                TokenKind::Identifier(n) if depth == 0 && n.eq_ignore_ascii_case(b"__halt_compiler") => {
-                    if matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::OpenParen))
-                        && matches!(tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::CloseParen))
-                        && matches!(tokens.get(i + 3).map(|t| &t.kind), Some(TokenKind::Semicolon) | Some(TokenKind::CloseTag))
-                    {
-                        let is_member = i > 0 && matches!(tokens[i - 1].kind,
-                            TokenKind::Arrow | TokenKind::NullsafeArrow | TokenKind::DoubleColon | TokenKind::Function | TokenKind::Backslash);
+                TokenKind::Identifier(n)
+                    if depth == 0 && n.eq_ignore_ascii_case(b"__halt_compiler") =>
+                {
+                    if matches!(
+                        tokens.get(i + 1).map(|t| &t.kind),
+                        Some(TokenKind::OpenParen)
+                    ) && matches!(
+                        tokens.get(i + 2).map(|t| &t.kind),
+                        Some(TokenKind::CloseParen)
+                    ) && matches!(
+                        tokens.get(i + 3).map(|t| &t.kind),
+                        Some(TokenKind::Semicolon) | Some(TokenKind::CloseTag)
+                    ) {
+                        let is_member = i > 0
+                            && matches!(
+                                tokens[i - 1].kind,
+                                TokenKind::Arrow
+                                    | TokenKind::NullsafeArrow
+                                    | TokenKind::DoubleColon
+                                    | TokenKind::Function
+                                    | TokenKind::Backslash
+                            );
                         if !is_member {
                             halt = Some((i, tokens[i + 3].span.end));
                             break;
@@ -98,13 +113,31 @@ impl Parser {
         while j < hi.min(tokens.len()) {
             let is_const = matches!(&tokens[j].kind, TokenKind::Identifier(n) if n.as_slice() == b"__COMPILER_HALT_OFFSET__");
             if is_const {
-                let prev = if j > 0 { Some(&tokens[j - 1].kind) } else { None };
-                let prev2 = if j > 1 { Some(&tokens[j - 2].kind) } else { None };
-                let member = matches!(prev, Some(TokenKind::Arrow) | Some(TokenKind::NullsafeArrow) | Some(TokenKind::DoubleColon) | Some(TokenKind::Const) | Some(TokenKind::Function));
+                let prev = if j > 0 {
+                    Some(&tokens[j - 1].kind)
+                } else {
+                    None
+                };
+                let prev2 = if j > 1 {
+                    Some(&tokens[j - 2].kind)
+                } else {
+                    None
+                };
+                let member = matches!(
+                    prev,
+                    Some(TokenKind::Arrow)
+                        | Some(TokenKind::NullsafeArrow)
+                        | Some(TokenKind::DoubleColon)
+                        | Some(TokenKind::Const)
+                        | Some(TokenKind::Function)
+                );
                 if !member {
                     if matches!(prev, Some(TokenKind::Backslash)) {
                         // `\X` is the global constant; `ns\X` / `namespace\X` are not.
-                        if !matches!(prev2, Some(TokenKind::Identifier(_)) | Some(TokenKind::Namespace)) {
+                        if !matches!(
+                            prev2,
+                            Some(TokenKind::Identifier(_)) | Some(TokenKind::Namespace)
+                        ) {
                             tokens[j].kind = TokenKind::LongNumber(offset as i64);
                             tokens.remove(j - 1);
                             docs.remove(j - 1);
@@ -155,13 +188,17 @@ impl Parser {
 
     /// Take and clear the doc comment attached to the current token (if any).
     fn take_doc_comment(&mut self) -> Option<Vec<u8>> {
-        self.token_doc_comments.get_mut(self.pos).and_then(|d| d.take())
+        self.token_doc_comments
+            .get_mut(self.pos)
+            .and_then(|d| d.take())
     }
 
     /// Peek the doc comment at the current token without consuming it.
     #[allow(dead_code)]
     fn peek_doc_comment(&self) -> Option<&Vec<u8>> {
-        self.token_doc_comments.get(self.pos).and_then(|d| d.as_ref())
+        self.token_doc_comments
+            .get(self.pos)
+            .and_then(|d| d.as_ref())
     }
 
     /// Attach a doc comment to a freshly-parsed Statement that represents a
@@ -169,8 +206,8 @@ impl Parser {
     /// comment.
     fn attach_stmt_doc_comment(stmt: &mut Statement, doc: Vec<u8>) {
         match &mut stmt.kind {
-            StmtKind::FunctionDecl { doc_comment, .. } |
-            StmtKind::ClassDecl { doc_comment, .. } => {
+            StmtKind::FunctionDecl { doc_comment, .. }
+            | StmtKind::ClassDecl { doc_comment, .. } => {
                 *doc_comment = Some(doc);
             }
             _ => {}
@@ -252,7 +289,11 @@ impl Parser {
             Ok(span)
         } else {
             Err(ParseError {
-                message: format!("syntax error, unexpected {}, expecting {}", self.peek().to_php_unexpected(), expected.to_php_name()),
+                message: format!(
+                    "syntax error, unexpected {}, expecting {}",
+                    self.peek().to_php_unexpected(),
+                    expected.to_php_name()
+                ),
                 span: self.span(),
             })
         }
@@ -270,7 +311,10 @@ impl Parser {
                 Ok(())
             }
             _ => Err(ParseError {
-                message: format!("syntax error, unexpected {}", self.peek().to_php_unexpected()),
+                message: format!(
+                    "syntax error, unexpected {}",
+                    self.peek().to_php_unexpected()
+                ),
                 span: self.span(),
             }),
         }
@@ -292,7 +336,15 @@ impl Parser {
     /// Parse a complete PHP program
     pub fn parse(&mut self) -> ParseResult<Program> {
         if let Some((message, line)) = crate::take_lexer_error() {
-            let mut span = self.tokens.first().map(|t| t.span).unwrap_or(crate::token::Span { start: 0, end: 0, line });
+            let mut span = self
+                .tokens
+                .first()
+                .map(|t| t.span)
+                .unwrap_or(crate::token::Span {
+                    start: 0,
+                    end: 0,
+                    line,
+                });
             span.line = line;
             return Err(ParseError { message, span });
         }
@@ -317,21 +369,69 @@ impl Parser {
             self.advance();
             loop {
                 let mut parts = Vec::new();
-                if matches!(self.peek(), TokenKind::Backslash) { self.advance(); }
-                match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } TokenKind::Variable(v) => { return Err(ParseError { message: format!("syntax error, unexpected variable \"${}\"", String::from_utf8_lossy(&v)), span: self.span() }); } _ => { return Err(ParseError { message: "expected attribute name".into(), span: self.span() }); } }
-                while matches!(self.peek(), TokenKind::Backslash) { self.advance(); match self.peek().clone() { TokenKind::Identifier(n) => { parts.push(n); self.advance(); } _ if self.is_semi_reserved_keyword() => { parts.push(self.keyword_to_identifier()); self.advance(); } _ => break, } }
+                if matches!(self.peek(), TokenKind::Backslash) {
+                    self.advance();
+                }
+                match self.peek().clone() {
+                    TokenKind::Identifier(n) => {
+                        parts.push(n);
+                        self.advance();
+                    }
+                    _ if self.is_semi_reserved_keyword() => {
+                        parts.push(self.keyword_to_identifier());
+                        self.advance();
+                    }
+                    TokenKind::Variable(v) => {
+                        return Err(ParseError {
+                            message: format!(
+                                "syntax error, unexpected variable \"${}\"",
+                                String::from_utf8_lossy(&v)
+                            ),
+                            span: self.span(),
+                        });
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "expected attribute name".into(),
+                            span: self.span(),
+                        });
+                    }
+                }
+                while matches!(self.peek(), TokenKind::Backslash) {
+                    self.advance();
+                    match self.peek().clone() {
+                        TokenKind::Identifier(n) => {
+                            parts.push(n);
+                            self.advance();
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            parts.push(self.keyword_to_identifier());
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
                 let args = if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let a = self.parse_arguments()?;
                     if self.first_class_callable_flag {
-                        return Err(ParseError { message: "Cannot create Closure as attribute argument".into(), span: self.span() });
+                        return Err(ParseError {
+                            message: "Cannot create Closure as attribute argument".into(),
+                            span: self.span(),
+                        });
                     }
                     self.expect(&TokenKind::CloseParen)?;
                     a
-                } else { Vec::new() };
+                } else {
+                    Vec::new()
+                };
                 attrs.push(Attribute { name: parts, args });
-                if !self.eat(&TokenKind::Comma) { break; }
-                if matches!(self.peek(), TokenKind::CloseBracket) { break; }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                if matches!(self.peek(), TokenKind::CloseBracket) {
+                    break;
+                }
             }
             self.expect(&TokenKind::CloseBracket)?;
         }
@@ -376,7 +476,10 @@ impl Parser {
                     // <?php with no body / at end of file: emit a no-op so the
                     // overall parse succeeds (matches PHP, which accepts a file
                     // containing nothing but the opening tag).
-                    Ok(Statement { kind: StmtKind::Nop, span })
+                    Ok(Statement {
+                        kind: StmtKind::Nop,
+                        span,
+                    })
                 } else {
                     // <?php - just continue parsing
                     self.parse_statement()
@@ -485,22 +588,91 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::AttributeOpen => { let doc = self.take_doc_comment(); let attributes = self.parse_attributes()?; let r = match self.peek() { TokenKind::Function => self.parse_function_decl_with_attrs(attributes), TokenKind::Class | TokenKind::Abstract | TokenKind::Final | TokenKind::Interface | TokenKind::Trait | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes), TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) => self.parse_class_decl_with_attrs(attributes), TokenKind::Const => self.parse_const_with_attrs(attributes), _ => self.parse_statement(), }; if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
-            TokenKind::Function => { let doc = self.take_doc_comment(); let r = self.parse_function_decl_with_attrs(Vec::new()); if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
+            TokenKind::AttributeOpen => {
+                let doc = self.take_doc_comment();
+                let attributes = self.parse_attributes()?;
+                let r = match self.peek() {
+                    TokenKind::Function => self.parse_function_decl_with_attrs(attributes),
+                    TokenKind::Class
+                    | TokenKind::Abstract
+                    | TokenKind::Final
+                    | TokenKind::Interface
+                    | TokenKind::Trait
+                    | TokenKind::Enum => self.parse_class_decl_with_attrs(attributes),
+                    TokenKind::Readonly
+                        if matches!(
+                            self.peek_at(1),
+                            TokenKind::Class
+                                | TokenKind::Enum
+                                | TokenKind::Abstract
+                                | TokenKind::Final
+                                | TokenKind::Function
+                                | TokenKind::Trait
+                                | TokenKind::Interface
+                                | TokenKind::Readonly
+                        ) =>
+                    {
+                        self.parse_class_decl_with_attrs(attributes)
+                    }
+                    TokenKind::Const => self.parse_const_with_attrs(attributes),
+                    _ => self.parse_statement(),
+                };
+                if let Some(d) = doc {
+                    return r.map(|mut s| {
+                        Self::attach_stmt_doc_comment(&mut s, d);
+                        s
+                    });
+                }
+                r
+            }
+            TokenKind::Function => {
+                let doc = self.take_doc_comment();
+                let r = self.parse_function_decl_with_attrs(Vec::new());
+                if let Some(d) = doc {
+                    return r.map(|mut s| {
+                        Self::attach_stmt_doc_comment(&mut s, d);
+                        s
+                    });
+                }
+                r
+            }
             TokenKind::Class
             | TokenKind::Abstract
             | TokenKind::Final
             | TokenKind::Interface
             | TokenKind::Trait
-            | TokenKind::Enum => { let doc = self.take_doc_comment(); let r = self.parse_class_decl_with_attrs(Vec::new()); if let Some(d) = doc { return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s }); } r }
+            | TokenKind::Enum => {
+                let doc = self.take_doc_comment();
+                let r = self.parse_class_decl_with_attrs(Vec::new());
+                if let Some(d) = doc {
+                    return r.map(|mut s| {
+                        Self::attach_stmt_doc_comment(&mut s, d);
+                        s
+                    });
+                }
+                r
+            }
             TokenKind::Readonly => {
                 // readonly can be a class modifier (readonly class Foo {}) or a function call
                 // Check if followed by class/enum/abstract/final/function
-                if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Enum | TokenKind::Abstract | TokenKind::Final | TokenKind::Function | TokenKind::Trait | TokenKind::Interface | TokenKind::Readonly) {
+                if matches!(
+                    self.peek_at(1),
+                    TokenKind::Class
+                        | TokenKind::Enum
+                        | TokenKind::Abstract
+                        | TokenKind::Final
+                        | TokenKind::Function
+                        | TokenKind::Trait
+                        | TokenKind::Interface
+                        | TokenKind::Readonly
+                ) {
                     let doc = self.take_doc_comment();
                     let r = self.parse_class_decl_with_attrs(Vec::new());
                     if let Some(d) = doc {
-                        return r.map(|mut s| { Self::attach_stmt_doc_comment(&mut s, d); s });
+                        return r.map(|mut s| {
+                            Self::attach_stmt_doc_comment(&mut s, d);
+                            s
+                        });
                     }
                     r
                 } else {
@@ -521,7 +693,9 @@ impl Parser {
                         let expr = if is_fcc {
                             Expr {
                                 span: span.merge(end_span),
-                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(
+                                    Box::new(name_expr),
+                                )),
                             }
                         } else {
                             Expr {
@@ -589,14 +763,33 @@ impl Parser {
                 // namespace Name\Space;  or  namespace Name\Space { ... }
                 // Namespace names can contain reserved keywords as parts
                 let mut name_parts = Vec::new();
-                if matches!(self.peek(), TokenKind::Identifier(_)) || self.is_semi_reserved_keyword() || matches!(self.peek(), TokenKind::Fn | TokenKind::Match | TokenKind::Null | TokenKind::True | TokenKind::False) {
+                if matches!(self.peek(), TokenKind::Identifier(_))
+                    || self.is_semi_reserved_keyword()
+                    || matches!(
+                        self.peek(),
+                        TokenKind::Fn
+                            | TokenKind::Match
+                            | TokenKind::Null
+                            | TokenKind::True
+                            | TokenKind::False
+                    )
+                {
                     loop {
                         match self.peek().clone() {
                             TokenKind::Identifier(part) => {
                                 self.advance();
                                 name_parts.push(part);
                             }
-                            _ if self.is_semi_reserved_keyword() || matches!(self.peek(), TokenKind::Fn | TokenKind::Match | TokenKind::Null | TokenKind::True | TokenKind::False) => {
+                            _ if self.is_semi_reserved_keyword()
+                                || matches!(
+                                    self.peek(),
+                                    TokenKind::Fn
+                                        | TokenKind::Match
+                                        | TokenKind::Null
+                                        | TokenKind::True
+                                        | TokenKind::False
+                                ) =>
+                            {
                                 let kw = self.keyword_to_identifier();
                                 self.advance();
                                 name_parts.push(kw);
@@ -841,7 +1034,9 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut exprs = vec![self.parse_expression()?];
                 while self.eat(&TokenKind::Comma) {
-                    if matches!(self.peek(), TokenKind::CloseParen) { break; }
+                    if matches!(self.peek(), TokenKind::CloseParen) {
+                        break;
+                    }
                     exprs.push(self.parse_expression()?);
                 }
                 self.expect(&TokenKind::CloseParen)?;
@@ -910,7 +1105,8 @@ impl Parser {
                         // Check for () and ;
                         if matches!(self.peek_at(1), TokenKind::OpenParen)
                             && matches!(self.peek_at(2), TokenKind::CloseParen)
-                            && matches!(self.peek_at(3), TokenKind::Semicolon) {
+                            && matches!(self.peek_at(3), TokenKind::Semicolon)
+                        {
                             self.advance(); // __halt_compiler
                             self.advance(); // (
                             self.advance(); // )
@@ -969,7 +1165,10 @@ impl Parser {
                             matches!(after, Some(TokenKind::Assign))
                                 && (matches!(then, Some(TokenKind::Function) | Some(TokenKind::Fn))
                                     || (matches!(then, Some(TokenKind::Static))
-                                        && matches!(then2, Some(TokenKind::Function) | Some(TokenKind::Fn))))
+                                        && matches!(
+                                            then2,
+                                            Some(TokenKind::Function) | Some(TokenKind::Fn)
+                                        )))
                         }
                         _ => false,
                     };
@@ -1384,7 +1583,10 @@ impl Parser {
         })
     }
 
-    fn parse_function_decl_with_attrs(&mut self, attributes: Vec<Attribute>) -> ParseResult<Statement> {
+    fn parse_function_decl_with_attrs(
+        &mut self,
+        attributes: Vec<Attribute>,
+    ) -> ParseResult<Statement> {
         let span = self.span();
         self.advance(); // function
         // Optional & for return-by-reference
@@ -1462,7 +1664,9 @@ impl Parser {
                         };
                         self.advance();
                         // Check for asymmetric visibility: private(set), protected(set), public(set)
-                        if matches!(self.peek(), TokenKind::OpenParen) && self.lookahead_is_set_modifier() {
+                        if matches!(self.peek(), TokenKind::OpenParen)
+                            && self.lookahead_is_set_modifier()
+                        {
                             self.advance(); // consume (
                             self.advance(); // consume 'set'
                             self.advance(); // consume )
@@ -1517,7 +1721,14 @@ impl Parser {
             // Parse property hooks for promoted properties: public int $x { get => ...; set => ...; }
             // Hooks can appear even without explicit visibility modifier (implicit promotion in PHP 8.4)
             self.last_set_hook_type = None;
-            let (param_get_hook, param_set_hook, param_get_hook_final, param_set_hook_final, param_get_hook_abstract, param_set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+            let (
+                param_get_hook,
+                param_set_hook,
+                param_get_hook_final,
+                param_set_hook_final,
+                param_get_hook_abstract,
+                param_set_hook_abstract,
+            ) = if matches!(self.peek(), TokenKind::OpenBrace) {
                 self.parse_property_hooks(&name, type_hint.as_ref())?
             } else {
                 (None, None, false, false, false, false)
@@ -1597,7 +1808,10 @@ impl Parser {
                 for t in &types {
                     if let Some(err_name) = Self::check_invalid_intersection_type(t) {
                         return Err(ParseError {
-                            message: format!("Type {} cannot be part of an intersection type", err_name),
+                            message: format!(
+                                "Type {} cannot be part of an intersection type",
+                                err_name
+                            ),
                             span: self.span(),
                         });
                     }
@@ -1627,7 +1841,10 @@ impl Parser {
             for t in &types {
                 if let Some(err_name) = Self::check_invalid_intersection_type(t) {
                     return Err(ParseError {
-                        message: format!("Type {} cannot be part of an intersection type", err_name),
+                        message: format!(
+                            "Type {} cannot be part of an intersection type",
+                            err_name
+                        ),
                         span: self.span(),
                     });
                 }
@@ -1686,9 +1903,9 @@ impl Parser {
             TypeHint::Simple(name) => {
                 let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 match lower.as_slice() {
-                    b"int" | b"float" | b"string" | b"bool" | b"array" | b"null"
-                    | b"void" | b"never" | b"object" | b"mixed" | b"callable"
-                    | b"false" | b"true" | b"static" | b"iterable" => {
+                    b"int" | b"float" | b"string" | b"bool" | b"array" | b"null" | b"void"
+                    | b"never" | b"object" | b"mixed" | b"callable" | b"false" | b"true"
+                    | b"static" | b"iterable" => {
                         let display = match lower.as_slice() {
                             b"iterable" => "Traversable|array".to_string(),
                             _ => String::from_utf8_lossy(name).to_string(),
@@ -1771,7 +1988,10 @@ impl Parser {
         }
     }
 
-    fn parse_class_decl_with_attrs(&mut self, attributes: Vec<Attribute>) -> ParseResult<Statement> {
+    fn parse_class_decl_with_attrs(
+        &mut self,
+        attributes: Vec<Attribute>,
+    ) -> ParseResult<Statement> {
         let span = self.span();
         let mut modifiers = ClassModifiers::default();
 
@@ -1924,7 +2144,8 @@ impl Parser {
             // Traits cannot implement interfaces — PHP raises a parse error here.
             if modifiers.is_trait {
                 return Err(ParseError {
-                    message: "syntax error, unexpected token \"implements\", expecting \"{\"".into(),
+                    message: "syntax error, unexpected token \"implements\", expecting \"{\""
+                        .into(),
                     span: self.span(),
                 });
             }
@@ -1945,7 +2166,10 @@ impl Parser {
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
             match self.parse_class_members() {
                 Ok(members) => body.extend(members),
-                Err(e) => { parse_err = Some(e); break; }
+                Err(e) => {
+                    parse_err = Some(e);
+                    break;
+                }
             }
         }
         self.class_name_stack.pop();
@@ -2022,7 +2246,8 @@ impl Parser {
                         if self.lookahead_is_set_modifier() {
                             if has_set_visibility {
                                 return Err(ParseError {
-                                    message: "Multiple access type modifiers are not allowed".into(),
+                                    message: "Multiple access type modifiers are not allowed"
+                                        .into(),
                                     span: self.span(),
                                 });
                             }
@@ -2120,7 +2345,12 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                Ok(ClassMember::EnumCase { name, value, attributes: member_attributes, doc_comment: member_doc_comment })
+                Ok(ClassMember::EnumCase {
+                    name,
+                    value,
+                    attributes: member_attributes,
+                    doc_comment: member_doc_comment,
+                })
             }
             TokenKind::Use => {
                 // trait use
@@ -2257,7 +2487,10 @@ impl Parser {
             }
             TokenKind::Function => {
                 if is_readonly {
-                    return Err(ParseError { message: "Cannot use the readonly modifier on a method".into(), span: self.span() });
+                    return Err(ParseError {
+                        message: "Cannot use the readonly modifier on a method".into(),
+                        span: self.span(),
+                    });
                 }
                 let method_line = self.span().line;
                 self.advance();
@@ -2336,13 +2569,22 @@ impl Parser {
             }
             TokenKind::Const => {
                 if is_readonly {
-                    return Err(ParseError { message: "Cannot use the readonly modifier on a class constant".into(), span: self.span() });
+                    return Err(ParseError {
+                        message: "Cannot use the readonly modifier on a class constant".into(),
+                        span: self.span(),
+                    });
                 }
                 if is_static {
-                    return Err(ParseError { message: "Cannot use the static modifier on a class constant".into(), span: self.span() });
+                    return Err(ParseError {
+                        message: "Cannot use the static modifier on a class constant".into(),
+                        span: self.span(),
+                    });
                 }
                 if is_abstract {
-                    return Err(ParseError { message: "Cannot use the abstract modifier on a class constant".into(), span: self.span() });
+                    return Err(ParseError {
+                        message: "Cannot use the abstract modifier on a class constant".into(),
+                        span: self.span(),
+                    });
                 }
                 self.advance();
 
@@ -2362,13 +2604,16 @@ impl Parser {
                 // A type hint definitely starts with ?, (, or is followed by
                 // | / & / identifier-after-identifier. Try parsing a type hint
                 // speculatively when we see those leading tokens.
-                let starts_with_type_token = matches!(self.peek(), TokenKind::QuestionMark | TokenKind::OpenParen);
+                let starts_with_type_token =
+                    matches!(self.peek(), TokenKind::QuestionMark | TokenKind::OpenParen);
 
                 if starts_with_type_token {
                     // Must be a type hint
                     let th = self.parse_type_hint()?;
                     const_type = Some(th);
-                } else if matches!(self.peek(), TokenKind::Identifier(_)) || self.is_semi_reserved_keyword() {
+                } else if matches!(self.peek(), TokenKind::Identifier(_))
+                    || self.is_semi_reserved_keyword()
+                {
                     // Could be type hint OR constant name. Look ahead.
                     // Peek past potential identifier and check next token:
                     // - If next is `=` -> identifier was the constant name.
@@ -2398,12 +2643,22 @@ impl Parser {
                 // Now parse the constant name (if not already)
                 if name.is_none() {
                     name = Some(match self.peek().clone() {
-                        TokenKind::Identifier(n) => { self.advance(); n }
-                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                        TokenKind::Identifier(n) => {
+                            self.advance();
+                            n
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            let kw = self.keyword_to_identifier();
+                            self.advance();
+                            kw
+                        }
                         _ => {
                             // Rollback to saved_pos so error messages make sense
                             self.pos = saved_pos;
-                            return Err(ParseError { message: "expected constant name".into(), span: self.span() });
+                            return Err(ParseError {
+                                message: "expected constant name".into(),
+                                span: self.span(),
+                            });
                         }
                     });
                 }
@@ -2416,21 +2671,29 @@ impl Parser {
                 self.pending_extra_constants.clear();
                 while self.eat(&TokenKind::Comma) {
                     let extra_name = match self.peek().clone() {
-                        TokenKind::Identifier(n) => { self.advance(); n }
-                        _ if self.is_semi_reserved_keyword() => { let kw = self.keyword_to_identifier(); self.advance(); kw }
+                        TokenKind::Identifier(n) => {
+                            self.advance();
+                            n
+                        }
+                        _ if self.is_semi_reserved_keyword() => {
+                            let kw = self.keyword_to_identifier();
+                            self.advance();
+                            kw
+                        }
                         _ => break,
                     };
                     self.expect(&TokenKind::Assign)?;
                     let extra_value = self.parse_expression()?;
-                    self.pending_extra_constants.push(ClassMember::ClassConstant {
-                        name: extra_name,
-                        value: extra_value,
-                        visibility,
-                        is_final,
-                        attributes: member_attributes.clone(),
-                        type_hint: const_type.clone(),
-                        doc_comment: const_doc.clone(),
-                    });
+                    self.pending_extra_constants
+                        .push(ClassMember::ClassConstant {
+                            name: extra_name,
+                            value: extra_value,
+                            visibility,
+                            is_final,
+                            attributes: member_attributes.clone(),
+                            type_hint: const_type.clone(),
+                            doc_comment: const_doc.clone(),
+                        });
                 }
 
                 self.expect_semicolon()?;
@@ -2460,7 +2723,14 @@ impl Parser {
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
                 self.last_set_hook_type = None;
-                let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                let (
+                    get_hook,
+                    set_hook,
+                    get_hook_final,
+                    set_hook_final,
+                    get_hook_abstract,
+                    set_hook_abstract,
+                ) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name, None)?
                 } else {
                     // Parse comma-separated additional properties
@@ -2537,7 +2807,9 @@ impl Parser {
                 }
                 // Abstract property must have at least one abstract hook
                 if is_abstract && !get_hook_abstract && !set_hook_abstract {
-                    let class_name = self.class_name_stack.last()
+                    let class_name = self
+                        .class_name_stack
+                        .last()
                         .map(|n| String::from_utf8_lossy(n).into_owned())
                         .unwrap_or_else(|| "?".to_string());
                     return Err(ParseError {
@@ -2598,7 +2870,14 @@ impl Parser {
                 };
                 // Check for property hooks { get { ... } set(...) { ... } }
                 self.last_set_hook_type = None;
-                let (get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract) = if matches!(self.peek(), TokenKind::OpenBrace) {
+                let (
+                    get_hook,
+                    set_hook,
+                    get_hook_final,
+                    set_hook_final,
+                    get_hook_abstract,
+                    set_hook_abstract,
+                ) = if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.parse_property_hooks(&name, Some(&type_hint))?
                 } else {
                     // Parse comma-separated additional properties (they share the same type)
@@ -2672,7 +2951,9 @@ impl Parser {
                 }
                 // Abstract property must have at least one abstract hook
                 if is_abstract && !get_hook_abstract && !set_hook_abstract {
-                    let class_name = self.class_name_stack.last()
+                    let class_name = self
+                        .class_name_stack
+                        .last()
                         .map(|n| String::from_utf8_lossy(n).into_owned())
                         .unwrap_or_else(|| "?".to_string());
                     return Err(ParseError {
@@ -2716,7 +2997,18 @@ impl Parser {
 
     /// Parse property hooks: { get { ... } set($value) { ... } }
     /// Returns (get_hook, set_hook)
-    fn parse_property_hooks(&mut self, prop_name: &[u8], prop_type_hint: Option<&TypeHint>) -> ParseResult<(Option<Vec<Statement>>, Option<(Vec<u8>, Vec<Statement>)>, bool, bool, bool, bool)> {
+    fn parse_property_hooks(
+        &mut self,
+        prop_name: &[u8],
+        prop_type_hint: Option<&TypeHint>,
+    ) -> ParseResult<(
+        Option<Vec<Statement>>,
+        Option<(Vec<u8>, Vec<Statement>)>,
+        bool,
+        bool,
+        bool,
+        bool,
+    )> {
         self.expect(&TokenKind::OpenBrace)?;
         let mut get_hook = None;
         let mut set_hook = None;
@@ -2738,12 +3030,31 @@ impl Parser {
             let mut hook_is_by_ref = false;
             loop {
                 match self.peek() {
-                    TokenKind::Final => { hook_is_final = true; self.advance(); }
-                    TokenKind::Static => { hook_is_static = true; self.advance(); }
-                    TokenKind::Private => { hook_is_private = true; visibility_modifier = Some("private"); self.advance(); }
-                    TokenKind::Public => { visibility_modifier = Some("public"); self.advance(); }
-                    TokenKind::Protected => { visibility_modifier = Some("protected"); self.advance(); }
-                    TokenKind::Ampersand => { hook_is_by_ref = true; self.advance(); }
+                    TokenKind::Final => {
+                        hook_is_final = true;
+                        self.advance();
+                    }
+                    TokenKind::Static => {
+                        hook_is_static = true;
+                        self.advance();
+                    }
+                    TokenKind::Private => {
+                        hook_is_private = true;
+                        visibility_modifier = Some("private");
+                        self.advance();
+                    }
+                    TokenKind::Public => {
+                        visibility_modifier = Some("public");
+                        self.advance();
+                    }
+                    TokenKind::Protected => {
+                        visibility_modifier = Some("protected");
+                        self.advance();
+                    }
+                    TokenKind::Ampersand => {
+                        hook_is_by_ref = true;
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
@@ -2780,10 +3091,14 @@ impl Parser {
                         span: self.span(),
                     });
                 }
-                if hook_is_final { get_hook_final = true; }
+                if hook_is_final {
+                    get_hook_final = true;
+                }
                 self.advance(); // consume 'get'
                 if matches!(self.peek(), TokenKind::OpenParen) {
-                    let class_name = self.class_name_stack.last()
+                    let class_name = self
+                        .class_name_stack
+                        .last()
                         .map(|n| String::from_utf8_lossy(n).into_owned())
                         .unwrap_or_else(|| "?".to_string());
                     return Err(ParseError {
@@ -2826,7 +3141,9 @@ impl Parser {
                         span: self.span(),
                     });
                 }
-                if hook_is_final { set_hook_final = true; }
+                if hook_is_final {
+                    set_hook_final = true;
+                }
                 self.advance(); // consume 'set'
                 // Optional parameter: set(Type $value) or set($value) or just set
                 let had_paren = matches!(self.peek(), TokenKind::OpenParen);
@@ -2840,7 +3157,13 @@ impl Parser {
                     let mut got_by_ref = matches!(self.peek(), TokenKind::Ampersand);
                     let mut got_variadic = matches!(self.peek(), TokenKind::Ellipsis);
                     // If the next token is a variable, no type hint; else parse type hint.
-                    let type_hint = if matches!(self.peek(), TokenKind::Variable(_) | TokenKind::CloseParen | TokenKind::Ampersand | TokenKind::Ellipsis) {
+                    let type_hint = if matches!(
+                        self.peek(),
+                        TokenKind::Variable(_)
+                            | TokenKind::CloseParen
+                            | TokenKind::Ampersand
+                            | TokenKind::Ellipsis
+                    ) {
                         None
                     } else {
                         Some(self.parse_type_hint()?)
@@ -2862,9 +3185,7 @@ impl Parser {
                             self.advance();
                             name
                         }
-                        TokenKind::CloseParen => {
-                            b"value".to_vec()
-                        }
+                        TokenKind::CloseParen => b"value".to_vec(),
                         _ => {
                             return Err(ParseError {
                                 message: "expected parameter name in set hook".into(),
@@ -2873,10 +3194,16 @@ impl Parser {
                         }
                     };
                     if got_by_ref || got_variadic {
-                        let class_name = self.class_name_stack.last()
+                        let class_name = self
+                            .class_name_stack
+                            .last()
                             .map(|n| String::from_utf8_lossy(n).into_owned())
                             .unwrap_or_else(|| "?".to_string());
-                        let kind = if got_by_ref { "pass-by-reference" } else { "variadic" };
+                        let kind = if got_by_ref {
+                            "pass-by-reference"
+                        } else {
+                            "variadic"
+                        };
                         return Err(ParseError {
                             message: format!(
                                 "Parameter ${} of set hook {}::${} must not be {}",
@@ -2890,7 +3217,9 @@ impl Parser {
                     }
                     // No default value allowed: `set($value = null)` → error
                     if matches!(self.peek(), TokenKind::Assign) {
-                        let class_name = self.class_name_stack.last()
+                        let class_name = self
+                            .class_name_stack
+                            .last()
                             .map(|n| String::from_utf8_lossy(n).into_owned())
                             .unwrap_or_else(|| "?".to_string());
                         return Err(ParseError {
@@ -2921,7 +3250,9 @@ impl Parser {
                         (None, None) => false,
                     };
                     if mismatch {
-                        let class_name = self.class_name_stack.last()
+                        let class_name = self
+                            .class_name_stack
+                            .last()
                             .map(|n| String::from_utf8_lossy(n).into_owned())
                             .unwrap_or_else(|| "?".to_string());
                         return Err(ParseError {
@@ -2946,8 +3277,14 @@ impl Parser {
                     let expr = self.parse_expression()?;
                     self.expect_semicolon()?;
                     // Generate: $this->propname = expr;
-                    let this_expr = Expr { kind: ExprKind::Variable(b"this".to_vec()), span };
-                    let prop_ident = Expr { kind: ExprKind::Identifier(prop_name.to_vec()), span };
+                    let this_expr = Expr {
+                        kind: ExprKind::Variable(b"this".to_vec()),
+                        span,
+                    };
+                    let prop_ident = Expr {
+                        kind: ExprKind::Identifier(prop_name.to_vec()),
+                        span,
+                    };
                     let prop_access = Expr {
                         kind: ExprKind::PropertyAccess {
                             object: Box::new(this_expr),
@@ -2979,14 +3316,18 @@ impl Parser {
                     });
                 }
             } else {
-                let class_name = self.class_name_stack.last()
+                let class_name = self
+                    .class_name_stack
+                    .last()
                     .map(|n| String::from_utf8_lossy(n).into_owned())
                     .unwrap_or_else(|| "?".to_string());
                 return Err(ParseError {
-                    message: format!("Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
+                    message: format!(
+                        "Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
                         String::from_utf8_lossy(&hook_name),
                         class_name,
-                        String::from_utf8_lossy(prop_name)),
+                        String::from_utf8_lossy(prop_name)
+                    ),
                     span: self.span(),
                 });
             }
@@ -2999,7 +3340,14 @@ impl Parser {
                 span: self.span(),
             });
         }
-        Ok((get_hook, set_hook, get_hook_final, set_hook_final, get_hook_abstract, set_hook_abstract))
+        Ok((
+            get_hook,
+            set_hook,
+            get_hook_final,
+            set_hook_final,
+            get_hook_abstract,
+            set_hook_abstract,
+        ))
     }
 
     fn parse_try_catch(&mut self) -> ParseResult<Statement> {
@@ -3116,7 +3464,11 @@ impl Parser {
         };
 
         Ok(Statement {
-            kind: StmtKind::Declare { directives, body, attributes: Vec::new() },
+            kind: StmtKind::Declare {
+                directives,
+                body,
+                attributes: Vec::new(),
+            },
             span,
         })
     }
@@ -3220,8 +3572,14 @@ impl Parser {
                     //   @$x = expr             →  @($x = expr)
                     if !Self::is_lvalue(&left) {
                         // Binary op: (expr OP $var) = val → expr OP ($var = val)
-                        if matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r)) {
-                            if let ExprKind::BinaryOp { op, left: bin_left, right: bin_right } = left.kind {
+                        if matches!(&left.kind, ExprKind::BinaryOp { right: r, .. } if Self::is_lvalue(r))
+                        {
+                            if let ExprKind::BinaryOp {
+                                op,
+                                left: bin_left,
+                                right: bin_right,
+                            } = left.kind
+                            {
                                 let assign = Expr {
                                     span: bin_right.span.merge(right.span),
                                     kind: ExprKind::Assign {
@@ -3240,8 +3598,14 @@ impl Parser {
                             }
                         }
                         // Unary prefix: (!$var) = val → !($var = val)
-                        if matches!(&left.kind, ExprKind::UnaryOp { operand: o, prefix: true, .. } if Self::is_lvalue(o)) {
-                            if let ExprKind::UnaryOp { op, operand, prefix } = left.kind {
+                        if matches!(&left.kind, ExprKind::UnaryOp { operand: o, prefix: true, .. } if Self::is_lvalue(o))
+                        {
+                            if let ExprKind::UnaryOp {
+                                op,
+                                operand,
+                                prefix,
+                            } = left.kind
+                            {
                                 let assign = Expr {
                                     span: operand.span.merge(right.span),
                                     kind: ExprKind::Assign {
@@ -3482,19 +3846,32 @@ impl Parser {
             // PHP's grammar is left-associative and rejects unparenthesized
             // nesting (except `a ?: b ?: c`). We parse right-associatively,
             // so check whether the false branch is a bare nested ternary.
-            if let ExprKind::Ternary { if_true: inner_true, .. } = &if_false.kind {
+            if let ExprKind::Ternary {
+                if_true: inner_true,
+                ..
+            } = &if_false.kind
+            {
                 let parenthesized = self.tokens_parenthesized(false_start, self.pos);
                 if !parenthesized {
                     let outer_short = if_true.is_none();
                     let inner_short = inner_true.is_none();
                     let msg = match (outer_short, inner_short) {
-                        (false, false) => Some("Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`"),
-                        (true, false) => Some("Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`"),
-                        (false, true) => Some("Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`"),
+                        (false, false) => Some(
+                            "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
+                        ),
+                        (true, false) => Some(
+                            "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`",
+                        ),
+                        (false, true) => Some(
+                            "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`",
+                        ),
                         (true, true) => None,
                     };
                     if let Some(m) = msg {
-                        return Err(ParseError { message: m.to_string(), span: cond.span });
+                        return Err(ParseError {
+                            message: m.to_string(),
+                            span: cond.span,
+                        });
                     }
                 }
             }
@@ -3895,12 +4272,10 @@ impl Parser {
                     kind: ExprKind::Cast(CastType::Object, Box::new(operand)),
                 })
             }
-            TokenKind::RealCast => {
-                Err(ParseError {
-                    message: "The (real) cast has been removed, use (float) instead".to_string(),
-                    span,
-                })
-            }
+            TokenKind::RealCast => Err(ParseError {
+                message: "The (real) cast has been removed, use (float) instead".to_string(),
+                span,
+            }),
             TokenKind::At => {
                 self.advance();
                 let operand = self.parse_pow()?;
@@ -4285,10 +4660,12 @@ impl Parser {
                             expr = if is_fcc {
                                 Expr {
                                     span: expr.span.merge(end_span),
-                                    kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
-                                        class: Box::new(expr),
-                                        method: name,
-                                    }),
+                                    kind: ExprKind::FirstClassCallable(
+                                        CallableTarget::StaticMethod {
+                                            class: Box::new(expr),
+                                            method: name,
+                                        },
+                                    ),
                                 }
                             } else {
                                 Expr {
@@ -4313,7 +4690,10 @@ impl Parser {
                         }
                         // `X::class` (but `X::class()` is a method named "class")
                         TokenKind::Class
-                            if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::OpenParen)) =>
+                            if !matches!(
+                                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                                Some(TokenKind::OpenParen)
+                            ) =>
                         {
                             self.advance();
                             expr = Expr {
@@ -4329,7 +4709,8 @@ impl Parser {
                             // Property hook parent call: parent::$prop::get() / parent::$prop::set($v)
                             // Rewrite to parent::__property_get_<prop>() / parent::__property_set_<prop>($v)
                             if matches!(self.peek(), TokenKind::DoubleColon) {
-                                let lookahead = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+                                let lookahead =
+                                    self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                                 if let Some(TokenKind::Identifier(ref hook_name)) = lookahead {
                                     if (hook_name.eq_ignore_ascii_case(b"get")
                                         || hook_name.eq_ignore_ascii_case(b"set"))
@@ -4358,10 +4739,12 @@ impl Parser {
                                         expr = if is_fcc {
                                             Expr {
                                                 span: expr.span.merge(end_span),
-                                                kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
-                                                    class: Box::new(expr),
-                                                    method: synthetic_method,
-                                                }),
+                                                kind: ExprKind::FirstClassCallable(
+                                                    CallableTarget::StaticMethod {
+                                                        class: Box::new(expr),
+                                                        method: synthetic_method,
+                                                    },
+                                                ),
                                             }
                                         } else {
                                             Expr {
@@ -4450,10 +4833,12 @@ impl Parser {
                                 expr = if is_fcc {
                                     Expr {
                                         span: expr.span.merge(end_span),
-                                        kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
-                                            class: Box::new(expr),
-                                            method: name,
-                                        }),
+                                        kind: ExprKind::FirstClassCallable(
+                                            CallableTarget::StaticMethod {
+                                                class: Box::new(expr),
+                                                method: name,
+                                            },
+                                        ),
                                     }
                                 } else {
                                     Expr {
@@ -4523,7 +4908,9 @@ impl Parser {
                     expr = if is_fcc {
                         Expr {
                             span: expr.span.merge(end_span),
-                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(expr))),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(
+                                expr,
+                            ))),
                         }
                     } else {
                         Expr {
@@ -4551,22 +4938,89 @@ impl Parser {
                 let span = self.span();
                 match self.peek() {
                     TokenKind::Function => {
-                        self.advance(); let by_ref_return = self.eat(&TokenKind::Ampersand);
-                        self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
-                        let use_vars = if matches!(self.peek(), TokenKind::Use) { self.advance(); self.expect(&TokenKind::OpenParen)?; let mut v = Vec::new(); loop { let br = self.eat(&TokenKind::Ampersand); match self.peek().clone() { TokenKind::Variable(n) => { self.advance(); v.push(ClosureUse{variable:n,by_ref:br}); } _ => break }; if !self.eat(&TokenKind::Comma) { break; } } self.expect(&TokenKind::CloseParen)?; v } else { Vec::new() };
-                        let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
+                        self.advance();
+                        let by_ref_return = self.eat(&TokenKind::Ampersand);
+                        self.expect(&TokenKind::OpenParen)?;
+                        let params = self.parse_params()?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        let use_vars = if matches!(self.peek(), TokenKind::Use) {
+                            self.advance();
+                            self.expect(&TokenKind::OpenParen)?;
+                            let mut v = Vec::new();
+                            loop {
+                                let br = self.eat(&TokenKind::Ampersand);
+                                match self.peek().clone() {
+                                    TokenKind::Variable(n) => {
+                                        self.advance();
+                                        v.push(ClosureUse {
+                                            variable: n,
+                                            by_ref: br,
+                                        });
+                                    }
+                                    _ => break,
+                                };
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect(&TokenKind::CloseParen)?;
+                            v
+                        } else {
+                            Vec::new()
+                        };
+                        let return_type = if self.eat(&TokenKind::Colon) {
+                            Some(self.parse_type_hint()?)
+                        } else {
+                            None
+                        };
                         let (body, end_line) = self.parse_block_with_end()?;
-                        Ok(Expr { span, kind: ExprKind::Closure { is_static: false, params, use_vars, return_type, body, attributes, end_line, doc_comment: attr_doc, returns_by_ref: by_ref_return } })
+                        Ok(Expr {
+                            span,
+                            kind: ExprKind::Closure {
+                                is_static: false,
+                                params,
+                                use_vars,
+                                return_type,
+                                body,
+                                attributes,
+                                end_line,
+                                doc_comment: attr_doc,
+                                returns_by_ref: by_ref_return,
+                            },
+                        })
                     }
                     TokenKind::Fn => {
-                        self.advance(); let by_ref_return = self.eat(&TokenKind::Ampersand);
-                        self.expect(&TokenKind::OpenParen)?; let params = self.parse_params()?; self.expect(&TokenKind::CloseParen)?;
-                        let return_type = if self.eat(&TokenKind::Colon) { Some(self.parse_type_hint()?) } else { None };
-                        self.expect(&TokenKind::DoubleArrow)?; let body = self.parse_expression()?;
+                        self.advance();
+                        let by_ref_return = self.eat(&TokenKind::Ampersand);
+                        self.expect(&TokenKind::OpenParen)?;
+                        let params = self.parse_params()?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        let return_type = if self.eat(&TokenKind::Colon) {
+                            Some(self.parse_type_hint()?)
+                        } else {
+                            None
+                        };
+                        self.expect(&TokenKind::DoubleArrow)?;
+                        let body = self.parse_expression()?;
                         let end_line = body.span.line;
-                        Ok(Expr { span, kind: ExprKind::ArrowFunction { is_static: false, params, return_type, body: Box::new(body), attributes, end_line, doc_comment: attr_doc, returns_by_ref: by_ref_return } })
+                        Ok(Expr {
+                            span,
+                            kind: ExprKind::ArrowFunction {
+                                is_static: false,
+                                params,
+                                return_type,
+                                body: Box::new(body),
+                                attributes,
+                                end_line,
+                                doc_comment: attr_doc,
+                                returns_by_ref: by_ref_return,
+                            },
+                        })
                     }
-                    _ => Err(ParseError { message: "expected function or fn after attribute".into(), span: self.span() })
+                    _ => Err(ParseError {
+                        message: "expected function or fn after attribute".into(),
+                        span: self.span(),
+                    }),
                 }
             }
             TokenKind::LongNumber(n) => {
@@ -4613,9 +5067,16 @@ impl Parser {
                                         if matches!(self.peek(), TokenKind::OpenParen) {
                                             self.advance(); // consume (
                                             let mut args: Vec<crate::ast::Argument> = Vec::new();
-                                            while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
+                                            while !matches!(
+                                                self.peek(),
+                                                TokenKind::CloseParen | TokenKind::Eof
+                                            ) {
                                                 let arg_expr = self.parse_expression()?;
-                                                args.push(crate::ast::Argument { name: None, value: arg_expr, unpack: false });
+                                                args.push(crate::ast::Argument {
+                                                    name: None,
+                                                    value: arg_expr,
+                                                    unpack: false,
+                                                });
                                                 if matches!(self.peek(), TokenKind::Comma) {
                                                     self.advance();
                                                 } else {
@@ -4799,7 +5260,9 @@ impl Parser {
                     if is_fcc {
                         Ok(Expr {
                             span: span.merge(end_span),
-                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(
+                                name_expr,
+                            ))),
                         })
                     } else {
                         Ok(Expr {
@@ -4825,7 +5288,10 @@ impl Parser {
                 // function called NAME: mark the name as a constant fetch.
                 if let ExprKind::Identifier(name) = &expr.kind {
                     if matches!(self.peek(), TokenKind::OpenParen) {
-                        return Ok(Expr { kind: ExprKind::ConstantAccess(vec![name.clone()]), span: expr.span });
+                        return Ok(Expr {
+                            kind: ExprKind::ConstantAccess(vec![name.clone()]),
+                            span: expr.span,
+                        });
                     }
                 }
                 Ok(expr)
@@ -4929,13 +5395,25 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
-                let anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) { self.parse_attributes()? } else { Vec::new() };
+                let anon_attrs = if matches!(self.peek(), TokenKind::AttributeOpen) {
+                    self.parse_attributes()?
+                } else {
+                    Vec::new()
+                };
                 // Check for class modifiers before anonymous class: new readonly class, new abstract class, etc.
                 let mut anon_modifiers = ClassModifiers::default();
                 let mut has_anon_modifiers = false;
                 loop {
                     match self.peek() {
-                        TokenKind::Readonly if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                        TokenKind::Readonly
+                            if matches!(
+                                self.peek_at(1),
+                                TokenKind::Class
+                                    | TokenKind::Readonly
+                                    | TokenKind::Abstract
+                                    | TokenKind::Final
+                            ) =>
+                        {
                             if anon_modifiers.is_readonly {
                                 return Err(ParseError {
                                     message: "Multiple readonly modifiers are not allowed".into(),
@@ -4946,12 +5424,28 @@ impl Parser {
                             has_anon_modifiers = true;
                             self.advance();
                         }
-                        TokenKind::Abstract if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                        TokenKind::Abstract
+                            if matches!(
+                                self.peek_at(1),
+                                TokenKind::Class
+                                    | TokenKind::Readonly
+                                    | TokenKind::Abstract
+                                    | TokenKind::Final
+                            ) =>
+                        {
                             anon_modifiers.is_abstract = true;
                             has_anon_modifiers = true;
                             self.advance();
                         }
-                        TokenKind::Final if matches!(self.peek_at(1), TokenKind::Class | TokenKind::Readonly | TokenKind::Abstract | TokenKind::Final) => {
+                        TokenKind::Final
+                            if matches!(
+                                self.peek_at(1),
+                                TokenKind::Class
+                                    | TokenKind::Readonly
+                                    | TokenKind::Abstract
+                                    | TokenKind::Final
+                            ) =>
+                        {
                             anon_modifiers.is_final = true;
                             has_anon_modifiers = true;
                             self.advance();
@@ -4963,7 +5457,8 @@ impl Parser {
                 if has_anon_modifiers && matches!(self.peek(), TokenKind::Class) {
                     if anon_modifiers.is_abstract {
                         return Err(ParseError {
-                            message: "Cannot use the abstract modifier on an anonymous class".into(),
+                            message: "Cannot use the abstract modifier on an anonymous class"
+                                .into(),
                             span: self.span(),
                         });
                     }
@@ -5083,7 +5578,10 @@ impl Parser {
                             self.advance();
                             let args = self.parse_arguments()?;
                             if self.first_class_callable_flag {
-                                return Err(ParseError { message: "Cannot create Closure for new expression".into(), span: self.span() });
+                                return Err(ParseError {
+                                    message: "Cannot create Closure for new expression".into(),
+                                    span: self.span(),
+                                });
                             }
                             self.expect(&TokenKind::CloseParen)?;
                             args
@@ -5204,7 +5702,10 @@ impl Parser {
                     self.advance();
                     let args = self.parse_arguments()?;
                     if self.first_class_callable_flag {
-                        return Err(ParseError { message: "Cannot create Closure for new expression".into(), span });
+                        return Err(ParseError {
+                            message: "Cannot create Closure for new expression".into(),
+                            span,
+                        });
                     }
                     self.expect(&TokenKind::CloseParen)?;
                     args
@@ -5224,7 +5725,9 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut exprs = vec![self.parse_expression()?];
                 while self.eat(&TokenKind::Comma) {
-                    if matches!(self.peek(), TokenKind::CloseParen) { break; }
+                    if matches!(self.peek(), TokenKind::CloseParen) {
+                        break;
+                    }
                     exprs.push(self.parse_expression()?);
                 }
                 self.expect(&TokenKind::CloseParen)?;
@@ -5276,7 +5779,9 @@ impl Parser {
                 // Anonymous function. Prefer a stashed closure doc-comment
                 // from an enclosing `$var = function(){}` assignment, falling
                 // back to a doc-comment directly attached to this token.
-                let closure_doc = self.pending_closure_doc.take()
+                let closure_doc = self
+                    .pending_closure_doc
+                    .take()
                     .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
@@ -5350,7 +5855,9 @@ impl Parser {
                     Some(TokenKind::Backslash)
                 ) =>
             {
-                let arrow_doc = self.pending_closure_doc.take()
+                let arrow_doc = self
+                    .pending_closure_doc
+                    .take()
                     .or_else(|| self.take_doc_comment());
                 self.advance();
                 // Optional & for reference return
@@ -5386,7 +5893,9 @@ impl Parser {
                     Some(TokenKind::Function | TokenKind::Fn)
                 ) =>
             {
-                let static_doc = self.pending_closure_doc.take()
+                let static_doc = self
+                    .pending_closure_doc
+                    .take()
                     .or_else(|| self.take_doc_comment());
                 self.advance(); // static
                 if matches!(self.peek(), TokenKind::Fn) {
@@ -5692,7 +6201,9 @@ impl Parser {
                     if is_fcc {
                         Ok(Expr {
                             span: span.merge(end_span),
-                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(
+                                name_expr,
+                            ))),
                         })
                     } else {
                         Ok(Expr {
@@ -5761,7 +6272,9 @@ impl Parser {
                         if is_fcc {
                             Ok(Expr {
                                 span: span.merge(end_span),
-                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(name_expr))),
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(
+                                    Box::new(name_expr),
+                                )),
                             })
                         } else {
                             Ok(Expr {
@@ -5781,7 +6294,10 @@ impl Parser {
                 }
             }
             _ => Err(ParseError {
-                message: format!("syntax error, unexpected {}", self.peek().to_php_unexpected()),
+                message: format!(
+                    "syntax error, unexpected {}",
+                    self.peek().to_php_unexpected()
+                ),
                 span,
             }),
         }
@@ -6221,7 +6737,13 @@ impl Parser {
             TokenKind::And => b"and".to_vec(),
             TokenKind::Or => b"or".to_vec(),
             TokenKind::Xor => b"xor".to_vec(),
-            TokenKind::Exit => if span_len == 3 { b"die".to_vec() } else { b"exit".to_vec() },
+            TokenKind::Exit => {
+                if span_len == 3 {
+                    b"die".to_vec()
+                } else {
+                    b"exit".to_vec()
+                }
+            }
             TokenKind::Eval => b"eval".to_vec(),
             TokenKind::Include => b"include".to_vec(),
             TokenKind::IncludeOnce => b"include_once".to_vec(),

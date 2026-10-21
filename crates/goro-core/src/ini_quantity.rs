@@ -29,7 +29,11 @@ fn strtoul(s: &[u8], base: u32) -> (u64, usize, bool) {
     let mut i = 0;
     let mut base = base;
     if base == 0 {
-        if s.len() >= 2 && s[0] == b'0' && (s[1] == b'x' || s[1] == b'X') && s.get(2).is_some_and(|c| c.is_ascii_hexdigit()) {
+        if s.len() >= 2
+            && s[0] == b'0'
+            && (s[1] == b'x' || s[1] == b'X')
+            && s.get(2).is_some_and(|c| c.is_ascii_hexdigit())
+        {
             base = 16;
             i = 2;
         } else if s.first() == Some(&b'0') {
@@ -109,7 +113,7 @@ pub fn parse_quantity(value: &[u8], signed: bool) -> (u64, Option<String>) {
                         "Invalid prefix \"0{}\", interpreting as \"0\" for backwards compatibility",
                         c as char
                     )),
-                )
+                );
             }
         }
         if base != 0 {
@@ -165,7 +169,7 @@ pub fn parse_quantity(value: &[u8], signed: bool) -> (u64, Option<String>) {
                         escaped(&s[hi - 1..hi]),
                         escaped(&value[..digits_end])
                     )),
-                )
+                );
             }
         };
         if !overflow {

@@ -81,12 +81,22 @@ const H_NEXT_EL: i64 = 64;
 
 /// Built-in classes implemented here (lowercase).
 pub const ITER_CLASSES: &[&[u8]] = &[
-    b"iteratoriterator", b"filteriterator", b"callbackfilteriterator",
-    b"recursivecallbackfilteriterator", b"recursivefilteriterator", b"parentiterator",
-    b"limititerator", b"cachingiterator", b"recursivecachingiterator",
-    b"norewinditerator", b"appenditerator", b"infiniteiterator",
-    b"regexiterator", b"recursiveregexiterator",
-    b"recursiveiteratoriterator", b"recursivetreeiterator",
+    b"iteratoriterator",
+    b"filteriterator",
+    b"callbackfilteriterator",
+    b"recursivecallbackfilteriterator",
+    b"recursivefilteriterator",
+    b"parentiterator",
+    b"limititerator",
+    b"cachingiterator",
+    b"recursivecachingiterator",
+    b"norewinditerator",
+    b"appenditerator",
+    b"infiniteiterator",
+    b"regexiterator",
+    b"recursiveregexiterator",
+    b"recursiveiteratoriterator",
+    b"recursivetreeiterator",
 ];
 
 fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
@@ -126,7 +136,10 @@ impl Vm {
     }
 
     fn gen_prime(&mut self, g: &Rc<RefCell<crate::generator::PhpGenerator>>) {
-        let created = matches!(g.try_borrow().map(|b| b.state.clone()), Ok(crate::generator::GeneratorState::Created));
+        let created = matches!(
+            g.try_borrow().map(|b| b.state.clone()),
+            Ok(crate::generator::GeneratorState::Created)
+        );
         if created {
             if let Ok(mut b) = g.try_borrow_mut() {
                 let _ = b.resume(self);
@@ -141,13 +154,19 @@ impl Vm {
             }
             Value::Generator(g) => {
                 let (created, advanced) = match g.try_borrow() {
-                    Ok(b) => (b.state == crate::generator::GeneratorState::Created, b.advanced_past_first),
+                    Ok(b) => (
+                        b.state == crate::generator::GeneratorState::Created,
+                        b.advanced_past_first,
+                    ),
                     Err(_) => (false, false),
                 };
                 if created {
                     self.gen_prime(g);
                 } else if advanced {
-                    self.spl_throw(b"Exception", "Cannot rewind a generator that was already run");
+                    self.spl_throw(
+                        b"Exception",
+                        "Cannot rewind a generator that was already run",
+                    );
                 }
             }
             _ => {}
@@ -156,10 +175,16 @@ impl Vm {
 
     pub(crate) fn it_valid(&mut self, it: &Value) -> bool {
         match it {
-            Value::Object(_) => self.spl_call_method(it, b"valid", &[]).map(|v| v.is_truthy()).unwrap_or(false),
+            Value::Object(_) => self
+                .spl_call_method(it, b"valid", &[])
+                .map(|v| v.is_truthy())
+                .unwrap_or(false),
             Value::Generator(g) => {
                 self.gen_prime(g);
-                !matches!(g.try_borrow().map(|b| b.state.clone()), Ok(crate::generator::GeneratorState::Completed))
+                !matches!(
+                    g.try_borrow().map(|b| b.state.clone()),
+                    Ok(crate::generator::GeneratorState::Completed)
+                )
             }
             _ => false,
         }
@@ -167,10 +192,14 @@ impl Vm {
 
     pub(crate) fn it_current(&mut self, it: &Value) -> Value {
         match it {
-            Value::Object(_) => self.spl_call_method(it, b"current", &[]).unwrap_or(Value::Null),
+            Value::Object(_) => self
+                .spl_call_method(it, b"current", &[])
+                .unwrap_or(Value::Null),
             Value::Generator(g) => {
                 self.gen_prime(g);
-                g.try_borrow().map(|b| b.current_value.clone()).unwrap_or(Value::Null)
+                g.try_borrow()
+                    .map(|b| b.current_value.clone())
+                    .unwrap_or(Value::Null)
             }
             _ => Value::Null,
         }
@@ -181,7 +210,9 @@ impl Vm {
             Value::Object(_) => self.spl_call_method(it, b"key", &[]).unwrap_or(Value::Null),
             Value::Generator(g) => {
                 self.gen_prime(g);
-                g.try_borrow().map(|b| b.current_key.clone()).unwrap_or(Value::Null)
+                g.try_borrow()
+                    .map(|b| b.current_key.clone())
+                    .unwrap_or(Value::Null)
             }
             _ => Value::Null,
         }
@@ -218,12 +249,17 @@ impl Vm {
                 for _ in 0..64 {
                     match self.classes.get(&cur) {
                         Some(cd) => {
-                            if cd.interfaces.iter().any(|i| i.eq_ignore_ascii_case(iface_lower)) {
+                            if cd
+                                .interfaces
+                                .iter()
+                                .any(|i| i.eq_ignore_ascii_case(iface_lower))
+                            {
                                 return true;
                             }
                             match &cd.parent {
                                 Some(p) => {
-                                    let pl: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let pl: Vec<u8> =
+                                        p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                     if pl == iface_lower {
                                         return true;
                                     }
@@ -242,7 +278,9 @@ impl Vm {
                 }
                 self.class_implements_interface(&cl, iface_lower)
             }
-            Value::Generator(_) => matches!(iface_lower, b"traversable" | b"iterator" | b"generator"),
+            Value::Generator(_) => {
+                matches!(iface_lower, b"traversable" | b"iterator" | b"generator")
+            }
             _ => false,
         }
     }
@@ -257,19 +295,28 @@ impl Vm {
             if !matches!(cur, Value::Object(_)) {
                 return cur;
             }
-            if self.obj_instanceof(&cur, b"iterator") || !self.obj_instanceof(&cur, b"iteratoraggregate") {
+            if self.obj_instanceof(&cur, b"iterator")
+                || !self.obj_instanceof(&cur, b"iteratoraggregate")
+            {
                 return cur;
             }
             let cls = match &cur {
-                Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
+                Value::Object(o) => {
+                    crate::value::display_class_name(&o.borrow().class_name).to_string()
+                }
                 _ => String::new(),
             };
-            let r = self.spl_call_method_at(&cur, b"getIterator", &[], true).unwrap_or(Value::Null);
+            let r = self
+                .spl_call_method_at(&cur, b"getIterator", &[], true)
+                .unwrap_or(Value::Null);
             if self.exc() {
                 return Value::Null;
             }
             if !self.obj_instanceof(&r, b"traversable") {
-                let msg = format!("{}::getIterator() must return an object that implements Traversable", cls);
+                let msg = format!(
+                    "{}::getIterator() must return an object that implements Traversable",
+                    cls
+                );
                 self.spl_throw(b"Exception", &msg);
                 return Value::Null;
             }
@@ -286,7 +333,8 @@ impl Vm {
             return PhpString::from_bytes(b"Array");
         }
         // convert_to_string(): objects without __toString() throw.
-        self.value_to_string_checked(&v).unwrap_or_else(|_| PhpString::empty())
+        self.value_to_string_checked(&v)
+            .unwrap_or_else(|_| PhpString::empty())
     }
 
     // ------------------------------------------------------------------
@@ -304,7 +352,10 @@ impl Vm {
         match Self::dit_type(obj) {
             Some(t) => Some(t),
             None => {
-                self.spl_throw(b"Error", "The object is in an invalid state as the parent constructor was not called");
+                self.spl_throw(
+                    b"Error",
+                    "The object is in an invalid state as the parent constructor was not called",
+                );
                 None
             }
         }
@@ -382,7 +433,10 @@ impl Vm {
         let inner = Self::dit_inner(obj);
         if matches!(inner, Value::Null | Value::Undef) {
             if !do_free {
-                self.spl_throw(b"Error", "The inner constructor wasn't initialized with an iterator instance");
+                self.spl_throw(
+                    b"Error",
+                    "The inner constructor wasn't initialized with an iterator instance",
+                );
             }
             return;
         }
@@ -392,11 +446,19 @@ impl Vm {
     }
 
     fn dit_cur(obj: &Rc<RefCell<PhpObject>>) -> Value {
-        if Self::dit_has_cur(obj) { prop(obj, b"__spl_cur_data") } else { Value::Null }
+        if Self::dit_has_cur(obj) {
+            prop(obj, b"__spl_cur_data")
+        } else {
+            Value::Null
+        }
     }
 
     fn dit_key(obj: &Rc<RefCell<PhpObject>>) -> Value {
-        if bprop(obj, b"__spl_has_key") { prop(obj, b"__spl_cur_key") } else { Value::Null }
+        if bprop(obj, b"__spl_has_key") {
+            prop(obj, b"__spl_cur_key")
+        } else {
+            Value::Null
+        }
     }
 
     // Filter
@@ -437,12 +499,18 @@ impl Vm {
         let offset = lprop(obj, b"__spl_limit_offset", 0);
         let count = lprop(obj, b"__spl_limit_count", -1);
         if pos < offset {
-            let msg = format!("Cannot seek to {} which is below the offset {}", pos, offset);
+            let msg = format!(
+                "Cannot seek to {} which is below the offset {}",
+                pos, offset
+            );
             self.spl_throw(b"OutOfBoundsException", &msg);
             return;
         }
         if Self::limit_rel(obj, pos) >= count && count != -1 {
-            let msg = format!("Cannot seek to {} which is behind offset {} plus count {}", pos, offset, count);
+            let msg = format!(
+                "Cannot seek to {} which is behind offset {} plus count {}",
+                pos, offset, count
+            );
             self.spl_throw(b"OutOfBoundsException", &msg);
             return;
         }
@@ -507,7 +575,9 @@ impl Vm {
                         return;
                     }
                 } else if r.map(|v| v.is_truthy()).unwrap_or(false) {
-                    let ch = self.spl_call_method(&inner, b"getChildren", &[]).unwrap_or(Value::Null);
+                    let ch = self
+                        .spl_call_method(&inner, b"getChildren", &[])
+                        .unwrap_or(Value::Null);
                     if self.exc() {
                         if flags & CIT_CATCH_GET_CHILD != 0 {
                             self.current_exception = None;
@@ -555,7 +625,12 @@ impl Vm {
 
     fn cit_check_flags(flags: i64) -> bool {
         let mut cnt = 0;
-        for f in [CIT_CALL_TOSTRING, CIT_TOSTRING_USE_KEY, CIT_TOSTRING_USE_CURRENT, CIT_TOSTRING_USE_INNER] {
+        for f in [
+            CIT_CALL_TOSTRING,
+            CIT_TOSTRING_USE_KEY,
+            CIT_TOSTRING_USE_CURRENT,
+            CIT_TOSTRING_USE_INNER,
+        ] {
             if flags & f != 0 {
                 cnt += 1;
             }
@@ -638,7 +713,14 @@ impl Vm {
             } else {
                 ("at most", max)
             };
-            let msg = format!("{}() expects {} {} argument{}, {} given", func, word, n, if n == 1 { "" } else { "s" }, given);
+            let msg = format!(
+                "{}() expects {} {} argument{}, {} given",
+                func,
+                word,
+                n,
+                if n == 1 { "" } else { "s" },
+                given
+            );
             self.spl_throw(b"ArgumentCountError", &msg);
             return false;
         }
@@ -659,7 +741,10 @@ impl Vm {
         let func = format!("{}::__construct", base_disp);
         let dit = Self::dit_type_for(base);
         if Self::dit_type(obj).is_some() {
-            let msg = format!("{}::getIterator() must be called exactly once per instance", base_disp);
+            let msg = format!(
+                "{}::getIterator() must be called exactly once per instance",
+                base_disp
+            );
             self.spl_throw(b"BadMethodCallException", &msg);
             return false;
         }
@@ -727,12 +812,18 @@ impl Vm {
                     None => -1,
                 };
                 if offset < 0 {
-                    let msg = format!("{}(): Argument #2 ($offset) must be greater than or equal to 0", func);
+                    let msg = format!(
+                        "{}(): Argument #2 ($offset) must be greater than or equal to 0",
+                        func
+                    );
                     self.spl_throw(b"ValueError", &msg);
                     return false;
                 }
                 if count < -1 {
-                    let msg = format!("{}(): Argument #3 ($limit) must be greater than or equal to -1", func);
+                    let msg = format!(
+                        "{}(): Argument #3 ($limit) must be greater than or equal to -1",
+                        func
+                    );
                     self.spl_throw(b"ValueError", &msg);
                     return false;
                 }
@@ -764,8 +855,13 @@ impl Vm {
                     if let Some(cv) = args.get(1) {
                         if !matches!(cv.deref(), Value::Null) {
                             let cname = cv.to_php_string();
-                            let cname_lower: Vec<u8> = cname.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let known = self.classes.contains_key(&cname_lower) || self.is_known_builtin_class(&cname_lower);
+                            let cname_lower: Vec<u8> = cname
+                                .as_bytes()
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            let known = self.classes.contains_key(&cname_lower)
+                                || self.is_known_builtin_class(&cname_lower);
                             if !known || !self.obj_instanceof(&inner, &cname_lower) {
                                 self.spl_throw(
                                     b"LogicException",
@@ -777,7 +873,9 @@ impl Vm {
                     }
                     if self.obj_instanceof(&inner, b"iteratoraggregate") {
                         let agg_cls = match &inner {
-                            Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
+                            Value::Object(o) => {
+                                crate::value::display_class_name(&o.borrow().class_name).to_string()
+                            }
                             _ => String::new(),
                         };
                         let r = self.spl_call_method(&inner, b"getIterator", &[]);
@@ -786,7 +884,10 @@ impl Vm {
                         }
                         let r = r.unwrap_or(Value::Null);
                         if !self.obj_instanceof(&r, b"traversable") {
-                            let msg = format!("{}::getIterator() must return an object that implements Traversable", agg_cls);
+                            let msg = format!(
+                                "{}::getIterator() must return an object that implements Traversable",
+                                agg_cls
+                            );
                             self.spl_throw(b"LogicException", &msg);
                             return false;
                         }
@@ -830,8 +931,15 @@ impl Vm {
                 }
                 // Compile check: warnings become InvalidArgumentException.
                 let prev = self.warning_capture.replace(Vec::new());
-                self.spl_call_builtin(b"preg_match", &[Value::String(pattern.clone()), Value::String(PhpString::empty())]);
-                let captured = std::mem::replace(&mut self.warning_capture, prev).unwrap_or_default();
+                self.spl_call_builtin(
+                    b"preg_match",
+                    &[
+                        Value::String(pattern.clone()),
+                        Value::String(PhpString::empty()),
+                    ],
+                );
+                let captured =
+                    std::mem::replace(&mut self.warning_capture, prev).unwrap_or_default();
                 if let Some(w) = captured.first() {
                     let msg = match w.find("(): ") {
                         Some(i) => format!("{}(): {}", func, &w[i + 4..]),
@@ -852,24 +960,40 @@ impl Vm {
             DIT_CALLBACK | DIT_RCALLBACK => {
                 let cb = args[1].deref();
                 let detail: Option<String> = match &cb {
-                    Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_) => {
-                        Some("no array or string given".to_string())
+                    Value::Null
+                    | Value::True
+                    | Value::False
+                    | Value::Long(_)
+                    | Value::Double(_) => Some("no array or string given".to_string()),
+                    Value::Array(a) if a.borrow().len() != 2 => {
+                        Some("array callback must have exactly two members".to_string())
                     }
-                    Value::Array(a) if a.borrow().len() != 2 => Some("array callback must have exactly two members".to_string()),
                     Value::String(s) => {
                         let b = s.as_bytes();
                         let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                        let is_closure_name = b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_");
-                        if is_closure_name || b.windows(2).any(|w| w == b"::") || self.functions.contains_key(&lower) || self.user_functions_contains(&lower) {
+                        let is_closure_name = b.starts_with(b"__closure_")
+                            || b.starts_with(b"__arrow_")
+                            || b.starts_with(b"__bound_closure_");
+                        if is_closure_name
+                            || b.windows(2).any(|w| w == b"::")
+                            || self.functions.contains_key(&lower)
+                            || self.user_functions_contains(&lower)
+                        {
                             None
                         } else {
-                            Some(format!("function \"{}\" not found or invalid function name", s.to_string_lossy()))
+                            Some(format!(
+                                "function \"{}\" not found or invalid function name",
+                                s.to_string_lossy()
+                            ))
                         }
                     }
                     _ => None,
                 };
                 if let Some(d) = detail {
-                    let msg = format!("{}(): Argument #2 ($callback) must be a valid callback, {}", func, d);
+                    let msg = format!(
+                        "{}(): Argument #2 ($callback) must be a valid callback, {}",
+                        func, d
+                    );
                     self.spl_throw(b"TypeError", &msg);
                     return false;
                 }
@@ -912,7 +1036,11 @@ impl Vm {
         if method == b"__construct" {
             // parent::__construct() from a userland constructor (the
             // __spl:: call path already pushed a frame).
-            let has_frame = self.call_stack.last().map(|f| f.0.ends_with("->__construct")).unwrap_or(false);
+            let has_frame = self
+                .call_stack
+                .last()
+                .map(|f| f.0.ends_with("->__construct"))
+                .unwrap_or(false);
             if !has_frame {
                 self.spl_push_ctor_frame(obj, args);
             }
@@ -922,7 +1050,9 @@ impl Vm {
             }
             return Some(Value::Null);
         }
-        if crate::spl_stubs::spl_stub_method(class_lower, method).is_none() && method != b"__tostring" {
+        if crate::spl_stubs::spl_stub_method(class_lower, method).is_none()
+            && method != b"__tostring"
+        {
             return None;
         }
         if class_lower == b"recursiveiteratoriterator" || class_lower == b"recursivetreeiterator" {
@@ -941,7 +1071,9 @@ impl Vm {
                 }
                 Value::Null
             }
-            (b"iteratoriterator", b"valid") | (b"appenditerator", b"valid") => bv(Self::dit_has_cur(obj)),
+            (b"iteratoriterator", b"valid") | (b"appenditerator", b"valid") => {
+                bv(Self::dit_has_cur(obj))
+            }
             (b"iteratoriterator", b"key") => Self::dit_key(obj),
             (b"iteratoriterator", b"current") => Self::dit_cur(obj),
             (b"iteratoriterator", b"next") => {
@@ -983,7 +1115,8 @@ impl Vm {
             | (b"parentiterator", b"accept")
             | (b"recursiveregexiterator", b"haschildren") => {
                 let inner = Self::dit_inner(obj);
-                self.spl_call_method(&inner, b"hasChildren", &[]).unwrap_or(Value::Null)
+                self.spl_call_method(&inner, b"hasChildren", &[])
+                    .unwrap_or(Value::Null)
             }
             (b"recursivefilteriterator", b"getchildren") => {
                 let inner = Self::dit_inner(obj);
@@ -1069,7 +1202,13 @@ impl Vm {
             (b"cachingiterator", b"hasnext") => bv(self.dit_valid(obj)),
             (b"cachingiterator", b"__tostring") => {
                 let flags = Self::cit_flags(obj);
-                if flags & (CIT_CALL_TOSTRING | CIT_TOSTRING_USE_KEY | CIT_TOSTRING_USE_CURRENT | CIT_TOSTRING_USE_INNER) == 0 {
+                if flags
+                    & (CIT_CALL_TOSTRING
+                        | CIT_TOSTRING_USE_KEY
+                        | CIT_TOSTRING_USE_CURRENT
+                        | CIT_TOSTRING_USE_INNER)
+                    == 0
+                {
                     let msg = format!(
                         "{} does not fetch string value (see CachingIterator::__construct)",
                         crate::value::display_class_name(&obj.borrow().class_name)
@@ -1089,7 +1228,12 @@ impl Vm {
                 }
             }
             (b"cachingiterator", b"offsetset") => {
-                let k = match self.spl_arg_string("CachingIterator::offsetSet", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                let k = match self.spl_arg_string(
+                    "CachingIterator::offsetSet",
+                    1,
+                    "key",
+                    args.first().unwrap_or(&Value::Null),
+                ) {
                     Some(k) => k,
                     None => return Some(Value::Null),
                 };
@@ -1098,12 +1242,18 @@ impl Vm {
                 }
                 let v = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Array(c) = prop(obj, b"__spl_cache") {
-                    c.borrow_mut().set(Self::value_to_array_key(Value::String(k)), v);
+                    c.borrow_mut()
+                        .set(Self::value_to_array_key(Value::String(k)), v);
                 }
                 Value::Null
             }
             (b"cachingiterator", b"offsetget") => {
-                let k = match self.spl_arg_string("CachingIterator::offsetGet", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                let k = match self.spl_arg_string(
+                    "CachingIterator::offsetGet",
+                    1,
+                    "key",
+                    args.first().unwrap_or(&Value::Null),
+                ) {
                     Some(k) => k,
                     None => return Some(Value::Null),
                 };
@@ -1111,7 +1261,10 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 let got = match prop(obj, b"__spl_cache") {
-                    Value::Array(c) => c.borrow().get(&Self::value_to_array_key(Value::String(k.clone()))).cloned(),
+                    Value::Array(c) => c
+                        .borrow()
+                        .get(&Self::value_to_array_key(Value::String(k.clone())))
+                        .cloned(),
                     _ => None,
                 };
                 match got {
@@ -1124,7 +1277,12 @@ impl Vm {
                 }
             }
             (b"cachingiterator", b"offsetunset") => {
-                let k = match self.spl_arg_string("CachingIterator::offsetUnset", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                let k = match self.spl_arg_string(
+                    "CachingIterator::offsetUnset",
+                    1,
+                    "key",
+                    args.first().unwrap_or(&Value::Null),
+                ) {
                     Some(k) => k,
                     None => return Some(Value::Null),
                 };
@@ -1132,12 +1290,18 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 if let Value::Array(c) = prop(obj, b"__spl_cache") {
-                    c.borrow_mut().remove(&Self::value_to_array_key(Value::String(k)));
+                    c.borrow_mut()
+                        .remove(&Self::value_to_array_key(Value::String(k)));
                 }
                 Value::Null
             }
             (b"cachingiterator", b"offsetexists") => {
-                let k = match self.spl_arg_string("CachingIterator::offsetExists", 1, "key", args.first().unwrap_or(&Value::Null)) {
+                let k = match self.spl_arg_string(
+                    "CachingIterator::offsetExists",
+                    1,
+                    "key",
+                    args.first().unwrap_or(&Value::Null),
+                ) {
                     Some(k) => k,
                     None => return Some(Value::Null),
                 };
@@ -1145,7 +1309,10 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 match prop(obj, b"__spl_cache") {
-                    Value::Array(c) => bv(c.borrow().get(&Self::value_to_array_key(Value::String(k))).is_some()),
+                    Value::Array(c) => bv(c
+                        .borrow()
+                        .get(&Self::value_to_array_key(Value::String(k)))
+                        .is_some()),
                     _ => Value::False,
                 }
             }
@@ -1170,10 +1337,12 @@ impl Vm {
             (b"cachingiterator", b"getflags") => Value::Long(Self::cit_flags(obj)),
             (b"cachingiterator", b"setflags") => {
                 let flags = match args.first() {
-                    Some(v) => match self.spl_arg_long("CachingIterator::setFlags", 1, "flags", v) {
-                        Some(n) => n,
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_long("CachingIterator::setFlags", 1, "flags", v) {
+                            Some(n) => n,
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => 0,
                 };
                 if !Self::cit_check_flags(flags) {
@@ -1181,10 +1350,16 @@ impl Vm {
                 }
                 let cur = Self::cit_flags(obj);
                 if cur & CIT_CALL_TOSTRING != 0 && flags & CIT_CALL_TOSTRING == 0 {
-                    return self.spl_throw(b"InvalidArgumentException", "Unsetting flag CALL_TO_STRING is not possible");
+                    return self.spl_throw(
+                        b"InvalidArgumentException",
+                        "Unsetting flag CALL_TO_STRING is not possible",
+                    );
                 }
                 if cur & CIT_TOSTRING_USE_INNER != 0 && flags & CIT_TOSTRING_USE_INNER == 0 {
-                    return self.spl_throw(b"InvalidArgumentException", "Unsetting flag TOSTRING_USE_INNER is not possible");
+                    return self.spl_throw(
+                        b"InvalidArgumentException",
+                        "Unsetting flag TOSTRING_USE_INNER is not possible",
+                    );
                 }
                 if flags & CIT_FULL_CACHE != 0 && cur & CIT_FULL_CACHE == 0 {
                     set_prop(obj, b"__spl_cache", val_arr(PhpArray::new()));
@@ -1195,7 +1370,8 @@ impl Vm {
             (b"recursivecachingiterator", b"haschildren") => {
                 bv(matches!(prop(obj, b"__spl_cit_children"), Value::Object(_)))
             }
-            (b"recursivecachingiterator", b"getchildren") => match prop(obj, b"__spl_cit_children") {
+            (b"recursivecachingiterator", b"getchildren") => match prop(obj, b"__spl_cit_children")
+            {
                 v @ Value::Object(_) => v,
                 _ => Value::Null,
             },
@@ -1290,7 +1466,11 @@ impl Vm {
             }
             (b"appenditerator", b"getiteratorindex") => {
                 let ai = Self::append_it(obj);
-                if self.it_valid(&ai) { self.it_key(&ai) } else { Value::Null }
+                if self.it_valid(&ai) {
+                    self.it_key(&ai)
+                } else {
+                    Value::Null
+                }
             }
             (b"appenditerator", b"getarrayiterator") => Self::append_it(obj),
             (b"regexiterator", b"accept") => return Some(self.regex_accept(obj)),
@@ -1331,13 +1511,17 @@ impl Vm {
                 set_prop(obj, b"__regex_flags", Value::Long(f));
                 Value::Null
             }
-            (b"regexiterator", b"getpregflags") => Value::Long(lprop(obj, b"__regex_preg_flags", 0)),
+            (b"regexiterator", b"getpregflags") => {
+                Value::Long(lprop(obj, b"__regex_preg_flags", 0))
+            }
             (b"regexiterator", b"setpregflags") => {
                 let f = match args.first() {
-                    Some(v) => match self.spl_arg_long("RegexIterator::setPregFlags", 1, "pregFlags", v) {
-                        Some(n) => n,
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_long("RegexIterator::setPregFlags", 1, "pregFlags", v) {
+                            Some(n) => n,
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => 0,
                 };
                 set_prop(obj, b"__regex_preg_flags", Value::Long(f));
@@ -1401,10 +1585,18 @@ impl Vm {
             1 | 2 => {
                 let all = lprop(obj, b"__regex_mode", 0) == 2;
                 let out = Value::Reference(Rc::new(RefCell::new(Value::Null)));
-                let f: &[u8] = if all { b"preg_match_all" } else { b"preg_match" };
+                let f: &[u8] = if all {
+                    b"preg_match_all"
+                } else {
+                    b"preg_match"
+                };
                 let mut a = vec![pattern, subj, out.clone()];
                 if preg_flags != 0 || all {
-                    a.push(Value::Long(if all && preg_flags == 0 { 1 } else { preg_flags }));
+                    a.push(Value::Long(if all && preg_flags == 0 {
+                        1
+                    } else {
+                        preg_flags
+                    }));
                 }
                 let cnt = self.spl_call_builtin(f, &a).unwrap_or(Value::Long(0));
                 let m = out.deref();
@@ -1413,7 +1605,10 @@ impl Vm {
             }
             3 => {
                 let r = self
-                    .spl_call_builtin(b"preg_split", &[pattern, subj, Value::Long(-1), Value::Long(preg_flags)])
+                    .spl_call_builtin(
+                        b"preg_split",
+                        &[pattern, subj, Value::Long(-1), Value::Long(preg_flags)],
+                    )
                     .unwrap_or(Value::False);
                 let n = match &r {
                     Value::Array(a) => a.borrow().len(),
@@ -1431,7 +1626,13 @@ impl Vm {
                 let count = Value::Reference(Rc::new(RefCell::new(Value::Long(0))));
                 let r = self.spl_call_builtin(
                     b"preg_replace",
-                    &[pattern, Value::String(repl_s), subj, Value::Long(-1), count.clone()],
+                    &[
+                        pattern,
+                        Value::String(repl_s),
+                        subj,
+                        Value::Long(-1),
+                        count.clone(),
+                    ],
                 );
                 match r {
                     Some(v @ Value::String(_)) => {
@@ -1468,7 +1669,9 @@ impl Vm {
     }
 
     fn rii_level(obj: &Rc<RefCell<PhpObject>>) -> i64 {
-        Self::rii_its(obj).map(|a| a.borrow().len() as i64 - 1).unwrap_or(-1)
+        Self::rii_its(obj)
+            .map(|a| a.borrow().len() as i64 - 1)
+            .unwrap_or(-1)
     }
 
     fn rii_it_at(obj: &Rc<RefCell<PhpObject>>, level: i64) -> Value {
@@ -1524,7 +1727,11 @@ impl Vm {
 
     fn rii_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, base: &[u8], args: &[Value]) -> bool {
         let is_tree = base == b"recursivetreeiterator";
-        let func = if is_tree { "RecursiveTreeIterator::__construct" } else { "RecursiveIteratorIterator::__construct" };
+        let func = if is_tree {
+            "RecursiveTreeIterator::__construct"
+        } else {
+            "RecursiveIteratorIterator::__construct"
+        };
         if !self.arity_check(func, args.len(), 1, if is_tree { 4 } else { 3 }) {
             return false;
         }
@@ -1595,7 +1802,10 @@ impl Vm {
             }
         }
         if !self.obj_instanceof(&iterator, b"recursiveiterator") {
-            self.spl_throw(b"InvalidArgumentException", "An instance of RecursiveIterator or IteratorAggregate creating it is required");
+            self.spl_throw(
+                b"InvalidArgumentException",
+                "An instance of RecursiveIterator or IteratorAggregate creating it is required",
+            );
             return false;
         }
         // Overridden hooks
@@ -1610,7 +1820,12 @@ impl Vm {
             (b"endchildren", H_END_CH),
             (b"nextelement", H_NEXT_EL),
         ] {
-            if self.classes.get(&cl).map(|c| c.get_method(name).is_some()).unwrap_or(false) {
+            if self
+                .classes
+                .get(&cl)
+                .map(|c| c.get_method(name).is_some())
+                .unwrap_or(false)
+            {
                 hooks |= bit;
             }
         }
@@ -1639,7 +1854,9 @@ impl Vm {
 
     fn rii_from_aggregate(&mut self, agg: &Value) -> Option<Value> {
         let cls = match agg {
-            Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
+            Value::Object(o) => {
+                crate::value::display_class_name(&o.borrow().class_name).to_string()
+            }
             _ => String::new(),
         };
         let r = self.spl_call_method(agg, b"getIterator", &[]);
@@ -1648,7 +1865,10 @@ impl Vm {
         }
         let r = r.unwrap_or(Value::Null);
         if !self.obj_instanceof(&r, b"traversable") {
-            let msg = format!("{}::getIterator() must return an object that implements Traversable", cls);
+            let msg = format!(
+                "{}::getIterator() must return an object that implements Traversable",
+                cls
+            );
             self.spl_throw(b"LogicException", &msg);
             return None;
         }
@@ -1683,7 +1903,10 @@ impl Vm {
 
     fn rii_move_forward_ex(&mut self, obj: &Rc<RefCell<PhpObject>>) {
         if Self::rii_its(obj).is_none() {
-            self.spl_throw(b"Error", "The object is in an invalid state as the parent constructor was not called");
+            self.spl_throw(
+                b"Error",
+                "The object is in an invalid state as the parent constructor was not called",
+            );
             return;
         }
         let mode = lprop(obj, b"__spl_rii_mode", RIT_LEAVES_ONLY);
@@ -1782,7 +2005,9 @@ impl Vm {
                     return;
                 }
                 RS_SELF => {
-                    if Self::rii_hook(obj, H_NEXT_EL) && (mode == RIT_SELF_FIRST || mode == RIT_CHILD_FIRST) {
+                    if Self::rii_hook(obj, H_NEXT_EL)
+                        && (mode == RIT_SELF_FIRST || mode == RIT_CHILD_FIRST)
+                    {
                         self.rii_call_hook(obj, b"nextelement");
                     }
                     if mode == RIT_SELF_FIRST {
@@ -1839,7 +2064,10 @@ impl Vm {
 
     fn rii_rewind_ex(&mut self, obj: &Rc<RefCell<PhpObject>>) {
         if Self::rii_its(obj).is_none() {
-            self.spl_throw(b"Error", "The object is in an invalid state as the parent constructor was not called");
+            self.spl_throw(
+                b"Error",
+                "The object is in an invalid state as the parent constructor was not called",
+            );
             return;
         }
         while Self::rii_level(obj) > 0 {
@@ -1860,7 +2088,11 @@ impl Vm {
 
     fn rti_prefix(&mut self, obj: &Rc<RefCell<PhpObject>>) -> PhpString {
         let parts: Vec<Vec<u8>> = match prop(obj, b"__spl_rti_prefix") {
-            Value::Array(a) => a.borrow().values().map(|v| v.to_php_string().as_bytes().to_vec()).collect(),
+            Value::Array(a) => a
+                .borrow()
+                .values()
+                .map(|v| v.to_php_string().as_bytes().to_vec())
+                .collect(),
             _ => vec![Vec::new(); 6],
         };
         let part = |i: usize| parts.get(i).cloned().unwrap_or_default();
@@ -1908,7 +2140,10 @@ impl Vm {
 
     fn rii_check(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         if Self::rii_its(obj).is_none() {
-            self.spl_throw(b"Error", "The object is in an invalid state as the parent constructor was not called");
+            self.spl_throw(
+                b"Error",
+                "The object is in an invalid state as the parent constructor was not called",
+            );
             return false;
         }
         true
@@ -1950,7 +2185,12 @@ impl Vm {
                 let lvl = Self::rii_level(obj);
                 let level = match args.first().map(|v| v.deref()) {
                     None | Some(Value::Null) | Some(Value::Undef) => lvl,
-                    Some(v) => match self.spl_arg_long("RecursiveIteratorIterator::getSubIterator", 1, "level", &v) {
+                    Some(v) => match self.spl_arg_long(
+                        "RecursiveIteratorIterator::getSubIterator",
+                        1,
+                        "level",
+                        &v,
+                    ) {
                         Some(n) => {
                             if n < 0 || n > lvl {
                                 return Some(Value::Null);
@@ -1984,7 +2224,8 @@ impl Vm {
                 if matches!(it, Value::Null | Value::Undef) {
                     return Some(Value::False);
                 }
-                self.spl_call_method(&it, b"hasChildren", &[]).unwrap_or(Value::False)
+                self.spl_call_method(&it, b"hasChildren", &[])
+                    .unwrap_or(Value::False)
             }
             (b"recursiveiteratoriterator", b"callgetchildren") => {
                 if !self.rii_check(obj) {
@@ -1994,11 +2235,17 @@ impl Vm {
                 if matches!(it, Value::Null | Value::Undef) {
                     return Some(Value::Null);
                 }
-                self.spl_call_method(&it, b"getChildren", &[]).unwrap_or(Value::Null)
+                self.spl_call_method(&it, b"getChildren", &[])
+                    .unwrap_or(Value::Null)
             }
             (b"recursiveiteratoriterator", b"setmaxdepth") => {
                 let d = match args.first() {
-                    Some(v) => match self.spl_arg_long("RecursiveIteratorIterator::setMaxDepth", 1, "maxDepth", v) {
+                    Some(v) => match self.spl_arg_long(
+                        "RecursiveIteratorIterator::setMaxDepth",
+                        1,
+                        "maxDepth",
+                        v,
+                    ) {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
@@ -2012,18 +2259,32 @@ impl Vm {
             }
             (b"recursiveiteratoriterator", b"getmaxdepth") => {
                 let d = lprop(obj, b"__spl_rii_maxd", -1);
-                if d == -1 { Value::False } else { Value::Long(d) }
+                if d == -1 {
+                    Value::False
+                } else {
+                    Value::Long(d)
+                }
             }
             (b"recursivetreeiterator", b"setprefixpart") => {
                 let part = match args.first() {
-                    Some(v) => match self.spl_arg_long("RecursiveTreeIterator::setPrefixPart", 1, "part", v) {
+                    Some(v) => match self.spl_arg_long(
+                        "RecursiveTreeIterator::setPrefixPart",
+                        1,
+                        "part",
+                        v,
+                    ) {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
                     None => 0,
                 };
                 let value = match args.get(1) {
-                    Some(v) => match self.spl_arg_string("RecursiveTreeIterator::setPrefixPart", 2, "value", v) {
+                    Some(v) => match self.spl_arg_string(
+                        "RecursiveTreeIterator::setPrefixPart",
+                        2,
+                        "value",
+                        v,
+                    ) {
                         Some(s) => s,
                         None => return Some(Value::Null),
                     },
@@ -2033,7 +2294,8 @@ impl Vm {
                     return self.spl_throw(b"ValueError", "RecursiveTreeIterator::setPrefixPart(): Argument #1 ($part) must be a RecursiveTreeIterator::PREFIX_* constant");
                 }
                 if let Value::Array(a) = prop(obj, b"__spl_rti_prefix") {
-                    a.borrow_mut().set(ArrayKey::Int(part), Value::String(value));
+                    a.borrow_mut()
+                        .set(ArrayKey::Int(part), Value::String(value));
                 }
                 Value::Null
             }
@@ -2045,7 +2307,12 @@ impl Vm {
             }
             (b"recursivetreeiterator", b"setpostfix") => {
                 let value = match args.first() {
-                    Some(v) => match self.spl_arg_string("RecursiveTreeIterator::setPostfix", 1, "postfix", v) {
+                    Some(v) => match self.spl_arg_string(
+                        "RecursiveTreeIterator::setPostfix",
+                        1,
+                        "postfix",
+                        v,
+                    ) {
                         Some(s) => s,
                         None => return Some(Value::Null),
                     },
@@ -2124,7 +2391,11 @@ pub fn spl_iter_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Res
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)

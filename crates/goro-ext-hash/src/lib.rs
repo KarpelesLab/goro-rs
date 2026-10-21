@@ -41,21 +41,66 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"md5_file", vec![s(), b()]);
     vm.register_builtin_param_types(b"sha1_file", vec![s(), b()]);
     vm.register_builtin_param_types(b"crc32", vec![s()]);
-    vm.register_builtin_param_types(b"hash", vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))]);
-    vm.register_builtin_param_types(b"hash_file", vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))]);
+    vm.register_builtin_param_types(
+        b"hash",
+        vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))],
+    );
+    vm.register_builtin_param_types(
+        b"hash_file",
+        vec![s(), s(), b(), Some(ParamType::Simple(b"array".to_vec()))],
+    );
     vm.register_builtin_param_types(b"hash_hmac", vec![s(), s(), s(), b()]);
     vm.register_builtin_param_types(b"hash_pbkdf2", vec![s(), s(), s(), i(), i(), b()]);
     vm.register_builtin_param_types(b"hash_equals", vec![s(), s()]);
 
     // Register parameter names (for deprecation messages that mention $filename, etc.)
-    vm.builtin_param_names.insert(b"md5_file".to_vec(), vec![b"filename".to_vec(), b"binary".to_vec()]);
-    vm.builtin_param_names.insert(b"sha1_file".to_vec(), vec![b"filename".to_vec(), b"binary".to_vec()]);
-    vm.builtin_param_names.insert(b"md5".to_vec(), vec![b"string".to_vec(), b"binary".to_vec()]);
-    vm.builtin_param_names.insert(b"sha1".to_vec(), vec![b"string".to_vec(), b"binary".to_vec()]);
-    vm.builtin_param_names.insert(b"hash".to_vec(), vec![b"algo".to_vec(), b"data".to_vec(), b"binary".to_vec(), b"options".to_vec()]);
-    vm.builtin_param_names.insert(b"hash_file".to_vec(), vec![b"algo".to_vec(), b"filename".to_vec(), b"binary".to_vec(), b"options".to_vec()]);
-    vm.builtin_param_names.insert(b"hash_hmac".to_vec(), vec![b"algo".to_vec(), b"data".to_vec(), b"key".to_vec(), b"binary".to_vec()]);
-    vm.builtin_param_names.insert(b"hash_equals".to_vec(), vec![b"known_string".to_vec(), b"user_string".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"md5_file".to_vec(),
+        vec![b"filename".to_vec(), b"binary".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"sha1_file".to_vec(),
+        vec![b"filename".to_vec(), b"binary".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"md5".to_vec(),
+        vec![b"string".to_vec(), b"binary".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"sha1".to_vec(),
+        vec![b"string".to_vec(), b"binary".to_vec()],
+    );
+    vm.builtin_param_names.insert(
+        b"hash".to_vec(),
+        vec![
+            b"algo".to_vec(),
+            b"data".to_vec(),
+            b"binary".to_vec(),
+            b"options".to_vec(),
+        ],
+    );
+    vm.builtin_param_names.insert(
+        b"hash_file".to_vec(),
+        vec![
+            b"algo".to_vec(),
+            b"filename".to_vec(),
+            b"binary".to_vec(),
+            b"options".to_vec(),
+        ],
+    );
+    vm.builtin_param_names.insert(
+        b"hash_hmac".to_vec(),
+        vec![
+            b"algo".to_vec(),
+            b"data".to_vec(),
+            b"key".to_vec(),
+            b"binary".to_vec(),
+        ],
+    );
+    vm.builtin_param_names.insert(
+        b"hash_equals".to_vec(),
+        vec![b"known_string".to_vec(), b"user_string".to_vec()],
+    );
 }
 
 fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -165,7 +210,9 @@ fn hash_block_size(algo: &str) -> usize {
         "sha3-512" => 72,
         "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320" => 64,
         "whirlpool" => 64,
-        "tiger128,3" | "tiger160,3" | "tiger192,3" | "tiger128,4" | "tiger160,4" | "tiger192,4" => 64,
+        "tiger128,3" | "tiger160,3" | "tiger192,3" | "tiger128,4" | "tiger160,4" | "tiger192,4" => {
+            64
+        }
         "gost" | "gost-crypto" => 32,
         _ => 64,
     }
@@ -173,18 +220,40 @@ fn hash_block_size(algo: &str) -> usize {
 
 /// Returns true if the algorithm is a cryptographic hash usable with HMAC.
 fn is_crypto_algo(algo: &str) -> bool {
-    matches!(algo,
-        "md2" | "md4" | "md5"
-        | "sha1" | "sha-1"
-        | "sha224" | "sha-224" | "sha256" | "sha-256"
-        | "sha384" | "sha-384" | "sha512" | "sha-512"
-        | "sha512/224" | "sha512/256"
-        | "sha3-224" | "sha3-256" | "sha3-384" | "sha3-512"
-        | "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320"
-        | "whirlpool"
-        | "tiger128,3" | "tiger160,3" | "tiger192,3"
-        | "tiger128,4" | "tiger160,4" | "tiger192,4"
-        | "gost" | "gost-crypto"
+    matches!(
+        algo,
+        "md2"
+            | "md4"
+            | "md5"
+            | "sha1"
+            | "sha-1"
+            | "sha224"
+            | "sha-224"
+            | "sha256"
+            | "sha-256"
+            | "sha384"
+            | "sha-384"
+            | "sha512"
+            | "sha-512"
+            | "sha512/224"
+            | "sha512/256"
+            | "sha3-224"
+            | "sha3-256"
+            | "sha3-384"
+            | "sha3-512"
+            | "ripemd128"
+            | "ripemd160"
+            | "ripemd256"
+            | "ripemd320"
+            | "whirlpool"
+            | "tiger128,3"
+            | "tiger160,3"
+            | "tiger192,3"
+            | "tiger128,4"
+            | "tiger160,4"
+            | "tiger192,4"
+            | "gost"
+            | "gost-crypto"
     )
 }
 
@@ -211,7 +280,10 @@ fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "hash(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -229,10 +301,15 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // hash_hmac requires a cryptographic algorithm
     if !is_crypto_algo(&algo) {
-        let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let msg =
+            "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     let block_size = hash_block_size(&algo);
@@ -246,7 +323,10 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         };
     }
@@ -267,10 +347,15 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let inner_hash = match compute_hash(&algo, &inner_data) {
         Some(h) => h,
         None => {
-            let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+            let msg =
+                "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                    .to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
 
@@ -280,10 +365,15 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let digest = match compute_hash(&algo, &outer_data) {
         Some(h) => h,
         None => {
-            let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+            let msg =
+                "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                    .to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
 
@@ -297,11 +387,18 @@ fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// hash_init(): Create a HashContext object (we use an Object with algo + data properties)
 fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let algo = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
     let options = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     // Emit deprecated if key arg is explicitly null
     if matches!(args.get(2), Some(Value::Null)) {
-        vm.emit_deprecated("hash_init(): Passing null to parameter #3 ($key) of type string is deprecated");
+        vm.emit_deprecated(
+            "hash_init(): Passing null to parameter #3 ($key) of type string is deprecated",
+        );
     }
     let key = args.get(2).map(|v| v.to_php_string());
 
@@ -310,7 +407,10 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "hash_init(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     // HASH_HMAC = 1: must be cryptographic algo and key must not be empty
@@ -319,24 +419,37 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "hash_init(): Argument #1 ($algo) must be a cryptographic hashing algorithm if HMAC is requested".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError {
+                message: msg,
+                line: 0,
+            });
         }
         let key_empty = match &key {
             Some(s) => s.as_bytes().is_empty(),
             None => true,
         };
         if key_empty {
-            let msg = "hash_init(): Argument #3 ($key) must not be empty when HMAC is requested".to_string();
+            let msg = "hash_init(): Argument #3 ($key) must not be empty when HMAC is requested"
+                .to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError {
+                message: msg,
+                line: 0,
+            });
         }
     }
 
     let obj_id = vm.next_object_id();
     let mut obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), obj_id);
-    obj.set_property(b"algo".to_vec(), Value::String(PhpString::from_string(algo.clone())));
-    obj.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(Vec::new())));
+    obj.set_property(
+        b"algo".to_vec(),
+        Value::String(PhpString::from_string(algo.clone())),
+    );
+    obj.set_property(
+        b"__hash_data".to_vec(),
+        Value::String(PhpString::from_vec(Vec::new())),
+    );
 
     // HASH_HMAC = 1
     if options & 1 != 0 {
@@ -349,7 +462,10 @@ fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             while key_bytes.len() < block_size {
                 key_bytes.push(0);
             }
-            obj.set_property(b"__hmac_key".to_vec(), Value::String(PhpString::from_vec(key_bytes)));
+            obj.set_property(
+                b"__hmac_key".to_vec(),
+                Value::String(PhpString::from_vec(key_bytes)),
+            );
             obj.set_property(b"__hash_is_hmac".to_vec(), Value::True);
         }
     }
@@ -364,15 +480,23 @@ fn hash_update_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Check if context is already finalized
         if obj_mut.get_property(b"__hash_finalized").is_truthy() {
             drop(obj_mut);
-            let msg = "hash_update(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let msg =
+                "hash_update(): Argument #1 ($context) must be a valid, non-finalized HashContext"
+                    .to_string();
             let exc = vm.create_exception(b"Error", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError {
+                message: msg,
+                line: 0,
+            });
         }
         let existing = obj_mut.get_property(b"__hash_data").to_php_string();
         let mut combined = existing.as_bytes().to_vec();
         combined.extend_from_slice(data.as_bytes());
-        obj_mut.set_property(b"__hash_data".to_vec(), Value::String(PhpString::from_vec(combined)));
+        obj_mut.set_property(
+            b"__hash_data".to_vec(),
+            Value::String(PhpString::from_vec(combined)),
+        );
         return Ok(Value::True);
     }
     Ok(Value::False)
@@ -385,19 +509,29 @@ fn hash_final_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Check if context is already finalized
         if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
             drop(obj_borrow);
-            let msg = "hash_final(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let msg =
+                "hash_final(): Argument #1 ($context) must be a valid, non-finalized HashContext"
+                    .to_string();
             let exc = vm.create_exception(b"Error", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError {
+                message: msg,
+                line: 0,
+            });
         }
-        let algo = obj_borrow.get_property(b"algo").to_php_string().to_string_lossy().to_ascii_lowercase();
+        let algo = obj_borrow
+            .get_property(b"algo")
+            .to_php_string()
+            .to_string_lossy()
+            .to_ascii_lowercase();
         let data = obj_borrow.get_property(b"__hash_data").to_php_string();
         let is_hmac = obj_borrow.get_property(b"__hash_is_hmac").is_truthy();
         let hmac_key_val = obj_borrow.get_property(b"__hmac_key");
         let hmac_key = hmac_key_val.to_php_string();
         drop(obj_borrow);
         // Mark context as finalized
-        obj.borrow_mut().set_property(b"__hash_finalized".to_vec(), Value::True);
+        obj.borrow_mut()
+            .set_property(b"__hash_finalized".to_vec(), Value::True);
 
         let digest = if is_hmac {
             let block_size = hash_block_size(&algo);
@@ -437,10 +571,15 @@ fn hash_copy_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let obj_borrow = obj.borrow();
         if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
             drop(obj_borrow);
-            let msg = "hash_copy(): Argument #1 ($context) must be a valid, non-finalized HashContext".to_string();
+            let msg =
+                "hash_copy(): Argument #1 ($context) must be a valid, non-finalized HashContext"
+                    .to_string();
             let exc = vm.create_exception(b"ValueError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: 0 });
+            return Err(VmError {
+                message: msg,
+                line: 0,
+            });
         }
         let algo = obj_borrow.get_property(b"algo");
         let data = obj_borrow.get_property(b"__hash_data");
@@ -460,7 +599,12 @@ fn hash_copy_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let algo = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
     let password = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let salt = args.get(2).unwrap_or(&Value::Null).to_php_string();
     let iterations_raw = args.get(3).map(|v| v.to_long()).unwrap_or(1);
@@ -472,17 +616,33 @@ fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // non-cryptographic ones (CRC, FNV, adler, joaat, MurmurHash, xxhash).
     let non_cryptographic = matches!(
         algo.as_str(),
-        "adler32" | "crc32" | "crc32b" | "crc32c"
-            | "fnv132" | "fnv1a32" | "fnv164" | "fnv1a64"
+        "adler32"
+            | "crc32"
+            | "crc32b"
+            | "crc32c"
+            | "fnv132"
+            | "fnv1a32"
+            | "fnv164"
+            | "fnv1a64"
             | "joaat"
-            | "murmur3a" | "murmur3c" | "murmur3f"
-            | "xxh32" | "xxh64" | "xxh3" | "xxh128"
+            | "murmur3a"
+            | "murmur3c"
+            | "murmur3f"
+            | "xxh32"
+            | "xxh64"
+            | "xxh3"
+            | "xxh128"
     );
     if hash_len == 0 || non_cryptographic {
-        let msg = "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let msg =
+            "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // Validate iterations: must be > 0. Without this check, negative values
     // wrap around to usize::MAX and the iterations loop spins effectively
@@ -491,19 +651,32 @@ fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // Validate length: must be >= 0.
     if length_raw < 0 {
-        let msg = "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0".to_string();
+        let msg =
+            "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let iterations = iterations_raw as usize;
     let length = length_raw as usize;
 
-    let output_len = if length == 0 { hash_len } else if raw { length } else { length.div_ceil(2) };
+    let output_len = if length == 0 {
+        hash_len
+    } else if raw {
+        length
+    } else {
+        length.div_ceil(2)
+    };
 
     // PBKDF2 implementation
     let block_size = hash_block_size(&algo);
@@ -565,19 +738,50 @@ fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
-        "md2", "md4", "md5", "sha1",
-        "sha224", "sha256", "sha384",
-        "sha512/224", "sha512/256", "sha512",
-        "sha3-224", "sha3-256", "sha3-384", "sha3-512",
-        "ripemd128", "ripemd160", "ripemd256", "ripemd320",
+        "md2",
+        "md4",
+        "md5",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512/224",
+        "sha512/256",
+        "sha512",
+        "sha3-224",
+        "sha3-256",
+        "sha3-384",
+        "sha3-512",
+        "ripemd128",
+        "ripemd160",
+        "ripemd256",
+        "ripemd320",
         "whirlpool",
-        "tiger128,3", "tiger160,3", "tiger192,3",
-        "tiger128,4", "tiger160,4", "tiger192,4",
-        "snefru", "snefru256",
-        "gost", "gost-crypto",
-        "haval128,3", "haval160,3", "haval192,3", "haval224,3", "haval256,3",
-        "haval128,4", "haval160,4", "haval192,4", "haval224,4", "haval256,4",
-        "haval128,5", "haval160,5", "haval192,5", "haval224,5", "haval256,5",
+        "tiger128,3",
+        "tiger160,3",
+        "tiger192,3",
+        "tiger128,4",
+        "tiger160,4",
+        "tiger192,4",
+        "snefru",
+        "snefru256",
+        "gost",
+        "gost-crypto",
+        "haval128,3",
+        "haval160,3",
+        "haval192,3",
+        "haval224,3",
+        "haval256,3",
+        "haval128,4",
+        "haval160,4",
+        "haval192,4",
+        "haval224,4",
+        "haval256,4",
+        "haval128,5",
+        "haval160,5",
+        "haval192,5",
+        "haval224,5",
+        "haval256,5",
     ] {
         result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
     }
@@ -587,24 +791,66 @@ fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     for algo in &[
-        "md2", "md4", "md5", "sha1",
-        "sha224", "sha256", "sha384",
-        "sha512/224", "sha512/256", "sha512",
-        "sha3-224", "sha3-256", "sha3-384", "sha3-512",
-        "ripemd128", "ripemd160", "ripemd256", "ripemd320",
+        "md2",
+        "md4",
+        "md5",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512/224",
+        "sha512/256",
+        "sha512",
+        "sha3-224",
+        "sha3-256",
+        "sha3-384",
+        "sha3-512",
+        "ripemd128",
+        "ripemd160",
+        "ripemd256",
+        "ripemd320",
         "whirlpool",
-        "tiger128,3", "tiger160,3", "tiger192,3",
-        "tiger128,4", "tiger160,4", "tiger192,4",
-        "snefru", "snefru256",
-        "gost", "gost-crypto",
-        "adler32", "crc32", "crc32b", "crc32c",
-        "fnv132", "fnv1a32", "fnv164", "fnv1a64",
+        "tiger128,3",
+        "tiger160,3",
+        "tiger192,3",
+        "tiger128,4",
+        "tiger160,4",
+        "tiger192,4",
+        "snefru",
+        "snefru256",
+        "gost",
+        "gost-crypto",
+        "adler32",
+        "crc32",
+        "crc32b",
+        "crc32c",
+        "fnv132",
+        "fnv1a32",
+        "fnv164",
+        "fnv1a64",
         "joaat",
-        "murmur3a", "murmur3c", "murmur3f",
-        "xxh32", "xxh64", "xxh3", "xxh128",
-        "haval128,3", "haval160,3", "haval192,3", "haval224,3", "haval256,3",
-        "haval128,4", "haval160,4", "haval192,4", "haval224,4", "haval256,4",
-        "haval128,5", "haval160,5", "haval192,5", "haval224,5", "haval256,5",
+        "murmur3a",
+        "murmur3c",
+        "murmur3f",
+        "xxh32",
+        "xxh64",
+        "xxh3",
+        "xxh128",
+        "haval128,3",
+        "haval160,3",
+        "haval192,3",
+        "haval224,3",
+        "haval256,3",
+        "haval128,4",
+        "haval160,4",
+        "haval192,4",
+        "haval224,4",
+        "haval256,4",
+        "haval128,5",
+        "haval160,5",
+        "haval192,5",
+        "haval224,5",
+        "haval256,5",
     ] {
         result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
     }
@@ -631,7 +877,10 @@ fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     if !matches!(user_val, Value::String(_)) {
         let type_name = match user_val {
@@ -649,7 +898,10 @@ fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let known = known_val.to_php_string();
     let user = user_val.to_php_string();
@@ -790,26 +1042,70 @@ fn md4_hash(data: &[u8]) -> [u8; 16] {
 
         // Round 1
         for &i in &[0, 4, 8, 12] {
-            a = a.wrapping_add((b & c) | ((!b) & d)).wrapping_add(x[i]).rotate_left(3);
-            d = d.wrapping_add((a & b) | ((!a) & c)).wrapping_add(x[i + 1]).rotate_left(7);
-            c = c.wrapping_add((d & a) | ((!d) & b)).wrapping_add(x[i + 2]).rotate_left(11);
-            b = b.wrapping_add((c & d) | ((!c) & a)).wrapping_add(x[i + 3]).rotate_left(19);
+            a = a
+                .wrapping_add((b & c) | ((!b) & d))
+                .wrapping_add(x[i])
+                .rotate_left(3);
+            d = d
+                .wrapping_add((a & b) | ((!a) & c))
+                .wrapping_add(x[i + 1])
+                .rotate_left(7);
+            c = c
+                .wrapping_add((d & a) | ((!d) & b))
+                .wrapping_add(x[i + 2])
+                .rotate_left(11);
+            b = b
+                .wrapping_add((c & d) | ((!c) & a))
+                .wrapping_add(x[i + 3])
+                .rotate_left(19);
         }
 
         // Round 2
         for &i in &[0, 1, 2, 3] {
-            a = a.wrapping_add((b & c) | (b & d) | (c & d)).wrapping_add(x[i]).wrapping_add(0x5A827999).rotate_left(3);
-            d = d.wrapping_add((a & b) | (a & c) | (b & c)).wrapping_add(x[i + 4]).wrapping_add(0x5A827999).rotate_left(5);
-            c = c.wrapping_add((d & a) | (d & b) | (a & b)).wrapping_add(x[i + 8]).wrapping_add(0x5A827999).rotate_left(9);
-            b = b.wrapping_add((c & d) | (c & a) | (d & a)).wrapping_add(x[i + 12]).wrapping_add(0x5A827999).rotate_left(13);
+            a = a
+                .wrapping_add((b & c) | (b & d) | (c & d))
+                .wrapping_add(x[i])
+                .wrapping_add(0x5A827999)
+                .rotate_left(3);
+            d = d
+                .wrapping_add((a & b) | (a & c) | (b & c))
+                .wrapping_add(x[i + 4])
+                .wrapping_add(0x5A827999)
+                .rotate_left(5);
+            c = c
+                .wrapping_add((d & a) | (d & b) | (a & b))
+                .wrapping_add(x[i + 8])
+                .wrapping_add(0x5A827999)
+                .rotate_left(9);
+            b = b
+                .wrapping_add((c & d) | (c & a) | (d & a))
+                .wrapping_add(x[i + 12])
+                .wrapping_add(0x5A827999)
+                .rotate_left(13);
         }
 
         // Round 3
         for &i in &[0, 2, 1, 3] {
-            a = a.wrapping_add(b ^ c ^ d).wrapping_add(x[i]).wrapping_add(0x6ED9EBA1).rotate_left(3);
-            d = d.wrapping_add(a ^ b ^ c).wrapping_add(x[i + 8]).wrapping_add(0x6ED9EBA1).rotate_left(9);
-            c = c.wrapping_add(d ^ a ^ b).wrapping_add(x[i + 4]).wrapping_add(0x6ED9EBA1).rotate_left(11);
-            b = b.wrapping_add(c ^ d ^ a).wrapping_add(x[i + 12]).wrapping_add(0x6ED9EBA1).rotate_left(15);
+            a = a
+                .wrapping_add(b ^ c ^ d)
+                .wrapping_add(x[i])
+                .wrapping_add(0x6ED9EBA1)
+                .rotate_left(3);
+            d = d
+                .wrapping_add(a ^ b ^ c)
+                .wrapping_add(x[i + 8])
+                .wrapping_add(0x6ED9EBA1)
+                .rotate_left(9);
+            c = c
+                .wrapping_add(d ^ a ^ b)
+                .wrapping_add(x[i + 4])
+                .wrapping_add(0x6ED9EBA1)
+                .rotate_left(11);
+            b = b
+                .wrapping_add(c ^ d ^ a)
+                .wrapping_add(x[i + 12])
+                .wrapping_add(0x6ED9EBA1)
+                .rotate_left(15);
         }
 
         a0 = a0.wrapping_add(a);
@@ -970,19 +1266,21 @@ fn sha1_hash(data: &[u8]) -> [u8; 20] {
 /// SHA-256 hash implementation (FIPS 180-4)
 fn sha256_hash(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (data.len() as u64) * 8;
@@ -997,13 +1295,19 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
-                chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3],
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
             ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
@@ -1011,7 +1315,11 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -1046,19 +1354,21 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
 /// SHA-224 hash (truncated SHA-256 with different IVs)
 fn sha224_hash(data: &[u8]) -> [u8; 28] {
     let mut h: [u32; 8] = [
-        0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939,
-        0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4,
+        0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7,
+        0xbefa4fa4,
     ];
 
     let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (data.len() as u64) * 8;
@@ -1073,13 +1383,19 @@ fn sha224_hash(data: &[u8]) -> [u8; 28] {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
-                chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3],
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
             ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
@@ -1087,7 +1403,11 @@ fn sha224_hash(data: &[u8]) -> [u8; 28] {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -1121,44 +1441,124 @@ fn sha224_hash(data: &[u8]) -> [u8; 28] {
 
 /// SHA-512 hash implementation (FIPS 180-4)
 fn sha512_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &[
-        0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-        0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
-    ], 64)
+    sha512_core(
+        data,
+        &[
+            0x6a09e667f3bcc908,
+            0xbb67ae8584caa73b,
+            0x3c6ef372fe94f82b,
+            0xa54ff53a5f1d36f1,
+            0x510e527fade682d1,
+            0x9b05688c2b3e6c1f,
+            0x1f83d9abfb41bd6b,
+            0x5be0cd19137e2179,
+        ],
+        64,
+    )
 }
 
 /// SHA-384 hash (truncated SHA-512 with different IVs)
 fn sha384_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &[
-        0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939,
-        0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4,
-    ], 48)
+    sha512_core(
+        data,
+        &[
+            0xcbbb9d5dc1059ed8,
+            0x629a292a367cd507,
+            0x9159015a3070dd17,
+            0x152fecd8f70e5939,
+            0x67332667ffc00b31,
+            0x8eb44a8768581511,
+            0xdb0c2e0d64f98fa7,
+            0x47b5481dbefa4fa4,
+        ],
+        48,
+    )
 }
 
 fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
     let mut h = *init;
 
     let k: [u64; 80] = [
-        0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-        0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-        0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-        0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
-        0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-        0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
-        0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-        0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
-        0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
-        0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-        0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
-        0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
-        0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
-        0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
-        0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-        0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
-        0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
-        0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
-        0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
-        0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+        0x428a2f98d728ae22,
+        0x7137449123ef65cd,
+        0xb5c0fbcfec4d3b2f,
+        0xe9b5dba58189dbbc,
+        0x3956c25bf348b538,
+        0x59f111f1b605d019,
+        0x923f82a4af194f9b,
+        0xab1c5ed5da6d8118,
+        0xd807aa98a3030242,
+        0x12835b0145706fbe,
+        0x243185be4ee4b28c,
+        0x550c7dc3d5ffb4e2,
+        0x72be5d74f27b896f,
+        0x80deb1fe3b1696b1,
+        0x9bdc06a725c71235,
+        0xc19bf174cf692694,
+        0xe49b69c19ef14ad2,
+        0xefbe4786384f25e3,
+        0x0fc19dc68b8cd5b5,
+        0x240ca1cc77ac9c65,
+        0x2de92c6f592b0275,
+        0x4a7484aa6ea6e483,
+        0x5cb0a9dcbd41fbd4,
+        0x76f988da831153b5,
+        0x983e5152ee66dfab,
+        0xa831c66d2db43210,
+        0xb00327c898fb213f,
+        0xbf597fc7beef0ee4,
+        0xc6e00bf33da88fc2,
+        0xd5a79147930aa725,
+        0x06ca6351e003826f,
+        0x142929670a0e6e70,
+        0x27b70a8546d22ffc,
+        0x2e1b21385c26c926,
+        0x4d2c6dfc5ac42aed,
+        0x53380d139d95b3df,
+        0x650a73548baf63de,
+        0x766a0abb3c77b2a8,
+        0x81c2c92e47edaee6,
+        0x92722c851482353b,
+        0xa2bfe8a14cf10364,
+        0xa81a664bbc423001,
+        0xc24b8b70d0f89791,
+        0xc76c51a30654be30,
+        0xd192e819d6ef5218,
+        0xd69906245565a910,
+        0xf40e35855771202a,
+        0x106aa07032bbd1b8,
+        0x19a4c116b8d2d0c8,
+        0x1e376c085141ab53,
+        0x2748774cdf8eeb99,
+        0x34b0bcb5e19b48a8,
+        0x391c0cb3c5c95a63,
+        0x4ed8aa4ae3418acb,
+        0x5b9cca4f7763e373,
+        0x682e6ff3d6b2b8a3,
+        0x748f82ee5defb2fc,
+        0x78a5636f43172f60,
+        0x84c87814a1f0ab72,
+        0x8cc702081a6439ec,
+        0x90befffa23631e28,
+        0xa4506cebde82bde9,
+        0xbef9a3f7b2c67915,
+        0xc67178f2e372532b,
+        0xca273eceea26619c,
+        0xd186b8c721c0c207,
+        0xeada7dd6cde0eb1e,
+        0xf57d4f7fee6ed178,
+        0x06f067aa72176fba,
+        0x0a637dc5a2c898a6,
+        0x113f9804bef90dae,
+        0x1b710b35131c471b,
+        0x28db77f523047d84,
+        0x32caab7b40c72493,
+        0x3c9ebe0a15c9bebc,
+        0x431d67c49c100d4c,
+        0x4cc5d4becb3e42b6,
+        0x597f299cfc657e2a,
+        0x5fcb6fab3ad6faec,
+        0x6c44198c4a475817,
     ];
 
     let bit_len = (data.len() as u128) * 8;
@@ -1173,14 +1573,23 @@ fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
         let mut w = [0u64; 80];
         for i in 0..16 {
             w[i] = u64::from_be_bytes([
-                chunk[i * 8], chunk[i * 8 + 1], chunk[i * 8 + 2], chunk[i * 8 + 3],
-                chunk[i * 8 + 4], chunk[i * 8 + 5], chunk[i * 8 + 6], chunk[i * 8 + 7],
+                chunk[i * 8],
+                chunk[i * 8 + 1],
+                chunk[i * 8 + 2],
+                chunk[i * 8 + 3],
+                chunk[i * 8 + 4],
+                chunk[i * 8 + 5],
+                chunk[i * 8 + 6],
+                chunk[i * 8 + 7],
             ]);
         }
         for i in 16..80 {
             let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
             let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
@@ -1188,7 +1597,11 @@ fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
         for i in 0..80 {
             let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -1222,8 +1635,17 @@ fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
 }
 
 fn hash_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
-    let filename = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let algo = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let filename = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let raw = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
 
     // Validate algorithm
@@ -1231,71 +1653,106 @@ fn hash_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "hash_file(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     match std::fs::read(&filename) {
-        Ok(data) => {
-            match compute_hash(&algo, &data) {
-                Some(digest) => {
-                    if raw {
-                        Ok(Value::String(PhpString::from_vec(digest)))
-                    } else {
-                        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                        Ok(Value::String(PhpString::from_string(hex)))
-                    }
+        Ok(data) => match compute_hash(&algo, &data) {
+            Some(digest) => {
+                if raw {
+                    Ok(Value::String(PhpString::from_vec(digest)))
+                } else {
+                    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                    Ok(Value::String(PhpString::from_string(hex)))
                 }
-                None => Ok(Value::False),
             }
-        }
+            None => Ok(Value::False),
+        },
         Err(_) => {
-            vm.emit_warning(&format!("hash_file({}): Failed to open stream: No such file or directory", filename));
+            vm.emit_warning(&format!(
+                "hash_file({}): Failed to open stream: No such file or directory",
+                filename
+            ));
             Ok(Value::False)
         }
     }
 }
 
 fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
+    let algo = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
     let ikm = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let length = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     let info = args.get(3).unwrap_or(&Value::Null).to_php_string();
     let salt = args.get(4).unwrap_or(&Value::Null).to_php_string();
 
     if !is_crypto_algo(&algo) {
-        let msg = "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let msg =
+            "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
     let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
     if hash_len == 0 {
-        let msg = "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let msg =
+            "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     if ikm.as_bytes().is_empty() {
         let msg = "hash_hkdf(): Argument #2 ($key) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: 0 });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: 0,
+        });
     }
 
     if length < 0 {
         let msg = "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: 0 });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: 0,
+        });
     }
 
-    let output_len = if length == 0 { hash_len } else { length as usize };
+    let output_len = if length == 0 {
+        hash_len
+    } else {
+        length as usize
+    };
     if output_len > 255 * hash_len {
-        let msg = format!("hash_hkdf(): Argument #3 ($length) must be less than or equal to {}", 255 * hash_len);
+        let msg = format!(
+            "hash_hkdf(): Argument #3 ($length) must be less than or equal to {}",
+            255 * hash_len
+        );
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
@@ -1352,13 +1809,20 @@ fn compute_hmac(algo: &str, key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     if filename.is_empty() {
         let msg = "Path must not be empty".to_string();
         let exc = _vm.create_exception(b"ValueError", &msg, 0);
         _vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: _vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: _vm.current_line,
+        });
     }
     match std::fs::read(&filename) {
         Ok(data) => {
@@ -1372,8 +1836,12 @@ fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             let err_msg = match e.kind() {
-                std::io::ErrorKind::NotFound => "Failed to open stream: No such file or directory".to_string(),
-                std::io::ErrorKind::PermissionDenied => "Failed to open stream: Permission denied".to_string(),
+                std::io::ErrorKind::NotFound => {
+                    "Failed to open stream: No such file or directory".to_string()
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    "Failed to open stream: Permission denied".to_string()
+                }
                 _ => format!("Failed to open stream: {}", e),
             };
             _vm.emit_warning(&format!("md5_file({}): {}", filename, err_msg));
@@ -1385,17 +1853,37 @@ fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // --- SHA-512/224 and SHA-512/256 ---
 
 fn sha512_224_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &[
-        0x8C3D37C819544DA2, 0x73E1996689DCD4D6, 0x1DFAB7AE32FF9C82, 0x679DD514582F9FCF,
-        0x0F6D2B697BD44DA8, 0x77E36F7304C48942, 0x3F9D85A86A1D36C8, 0x1112E6AD91D692A1,
-    ], 28)
+    sha512_core(
+        data,
+        &[
+            0x8C3D37C819544DA2,
+            0x73E1996689DCD4D6,
+            0x1DFAB7AE32FF9C82,
+            0x679DD514582F9FCF,
+            0x0F6D2B697BD44DA8,
+            0x77E36F7304C48942,
+            0x3F9D85A86A1D36C8,
+            0x1112E6AD91D692A1,
+        ],
+        28,
+    )
 }
 
 fn sha512_256_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(data, &[
-        0x22312194FC2BF72C, 0x9F555FA3C84C64C2, 0x2393B86B6F53B151, 0x963877195940EABD,
-        0x96283EE2A88EFFE3, 0xBE5E1E2553863992, 0x2B0199FC2C85B8AA, 0x0EB72DDC81C52CA2,
-    ], 32)
+    sha512_core(
+        data,
+        &[
+            0x22312194FC2BF72C,
+            0x9F555FA3C84C64C2,
+            0x2393B86B6F53B151,
+            0x963877195940EABD,
+            0x96283EE2A88EFFE3,
+            0xBE5E1E2553863992,
+            0x2B0199FC2C85B8AA,
+            0x0EB72DDC81C52CA2,
+        ],
+        32,
+    )
 }
 
 // --- SHA-3 (Keccak) ---
@@ -1416,10 +1904,14 @@ fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8
     while offset + rate_bytes <= data.len() {
         for i in 0..rate_bytes / 8 {
             let word = u64::from_le_bytes([
-                data[offset + i * 8], data[offset + i * 8 + 1],
-                data[offset + i * 8 + 2], data[offset + i * 8 + 3],
-                data[offset + i * 8 + 4], data[offset + i * 8 + 5],
-                data[offset + i * 8 + 6], data[offset + i * 8 + 7],
+                data[offset + i * 8],
+                data[offset + i * 8 + 1],
+                data[offset + i * 8 + 2],
+                data[offset + i * 8 + 3],
+                data[offset + i * 8 + 4],
+                data[offset + i * 8 + 5],
+                data[offset + i * 8 + 6],
+                data[offset + i * 8 + 7],
             ]);
             state[i] ^= word;
         }
@@ -1436,10 +1928,14 @@ fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8
 
     for i in 0..rate_bytes / 8 {
         let word = u64::from_le_bytes([
-            last_block[i * 8], last_block[i * 8 + 1],
-            last_block[i * 8 + 2], last_block[i * 8 + 3],
-            last_block[i * 8 + 4], last_block[i * 8 + 5],
-            last_block[i * 8 + 6], last_block[i * 8 + 7],
+            last_block[i * 8],
+            last_block[i * 8 + 1],
+            last_block[i * 8 + 2],
+            last_block[i * 8 + 3],
+            last_block[i * 8 + 4],
+            last_block[i * 8 + 5],
+            last_block[i * 8 + 6],
+            last_block[i * 8 + 7],
         ]);
         state[i] ^= word;
     }
@@ -1475,21 +1971,36 @@ fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8
 #[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
 fn keccak_f1600(state: &mut [u64; 25]) {
     const RC: [u64; 24] = [
-        0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
-        0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
-        0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
-        0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
-        0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
-        0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+        0x0000000000000001,
+        0x0000000000008082,
+        0x800000000000808A,
+        0x8000000080008000,
+        0x000000000000808B,
+        0x0000000080000001,
+        0x8000000080008081,
+        0x8000000000008009,
+        0x000000000000008A,
+        0x0000000000000088,
+        0x0000000080008009,
+        0x000000008000000A,
+        0x000000008000808B,
+        0x800000000000008B,
+        0x8000000000008089,
+        0x8000000000008003,
+        0x8000000000008002,
+        0x8000000000000080,
+        0x000000000000800A,
+        0x800000008000000A,
+        0x8000000080008081,
+        0x8000000000008080,
+        0x0000000080000001,
+        0x8000000080008008,
     ];
 
     // The rotation offsets for rho, indexed as [x + 5*y]
     const ROTATIONS: [u32; 25] = [
-         0,  1, 62, 28, 27,
-        36, 44,  6, 55, 20,
-         3, 10, 43, 25, 39,
-        41, 45, 15, 21,  8,
-        18,  2, 61, 56, 14,
+        0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56,
+        14,
     ];
 
     for round in 0..24 {
@@ -1520,7 +2031,8 @@ fn keccak_f1600(state: &mut [u64; 25]) {
         // Chi
         for y in 0..5 {
             for x in 0..5 {
-                state[x + 5 * y] = b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
+                state[x + 5 * y] =
+                    b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
             }
         }
 
@@ -1539,41 +2051,44 @@ fn ripemd128_hash(data: &[u8]) -> [u8; 16] {
     let bit_len = (data.len() as u64) * 8;
     let mut msg = data.to_vec();
     msg.push(0x80);
-    while msg.len() % 64 != 56 { msg.push(0); }
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
     for chunk in msg.chunks(64) {
         let mut x = [0u32; 16];
         for i in 0..16 {
-            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            x[i] = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         let (mut a, mut b, mut c, mut d) = (h0, h1, h2, h3);
         let (mut aa, mut bb, mut cc, mut dd) = (h0, h1, h2, h3);
 
         // Left rounds
         let rl = [
-            0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-            7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
-            3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
-            1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
+            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
+            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
         ];
         let sl = [
-            11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
-            7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
-            11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
-            11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
+            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
+            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
         ];
         let rr = [
-            5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
-            6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
-            15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
-            8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
+            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
+            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
         ];
         let sr = [
-            8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
-            9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
-            9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
-            15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
+            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
+            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
         ];
         let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
         let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
@@ -1587,8 +2102,16 @@ fn ripemd128_hash(data: &[u8]) -> [u8; 16] {
                 3 => (b & d) | (c & !d),
                 _ => unreachable!(),
             };
-            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(0u32);
-            a = d; d = c; c = b; b = t;
+            let t = a
+                .wrapping_add(f)
+                .wrapping_add(x[rl[j]])
+                .wrapping_add(kl[round])
+                .rotate_left(sl[j])
+                .wrapping_add(0u32);
+            a = d;
+            d = c;
+            c = b;
+            b = t;
 
             let ff = match round {
                 0 => (bb & dd) | (cc & !dd),
@@ -1597,8 +2120,16 @@ fn ripemd128_hash(data: &[u8]) -> [u8; 16] {
                 3 => bb ^ cc ^ dd,
                 _ => unreachable!(),
             };
-            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(0u32);
-            aa = dd; dd = cc; cc = bb; bb = tt;
+            let tt = aa
+                .wrapping_add(ff)
+                .wrapping_add(x[rr[j]])
+                .wrapping_add(kr[round])
+                .rotate_left(sr[j])
+                .wrapping_add(0u32);
+            aa = dd;
+            dd = cc;
+            cc = bb;
+            bb = tt;
         }
 
         let t = h1.wrapping_add(c).wrapping_add(dd);
@@ -1627,44 +2158,47 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
     let bit_len = (data.len() as u64) * 8;
     let mut msg = data.to_vec();
     msg.push(0x80);
-    while msg.len() % 64 != 56 { msg.push(0); }
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
     for chunk in msg.chunks(64) {
         let mut x = [0u32; 16];
         for i in 0..16 {
-            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            x[i] = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
         let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h0, h1, h2, h3, h4);
 
         let rl = [
-            0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-            7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
-            3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
-            1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
-            4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
+            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
+            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2, 4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6,
+            15, 13,
         ];
         let sl = [
-            11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
-            7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
-            11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
-            11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
-            9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6,
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
+            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
+            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12, 9, 15, 5, 11, 6, 8, 13, 12, 5, 12,
+            13, 14, 11, 8, 5, 6,
         ];
         let rr = [
-            5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
-            6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
-            15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
-            8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
-            12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11,
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
+            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
+            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14, 12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14,
+            0, 3, 9, 11,
         ];
         let sr = [
-            8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
-            9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
-            9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
-            15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
-            8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11,
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
+            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
+            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8, 8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6,
+            5, 15, 13, 11, 11,
         ];
         let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
         let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
@@ -1679,8 +2213,17 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
                 4 => b ^ (c | !d),
                 _ => unreachable!(),
             };
-            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(e);
-            a = e; e = d; d = c.rotate_left(10); c = b; b = t;
+            let t = a
+                .wrapping_add(f)
+                .wrapping_add(x[rl[j]])
+                .wrapping_add(kl[round])
+                .rotate_left(sl[j])
+                .wrapping_add(e);
+            a = e;
+            e = d;
+            d = c.rotate_left(10);
+            c = b;
+            b = t;
 
             let ff = match round {
                 0 => bb ^ (cc | !dd),
@@ -1690,8 +2233,17 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
                 4 => bb ^ cc ^ dd,
                 _ => unreachable!(),
             };
-            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(ee);
-            aa = ee; ee = dd; dd = cc.rotate_left(10); cc = bb; bb = tt;
+            let tt = aa
+                .wrapping_add(ff)
+                .wrapping_add(x[rr[j]])
+                .wrapping_add(kr[round])
+                .rotate_left(sr[j])
+                .wrapping_add(ee);
+            aa = ee;
+            ee = dd;
+            dd = cc.rotate_left(10);
+            cc = bb;
+            bb = tt;
         }
 
         let t = h1.wrapping_add(c).wrapping_add(dd);
@@ -1714,138 +2266,259 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
 // --- RIPEMD-256 ---
 fn ripemd256_hash(data: &[u8]) -> [u8; 32] {
     // RIPEMD-256 is an extension of RIPEMD-128 with 256-bit output
-    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476,
-                 0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567];
+    let mut h = [
+        0x67452301u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0x76543210,
+        0xfedcba98,
+        0x89abcdef,
+        0x01234567,
+    ];
 
     let bit_len = (data.len() as u64) * 8;
     let mut msg = data.to_vec();
     msg.push(0x80);
-    while msg.len() % 64 != 56 { msg.push(0); }
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
     for chunk in msg.chunks(64) {
         let mut x = [0u32; 16];
         for i in 0..16 {
-            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            x[i] = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
         let (mut aa, mut bb, mut cc, mut dd) = (h[4], h[5], h[6], h[7]);
 
-        let rl = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-                   7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
-                   3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
-                   1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2];
-        let sl = [11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
-                   7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
-                   11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
-                   11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12];
-        let rr = [5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
-                   6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
-                   15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
-                   8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14];
-        let sr = [8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
-                   9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
-                   9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
-                   15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8];
+        let rl = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
+            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
+            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+        ];
+        let sl = [
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
+            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
+            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+        ];
+        let rr = [
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
+            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
+            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+        ];
+        let sr = [
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
+            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
+            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+        ];
         let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
         let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
 
         for j in 0..64 {
             let round = j / 16;
-            let f = match round { 0 => b ^ c ^ d, 1 => (b & c) | (!b & d), 2 => (b | !c) ^ d, 3 => (b & d) | (c & !d), _ => unreachable!() };
-            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]);
-            a = d; d = c; c = b; b = t;
-            let ff = match round { 0 => (bb & dd) | (cc & !dd), 1 => (bb | !cc) ^ dd, 2 => (bb & cc) | (!bb & dd), 3 => bb ^ cc ^ dd, _ => unreachable!() };
-            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]);
-            aa = dd; dd = cc; cc = bb; bb = tt;
+            let f = match round {
+                0 => b ^ c ^ d,
+                1 => (b & c) | (!b & d),
+                2 => (b | !c) ^ d,
+                3 => (b & d) | (c & !d),
+                _ => unreachable!(),
+            };
+            let t = a
+                .wrapping_add(f)
+                .wrapping_add(x[rl[j]])
+                .wrapping_add(kl[round])
+                .rotate_left(sl[j]);
+            a = d;
+            d = c;
+            c = b;
+            b = t;
+            let ff = match round {
+                0 => (bb & dd) | (cc & !dd),
+                1 => (bb | !cc) ^ dd,
+                2 => (bb & cc) | (!bb & dd),
+                3 => bb ^ cc ^ dd,
+                _ => unreachable!(),
+            };
+            let tt = aa
+                .wrapping_add(ff)
+                .wrapping_add(x[rr[j]])
+                .wrapping_add(kr[round])
+                .rotate_left(sr[j]);
+            aa = dd;
+            dd = cc;
+            cc = bb;
+            bb = tt;
 
             // Swap after each round of 16
-            if j == 15 { std::mem::swap(&mut a, &mut aa); }
-            else if j == 31 { std::mem::swap(&mut b, &mut bb); }
-            else if j == 47 { std::mem::swap(&mut c, &mut cc); }
-            else if j == 63 { std::mem::swap(&mut d, &mut dd); }
+            if j == 15 {
+                std::mem::swap(&mut a, &mut aa);
+            } else if j == 31 {
+                std::mem::swap(&mut b, &mut bb);
+            } else if j == 47 {
+                std::mem::swap(&mut c, &mut cc);
+            } else if j == 63 {
+                std::mem::swap(&mut d, &mut dd);
+            }
         }
 
-        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(aa); h[5] = h[5].wrapping_add(bb);
-        h[6] = h[6].wrapping_add(cc); h[7] = h[7].wrapping_add(dd);
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(aa);
+        h[5] = h[5].wrapping_add(bb);
+        h[6] = h[6].wrapping_add(cc);
+        h[7] = h[7].wrapping_add(dd);
     }
 
     let mut result = [0u8; 32];
-    for i in 0..8 { result[i*4..(i+1)*4].copy_from_slice(&h[i].to_le_bytes()); }
+    for i in 0..8 {
+        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_le_bytes());
+    }
     result
 }
 
 // --- RIPEMD-320 ---
 fn ripemd320_hash(data: &[u8]) -> [u8; 40] {
     // RIPEMD-320 is an extension of RIPEMD-160 with 320-bit output
-    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0,
-                 0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567, 0x3c2d1e0f];
+    let mut h = [
+        0x67452301u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0xc3d2e1f0,
+        0x76543210,
+        0xfedcba98,
+        0x89abcdef,
+        0x01234567,
+        0x3c2d1e0f,
+    ];
 
     let bit_len = (data.len() as u64) * 8;
     let mut msg = data.to_vec();
     msg.push(0x80);
-    while msg.len() % 64 != 56 { msg.push(0); }
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
     for chunk in msg.chunks(64) {
         let mut x = [0u32; 16];
         for i in 0..16 {
-            x[i] = u32::from_le_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            x[i] = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
         let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h[5], h[6], h[7], h[8], h[9]);
 
-        let rl = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-                   7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
-                   3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
-                   1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
-                   4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13];
-        let sl = [11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
-                   7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
-                   11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
-                   11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
-                   9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6];
-        let rr = [5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
-                   6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
-                   15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,
-                   8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
-                   12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11];
-        let sr = [8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
-                   9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
-                   9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
-                   15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
-                   8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11];
+        let rl = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
+            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
+            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2, 4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6,
+            15, 13,
+        ];
+        let sl = [
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
+            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
+            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12, 9, 15, 5, 11, 6, 8, 13, 12, 5, 12,
+            13, 14, 11, 8, 5, 6,
+        ];
+        let rr = [
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
+            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
+            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14, 12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14,
+            0, 3, 9, 11,
+        ];
+        let sr = [
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
+            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
+            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8, 8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6,
+            5, 15, 13, 11, 11,
+        ];
         let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
         let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
 
         for j in 0..80 {
             let round = j / 16;
-            let f = match round { 0 => b ^ c ^ d, 1 => (b & c) | (!b & d), 2 => (b | !c) ^ d, 3 => (b & d) | (c & !d), 4 => b ^ (c | !d), _ => unreachable!() };
-            let t = a.wrapping_add(f).wrapping_add(x[rl[j]]).wrapping_add(kl[round]).rotate_left(sl[j]).wrapping_add(e);
-            a = e; e = d; d = c.rotate_left(10); c = b; b = t;
-            let ff = match round { 0 => bb ^ (cc | !dd), 1 => (bb & dd) | (cc & !dd), 2 => (bb | !cc) ^ dd, 3 => (bb & cc) | (!bb & dd), 4 => bb ^ cc ^ dd, _ => unreachable!() };
-            let tt = aa.wrapping_add(ff).wrapping_add(x[rr[j]]).wrapping_add(kr[round]).rotate_left(sr[j]).wrapping_add(ee);
-            aa = ee; ee = dd; dd = cc.rotate_left(10); cc = bb; bb = tt;
+            let f = match round {
+                0 => b ^ c ^ d,
+                1 => (b & c) | (!b & d),
+                2 => (b | !c) ^ d,
+                3 => (b & d) | (c & !d),
+                4 => b ^ (c | !d),
+                _ => unreachable!(),
+            };
+            let t = a
+                .wrapping_add(f)
+                .wrapping_add(x[rl[j]])
+                .wrapping_add(kl[round])
+                .rotate_left(sl[j])
+                .wrapping_add(e);
+            a = e;
+            e = d;
+            d = c.rotate_left(10);
+            c = b;
+            b = t;
+            let ff = match round {
+                0 => bb ^ (cc | !dd),
+                1 => (bb & dd) | (cc & !dd),
+                2 => (bb | !cc) ^ dd,
+                3 => (bb & cc) | (!bb & dd),
+                4 => bb ^ cc ^ dd,
+                _ => unreachable!(),
+            };
+            let tt = aa
+                .wrapping_add(ff)
+                .wrapping_add(x[rr[j]])
+                .wrapping_add(kr[round])
+                .rotate_left(sr[j])
+                .wrapping_add(ee);
+            aa = ee;
+            ee = dd;
+            dd = cc.rotate_left(10);
+            cc = bb;
+            bb = tt;
 
-            if j == 15 { std::mem::swap(&mut b, &mut bb); }
-            else if j == 31 { std::mem::swap(&mut d, &mut dd); }
-            else if j == 47 { std::mem::swap(&mut a, &mut aa); }
-            else if j == 63 { std::mem::swap(&mut c, &mut cc); }
-            else if j == 79 { std::mem::swap(&mut e, &mut ee); }
+            if j == 15 {
+                std::mem::swap(&mut b, &mut bb);
+            } else if j == 31 {
+                std::mem::swap(&mut d, &mut dd);
+            } else if j == 47 {
+                std::mem::swap(&mut a, &mut aa);
+            } else if j == 63 {
+                std::mem::swap(&mut c, &mut cc);
+            } else if j == 79 {
+                std::mem::swap(&mut e, &mut ee);
+            }
         }
 
-        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
         h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(aa); h[6] = h[6].wrapping_add(bb);
-        h[7] = h[7].wrapping_add(cc); h[8] = h[8].wrapping_add(dd);
+        h[5] = h[5].wrapping_add(aa);
+        h[6] = h[6].wrapping_add(bb);
+        h[7] = h[7].wrapping_add(cc);
+        h[8] = h[8].wrapping_add(dd);
         h[9] = h[9].wrapping_add(ee);
     }
 
     let mut result = [0u8; 40];
-    for i in 0..10 { result[i*4..(i+1)*4].copy_from_slice(&h[i].to_le_bytes()); }
+    for i in 0..10 {
+        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_le_bytes());
+    }
     result
 }
 
@@ -1864,13 +2537,20 @@ fn joaat_hash(data: &[u8]) -> u32 {
 }
 
 fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     if filename.is_empty() {
         let msg = "Path must not be empty".to_string();
         let exc = _vm.create_exception(b"ValueError", &msg, 0);
         _vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: _vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: _vm.current_line,
+        });
     }
     match std::fs::read(&filename) {
         Ok(data) => {
@@ -1884,8 +2564,12 @@ fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             let err_msg = match e.kind() {
-                std::io::ErrorKind::NotFound => "Failed to open stream: No such file or directory".to_string(),
-                std::io::ErrorKind::PermissionDenied => "Failed to open stream: Permission denied".to_string(),
+                std::io::ErrorKind::NotFound => {
+                    "Failed to open stream: No such file or directory".to_string()
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    "Failed to open stream: Permission denied".to_string()
+                }
                 _ => format!("Failed to open stream: {}", e),
             };
             _vm.emit_warning(&format!("sha1_file({}): {}", filename, err_msg));
@@ -1898,7 +2582,10 @@ fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::False);
     }
-    let algo = args[0].to_php_string().to_string_lossy().to_ascii_lowercase();
+    let algo = args[0]
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
     let filename_str = args[1].to_php_string();
     let filename_bytes = filename_str.as_bytes();
     let key = args[2].to_php_string();
@@ -1906,18 +2593,27 @@ fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Validate algorithm first
     if !is_crypto_algo(&algo) {
-        let msg = "hash_hmac_file(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
+        let msg =
+            "hash_hmac_file(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     // Check for null bytes in filename
     if filename_bytes.contains(&0u8) {
-        let msg = "hash_hmac_file(): Argument #2 ($filename) must not contain any null bytes".to_string();
+        let msg =
+            "hash_hmac_file(): Argument #2 ($filename) must not contain any null bytes".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: 0 });
+        return Err(VmError {
+            message: msg,
+            line: 0,
+        });
     }
 
     let filename = String::from_utf8_lossy(filename_bytes).to_string();
@@ -1930,7 +2626,10 @@ fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             hash_hmac_fn(vm, &[algo_val, data_val, key_val, raw_val])
         }
         Err(_) => {
-            vm.emit_warning(&format!("hash_hmac_file({}): Failed to open stream: No such file or directory", filename));
+            vm.emit_warning(&format!(
+                "hash_hmac_file({}): Failed to open stream: No such file or directory",
+                filename
+            ));
             Ok(Value::False)
         }
     }

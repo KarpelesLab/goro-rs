@@ -11,11 +11,13 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
-use handle::{CurlHandle, CURL_HANDLES as CURL_HANDLES_STORE};
+use handle::{CURL_HANDLES as CURL_HANDLES_STORE, CurlHandle};
 
 /// Helper: access the curl handles RefCell<HashMap>.
 /// Wraps the thread_local HandleStore so we can clear `private` on Drop.
-fn with_curl_handles<R>(f: impl FnOnce(&std::cell::RefCell<std::collections::HashMap<i64, CurlHandle>>) -> R) -> R {
+fn with_curl_handles<R>(
+    f: impl FnOnce(&std::cell::RefCell<std::collections::HashMap<i64, CurlHandle>>) -> R,
+) -> R {
     CURL_HANDLES_STORE.with(|store| f(&store.handles))
 }
 
@@ -146,14 +148,20 @@ fn arg_share_id(arg: Option<&Value>) -> Option<i64> {
 fn throw_value_error(vm: &mut Vm, msg: &str) -> VmError {
     let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 /// Throw a TypeError
 fn throw_type_error(vm: &mut Vm, msg: &str) -> VmError {
     let exc = vm.create_exception(b"TypeError", msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 /// Register all curl extension functions and constants
@@ -161,9 +169,18 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(b"curl");
 
     // Register classes
-    vm.classes.insert(b"curlhandle".to_vec(), ClassEntry::new(b"CurlHandle".to_vec()));
-    vm.classes.insert(b"curlmultihandle".to_vec(), ClassEntry::new(b"CurlMultiHandle".to_vec()));
-    vm.classes.insert(b"curlsharehandle".to_vec(), ClassEntry::new(b"CurlShareHandle".to_vec()));
+    vm.classes.insert(
+        b"curlhandle".to_vec(),
+        ClassEntry::new(b"CurlHandle".to_vec()),
+    );
+    vm.classes.insert(
+        b"curlmultihandle".to_vec(),
+        ClassEntry::new(b"CurlMultiHandle".to_vec()),
+    );
+    vm.classes.insert(
+        b"curlsharehandle".to_vec(),
+        ClassEntry::new(b"CurlShareHandle".to_vec()),
+    );
     let mut curlfile = ClassEntry::new(b"CURLFile".to_vec());
     curlfile.allow_dynamic_properties = true;
     vm.classes.insert(b"curlfile".to_vec(), curlfile);
@@ -206,251 +223,469 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"curl_unescape", curl_unescape);
 
     // CURLOPT constants
-    vm.constants.insert(b"CURLOPT_URL".to_vec(), Value::Long(10002));
-    vm.constants.insert(b"CURLOPT_RETURNTRANSFER".to_vec(), Value::Long(19913));
-    vm.constants.insert(b"CURLOPT_POST".to_vec(), Value::Long(47));
-    vm.constants.insert(b"CURLOPT_POSTFIELDS".to_vec(), Value::Long(10015));
-    vm.constants.insert(b"CURLOPT_HTTPHEADER".to_vec(), Value::Long(10023));
-    vm.constants.insert(b"CURLOPT_FOLLOWLOCATION".to_vec(), Value::Long(52));
-    vm.constants.insert(b"CURLOPT_MAXREDIRS".to_vec(), Value::Long(68));
-    vm.constants.insert(b"CURLOPT_TIMEOUT".to_vec(), Value::Long(13));
-    vm.constants.insert(b"CURLOPT_CONNECTTIMEOUT".to_vec(), Value::Long(78));
-    vm.constants.insert(b"CURLOPT_USERAGENT".to_vec(), Value::Long(10018));
-    vm.constants.insert(b"CURLOPT_HEADER".to_vec(), Value::Long(42));
-    vm.constants.insert(b"CURLOPT_NOBODY".to_vec(), Value::Long(44));
-    vm.constants.insert(b"CURLOPT_SSL_VERIFYPEER".to_vec(), Value::Long(64));
-    vm.constants.insert(b"CURLOPT_SSL_VERIFYHOST".to_vec(), Value::Long(81));
-    vm.constants.insert(b"CURLOPT_CUSTOMREQUEST".to_vec(), Value::Long(10036));
-    vm.constants.insert(b"CURLOPT_ENCODING".to_vec(), Value::Long(10102));
-    vm.constants.insert(b"CURLOPT_HTTPGET".to_vec(), Value::Long(80));
-    vm.constants.insert(b"CURLOPT_COOKIE".to_vec(), Value::Long(10022));
-    vm.constants.insert(b"CURLOPT_COOKIEFILE".to_vec(), Value::Long(10031));
-    vm.constants.insert(b"CURLOPT_USERPWD".to_vec(), Value::Long(10005));
-    vm.constants.insert(b"CURLOPT_HTTPAUTH".to_vec(), Value::Long(107));
-    vm.constants.insert(b"CURLOPT_HTTP_VERSION".to_vec(), Value::Long(84));
-    vm.constants.insert(b"CURLOPT_VERBOSE".to_vec(), Value::Long(41));
-    vm.constants.insert(b"CURLOPT_HEADERFUNCTION".to_vec(), Value::Long(20079));
-    vm.constants.insert(b"CURLOPT_WRITEFUNCTION".to_vec(), Value::Long(20011));
-    vm.constants.insert(b"CURLOPT_READFUNCTION".to_vec(), Value::Long(20012));
-    vm.constants.insert(b"CURLOPT_INFILESIZE".to_vec(), Value::Long(14));
-    vm.constants.insert(b"CURLOPT_PUT".to_vec(), Value::Long(54));
-    vm.constants.insert(b"CURLOPT_FAILONERROR".to_vec(), Value::Long(45));
-    vm.constants.insert(b"CURLOPT_SHARE".to_vec(), Value::Long(10100));
-    vm.constants.insert(b"CURLOPT_PRIVATE".to_vec(), Value::Long(10103));
+    vm.constants
+        .insert(b"CURLOPT_URL".to_vec(), Value::Long(10002));
+    vm.constants
+        .insert(b"CURLOPT_RETURNTRANSFER".to_vec(), Value::Long(19913));
+    vm.constants
+        .insert(b"CURLOPT_POST".to_vec(), Value::Long(47));
+    vm.constants
+        .insert(b"CURLOPT_POSTFIELDS".to_vec(), Value::Long(10015));
+    vm.constants
+        .insert(b"CURLOPT_HTTPHEADER".to_vec(), Value::Long(10023));
+    vm.constants
+        .insert(b"CURLOPT_FOLLOWLOCATION".to_vec(), Value::Long(52));
+    vm.constants
+        .insert(b"CURLOPT_MAXREDIRS".to_vec(), Value::Long(68));
+    vm.constants
+        .insert(b"CURLOPT_TIMEOUT".to_vec(), Value::Long(13));
+    vm.constants
+        .insert(b"CURLOPT_CONNECTTIMEOUT".to_vec(), Value::Long(78));
+    vm.constants
+        .insert(b"CURLOPT_USERAGENT".to_vec(), Value::Long(10018));
+    vm.constants
+        .insert(b"CURLOPT_HEADER".to_vec(), Value::Long(42));
+    vm.constants
+        .insert(b"CURLOPT_NOBODY".to_vec(), Value::Long(44));
+    vm.constants
+        .insert(b"CURLOPT_SSL_VERIFYPEER".to_vec(), Value::Long(64));
+    vm.constants
+        .insert(b"CURLOPT_SSL_VERIFYHOST".to_vec(), Value::Long(81));
+    vm.constants
+        .insert(b"CURLOPT_CUSTOMREQUEST".to_vec(), Value::Long(10036));
+    vm.constants
+        .insert(b"CURLOPT_ENCODING".to_vec(), Value::Long(10102));
+    vm.constants
+        .insert(b"CURLOPT_HTTPGET".to_vec(), Value::Long(80));
+    vm.constants
+        .insert(b"CURLOPT_COOKIE".to_vec(), Value::Long(10022));
+    vm.constants
+        .insert(b"CURLOPT_COOKIEFILE".to_vec(), Value::Long(10031));
+    vm.constants
+        .insert(b"CURLOPT_USERPWD".to_vec(), Value::Long(10005));
+    vm.constants
+        .insert(b"CURLOPT_HTTPAUTH".to_vec(), Value::Long(107));
+    vm.constants
+        .insert(b"CURLOPT_HTTP_VERSION".to_vec(), Value::Long(84));
+    vm.constants
+        .insert(b"CURLOPT_VERBOSE".to_vec(), Value::Long(41));
+    vm.constants
+        .insert(b"CURLOPT_HEADERFUNCTION".to_vec(), Value::Long(20079));
+    vm.constants
+        .insert(b"CURLOPT_WRITEFUNCTION".to_vec(), Value::Long(20011));
+    vm.constants
+        .insert(b"CURLOPT_READFUNCTION".to_vec(), Value::Long(20012));
+    vm.constants
+        .insert(b"CURLOPT_INFILESIZE".to_vec(), Value::Long(14));
+    vm.constants
+        .insert(b"CURLOPT_PUT".to_vec(), Value::Long(54));
+    vm.constants
+        .insert(b"CURLOPT_FAILONERROR".to_vec(), Value::Long(45));
+    vm.constants
+        .insert(b"CURLOPT_SHARE".to_vec(), Value::Long(10100));
+    vm.constants
+        .insert(b"CURLOPT_PRIVATE".to_vec(), Value::Long(10103));
 
     // CURLINFO constants
-    vm.constants.insert(b"CURLINFO_HTTP_CODE".to_vec(), Value::Long(2097154));
-    vm.constants.insert(b"CURLINFO_EFFECTIVE_URL".to_vec(), Value::Long(1048577));
-    vm.constants.insert(b"CURLINFO_CONTENT_TYPE".to_vec(), Value::Long(1048594));
-    vm.constants.insert(b"CURLINFO_TOTAL_TIME".to_vec(), Value::Long(3145731));
-    vm.constants.insert(b"CURLINFO_REDIRECT_COUNT".to_vec(), Value::Long(2097172));
-    vm.constants.insert(b"CURLINFO_HEADER_SIZE".to_vec(), Value::Long(2097163));
-    vm.constants.insert(b"CURLINFO_RESPONSE_CODE".to_vec(), Value::Long(2097154));
-    vm.constants.insert(b"CURLINFO_PRIVATE".to_vec(), Value::Long(1048597));
+    vm.constants
+        .insert(b"CURLINFO_HTTP_CODE".to_vec(), Value::Long(2097154));
+    vm.constants
+        .insert(b"CURLINFO_EFFECTIVE_URL".to_vec(), Value::Long(1048577));
+    vm.constants
+        .insert(b"CURLINFO_CONTENT_TYPE".to_vec(), Value::Long(1048594));
+    vm.constants
+        .insert(b"CURLINFO_TOTAL_TIME".to_vec(), Value::Long(3145731));
+    vm.constants
+        .insert(b"CURLINFO_REDIRECT_COUNT".to_vec(), Value::Long(2097172));
+    vm.constants
+        .insert(b"CURLINFO_HEADER_SIZE".to_vec(), Value::Long(2097163));
+    vm.constants
+        .insert(b"CURLINFO_RESPONSE_CODE".to_vec(), Value::Long(2097154));
+    vm.constants
+        .insert(b"CURLINFO_PRIVATE".to_vec(), Value::Long(1048597));
 
     // CURLE error constants
     vm.constants.insert(b"CURLE_OK".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLE_UNSUPPORTED_PROTOCOL".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLE_URL_MALFORMAT".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURLE_COULDNT_RESOLVE_HOST".to_vec(), Value::Long(6));
-    vm.constants.insert(b"CURLE_COULDNT_CONNECT".to_vec(), Value::Long(7));
-    vm.constants.insert(b"CURLE_OPERATION_TIMEDOUT".to_vec(), Value::Long(28));
-    vm.constants.insert(b"CURLE_SSL_CONNECT_ERROR".to_vec(), Value::Long(35));
+    vm.constants
+        .insert(b"CURLE_UNSUPPORTED_PROTOCOL".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLE_URL_MALFORMAT".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLE_COULDNT_RESOLVE_HOST".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"CURLE_COULDNT_CONNECT".to_vec(), Value::Long(7));
+    vm.constants
+        .insert(b"CURLE_OPERATION_TIMEDOUT".to_vec(), Value::Long(28));
+    vm.constants
+        .insert(b"CURLE_SSL_CONNECT_ERROR".to_vec(), Value::Long(35));
 
     // HTTP version constants
-    vm.constants.insert(b"CURL_HTTP_VERSION_NONE".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURL_HTTP_VERSION_1_0".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURL_HTTP_VERSION_1_1".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURL_HTTP_VERSION_NONE".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURL_HTTP_VERSION_1_0".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURL_HTTP_VERSION_1_1".to_vec(), Value::Long(2));
 
     // Auth constants
-    vm.constants.insert(b"CURLAUTH_BASIC".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLAUTH_DIGEST".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURLAUTH_ANY".to_vec(), Value::Long(-17));
+    vm.constants
+        .insert(b"CURLAUTH_BASIC".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLAUTH_DIGEST".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURLAUTH_ANY".to_vec(), Value::Long(-17));
 
     // CurlMulti constants
     vm.constants.insert(b"CURLM_OK".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLM_CALL_MULTI_PERFORM".to_vec(), Value::Long(-1));
-    vm.constants.insert(b"CURLM_INTERNAL_ERROR".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURLM_BAD_HANDLE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLM_BAD_EASY_HANDLE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURLM_OUT_OF_MEMORY".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURLM_UNKNOWN_OPTION".to_vec(), Value::Long(6));
-    vm.constants.insert(b"CURLMSG_DONE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLMOPT_MAXCONNECTS".to_vec(), Value::Long(6));
-    vm.constants.insert(b"CURLMOPT_PIPELINING".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLM_CALL_MULTI_PERFORM".to_vec(), Value::Long(-1));
+    vm.constants
+        .insert(b"CURLM_INTERNAL_ERROR".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURLM_BAD_HANDLE".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLM_BAD_EASY_HANDLE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURLM_OUT_OF_MEMORY".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLM_UNKNOWN_OPTION".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"CURLMSG_DONE".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLMOPT_MAXCONNECTS".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"CURLMOPT_PIPELINING".to_vec(), Value::Long(3));
 
     // Additional CURLOPT constants
-    vm.constants.insert(b"CURLOPT_FILE".to_vec(), Value::Long(10001));
-    vm.constants.insert(b"CURLOPT_STDERR".to_vec(), Value::Long(10037));
-    vm.constants.insert(b"CURLOPT_SAFE_UPLOAD".to_vec(), Value::Long(148));
-    vm.constants.insert(b"CURLOPT_NOPROGRESS".to_vec(), Value::Long(43));
-    vm.constants.insert(b"CURLOPT_UPLOAD".to_vec(), Value::Long(46));
-    vm.constants.insert(b"CURLOPT_PROGRESSFUNCTION".to_vec(), Value::Long(20056));
-    vm.constants.insert(b"CURLOPT_PROTOCOLS_STR".to_vec(), Value::Long(10318));
-    vm.constants.insert(b"CURLOPT_SSH_HOSTKEYFUNCTION".to_vec(), Value::Long(20316));
-    vm.constants.insert(b"CURLINFO_HEADER_OUT".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURL_LOCK_DATA_DNS".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURLOPT_INFILE".to_vec(), Value::Long(10009));
-    vm.constants.insert(b"CURLOPT_REFERER".to_vec(), Value::Long(10016));
-    vm.constants.insert(b"CURLOPT_PROXY".to_vec(), Value::Long(10004));
-    vm.constants.insert(b"CURLOPT_PROXYTYPE".to_vec(), Value::Long(101));
-    vm.constants.insert(b"CURLOPT_SSLCERT".to_vec(), Value::Long(10025));
-    vm.constants.insert(b"CURLOPT_SSLKEY".to_vec(), Value::Long(10087));
-    vm.constants.insert(b"CURLOPT_CAINFO".to_vec(), Value::Long(10065));
-    vm.constants.insert(b"CURLOPT_CAPATH".to_vec(), Value::Long(10097));
-    vm.constants.insert(b"CURLOPT_RANGE".to_vec(), Value::Long(10007));
-    vm.constants.insert(b"CURLOPT_RESUME_FROM".to_vec(), Value::Long(21));
-    vm.constants.insert(b"CURLOPT_BUFFERSIZE".to_vec(), Value::Long(98));
-    vm.constants.insert(b"CURLOPT_LOW_SPEED_LIMIT".to_vec(), Value::Long(19));
-    vm.constants.insert(b"CURLOPT_LOW_SPEED_TIME".to_vec(), Value::Long(20));
-    vm.constants.insert(b"CURLOPT_TIMEOUT_MS".to_vec(), Value::Long(155));
-    vm.constants.insert(b"CURLOPT_CONNECTTIMEOUT_MS".to_vec(), Value::Long(156));
-    vm.constants.insert(b"CURLOPT_PORT".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURLOPT_COOKIEJAR".to_vec(), Value::Long(10082));
-    vm.constants.insert(b"CURLOPT_COOKIESESSION".to_vec(), Value::Long(96));
-    vm.constants.insert(b"CURLOPT_SSLVERSION".to_vec(), Value::Long(32));
-    vm.constants.insert(b"CURLOPT_INTERFACE".to_vec(), Value::Long(10062));
-    vm.constants.insert(b"CURLOPT_XOAUTH2_BEARER".to_vec(), Value::Long(10220));
-    vm.constants.insert(b"CURLOPT_ACCEPT_ENCODING".to_vec(), Value::Long(10102));
-    vm.constants.insert(b"CURLOPT_TRANSFER_ENCODING".to_vec(), Value::Long(207));
-    vm.constants.insert(b"CURLOPT_MAXFILESIZE".to_vec(), Value::Long(114));
-    vm.constants.insert(b"CURLOPT_RESOLVE".to_vec(), Value::Long(10203));
-    vm.constants.insert(b"CURLOPT_DNS_SERVERS".to_vec(), Value::Long(10211));
-    vm.constants.insert(b"CURLOPT_XFERINFOFUNCTION".to_vec(), Value::Long(20219));
-    vm.constants.insert(b"CURLOPT_WRITEHEADER".to_vec(), Value::Long(10029));
-    vm.constants.insert(b"CURLOPT_DEBUGFUNCTION".to_vec(), Value::Long(20094));
-    vm.constants.insert(b"CURLOPT_READDATA".to_vec(), Value::Long(10009));
-    vm.constants.insert(b"CURLOPT_COOKIELIST".to_vec(), Value::Long(10135));
-    vm.constants.insert(b"CURLINFO_COOKIELIST".to_vec(), Value::Long(4194332));
-    vm.constants.insert(b"CURLOPT_FRESH_CONNECT".to_vec(), Value::Long(74));
-    vm.constants.insert(b"CURLOPT_FORBID_REUSE".to_vec(), Value::Long(75));
-    vm.constants.insert(b"CURLOPT_UPKEEP_INTERVAL_MS".to_vec(), Value::Long(281));
-    vm.constants.insert(b"CURLMOPT_PUSHFUNCTION".to_vec(), Value::Long(20014));
+    vm.constants
+        .insert(b"CURLOPT_FILE".to_vec(), Value::Long(10001));
+    vm.constants
+        .insert(b"CURLOPT_STDERR".to_vec(), Value::Long(10037));
+    vm.constants
+        .insert(b"CURLOPT_SAFE_UPLOAD".to_vec(), Value::Long(148));
+    vm.constants
+        .insert(b"CURLOPT_NOPROGRESS".to_vec(), Value::Long(43));
+    vm.constants
+        .insert(b"CURLOPT_UPLOAD".to_vec(), Value::Long(46));
+    vm.constants
+        .insert(b"CURLOPT_PROGRESSFUNCTION".to_vec(), Value::Long(20056));
+    vm.constants
+        .insert(b"CURLOPT_PROTOCOLS_STR".to_vec(), Value::Long(10318));
+    vm.constants
+        .insert(b"CURLOPT_SSH_HOSTKEYFUNCTION".to_vec(), Value::Long(20316));
+    vm.constants
+        .insert(b"CURLINFO_HEADER_OUT".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURL_LOCK_DATA_DNS".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLOPT_INFILE".to_vec(), Value::Long(10009));
+    vm.constants
+        .insert(b"CURLOPT_REFERER".to_vec(), Value::Long(10016));
+    vm.constants
+        .insert(b"CURLOPT_PROXY".to_vec(), Value::Long(10004));
+    vm.constants
+        .insert(b"CURLOPT_PROXYTYPE".to_vec(), Value::Long(101));
+    vm.constants
+        .insert(b"CURLOPT_SSLCERT".to_vec(), Value::Long(10025));
+    vm.constants
+        .insert(b"CURLOPT_SSLKEY".to_vec(), Value::Long(10087));
+    vm.constants
+        .insert(b"CURLOPT_CAINFO".to_vec(), Value::Long(10065));
+    vm.constants
+        .insert(b"CURLOPT_CAPATH".to_vec(), Value::Long(10097));
+    vm.constants
+        .insert(b"CURLOPT_RANGE".to_vec(), Value::Long(10007));
+    vm.constants
+        .insert(b"CURLOPT_RESUME_FROM".to_vec(), Value::Long(21));
+    vm.constants
+        .insert(b"CURLOPT_BUFFERSIZE".to_vec(), Value::Long(98));
+    vm.constants
+        .insert(b"CURLOPT_LOW_SPEED_LIMIT".to_vec(), Value::Long(19));
+    vm.constants
+        .insert(b"CURLOPT_LOW_SPEED_TIME".to_vec(), Value::Long(20));
+    vm.constants
+        .insert(b"CURLOPT_TIMEOUT_MS".to_vec(), Value::Long(155));
+    vm.constants
+        .insert(b"CURLOPT_CONNECTTIMEOUT_MS".to_vec(), Value::Long(156));
+    vm.constants
+        .insert(b"CURLOPT_PORT".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLOPT_COOKIEJAR".to_vec(), Value::Long(10082));
+    vm.constants
+        .insert(b"CURLOPT_COOKIESESSION".to_vec(), Value::Long(96));
+    vm.constants
+        .insert(b"CURLOPT_SSLVERSION".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"CURLOPT_INTERFACE".to_vec(), Value::Long(10062));
+    vm.constants
+        .insert(b"CURLOPT_XOAUTH2_BEARER".to_vec(), Value::Long(10220));
+    vm.constants
+        .insert(b"CURLOPT_ACCEPT_ENCODING".to_vec(), Value::Long(10102));
+    vm.constants
+        .insert(b"CURLOPT_TRANSFER_ENCODING".to_vec(), Value::Long(207));
+    vm.constants
+        .insert(b"CURLOPT_MAXFILESIZE".to_vec(), Value::Long(114));
+    vm.constants
+        .insert(b"CURLOPT_RESOLVE".to_vec(), Value::Long(10203));
+    vm.constants
+        .insert(b"CURLOPT_DNS_SERVERS".to_vec(), Value::Long(10211));
+    vm.constants
+        .insert(b"CURLOPT_XFERINFOFUNCTION".to_vec(), Value::Long(20219));
+    vm.constants
+        .insert(b"CURLOPT_WRITEHEADER".to_vec(), Value::Long(10029));
+    vm.constants
+        .insert(b"CURLOPT_DEBUGFUNCTION".to_vec(), Value::Long(20094));
+    vm.constants
+        .insert(b"CURLOPT_READDATA".to_vec(), Value::Long(10009));
+    vm.constants
+        .insert(b"CURLOPT_COOKIELIST".to_vec(), Value::Long(10135));
+    vm.constants
+        .insert(b"CURLINFO_COOKIELIST".to_vec(), Value::Long(4194332));
+    vm.constants
+        .insert(b"CURLOPT_FRESH_CONNECT".to_vec(), Value::Long(74));
+    vm.constants
+        .insert(b"CURLOPT_FORBID_REUSE".to_vec(), Value::Long(75));
+    vm.constants
+        .insert(b"CURLOPT_UPKEEP_INTERVAL_MS".to_vec(), Value::Long(281));
+    vm.constants
+        .insert(b"CURLMOPT_PUSHFUNCTION".to_vec(), Value::Long(20014));
 
     // CURLPAUSE constants
-    vm.constants.insert(b"CURLPAUSE_ALL".to_vec(), Value::Long(5));
-    vm.constants.insert(b"CURLPAUSE_CONT".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLPAUSE_RECV".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLPAUSE_RECV_CONT".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLPAUSE_SEND".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURLPAUSE_SEND_CONT".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURL_READFUNC_PAUSE".to_vec(), Value::Long(0x10000001));
+    vm.constants
+        .insert(b"CURLPAUSE_ALL".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURLPAUSE_CONT".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURLPAUSE_RECV".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLPAUSE_RECV_CONT".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURLPAUSE_SEND".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURLPAUSE_SEND_CONT".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURL_READFUNC_PAUSE".to_vec(), Value::Long(0x10000001));
 
     // Additional CURLINFO constants
-    vm.constants.insert(b"CURLINFO_SIZE_DOWNLOAD".to_vec(), Value::Long(3145736));
-    vm.constants.insert(b"CURLINFO_SIZE_UPLOAD".to_vec(), Value::Long(3145735));
-    vm.constants.insert(b"CURLINFO_SPEED_DOWNLOAD".to_vec(), Value::Long(3145737));
-    vm.constants.insert(b"CURLINFO_SPEED_UPLOAD".to_vec(), Value::Long(3145738));
-    vm.constants.insert(b"CURLINFO_FILETIME".to_vec(), Value::Long(2097166));
-    vm.constants.insert(b"CURLINFO_CONTENT_LENGTH_DOWNLOAD".to_vec(), Value::Long(3145743));
-    vm.constants.insert(b"CURLINFO_CONTENT_LENGTH_UPLOAD".to_vec(), Value::Long(3145744));
-    vm.constants.insert(b"CURLINFO_REDIRECT_URL".to_vec(), Value::Long(1048607));
-    vm.constants.insert(b"CURLINFO_PRIMARY_IP".to_vec(), Value::Long(1048608));
-    vm.constants.insert(b"CURLINFO_LOCAL_IP".to_vec(), Value::Long(1048617));
-    vm.constants.insert(b"CURLINFO_LOCAL_PORT".to_vec(), Value::Long(2097194));
-    vm.constants.insert(b"CURLINFO_PRIMARY_PORT".to_vec(), Value::Long(2097192));
+    vm.constants
+        .insert(b"CURLINFO_SIZE_DOWNLOAD".to_vec(), Value::Long(3145736));
+    vm.constants
+        .insert(b"CURLINFO_SIZE_UPLOAD".to_vec(), Value::Long(3145735));
+    vm.constants
+        .insert(b"CURLINFO_SPEED_DOWNLOAD".to_vec(), Value::Long(3145737));
+    vm.constants
+        .insert(b"CURLINFO_SPEED_UPLOAD".to_vec(), Value::Long(3145738));
+    vm.constants
+        .insert(b"CURLINFO_FILETIME".to_vec(), Value::Long(2097166));
+    vm.constants.insert(
+        b"CURLINFO_CONTENT_LENGTH_DOWNLOAD".to_vec(),
+        Value::Long(3145743),
+    );
+    vm.constants.insert(
+        b"CURLINFO_CONTENT_LENGTH_UPLOAD".to_vec(),
+        Value::Long(3145744),
+    );
+    vm.constants
+        .insert(b"CURLINFO_REDIRECT_URL".to_vec(), Value::Long(1048607));
+    vm.constants
+        .insert(b"CURLINFO_PRIMARY_IP".to_vec(), Value::Long(1048608));
+    vm.constants
+        .insert(b"CURLINFO_LOCAL_IP".to_vec(), Value::Long(1048617));
+    vm.constants
+        .insert(b"CURLINFO_LOCAL_PORT".to_vec(), Value::Long(2097194));
+    vm.constants
+        .insert(b"CURLINFO_PRIMARY_PORT".to_vec(), Value::Long(2097192));
 
     // CURL share constants
-    vm.constants.insert(b"CURL_LOCK_DATA_COOKIE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURL_LOCK_DATA_SSL_SESSION".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURL_LOCK_DATA_CONNECT".to_vec(), Value::Long(5));
-    vm.constants.insert(b"CURL_LOCK_DATA_PSL".to_vec(), Value::Long(6));
-    vm.constants.insert(b"CURLSHOPT_NONE".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLSHOPT_SHARE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLSHOPT_UNSHARE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURL_LOCK_DATA_COOKIE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURL_LOCK_DATA_SSL_SESSION".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURL_LOCK_DATA_CONNECT".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURL_LOCK_DATA_PSL".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"CURLSHOPT_NONE".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURLSHOPT_SHARE".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLSHOPT_UNSHARE".to_vec(), Value::Long(2));
     vm.constants.insert(b"CURLSHE_OK".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLSHE_BAD_OPTION".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLSHE_IN_USE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURLSHE_INVALID".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURLSHE_NOMEM".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURLSHE_NOT_BUILT_IN".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURLSHE_BAD_OPTION".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLSHE_IN_USE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURLSHE_INVALID".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURLSHE_NOMEM".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURLSHE_NOT_BUILT_IN".to_vec(), Value::Long(5));
 
     // CURLcode constants
-    vm.constants.insert(b"CURLE_ABORTED_BY_CALLBACK".to_vec(), Value::Long(42));
-    vm.constants.insert(b"CURLE_GOT_NOTHING".to_vec(), Value::Long(52));
-    vm.constants.insert(b"CURLE_RECV_ERROR".to_vec(), Value::Long(56));
-    vm.constants.insert(b"CURLE_SEND_ERROR".to_vec(), Value::Long(55));
+    vm.constants
+        .insert(b"CURLE_ABORTED_BY_CALLBACK".to_vec(), Value::Long(42));
+    vm.constants
+        .insert(b"CURLE_GOT_NOTHING".to_vec(), Value::Long(52));
+    vm.constants
+        .insert(b"CURLE_RECV_ERROR".to_vec(), Value::Long(56));
+    vm.constants
+        .insert(b"CURLE_SEND_ERROR".to_vec(), Value::Long(55));
 
     // CURLPROXY constants
-    vm.constants.insert(b"CURLPROXY_HTTP".to_vec(), Value::Long(0));
-    vm.constants.insert(b"CURLPROXY_SOCKS4".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURLPROXY_SOCKS5".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURLPROXY_HTTP".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"CURLPROXY_SOCKS4".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURLPROXY_SOCKS5".to_vec(), Value::Long(5));
 
     // CURL version constants
-    vm.constants.insert(b"CURL_VERSION_IPV6".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURL_VERSION_KERBEROS4".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURL_VERSION_SSL".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURL_VERSION_LIBZ".to_vec(), Value::Long(8));
-    vm.constants.insert(b"CURL_VERSION_NTLM".to_vec(), Value::Long(16));
-    vm.constants.insert(b"CURL_VERSION_GSSNEGOTIATE".to_vec(), Value::Long(32));
-    vm.constants.insert(b"CURL_VERSION_DEBUG".to_vec(), Value::Long(64));
-    vm.constants.insert(b"CURL_VERSION_ASYNCHDNS".to_vec(), Value::Long(128));
-    vm.constants.insert(b"CURL_VERSION_SPNEGO".to_vec(), Value::Long(256));
-    vm.constants.insert(b"CURL_VERSION_LARGEFILE".to_vec(), Value::Long(512));
-    vm.constants.insert(b"CURL_VERSION_IDN".to_vec(), Value::Long(1024));
-    vm.constants.insert(b"CURL_VERSION_SSPI".to_vec(), Value::Long(2048));
-    vm.constants.insert(b"CURL_VERSION_CONV".to_vec(), Value::Long(4096));
-    vm.constants.insert(b"CURL_VERSION_CURLDEBUG".to_vec(), Value::Long(8192));
-    vm.constants.insert(b"CURL_VERSION_TLSAUTH_SRP".to_vec(), Value::Long(16384));
-    vm.constants.insert(b"CURL_VERSION_NTLM_WB".to_vec(), Value::Long(32768));
-    vm.constants.insert(b"CURL_VERSION_HTTP2".to_vec(), Value::Long(65536));
-    vm.constants.insert(b"CURL_VERSION_GSSAPI".to_vec(), Value::Long(131072));
-    vm.constants.insert(b"CURL_VERSION_KERBEROS5".to_vec(), Value::Long(262144));
-    vm.constants.insert(b"CURL_VERSION_UNIX_SOCKETS".to_vec(), Value::Long(524288));
-    vm.constants.insert(b"CURL_VERSION_PSL".to_vec(), Value::Long(1048576));
-    vm.constants.insert(b"CURL_VERSION_HTTPS_PROXY".to_vec(), Value::Long(2097152));
-    vm.constants.insert(b"CURL_VERSION_MULTI_SSL".to_vec(), Value::Long(4194304));
-    vm.constants.insert(b"CURL_VERSION_BROTLI".to_vec(), Value::Long(8388608));
-    vm.constants.insert(b"CURL_VERSION_ALTSVC".to_vec(), Value::Long(16777216));
-    vm.constants.insert(b"CURL_VERSION_HTTP3".to_vec(), Value::Long(33554432));
-    vm.constants.insert(b"CURL_VERSION_ZSTD".to_vec(), Value::Long(67108864));
-    vm.constants.insert(b"CURL_VERSION_UNICODE".to_vec(), Value::Long(134217728));
-    vm.constants.insert(b"CURL_VERSION_HSTS".to_vec(), Value::Long(268435456));
-    vm.constants.insert(b"CURL_VERSION_GSASL".to_vec(), Value::Long(536870912));
+    vm.constants
+        .insert(b"CURL_VERSION_IPV6".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURL_VERSION_KERBEROS4".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURL_VERSION_SSL".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURL_VERSION_LIBZ".to_vec(), Value::Long(8));
+    vm.constants
+        .insert(b"CURL_VERSION_NTLM".to_vec(), Value::Long(16));
+    vm.constants
+        .insert(b"CURL_VERSION_GSSNEGOTIATE".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"CURL_VERSION_DEBUG".to_vec(), Value::Long(64));
+    vm.constants
+        .insert(b"CURL_VERSION_ASYNCHDNS".to_vec(), Value::Long(128));
+    vm.constants
+        .insert(b"CURL_VERSION_SPNEGO".to_vec(), Value::Long(256));
+    vm.constants
+        .insert(b"CURL_VERSION_LARGEFILE".to_vec(), Value::Long(512));
+    vm.constants
+        .insert(b"CURL_VERSION_IDN".to_vec(), Value::Long(1024));
+    vm.constants
+        .insert(b"CURL_VERSION_SSPI".to_vec(), Value::Long(2048));
+    vm.constants
+        .insert(b"CURL_VERSION_CONV".to_vec(), Value::Long(4096));
+    vm.constants
+        .insert(b"CURL_VERSION_CURLDEBUG".to_vec(), Value::Long(8192));
+    vm.constants
+        .insert(b"CURL_VERSION_TLSAUTH_SRP".to_vec(), Value::Long(16384));
+    vm.constants
+        .insert(b"CURL_VERSION_NTLM_WB".to_vec(), Value::Long(32768));
+    vm.constants
+        .insert(b"CURL_VERSION_HTTP2".to_vec(), Value::Long(65536));
+    vm.constants
+        .insert(b"CURL_VERSION_GSSAPI".to_vec(), Value::Long(131072));
+    vm.constants
+        .insert(b"CURL_VERSION_KERBEROS5".to_vec(), Value::Long(262144));
+    vm.constants
+        .insert(b"CURL_VERSION_UNIX_SOCKETS".to_vec(), Value::Long(524288));
+    vm.constants
+        .insert(b"CURL_VERSION_PSL".to_vec(), Value::Long(1048576));
+    vm.constants
+        .insert(b"CURL_VERSION_HTTPS_PROXY".to_vec(), Value::Long(2097152));
+    vm.constants
+        .insert(b"CURL_VERSION_MULTI_SSL".to_vec(), Value::Long(4194304));
+    vm.constants
+        .insert(b"CURL_VERSION_BROTLI".to_vec(), Value::Long(8388608));
+    vm.constants
+        .insert(b"CURL_VERSION_ALTSVC".to_vec(), Value::Long(16777216));
+    vm.constants
+        .insert(b"CURL_VERSION_HTTP3".to_vec(), Value::Long(33554432));
+    vm.constants
+        .insert(b"CURL_VERSION_ZSTD".to_vec(), Value::Long(67108864));
+    vm.constants
+        .insert(b"CURL_VERSION_UNICODE".to_vec(), Value::Long(134217728));
+    vm.constants
+        .insert(b"CURL_VERSION_HSTS".to_vec(), Value::Long(268435456));
+    vm.constants
+        .insert(b"CURL_VERSION_GSASL".to_vec(), Value::Long(536870912));
 
     // CURL sslversion constants
-    vm.constants.insert(b"CURL_SSLVERSION_TLSv1".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_0".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_1".to_vec(), Value::Long(5));
-    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_2".to_vec(), Value::Long(6));
-    vm.constants.insert(b"CURL_SSLVERSION_TLSv1_3".to_vec(), Value::Long(7));
+    vm.constants
+        .insert(b"CURL_SSLVERSION_TLSv1".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURL_SSLVERSION_TLSv1_0".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURL_SSLVERSION_TLSv1_1".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURL_SSLVERSION_TLSv1_2".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"CURL_SSLVERSION_TLSv1_3".to_vec(), Value::Long(7));
 
     // HTTP version constants
-    vm.constants.insert(b"CURL_HTTP_VERSION_2_0".to_vec(), Value::Long(3));
-    vm.constants.insert(b"CURL_HTTP_VERSION_2TLS".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"CURL_HTTP_VERSION_2_0".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"CURL_HTTP_VERSION_2TLS".to_vec(), Value::Long(4));
+    vm.constants.insert(
+        b"CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE".to_vec(),
+        Value::Long(5),
+    );
 
     // CURLPROTO_* constants
-    vm.constants.insert(b"CURLPROTO_HTTP".to_vec(), Value::Long(1));
-    vm.constants.insert(b"CURLPROTO_HTTPS".to_vec(), Value::Long(2));
-    vm.constants.insert(b"CURLPROTO_FTP".to_vec(), Value::Long(4));
-    vm.constants.insert(b"CURLPROTO_FTPS".to_vec(), Value::Long(8));
-    vm.constants.insert(b"CURLPROTO_SCP".to_vec(), Value::Long(16));
-    vm.constants.insert(b"CURLPROTO_SFTP".to_vec(), Value::Long(32));
-    vm.constants.insert(b"CURLPROTO_TELNET".to_vec(), Value::Long(64));
-    vm.constants.insert(b"CURLPROTO_LDAP".to_vec(), Value::Long(128));
-    vm.constants.insert(b"CURLPROTO_LDAPS".to_vec(), Value::Long(256));
-    vm.constants.insert(b"CURLPROTO_DICT".to_vec(), Value::Long(512));
-    vm.constants.insert(b"CURLPROTO_FILE".to_vec(), Value::Long(1024));
-    vm.constants.insert(b"CURLPROTO_TFTP".to_vec(), Value::Long(2048));
-    vm.constants.insert(b"CURLPROTO_IMAP".to_vec(), Value::Long(4096));
-    vm.constants.insert(b"CURLPROTO_IMAPS".to_vec(), Value::Long(8192));
-    vm.constants.insert(b"CURLPROTO_POP3".to_vec(), Value::Long(16384));
-    vm.constants.insert(b"CURLPROTO_POP3S".to_vec(), Value::Long(32768));
-    vm.constants.insert(b"CURLPROTO_SMTP".to_vec(), Value::Long(65536));
-    vm.constants.insert(b"CURLPROTO_SMTPS".to_vec(), Value::Long(131072));
-    vm.constants.insert(b"CURLPROTO_RTSP".to_vec(), Value::Long(262144));
-    vm.constants.insert(b"CURLPROTO_RTMP".to_vec(), Value::Long(524288));
-    vm.constants.insert(b"CURLPROTO_RTMPT".to_vec(), Value::Long(1048576));
-    vm.constants.insert(b"CURLPROTO_RTMPE".to_vec(), Value::Long(2097152));
-    vm.constants.insert(b"CURLPROTO_RTMPTE".to_vec(), Value::Long(4194304));
-    vm.constants.insert(b"CURLPROTO_RTMPS".to_vec(), Value::Long(8388608));
-    vm.constants.insert(b"CURLPROTO_RTMPTS".to_vec(), Value::Long(16777216));
-    vm.constants.insert(b"CURLPROTO_GOPHER".to_vec(), Value::Long(33554432));
-    vm.constants.insert(b"CURLPROTO_SMB".to_vec(), Value::Long(67108864));
-    vm.constants.insert(b"CURLPROTO_SMBS".to_vec(), Value::Long(134217728));
-    vm.constants.insert(b"CURLPROTO_MQTT".to_vec(), Value::Long(268435456));
-    vm.constants.insert(b"CURLPROTO_ALL".to_vec(), Value::Long(-1));
+    vm.constants
+        .insert(b"CURLPROTO_HTTP".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"CURLPROTO_HTTPS".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"CURLPROTO_FTP".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"CURLPROTO_FTPS".to_vec(), Value::Long(8));
+    vm.constants
+        .insert(b"CURLPROTO_SCP".to_vec(), Value::Long(16));
+    vm.constants
+        .insert(b"CURLPROTO_SFTP".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"CURLPROTO_TELNET".to_vec(), Value::Long(64));
+    vm.constants
+        .insert(b"CURLPROTO_LDAP".to_vec(), Value::Long(128));
+    vm.constants
+        .insert(b"CURLPROTO_LDAPS".to_vec(), Value::Long(256));
+    vm.constants
+        .insert(b"CURLPROTO_DICT".to_vec(), Value::Long(512));
+    vm.constants
+        .insert(b"CURLPROTO_FILE".to_vec(), Value::Long(1024));
+    vm.constants
+        .insert(b"CURLPROTO_TFTP".to_vec(), Value::Long(2048));
+    vm.constants
+        .insert(b"CURLPROTO_IMAP".to_vec(), Value::Long(4096));
+    vm.constants
+        .insert(b"CURLPROTO_IMAPS".to_vec(), Value::Long(8192));
+    vm.constants
+        .insert(b"CURLPROTO_POP3".to_vec(), Value::Long(16384));
+    vm.constants
+        .insert(b"CURLPROTO_POP3S".to_vec(), Value::Long(32768));
+    vm.constants
+        .insert(b"CURLPROTO_SMTP".to_vec(), Value::Long(65536));
+    vm.constants
+        .insert(b"CURLPROTO_SMTPS".to_vec(), Value::Long(131072));
+    vm.constants
+        .insert(b"CURLPROTO_RTSP".to_vec(), Value::Long(262144));
+    vm.constants
+        .insert(b"CURLPROTO_RTMP".to_vec(), Value::Long(524288));
+    vm.constants
+        .insert(b"CURLPROTO_RTMPT".to_vec(), Value::Long(1048576));
+    vm.constants
+        .insert(b"CURLPROTO_RTMPE".to_vec(), Value::Long(2097152));
+    vm.constants
+        .insert(b"CURLPROTO_RTMPTE".to_vec(), Value::Long(4194304));
+    vm.constants
+        .insert(b"CURLPROTO_RTMPS".to_vec(), Value::Long(8388608));
+    vm.constants
+        .insert(b"CURLPROTO_RTMPTS".to_vec(), Value::Long(16777216));
+    vm.constants
+        .insert(b"CURLPROTO_GOPHER".to_vec(), Value::Long(33554432));
+    vm.constants
+        .insert(b"CURLPROTO_SMB".to_vec(), Value::Long(67108864));
+    vm.constants
+        .insert(b"CURLPROTO_SMBS".to_vec(), Value::Long(134217728));
+    vm.constants
+        .insert(b"CURLPROTO_MQTT".to_vec(), Value::Long(268435456));
+    vm.constants
+        .insert(b"CURLPROTO_ALL".to_vec(), Value::Long(-1));
 }
 
 /// curl_init(?string $url = null): CurlHandle|false
@@ -493,13 +728,21 @@ fn is_known_curlopt(option: i64) -> bool {
 
 /// Apply a single curl option to a handle.
 /// Returns (success, exception_msg) where exception_msg signals a ValueError.
-fn apply_setopt(vm: &mut Vm, handle: &mut CurlHandle, option: i64, value: &Value) -> Result<bool, VmError> {
+fn apply_setopt(
+    vm: &mut Vm,
+    handle: &mut CurlHandle,
+    option: i64,
+    value: &Value,
+) -> Result<bool, VmError> {
     // Special validation per option
     if option == CURLOPT_URL {
         let url_str = value.to_php_string();
         // Check for null bytes
         if url_str.as_bytes().contains(&0) {
-            return Err(throw_value_error(vm, "curl_setopt(): cURL option must not contain any null bytes"));
+            return Err(throw_value_error(
+                vm,
+                "curl_setopt(): cURL option must not contain any null bytes",
+            ));
         }
         let s = url_str.to_string_lossy();
         handle.url = s.clone();
@@ -571,7 +814,10 @@ fn apply_setopt(vm: &mut Vm, handle: &mut CurlHandle, option: i64, value: &Value
                     }
                 }
             } else {
-                return Err(throw_type_error(vm, "curl_setopt(): The CURLOPT_HTTPHEADER option must have an array value"));
+                return Err(throw_type_error(
+                    vm,
+                    "curl_setopt(): The CURLOPT_HTTPHEADER option must have an array value",
+                ));
             }
         }
         CURLOPT_FOLLOWLOCATION => handle.follow_location = value.to_long() != 0,
@@ -635,14 +881,20 @@ fn curl_setopt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let opt_arg = args.get(1).unwrap_or(&Value::Null);
     let opt_arg_deref = opt_arg.deref();
     if let Value::String(_) = opt_arg_deref {
-        return Err(throw_type_error(vm, "curl_setopt(): Argument #2 ($option) must be of type int, string given"));
+        return Err(throw_type_error(
+            vm,
+            "curl_setopt(): Argument #2 ($option) must be of type int, string given",
+        ));
     }
     let option = opt_arg_deref.to_long();
     let value = args.get(2).cloned().unwrap_or(Value::Null);
 
     // First validate option is known
     if !is_known_curlopt(option) {
-        return Err(throw_value_error(vm, "curl_setopt(): Argument #2 ($option) is not a valid cURL option"));
+        return Err(throw_value_error(
+            vm,
+            "curl_setopt(): Argument #2 ($option) is not a valid cURL option",
+        ));
     }
 
     // Take handle out, apply, put back
@@ -733,9 +985,13 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let request_data = with_curl_handles(|handles| {
         let handles = handles.borrow();
-        handles.get(&handle_id).map(|handle| (
+        handles.get(&handle_id).map(|handle| {
+            (
                 handle.url.clone(),
-                handle.custom_request.clone().unwrap_or_else(|| handle.method.clone()),
+                handle
+                    .custom_request
+                    .clone()
+                    .unwrap_or_else(|| handle.method.clone()),
                 handle.headers.clone(),
                 handle.post_fields.clone(),
                 handle.timeout,
@@ -750,7 +1006,8 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 handle.include_header,
                 handle.nobody,
                 handle.fail_on_error,
-            ))
+            )
+        })
     });
 
     let (
@@ -793,7 +1050,11 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         config_builder = config_builder.timeout_global(Some(Duration::from_secs(timeout)));
     }
     if follow_location {
-        let max_redir = if max_redirects < 0 { 30 } else { max_redirects as u32 };
+        let max_redir = if max_redirects < 0 {
+            30
+        } else {
+            max_redirects as u32
+        };
         config_builder = config_builder.max_redirects(max_redir);
     } else {
         config_builder = config_builder.max_redirects(0);
@@ -848,7 +1109,8 @@ fn curl_exec(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 with_curl_handles(|handles| {
                     let mut handles = handles.borrow_mut();
                     if let Some(handle) = handles.get_mut(&handle_id) {
-                        handle.error_message = format!("The requested URL returned error: {}", status);
+                        handle.error_message =
+                            format!("The requested URL returned error: {}", status);
                         handle.error_number = 22;
                     }
                 });
@@ -927,7 +1189,9 @@ fn execute_request(
         }
 
         if let Some(body) = post_fields {
-            let has_content_type = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
+            let has_content_type = headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
             if !has_content_type {
                 request = request.header("Content-Type", "application/x-www-form-urlencoded");
             }
@@ -1029,7 +1293,9 @@ fn classify_ureq_error(e: &ureq::Error) -> (i64, String) {
 /// curl_close(CurlHandle $handle): void
 /// PHP 8.5: deprecated since 8.5, no-op since 8.0
 fn curl_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated("Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0");
+    vm.emit_deprecated(
+        "Function curl_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
+    );
     // No-op (handle stays alive); just consume the argument
     let _ = arg_curl_id(args.first());
     Ok(Value::Null)
@@ -1043,7 +1309,10 @@ fn curl_error(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let msg = with_curl_handles(|handles| {
         let handles = handles.borrow();
-        handles.get(&handle_id).map(|h| h.error_message.clone()).unwrap_or_default()
+        handles
+            .get(&handle_id)
+            .map(|h| h.error_message.clone())
+            .unwrap_or_default()
     });
     Ok(Value::String(PhpString::from_string(msg)))
 }
@@ -1080,14 +1349,16 @@ fn curl_getinfo(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let opt_val = opt.to_long();
                 match opt_val {
                     CURLINFO_HTTP_CODE => Ok(Value::Long(handle.response_code)),
-                    CURLINFO_EFFECTIVE_URL => {
-                        Ok(Value::String(PhpString::from_string(handle.effective_url.clone())))
-                    }
+                    CURLINFO_EFFECTIVE_URL => Ok(Value::String(PhpString::from_string(
+                        handle.effective_url.clone(),
+                    ))),
                     CURLINFO_CONTENT_TYPE => {
                         if handle.content_type.is_empty() {
                             Ok(Value::Null)
                         } else {
-                            Ok(Value::String(PhpString::from_string(handle.content_type.clone())))
+                            Ok(Value::String(PhpString::from_string(
+                                handle.content_type.clone(),
+                            )))
                         }
                     }
                     CURLINFO_TOTAL_TIME => Ok(Value::Double(handle.total_time)),
@@ -1124,44 +1395,158 @@ fn build_info_array(handle: &CurlHandle) -> Value {
             Value::String(PhpString::from_string(handle.content_type.clone()))
         },
     );
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"http_code")), Value::Long(handle.response_code));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"header_size")), Value::Long(handle.header_size as i64));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"request_size")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"filetime")), Value::Long(-1));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"ssl_verify_result")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"redirect_count")), Value::Long(handle.redirect_count));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"total_time")), Value::Double(handle.total_time));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"namelookup_time")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"connect_time")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"pretransfer_time")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"size_upload")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"size_download")), Value::Double(handle.response_body.len() as f64));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"speed_download")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"speed_upload")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"download_content_length")), Value::Double(-1.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"upload_content_length")), Value::Double(-1.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"starttransfer_time")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"redirect_time")), Value::Double(0.0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"redirect_url")), Value::String(PhpString::empty()));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"primary_ip")), Value::String(PhpString::empty()));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"certinfo")), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"primary_port")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"local_ip")), Value::String(PhpString::empty()));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"local_port")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"http_version")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"protocol")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"ssl_verifyresult")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"scheme")), Value::String(PhpString::empty()));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"appconnect_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"connect_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"namelookup_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"pretransfer_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"redirect_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"starttransfer_time_us")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"total_time_us")), Value::Long((handle.total_time * 1e6) as i64));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"effective_method")), Value::String(PhpString::from_string(handle.method.clone())));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"capath")), Value::String(PhpString::empty()));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"cainfo")), Value::String(PhpString::empty()));
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"http_code")),
+        Value::Long(handle.response_code),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"header_size")),
+        Value::Long(handle.header_size as i64),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"request_size")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"filetime")),
+        Value::Long(-1),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"ssl_verify_result")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"redirect_count")),
+        Value::Long(handle.redirect_count),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"total_time")),
+        Value::Double(handle.total_time),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"namelookup_time")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"connect_time")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"pretransfer_time")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"size_upload")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"size_download")),
+        Value::Double(handle.response_body.len() as f64),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"speed_download")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"speed_upload")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"download_content_length")),
+        Value::Double(-1.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"upload_content_length")),
+        Value::Double(-1.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"starttransfer_time")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"redirect_time")),
+        Value::Double(0.0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"redirect_url")),
+        Value::String(PhpString::empty()),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"primary_ip")),
+        Value::String(PhpString::empty()),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"certinfo")),
+        Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"primary_port")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"local_ip")),
+        Value::String(PhpString::empty()),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"local_port")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"http_version")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"protocol")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"ssl_verifyresult")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"scheme")),
+        Value::String(PhpString::empty()),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"appconnect_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"connect_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"namelookup_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"pretransfer_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"redirect_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"starttransfer_time_us")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"total_time_us")),
+        Value::Long((handle.total_time * 1e6) as i64),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"effective_method")),
+        Value::String(PhpString::from_string(handle.method.clone())),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"capath")),
+        Value::String(PhpString::empty()),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"cainfo")),
+        Value::String(PhpString::empty()),
+    );
 
     Value::Array(Rc::new(RefCell::new(arr)))
 }
@@ -1185,30 +1570,76 @@ fn curl_reset(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn curl_version(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
 
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"version_number")), Value::Long(0x075500));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"age")), Value::Long(9));
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"version_number")),
+        Value::Long(0x075500),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"age")),
+        Value::Long(9),
+    );
     // Features bitmask: SSL | IPV6 | LIBZ | LARGEFILE | NTLM | HTTP2 | UNIX_SOCKETS | HTTPS_PROXY
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"features")), Value::Long(4 | 1 | 8 | 512 | 16 | 65536 | 524288 | 2097152));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"ssl_version_number")), Value::Long(0));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"version")), Value::String(PhpString::from_bytes(b"7.85.0")));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"host")), Value::String(PhpString::from_bytes(b"rust")));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"ssl_version")), Value::String(PhpString::from_bytes(b"rustls/0.23")));
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"libz_version")), Value::String(PhpString::from_bytes(b"1.2.13")));
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"features")),
+        Value::Long(4 | 1 | 8 | 512 | 16 | 65536 | 524288 | 2097152),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"ssl_version_number")),
+        Value::Long(0),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"version")),
+        Value::String(PhpString::from_bytes(b"7.85.0")),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"host")),
+        Value::String(PhpString::from_bytes(b"rust")),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"ssl_version")),
+        Value::String(PhpString::from_bytes(b"rustls/0.23")),
+    );
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"libz_version")),
+        Value::String(PhpString::from_bytes(b"1.2.13")),
+    );
     let protos = {
         let mut protos = PhpArray::new();
         protos.push(Value::String(PhpString::from_bytes(b"http")));
         protos.push(Value::String(PhpString::from_bytes(b"https")));
         Value::Array(Rc::new(RefCell::new(protos)))
     };
-    arr.set(ArrayKey::String(PhpString::from_bytes(b"protocols")), protos);
+    arr.set(
+        ArrayKey::String(PhpString::from_bytes(b"protocols")),
+        protos,
+    );
 
     // Feature list - all bool false
     let mut feature_list = PhpArray::new();
     for &k in &[
-        "AsynchDNS", "CharConv", "Debug", "GSS-Negotiate", "IDN", "IPv6",
-        "krb4", "Largefile", "libz", "NTLM", "NTLMWB", "SPNEGO",
-        "SSL", "SSPI", "TLS-SRP", "HTTP2", "GSSAPI", "KERBEROS5",
-        "UNIX_SOCKETS", "PSL", "HTTPS_PROXY", "MULTI_SSL", "BROTLI",
+        "AsynchDNS",
+        "CharConv",
+        "Debug",
+        "GSS-Negotiate",
+        "IDN",
+        "IPv6",
+        "krb4",
+        "Largefile",
+        "libz",
+        "NTLM",
+        "NTLMWB",
+        "SPNEGO",
+        "SSL",
+        "SSPI",
+        "TLS-SRP",
+        "HTTP2",
+        "GSSAPI",
+        "KERBEROS5",
+        "UNIX_SOCKETS",
+        "PSL",
+        "HTTPS_PROXY",
+        "MULTI_SSL",
+        "BROTLI",
     ] {
         feature_list.set(
             ArrayKey::String(PhpString::from_bytes(k.as_bytes())),
@@ -1217,8 +1648,14 @@ fn curl_version(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     }
     // Set a few to true
     feature_list.set(ArrayKey::String(PhpString::from_bytes(b"SSL")), Value::True);
-    feature_list.set(ArrayKey::String(PhpString::from_bytes(b"IPv6")), Value::True);
-    feature_list.set(ArrayKey::String(PhpString::from_bytes(b"libz")), Value::True);
+    feature_list.set(
+        ArrayKey::String(PhpString::from_bytes(b"IPv6")),
+        Value::True,
+    );
+    feature_list.set(
+        ArrayKey::String(PhpString::from_bytes(b"libz")),
+        Value::True,
+    );
     arr.set(
         ArrayKey::String(PhpString::from_bytes(b"feature_list")),
         Value::Array(Rc::new(RefCell::new(feature_list))),
@@ -1372,9 +1809,7 @@ fn curl_multi_get_handles(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         Some(id) => id,
         None => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    let ids = MULTI_HANDLES.with(|h| {
-        h.borrow().get(&multi_id).cloned().unwrap_or_default()
-    });
+    let ids = MULTI_HANDLES.with(|h| h.borrow().get(&multi_id).cloned().unwrap_or_default());
     let mut arr = PhpArray::new();
     for cid in ids {
         // Create a CurlHandle object referring to existing handle
@@ -1480,7 +1915,9 @@ fn curl_share_setopt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// curl_share_close: deprecated since 8.5, no-op since 8.0
 fn curl_share_close(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated("Function curl_share_close() is deprecated since 8.5, as it has no effect since PHP 8.0");
+    vm.emit_deprecated(
+        "Function curl_share_close() is deprecated since 8.5, as it has no effect since PHP 8.0",
+    );
     let _ = arg_share_id(args.first());
     Ok(Value::Null)
 }
@@ -1537,9 +1974,18 @@ fn curl_upkeep(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
-    let mime_type = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"application/octet-stream"));
-    let posted_filename = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
+    let filename = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let mime_type = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"application/octet-stream"));
+    let posted_filename = args
+        .get(2)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
 
     let id = vm.next_object_id();
     let mut obj = PhpObject::new(b"CURLFile".to_vec(), id);
@@ -1552,7 +1998,10 @@ fn curl_file_create(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// curl_escape(CurlHandle $handle, string $string): string|false
 fn curl_escape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _handle_id = arg_curl_id(args.first());
-    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
+    let s = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
     let mut result = String::new();
     for byte in s.as_bytes() {
         match *byte {
@@ -1568,7 +2017,10 @@ fn curl_escape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// curl_unescape(CurlHandle $handle, string $string): string|false
 fn curl_unescape(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let _handle_id = arg_curl_id(args.first());
-    let s = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(PhpString::empty);
+    let s = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
     let bytes = s.as_bytes();
     let mut result = Vec::new();
     let mut i = 0;

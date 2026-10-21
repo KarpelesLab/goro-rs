@@ -25,11 +25,17 @@ fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> Result<Value, VmError> {
     let line = vm.current_line;
     let exc = vm.create_exception(class, msg, line);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg.to_string(), line })
+    Err(VmError {
+        message: msg.to_string(),
+        line,
+    })
 }
 
 fn is_closure_name(b: &[u8]) -> bool {
-    b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_")
+    b.starts_with(b"__closure_")
+        || b.starts_with(b"__arrow_")
+        || b.starts_with(b"__bound_closure_")
+        || b.starts_with(b"__closure_fcc_")
 }
 
 fn class_display(vm: &Vm, class_lower: &[u8]) -> String {
@@ -52,7 +58,11 @@ fn check_access(vm: &Vm, ce_name: &[u8], m: &goro_core::object::MethodDef) -> Re
         let decl = &m.declaring_class;
         let ok = match m.visibility {
             Visibility::Private => scope_l == *decl,
-            _ => scope_l == *decl || vm.class_extends(&scope_l, decl) || vm.class_extends(decl, &scope_l),
+            _ => {
+                scope_l == *decl
+                    || vm.class_extends(&scope_l, decl)
+                    || vm.class_extends(decl, &scope_l)
+            }
         };
         if ok {
             return Ok(());
@@ -75,7 +85,12 @@ fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, Str
     }
     let ce = match vm.classes.get(&cl) {
         Some(c) => c.clone(),
-        None => return Err(format!("class \"{}\" not found", String::from_utf8_lossy(class))),
+        None => {
+            return Err(format!(
+                "class \"{}\" not found",
+                String::from_utf8_lossy(class)
+            ));
+        }
     };
     let ml = lower(method);
     match ce.get_method(&ml) {
@@ -133,7 +148,10 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
                     .unwrap_or_else(|| name.to_vec());
                 return Ok(Value::String(PhpString::from_vec(declared)));
             }
-            Err(format!("function \"{}\" not found or invalid function name", s.to_string_lossy()))
+            Err(format!(
+                "function \"{}\" not found or invalid function name",
+                s.to_string_lossy()
+            ))
         }
         Value::Array(a) => {
             let vals: Vec<Value> = a.borrow().values().cloned().collect();
@@ -160,7 +178,11 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
                             let ce_name = ce.as_ref().map(|c| c.name.clone()).unwrap_or_default();
                             if let Err(e) = check_access(vm, &ce_name, &m) {
                                 // Inaccessible methods go through __call.
-                                if ce.as_ref().map(|c| c.get_method(b"__call").is_some()).unwrap_or(false) {
+                                if ce
+                                    .as_ref()
+                                    .map(|c| c.get_method(b"__call").is_some())
+                                    .unwrap_or(false)
+                                {
                                     return Ok(cb.clone());
                                 }
                                 return Err(e);
@@ -176,7 +198,11 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
                             Ok(Value::Array(Rc::new(RefCell::new(arr))))
                         }
                         None => {
-                            if ce.as_ref().map(|c| c.get_method(b"__call").is_some()).unwrap_or(false) {
+                            if ce
+                                .as_ref()
+                                .map(|c| c.get_method(b"__call").is_some())
+                                .unwrap_or(false)
+                            {
                                 return Ok(cb.clone());
                             }
                             Err(format!(
@@ -193,7 +219,13 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
         }
         Value::Object(o) => {
             let cl = lower(&o.borrow().class_name);
-            if cl == b"closure" || vm.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false) {
+            if cl == b"closure"
+                || vm
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__invoke").is_some())
+                    .unwrap_or(false)
+            {
                 Ok(cb.clone())
             } else {
                 Err("no array or string given".to_string())
@@ -210,11 +242,16 @@ fn same_callable(a: &Value, b: &Value) -> bool {
             let xb = x.borrow();
             let yb = y.borrow();
             xb.len() == yb.len()
-                && xb.iter().zip(yb.iter()).all(|((_, va), (_, vb))| match (va, vb) {
-                    (Value::String(sa), Value::String(sb)) => sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes()),
-                    (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
-                    _ => false,
-                })
+                && xb
+                    .iter()
+                    .zip(yb.iter())
+                    .all(|((_, va), (_, vb))| match (va, vb) {
+                        (Value::String(sa), Value::String(sb)) => {
+                            sa.as_bytes().eq_ignore_ascii_case(sb.as_bytes())
+                        }
+                        (Value::Object(oa), Value::Object(ob)) => Rc::ptr_eq(oa, ob),
+                        _ => false,
+                    })
         }
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
         _ => false,
@@ -256,7 +293,11 @@ pub fn spl_autoload_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         }
     }
     let prepend = args.get(2).is_some_and(|v| v.to_bool());
-    if vm.autoload_functions.iter().any(|e| same_callable(e, &normalized)) {
+    if vm
+        .autoload_functions
+        .iter()
+        .any(|e| same_callable(e, &normalized))
+    {
         return Ok(Value::True);
     }
     if prepend {
@@ -291,11 +332,18 @@ pub fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     let normalized = match resolve_callable(vm, &callback) {
         Ok(v) => v,
         Err(detail) => {
-            let msg = format!("spl_autoload_unregister(): Argument #1 ($callback) must be a valid callback, {}", detail);
+            let msg = format!(
+                "spl_autoload_unregister(): Argument #1 ($callback) must be a valid callback, {}",
+                detail
+            );
             return throw(vm, b"TypeError", &msg);
         }
     };
-    if let Some(p) = vm.autoload_functions.iter().position(|e| same_callable(e, &normalized)) {
+    if let Some(p) = vm
+        .autoload_functions
+        .iter()
+        .position(|e| same_callable(e, &normalized))
+    {
         vm.autoload_functions.remove(p);
         Ok(Value::True)
     } else {
@@ -304,7 +352,9 @@ pub fn spl_autoload_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 
 fn current_extensions() -> Vec<u8> {
-    AUTOLOAD_EXTENSIONS.with(|e| e.borrow().clone()).unwrap_or_else(|| DEFAULT_EXTENSIONS.to_vec())
+    AUTOLOAD_EXTENSIONS
+        .with(|e| e.borrow().clone())
+        .unwrap_or_else(|| DEFAULT_EXTENSIONS.to_vec())
 }
 
 pub fn spl_autoload_extensions_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -321,7 +371,11 @@ pub fn spl_autoload_extensions_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value,
 /// directory (php_resolve_path).
 fn resolve_include(vm: &Vm, file: &str) -> Option<String> {
     if file.starts_with('/') {
-        return if std::path::Path::new(file).is_file() { Some(file.to_string()) } else { None };
+        return if std::path::Path::new(file).is_file() {
+            Some(file.to_string())
+        } else {
+            None
+        };
     }
     let inc = vm
         .constants
@@ -330,20 +384,30 @@ fn resolve_include(vm: &Vm, file: &str) -> Option<String> {
         .unwrap_or_else(|| ".".to_string());
     for dir in inc.split(':') {
         let base = if dir.is_empty() || dir == "." {
-            std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| ".".to_string())
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
         } else {
             dir.to_string()
         };
         let p = format!("{}/{}", base.trim_end_matches('/'), file);
         if std::path::Path::new(&p).is_file() {
-            return Some(std::fs::canonicalize(&p).map(|c| c.to_string_lossy().to_string()).unwrap_or(p));
+            return Some(
+                std::fs::canonicalize(&p)
+                    .map(|c| c.to_string_lossy().to_string())
+                    .unwrap_or(p),
+            );
         }
     }
     // Fallback: the directory of the executing script.
     if let Some(pos) = vm.current_file.rfind('/') {
         let p = format!("{}/{}", &vm.current_file[..pos], file);
         if std::path::Path::new(&p).is_file() {
-            return Some(std::fs::canonicalize(&p).map(|c| c.to_string_lossy().to_string()).unwrap_or(p));
+            return Some(
+                std::fs::canonicalize(&p)
+                    .map(|c| c.to_string_lossy().to_string())
+                    .unwrap_or(p),
+            );
         }
     }
     None
@@ -353,11 +417,19 @@ pub fn spl_autoload_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class = match args.first().map(|v| v.deref()) {
         Some(Value::String(s)) => s.as_bytes().to_vec(),
         Some(Value::Array(_)) => {
-            return throw(vm, b"TypeError", "spl_autoload(): Argument #1 ($class) must be of type string, array given");
+            return throw(
+                vm,
+                b"TypeError",
+                "spl_autoload(): Argument #1 ($class) must be of type string, array given",
+            );
         }
         Some(v) => v.to_php_string().as_bytes().to_vec(),
         None => {
-            return throw(vm, b"ArgumentCountError", "spl_autoload() expects at least 1 argument, 0 given");
+            return throw(
+                vm,
+                b"ArgumentCountError",
+                "spl_autoload() expects at least 1 argument, 0 given",
+            );
         }
     };
     let exts = match args.get(1).map(|v| v.deref()) {
@@ -395,7 +467,11 @@ pub fn spl_autoload_call_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             return throw(vm, b"TypeError", &msg);
         }
         None => {
-            return throw(vm, b"ArgumentCountError", "spl_autoload_call() expects exactly 1 argument, 0 given");
+            return throw(
+                vm,
+                b"ArgumentCountError",
+                "spl_autoload_call() expects exactly 1 argument, 0 given",
+            );
         }
     };
     let lc = lower(class.as_bytes());
@@ -416,4 +492,3 @@ pub fn spl_autoload_call_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
     Ok(Value::Null)
 }
-

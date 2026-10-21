@@ -254,7 +254,14 @@ struct Graph {
 
 impl Graph {
     fn new() -> Self {
-        Graph { nodes: Vec::new(), index: HashMap::new(), children: Vec::new(), internal: Vec::new(), opaque: Vec::new(), ephemerons: HashMap::new() }
+        Graph {
+            nodes: Vec::new(),
+            index: HashMap::new(),
+            children: Vec::new(),
+            internal: Vec::new(),
+            opaque: Vec::new(),
+            ephemerons: HashMap::new(),
+        }
     }
     fn add(&mut self, n: Node) -> usize {
         let p = n.ptr();
@@ -290,13 +297,17 @@ impl Graph {
                     }
                     // WeakMap values keyed by this object are reachable
                     // through it (and only through it).
-                    if let Some(vals) = self.ephemerons.remove(&(Rc::as_ptr(o) as *const u8 as usize)) {
+                    if let Some(vals) = self
+                        .ephemerons
+                        .remove(&(Rc::as_ptr(o) as *const u8 as usize))
+                    {
                         for v in &vals {
                             if let Some(c) = self.add_value(v) {
                                 kids.push(c);
                             }
                         }
-                        self.ephemerons.insert(Rc::as_ptr(o) as *const u8 as usize, vals);
+                        self.ephemerons
+                            .insert(Rc::as_ptr(o) as *const u8 as usize, vals);
                     }
                     true
                 }
@@ -342,7 +353,11 @@ struct Analysis {
 }
 
 #[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
-fn analyze(extra_refs: &HashMap<usize, usize>, ephemerons: HashMap<usize, Vec<Value>>, limit: Option<usize>) -> Analysis {
+fn analyze(
+    extra_refs: &HashMap<usize, usize>,
+    ephemerons: HashMap<usize, Vec<Value>>,
+    limit: Option<usize>,
+) -> Analysis {
     let mut g = Graph::new();
     g.ephemerons = ephemerons;
     // Seed with candidates.
@@ -350,7 +365,9 @@ fn analyze(extra_refs: &HashMap<usize, usize>, ephemerons: HashMap<usize, Vec<Va
         let mut t = t.borrow_mut();
         t.retain(|w| w.strong_count() > 0);
         PRUNE_AT.with(|p| p.set((t.len() * 2).max(4096)));
-        if limit.is_some() { return Vec::new(); }
+        if limit.is_some() {
+            return Vec::new();
+        }
         t.iter().filter_map(|w| w.upgrade()).collect()
     });
     // Automatic runs only look at the root buffer (like Zend); explicit
@@ -417,8 +434,22 @@ fn analyze(extra_refs: &HashMap<usize, usize>, ephemerons: HashMap<usize, Vec<Va
     if std::env::var_os("GORO_GC_DEBUG").is_some() {
         for idx in 0..len {
             let n = &g.nodes[idx];
-            let kind = match n { Node::Obj(o) => format!("obj#{}", o.try_borrow().map(|b| b.object_id).unwrap_or(0)), Node::Arr(_) => "arr".into(), Node::Ref(_) => "ref".into() };
-            eprintln!("gc node {} {} strong={} internal={} extra={} opaque={} live={} kids={:?}", idx, kind, n.strong(), g.internal[idx], extra_refs.get(&n.ptr()).copied().unwrap_or(0), g.opaque[idx], live[idx], g.children[idx]);
+            let kind = match n {
+                Node::Obj(o) => format!("obj#{}", o.try_borrow().map(|b| b.object_id).unwrap_or(0)),
+                Node::Arr(_) => "arr".into(),
+                Node::Ref(_) => "ref".into(),
+            };
+            eprintln!(
+                "gc node {} {} strong={} internal={} extra={} opaque={} live={} kids={:?}",
+                idx,
+                kind,
+                n.strong(),
+                g.internal[idx],
+                extra_refs.get(&n.ptr()).copied().unwrap_or(0),
+                g.opaque[idx],
+                live[idx],
+                g.children[idx]
+            );
         }
     }
     let garbage = live.iter().map(|l| !l).collect();
@@ -441,7 +472,6 @@ pub trait GcHost {
         Vec::new()
     }
 }
-
 
 /// Run a collection. Returns the number of freed arrays/objects.
 #[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
@@ -582,12 +612,21 @@ impl GcHost for crate::vm::Vm {
         m
     }
     fn gc_needs_destructor(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
-        let Ok(b) = obj.try_borrow() else { return false };
+        let Ok(b) = obj.try_borrow() else {
+            return false;
+        };
         if matches!(b.get_property(b"__destructed"), Value::True) {
             return false;
         }
-        let lower: Vec<u8> = b.class_name.iter().map(|c| c.to_ascii_lowercase()).collect();
-        self.classes.get(&lower).and_then(|c| c.get_method(b"__destruct")).is_some()
+        let lower: Vec<u8> = b
+            .class_name
+            .iter()
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        self.classes
+            .get(&lower)
+            .and_then(|c| c.get_method(b"__destruct"))
+            .is_some()
     }
     fn gc_call_destructor(&mut self, obj: &Rc<RefCell<PhpObject>>) {
         if self.current_exception.is_some() {
@@ -618,7 +657,9 @@ impl GcHost for crate::vm::Vm {
         let mut out = Vec::new();
         for entries in self.weak_map_entries.values() {
             for (_, w, v) in entries {
-                if w.strong_count() > 0 && matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                if w.strong_count() > 0
+                    && matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_))
+                {
                     out.push((w.as_ptr() as *const u8 as usize, v.clone()));
                 }
             }

@@ -45,12 +45,24 @@ pub(crate) fn ao_flags(obj: &Rc<RefCell<PhpObject>>) -> i64 {
 
 /// Names of hidden engine-internal properties (never part of a table).
 pub(crate) fn is_hidden_prop(name: &[u8]) -> bool {
-    name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_")
-        || name.starts_with(b"__ctor_") || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-        || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp") || name.starts_with(b"__lazy_")
-        || name.starts_with(b"__uri_") || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-        || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") || name.starts_with(b"__pkey_id")
-        || name.starts_with(b"__cert_id") || name.starts_with(b"__csr_id") || name.starts_with(b"__xml_")
+    name.starts_with(b"__spl_")
+        || name.starts_with(b"__reflection_")
+        || name.starts_with(b"__enum_")
+        || name.starts_with(b"__ctor_")
+        || name.starts_with(b"__clone_")
+        || name.starts_with(b"__destructed")
+        || name.starts_with(b"__fiber_")
+        || name.starts_with(b"__timestamp")
+        || name.starts_with(b"__lazy_")
+        || name.starts_with(b"__uri_")
+        || name.starts_with(b"__weak_ref_id")
+        || name.starts_with(b"__sxml_")
+        || name.starts_with(b"__hash_")
+        || name.starts_with(b"__hmac_")
+        || name.starts_with(b"__pkey_id")
+        || name.starts_with(b"__cert_id")
+        || name.starts_with(b"__csr_id")
+        || name.starts_with(b"__xml_")
         || name.starts_with(b"__regex_")
 }
 
@@ -116,7 +128,11 @@ impl Vm {
 
     pub(crate) fn table_entries(&self, t: &Table) -> Vec<(ArrayKey, Value)> {
         match t {
-            Table::Arr(a) => a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Table::Arr(a) => a
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             Table::Obj(o) => {
                 let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
                 props
@@ -134,7 +150,11 @@ impl Vm {
             Table::Obj(o) => {
                 let name = key_name(k);
                 let ob = o.borrow();
-                let found = ob.properties.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone());
+                let found = ob
+                    .properties
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.clone());
                 drop(ob);
                 match found {
                     Some(v) if self.ao_prop_visible(o, &name, &v) => Some(v),
@@ -213,15 +233,24 @@ impl Vm {
     }
 
     /// get_hash_key(): Ok(key) or Err(type name) for illegal offsets.
-    fn ao_hash_key(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) -> Result<ArrayKey, String> {
+    fn ao_hash_key(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: &Value,
+    ) -> Result<ArrayKey, String> {
         let k = match offset.deref() {
             Value::Null | Value::Undef => {
-                self.emit_deprecated("Using null as an array offset is deprecated, use an empty string instead");
+                self.emit_deprecated(
+                    "Using null as an array offset is deprecated, use an empty string instead",
+                );
                 ArrayKey::String(PhpString::empty())
             }
             Value::String(s) => Self::value_to_array_key(Value::String(s)),
             Value::Resource(r) => {
-                let msg = format!("Resource ID#{} used as offset, casting to integer ({})", r, r);
+                let msg = format!(
+                    "Resource ID#{} used as offset, casting to integer ({})",
+                    r, r
+                );
                 self.emit_warning(&msg);
                 ArrayKey::Int(r)
             }
@@ -239,7 +268,9 @@ impl Vm {
             Value::True => ArrayKey::Int(1),
             Value::Long(n) => ArrayKey::Int(n),
             Value::Array(_) => return Err("array".to_string()),
-            Value::Object(o) => return Err(crate::value::display_class_name(&o.borrow().class_name).to_string()),
+            Value::Object(o) => {
+                return Err(crate::value::display_class_name(&o.borrow().class_name).to_string());
+            }
             other => return Err(Self::value_type_name(&other)),
         };
         // Object tables only have string keys.
@@ -268,7 +299,10 @@ impl Vm {
     fn ao_sort_check(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         // The sort lock lives on the object whose table is being sorted.
         if Self::ao_sorting(obj) {
-            self.spl_throw(b"Error", "Modification of ArrayObject during sorting is prohibited");
+            self.spl_throw(
+                b"Error",
+                "Modification of ArrayObject during sorting is prohibited",
+            );
             return false;
         }
         true
@@ -317,7 +351,11 @@ impl Vm {
                 Table::Obj(_) => {
                     // zend_hash_next_index_insert on a property table
                     let n = self.table_entries(&t).len();
-                    self.table_set(&t, ArrayKey::String(PhpString::from_string(n.to_string())), v);
+                    self.table_set(
+                        &t,
+                        ArrayKey::String(PhpString::from_string(n.to_string())),
+                        v,
+                    );
                 }
             }
             return;
@@ -351,7 +389,10 @@ impl Vm {
     /// Whether the object's (user) class overrides an ArrayAccess method.
     pub(crate) fn ao_user_has(&self, obj: &Rc<RefCell<PhpObject>>, m: &[u8]) -> bool {
         let cl = obj_class_lower(obj);
-        self.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false)
+        self.classes
+            .get(&cl)
+            .map(|c| c.get_method(m).is_some())
+            .unwrap_or(false)
     }
 
     /// ARRAY_AS_PROPS routes a property access to the storage when no real
@@ -361,17 +402,26 @@ impl Vm {
             return false;
         }
         let cl = obj_class_lower(obj);
-        if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_none() {
+        if self
+            .spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"])
+            .is_none()
+        {
             return false;
         }
         ao_flags(obj) & ARRAY_AS_PROPS != 0 && !obj.borrow().has_property(name)
     }
 
     /// spl_array_has_dimension_ex(check_inherited=true, check_empty=0): isset().
-    pub(crate) fn ao_has_dimension(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) -> bool {
+    pub(crate) fn ao_has_dimension(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: &Value,
+    ) -> bool {
         if self.ao_user_has(obj, b"offsetexists") {
             let ov = Value::Object(obj.clone());
-            let r = self.call_object_method(&ov, b"offsetExists", std::slice::from_ref(offset)).unwrap_or(Value::False);
+            let r = self
+                .call_object_method(&ov, b"offsetExists", std::slice::from_ref(offset))
+                .unwrap_or(Value::False);
             return self.current_exception.is_none() && r.is_truthy();
         }
         self.ao_offset_exists(obj, offset, 0)
@@ -379,14 +429,20 @@ impl Vm {
 
     /// has_property(ZEND_PROPERTY_EXISTS) for property_exists(): Some(result)
     /// when ARRAY_AS_PROPS routes the name to the storage.
-    pub fn spl_property_exists_hook(&mut self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<bool> {
+    pub fn spl_property_exists_hook(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+    ) -> Option<bool> {
         if !self.ao_prop_as_dim(obj, name) {
             return None;
         }
         let key = Value::String(PhpString::from_bytes(name));
         if self.ao_user_has(obj, b"offsetexists") {
             let ov = Value::Object(obj.clone());
-            let r = self.call_object_method(&ov, b"offsetExists", std::slice::from_ref(&key)).unwrap_or(Value::False);
+            let r = self
+                .call_object_method(&ov, b"offsetExists", std::slice::from_ref(&key))
+                .unwrap_or(Value::False);
             if self.current_exception.is_some() || !r.is_truthy() {
                 return Some(false);
             }
@@ -405,7 +461,12 @@ impl Vm {
     }
 
     /// spl_array_has_dimension_ex(check_inherited=false): check_empty 0/1/2.
-    pub(crate) fn ao_offset_exists(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value, check_empty: u8) -> bool {
+    pub(crate) fn ao_offset_exists(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: &Value,
+        check_empty: u8,
+    ) -> bool {
         let k = match self.ao_hash_key(obj, offset) {
             Ok(k) => k,
             Err(tn) => {
@@ -535,7 +596,9 @@ impl Vm {
                     return false;
                 }
                 let ocl = obj_class_lower(&o);
-                let other_is_ao = self.spl_find_base(&ocl, &[b"arrayobject", b"arrayiterator"]).is_some();
+                let other_is_ao = self
+                    .spl_find_base(&ocl, &[b"arrayobject", b"arrayiterator"])
+                    .is_some();
                 if other_is_ao {
                     if just_array {
                         ar_flags = ao_flags(&o) & !INT_MASK;
@@ -560,7 +623,11 @@ impl Vm {
                         .is_some()
                         || matches!(
                             ocl.as_slice(),
-                            b"dateinterval" | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateperiod"
+                            b"dateinterval"
+                                | b"datetime"
+                                | b"datetimeimmutable"
+                                | b"datetimezone"
+                                | b"dateperiod"
                         );
                     if overloaded {
                         let m = format!(
@@ -587,12 +654,20 @@ impl Vm {
     pub fn ao_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, args: &[Value]) -> bool {
         let base = self.ao_base_name(obj);
         let func = format!("{}::__construct", base);
-        if !matches!(prop(obj, b"__spl_array"), Value::Array(_) | Value::Object(_)) {
+        if !matches!(
+            prop(obj, b"__spl_array"),
+            Value::Array(_) | Value::Object(_)
+        ) {
             set_prop(obj, b"__spl_array", val_arr(PhpArray::new()));
         }
         let max = if base == "ArrayObject" { 3 } else { 2 };
         if args.len() > max {
-            let msg = format!("{}() expects at most {} arguments, {} given", func, max, args.len());
+            let msg = format!(
+                "{}() expects at most {} arguments, {} given",
+                func,
+                max,
+                args.len()
+            );
             self.spl_throw(b"ArgumentCountError", &msg);
             return false;
         }
@@ -628,7 +703,13 @@ impl Vm {
     }
 
     /// Z_PARAM_CLASS with ArrayIterator as base.
-    fn ao_iterator_class_arg(&mut self, func: &str, argn: usize, name: &str, v: &Value) -> Option<PhpString> {
+    fn ao_iterator_class_arg(
+        &mut self,
+        func: &str,
+        argn: usize,
+        name: &str,
+        v: &Value,
+    ) -> Option<PhpString> {
         let s = match v.deref() {
             Value::String(s) => s,
             other => {
@@ -643,7 +724,11 @@ impl Vm {
                 return None;
             }
         };
-        let cl: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        let cl: Vec<u8> = s
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         if !self.classes.contains_key(&cl) && !self.is_known_builtin_class(&cl) {
             self.try_autoload_class(s.as_bytes());
         }
@@ -680,7 +765,10 @@ impl Vm {
         };
         let base = self.ao_base_name(obj);
         out.set(
-            ArrayKey::String(PhpString::from_vec(mangle_private(base.as_bytes(), b"storage"))),
+            ArrayKey::String(PhpString::from_vec(mangle_private(
+                base.as_bytes(),
+                b"storage",
+            ))),
             storage,
         );
         out
@@ -702,7 +790,11 @@ impl Vm {
     }
 
     /// Storage and flags for a clone (spl_array_object_new_ex clone_orig).
-    pub(crate) fn ao_clone_storage(&self, obj: &Rc<RefCell<PhpObject>>, is_array_object: bool) -> (Value, i64) {
+    pub(crate) fn ao_clone_storage(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        is_array_object: bool,
+    ) -> (Value, i64) {
         let flags = ao_flags(obj) & CLONE_MASK;
         if flags & IS_SELF != 0 {
             return (Value::Null, flags);
@@ -730,15 +822,24 @@ impl Vm {
         }
         if ao_flags(obj) & IS_SELF != 0 {
             // iterator over the object's own properties
-            it.borrow_mut().set_property(b"__spl_flags".to_vec(), Value::Long(flags));
+            it.borrow_mut()
+                .set_property(b"__spl_flags".to_vec(), Value::Long(flags));
         }
         Value::Object(it)
     }
 
-    fn ao_sort(&mut self, obj: &Rc<RefCell<PhpObject>>, fname: &[u8], extra: Option<Value>) -> Option<Value> {
+    fn ao_sort(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        fname: &[u8],
+        extra: Option<Value>,
+    ) -> Option<Value> {
         let fname_s = String::from_utf8_lossy(fname).to_string();
         if self.disabled_functions_contains(fname) || !self.functions.contains_key(fname) {
-            let msg = format!("Cannot call method {} when function {} is disabled", fname_s, fname_s);
+            let msg = format!(
+                "Cannot call method {} when function {} is disabled",
+                fname_s, fname_s
+            );
             return self.spl_throw(b"Error", &msg);
         }
         let t = self.ao_table(obj);
@@ -813,7 +914,13 @@ impl Vm {
         }
         let a = args.unwrap_or(&[]);
         let is_ao = class == b"arrayobject";
-        let cls_name = if is_ao { "ArrayObject" } else if class == b"arrayiterator" { "ArrayIterator" } else { "RecursiveArrayIterator" };
+        let cls_name = if is_ao {
+            "ArrayObject"
+        } else if class == b"arrayiterator" {
+            "ArrayIterator"
+        } else {
+            "RecursiveArrayIterator"
+        };
         let r = match method {
             b"offsetexists" => {
                 let v = self.ao_offset_exists(obj, a.first().unwrap_or(&Value::Null), 2);
@@ -853,10 +960,12 @@ impl Vm {
             b"getflags" => Value::Long(ao_flags(obj) & !INT_MASK),
             b"setflags" => {
                 let f = match a.first() {
-                    Some(v) => match self.spl_arg_long(&format!("{}::setFlags", cls_name), 1, "flags", v) {
-                        Some(n) => n,
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_long(&format!("{}::setFlags", cls_name), 1, "flags", v) {
+                            Some(n) => n,
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => 0,
                 };
                 let nf = (ao_flags(obj) & INT_MASK) | (f & !INT_MASK);
@@ -865,7 +974,12 @@ impl Vm {
             }
             b"asort" | b"ksort" => {
                 let fl = match a.first() {
-                    Some(v) => match self.spl_arg_long(&format!("{}::{}", cls_name, String::from_utf8_lossy(method)), 1, "flags", v) {
+                    Some(v) => match self.spl_arg_long(
+                        &format!("{}::{}", cls_name, String::from_utf8_lossy(method)),
+                        1,
+                        "flags",
+                        v,
+                    ) {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
@@ -898,7 +1012,12 @@ impl Vm {
             }
             b"setiteratorclass" => {
                 let cv = a.first().cloned().unwrap_or(Value::Null);
-                match self.ao_iterator_class_arg("ArrayObject::setIteratorClass", 1, "iteratorClass", &cv) {
+                match self.ao_iterator_class_arg(
+                    "ArrayObject::setIteratorClass",
+                    1,
+                    "iteratorClass",
+                    &cv,
+                ) {
                     Some(c) => set_prop(obj, b"__spl_iterator_class", Value::String(c)),
                     None => return Some(Value::Null),
                 }
@@ -927,9 +1046,16 @@ impl Vm {
                     sym.set(Self::value_to_array_key(Self::key_value(k)), v.clone());
                 }
                 out.push(val_arr(sym));
-                if is_ao || self.spl_find_base(&obj_class_lower(obj), &[b"arrayobject"]).is_some() {
+                if is_ao
+                    || self
+                        .spl_find_base(&obj_class_lower(obj), &[b"arrayobject"])
+                        .is_some()
+                {
                     match prop(obj, b"__spl_iterator_class") {
-                        Value::String(s) if !s.as_bytes().is_empty() && !s.as_bytes().eq_ignore_ascii_case(b"arrayiterator") => {
+                        Value::String(s)
+                            if !s.as_bytes().is_empty()
+                                && !s.as_bytes().eq_ignore_ascii_case(b"arrayiterator") =>
+                        {
                             out.push(Value::String(s))
                         }
                         _ => out.push(Value::Null),
@@ -950,11 +1076,19 @@ impl Vm {
                 let iter_class = data.get(&ArrayKey::Int(3)).cloned();
                 let (flags, storage, members) = match (flags, storage, members) {
                     (Some(Value::Long(f)), Some(s), Some(Value::Array(m)))
-                        if matches!(iter_class, None | Some(Value::Null) | Some(Value::String(_))) =>
+                        if matches!(
+                            iter_class,
+                            None | Some(Value::Null) | Some(Value::String(_))
+                        ) =>
                     {
                         (f, s, m.borrow().clone())
                     }
-                    _ => return self.spl_throw(b"UnexpectedValueException", "Incomplete or ill-typed serialization data"),
+                    _ => {
+                        return self.spl_throw(
+                            b"UnexpectedValueException",
+                            "Incomplete or ill-typed serialization data",
+                        );
+                    }
                 };
                 let nf = (ao_flags(obj) & !CLONE_MASK) | (flags & CLONE_MASK);
                 set_prop(obj, b"__spl_flags", Value::Long(nf));
@@ -962,7 +1096,10 @@ impl Vm {
                     set_prop(obj, b"__spl_array", Value::Null);
                 } else {
                     if !matches!(storage.deref(), Value::Array(_) | Value::Object(_)) {
-                        return self.spl_throw(b"InvalidArgumentException", "Passed variable is not an array or object");
+                        return self.spl_throw(
+                            b"InvalidArgumentException",
+                            "Passed variable is not an array or object",
+                        );
                     }
                     let base = self.ao_base_name(obj);
                     let func = format!("{}::__unserialize", base);
@@ -971,11 +1108,23 @@ impl Vm {
                     }
                     // keep the deserialized clone-mask flags
                     let cur = ao_flags(obj);
-                    set_prop(obj, b"__spl_flags", Value::Long((cur & !CLONE_MASK & !IS_SELF) | (flags & CLONE_MASK & !IS_SELF) | (cur & USE_OTHER)));
+                    set_prop(
+                        obj,
+                        b"__spl_flags",
+                        Value::Long(
+                            (cur & !CLONE_MASK & !IS_SELF)
+                                | (flags & CLONE_MASK & !IS_SELF)
+                                | (cur & USE_OTHER),
+                        ),
+                    );
                 }
                 self.spl_load_props(obj, &members);
                 if let Some(Value::String(c)) = iter_class {
-                    let cl: Vec<u8> = c.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let cl: Vec<u8> = c
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     if !self.classes.contains_key(&cl) && !self.is_known_builtin_class(&cl) {
                         self.try_autoload_class(c.as_bytes());
                     }
@@ -986,7 +1135,8 @@ impl Vm {
                         );
                         return self.spl_throw(b"UnexpectedValueException", &msg);
                     }
-                    let is_iter = self.class_implements_interface(&cl, b"iterator") || crate::vm::is_builtin_subclass(&cl, b"iterator");
+                    let is_iter = self.class_implements_interface(&cl, b"iterator")
+                        || crate::vm::is_builtin_subclass(&cl, b"iterator");
                     if !is_iter {
                         let msg = format!(
                             "Cannot deserialize ArrayObject with iterator class '{}'; this class does not implement the Iterator interface",
@@ -998,7 +1148,9 @@ impl Vm {
                         .classes
                         .get(&cl)
                         .map(|ce| PhpString::from_vec(ce.name.clone()))
-                        .unwrap_or_else(|| PhpString::from_string(self.builtin_canonical_name(&cl)));
+                        .unwrap_or_else(|| {
+                            PhpString::from_string(self.builtin_canonical_name(&cl))
+                        });
                     set_prop(obj, b"__spl_iterator_class", Value::String(canonical));
                 }
                 Value::Null
@@ -1012,19 +1164,28 @@ impl Vm {
                         v @ (Value::Array(_) | Value::Object(_)) => v,
                         _ => val_arr(PhpArray::new()),
                     };
-                    let s = self.spl_call_builtin(b"serialize", &[st]).unwrap_or(Value::Null);
+                    let s = self
+                        .spl_call_builtin(b"serialize", &[st])
+                        .unwrap_or(Value::Null);
                     out.extend_from_slice(s.to_php_string().as_bytes());
                     out.push(b';');
                 }
                 out.extend_from_slice(b"m:");
                 let props = val_arr(self.spl_std_props(obj));
-                let s = self.spl_call_builtin(b"serialize", &[props]).unwrap_or(Value::Null);
+                let s = self
+                    .spl_call_builtin(b"serialize", &[props])
+                    .unwrap_or(Value::Null);
                 out.extend_from_slice(s.to_php_string().as_bytes());
                 Value::String(PhpString::from_vec(out))
             }
             b"unserialize" => {
                 let data = match a.first() {
-                    Some(v) => match self.spl_arg_string(&format!("{}::unserialize", cls_name), 1, "data", v) {
+                    Some(v) => match self.spl_arg_string(
+                        &format!("{}::unserialize", cls_name),
+                        1,
+                        "data",
+                        v,
+                    ) {
                         Some(s) => s.as_bytes().to_vec(),
                         None => return Some(Value::Null),
                     },
@@ -1059,7 +1220,10 @@ impl Vm {
                     set_prop(obj, b"__spl_flags", Value::Long(nf));
                     set_prop(obj, b"__spl_array", Value::Null);
                 } else {
-                    if !matches!(data.get(p), Some(b'a') | Some(b'O') | Some(b'C') | Some(b'r')) {
+                    if !matches!(
+                        data.get(p),
+                        Some(b'a') | Some(b'O') | Some(b'C') | Some(b'r')
+                    ) {
                         return fail(self, p);
                     }
                     let st = match self.spl_unserialize_at(&data, &mut p) {
@@ -1101,7 +1265,11 @@ impl Vm {
                 Value::Null
             }
             b"valid" => {
-                if self.ao_valid(obj) { Value::True } else { Value::False }
+                if self.ao_valid(obj) {
+                    Value::True
+                } else {
+                    Value::False
+                }
             }
             b"current" => match self.ao_current(obj) {
                 Some((_, _, v)) => v.deref(),
@@ -1138,7 +1306,8 @@ impl Vm {
                 Some((_, _, v)) => {
                     let v = v.deref();
                     let f = ao_flags(obj);
-                    let r = matches!(v, Value::Array(_)) || (matches!(v, Value::Object(_)) && f & CHILD_ARRAYS_ONLY == 0);
+                    let r = matches!(v, Value::Array(_))
+                        || (matches!(v, Value::Object(_)) && f & CHILD_ARRAYS_ONLY == 0);
                     if r { Value::True } else { Value::False }
                 }
                 None => Value::False,
@@ -1192,7 +1361,11 @@ pub fn spl_array_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Re
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)

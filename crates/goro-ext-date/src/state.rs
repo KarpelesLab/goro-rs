@@ -76,7 +76,10 @@ pub fn obj_base(vm: &Vm, o: &Rc<RefCell<PhpObject>>) -> Option<Base> {
 }
 
 pub fn is_date_interface(vm: &Vm, o: &Rc<RefCell<PhpObject>>) -> bool {
-    matches!(obj_base(vm, o), Some(Base::DateTime) | Some(Base::Immutable))
+    matches!(
+        obj_base(vm, o),
+        Some(Base::DateTime) | Some(Base::Immutable)
+    )
 }
 
 /// Canonical (declared) name of a class.
@@ -185,7 +188,17 @@ fn enc_time(e: &mut Enc, t: &Time) {
     for v in [t.y, t.m, t.d, t.h, t.i, t.s, t.us, t.z, t.dst as i64, t.sse] {
         e.i(v);
     }
-    for v in [t.have_time, t.have_date, t.have_zone, t.have_relative, t.have_weeknr_day, t.sse_uptodate, t.tim_uptodate, t.is_localtime, t.zone_type] {
+    for v in [
+        t.have_time,
+        t.have_date,
+        t.have_zone,
+        t.have_relative,
+        t.have_weeknr_day,
+        t.sse_uptodate,
+        t.tim_uptodate,
+        t.is_localtime,
+        t.zone_type,
+    ] {
         e.i(v as i64);
     }
     e.s(t.tz_abbr.as_deref());
@@ -252,20 +265,42 @@ pub fn tz_offset_str(offset: i64) -> String {
     let seconds = offset % 60;
     let sign = if offset < 0 { '-' } else { '+' };
     if seconds == 0 {
-        format!("{}{:02}:{:02}", sign, (offset / 3600).abs(), ((offset % 3600) / 60).abs())
+        format!(
+            "{}{:02}:{:02}",
+            sign,
+            (offset / 3600).abs(),
+            ((offset % 3600) / 60).abs()
+        )
     } else {
-        format!("{}{:02}:{:02}:{:02}", sign, (offset / 3600).abs(), ((offset % 3600) / 60).abs(), seconds.abs())
+        format!(
+            "{}{:02}:{:02}:{:02}",
+            sign,
+            (offset / 3600).abs(),
+            ((offset % 3600) / 60).abs(),
+            seconds.abs()
+        )
     }
 }
 
 /// The (date, timezone_type, timezone) property values for a time.
 pub fn date_props(t: &Time) -> Vec<(&'static [u8], Value)> {
     let mut out = Vec::new();
-    out.push((b"date" as &[u8], Value::String(PhpString::from_vec(crate::format::date_format(b"x-m-d H:i:s.u", t, t.is_localtime != 0)))));
+    out.push((
+        b"date" as &[u8],
+        Value::String(PhpString::from_vec(crate::format::date_format(
+            b"x-m-d H:i:s.u",
+            t,
+            t.is_localtime != 0,
+        ))),
+    ));
     if t.is_localtime != 0 {
         out.push((b"timezone_type", Value::Long(t.zone_type as i64)));
         let tzv = match t.zone_type {
-            ZONETYPE_ID => t.tz_info.as_ref().map(|z| z.name.clone()).unwrap_or_default(),
+            ZONETYPE_ID => t
+                .tz_info
+                .as_ref()
+                .map(|z| z.name.clone())
+                .unwrap_or_default(),
             ZONETYPE_OFFSET => tz_offset_str(t.z),
             ZONETYPE_ABBR => t.tz_abbr.clone().unwrap_or_default(),
             _ => String::new(),
@@ -285,7 +320,10 @@ pub fn date_set(o: &Rc<RefCell<PhpObject>>, t: &Time) {
     let mut ob = o.borrow_mut();
     ob.set_property(P_SSE.to_vec(), Value::Long(t.sse));
     ob.set_property(b"__timestamp_us".to_vec(), Value::Long(t.us));
-    ob.set_property(P_STATE.to_vec(), Value::String(PhpString::from_vec(encode_time(t))));
+    ob.set_property(
+        P_STATE.to_vec(),
+        Value::String(PhpString::from_vec(encode_time(t))),
+    );
     ob.remove_property(b"timezone_type");
     ob.remove_property(b"timezone");
     for (k, v) in props {
@@ -318,9 +356,27 @@ impl TzObj {
     /// set_timezone_from_timelib_time
     pub fn from_time(t: &Time) -> TzObj {
         match t.zone_type {
-            ZONETYPE_ID => TzObj { ztype: ZONETYPE_ID, utc_offset: 0, dst: 0, abbr: String::new(), tz: t.tz_info.clone() },
-            ZONETYPE_OFFSET => TzObj { ztype: ZONETYPE_OFFSET, utc_offset: t.z, dst: 0, abbr: String::new(), tz: None },
-            _ => TzObj { ztype: t.zone_type, utc_offset: t.z, dst: t.dst, abbr: t.tz_abbr.clone().unwrap_or_default(), tz: None },
+            ZONETYPE_ID => TzObj {
+                ztype: ZONETYPE_ID,
+                utc_offset: 0,
+                dst: 0,
+                abbr: String::new(),
+                tz: t.tz_info.clone(),
+            },
+            ZONETYPE_OFFSET => TzObj {
+                ztype: ZONETYPE_OFFSET,
+                utc_offset: t.z,
+                dst: 0,
+                abbr: String::new(),
+                tz: None,
+            },
+            _ => TzObj {
+                ztype: t.zone_type,
+                utc_offset: t.z,
+                dst: t.dst,
+                abbr: t.tz_abbr.clone().unwrap_or_default(),
+                tz: None,
+            },
         }
     }
 }
@@ -336,11 +392,23 @@ pub fn tz_get(o: &Rc<RefCell<PhpObject>>) -> Option<TzObj> {
         Some(n) => tz::parse_tzfile(&n),
         None => None,
     };
-    Some(TzObj { ztype, utc_offset, dst, abbr, tz })
+    Some(TzObj {
+        ztype,
+        utc_offset,
+        dst,
+        abbr,
+        tz,
+    })
 }
 
 pub fn tz_props(z: &TzObj) -> Vec<(&'static [u8], Value)> {
-    vec![(b"timezone_type" as &[u8], Value::Long(z.ztype as i64)), (b"timezone", Value::String(PhpString::from_string(z.to_string())))]
+    vec![
+        (b"timezone_type" as &[u8], Value::Long(z.ztype as i64)),
+        (
+            b"timezone",
+            Value::String(PhpString::from_string(z.to_string())),
+        ),
+    ]
 }
 
 pub fn tz_set(o: &Rc<RefCell<PhpObject>>, z: &TzObj) {
@@ -368,7 +436,18 @@ pub struct IntervalObj {
     pub date_string: Vec<u8>,
 }
 
-const IVAL_VISIBLE: [&[u8]; 10] = [b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string"];
+const IVAL_VISIBLE: [&[u8]; 10] = [
+    b"y",
+    b"m",
+    b"d",
+    b"h",
+    b"i",
+    b"s",
+    b"f",
+    b"invert",
+    b"days",
+    b"from_string",
+];
 
 pub fn interval_get(o: &Rc<RefCell<PhpObject>>) -> Option<IntervalObj> {
     let ob = o.borrow();
@@ -397,16 +476,31 @@ pub fn interval_get(o: &Rc<RefCell<PhpObject>>) -> Option<IntervalObj> {
             Value::Undef => {}
             v => {
                 let f = v.to_double() * 1000000.0;
-                diff.us = if f.is_finite() && f.abs() < 9.2e18 { f as i64 } else { 0 };
+                diff.us = if f.is_finite() && f.abs() < 9.2e18 {
+                    f as i64
+                } else {
+                    0
+                };
             }
         }
     }
-    Some(IntervalObj { diff, civil_or_wall, from_string, date_string })
+    Some(IntervalObj {
+        diff,
+        civil_or_wall,
+        from_string,
+        date_string,
+    })
 }
 
 pub fn interval_props(iv: &IntervalObj) -> Vec<(&'static [u8], Value)> {
     if iv.from_string {
-        return vec![(b"from_string" as &[u8], Value::True), (b"date_string", Value::String(PhpString::from_bytes(&iv.date_string)))];
+        return vec![
+            (b"from_string" as &[u8], Value::True),
+            (
+                b"date_string",
+                Value::String(PhpString::from_bytes(&iv.date_string)),
+            ),
+        ];
     }
     let d = &iv.diff;
     vec![
@@ -418,7 +512,14 @@ pub fn interval_props(iv: &IntervalObj) -> Vec<(&'static [u8], Value)> {
         (b"s", Value::Long(d.s)),
         (b"f", Value::Double(d.us as f64 / 1000000.0)),
         (b"invert", Value::Long(d.invert as i64)),
-        (b"days", if d.days != UNSET { Value::Long(d.days) } else { Value::False }),
+        (
+            b"days",
+            if d.days != UNSET {
+                Value::Long(d.days)
+            } else {
+                Value::False
+            },
+        ),
         (b"from_string", Value::False),
     ]
 }
@@ -465,7 +566,11 @@ fn enc_opt_time(e: &mut Enc, t: &Option<Time>) {
     }
 }
 fn dec_opt_time(d: &mut Dec) -> Option<Option<Time>> {
-    if d.i()? == 0 { Some(None) } else { Some(Some(dec_time(d)?)) }
+    if d.i()? == 0 {
+        Some(None)
+    } else {
+        Some(Some(dec_time(d)?))
+    }
 }
 
 pub fn period_get(o: &Rc<RefCell<PhpObject>>) -> Option<PeriodObj> {
@@ -474,13 +579,27 @@ pub fn period_get(o: &Rc<RefCell<PhpObject>>) -> Option<PeriodObj> {
     let start = dec_opt_time(&mut d)?;
     let current = dec_opt_time(&mut d)?;
     let end = dec_opt_time(&mut d)?;
-    let interval = if d.i()? == 0 { None } else { Some(dec_rel(&mut d)?) };
+    let interval = if d.i()? == 0 {
+        None
+    } else {
+        Some(dec_rel(&mut d)?)
+    };
     let recurrences = d.i()?;
     let include_start_date = d.i()? != 0;
     let include_end_date = d.i()? != 0;
     let start_ce = d.s()?.unwrap_or_default().into_bytes();
     let initialized = d.i()? != 0;
-    Some(PeriodObj { start, current, end, interval, recurrences, include_start_date, include_end_date, start_ce, initialized })
+    Some(PeriodObj {
+        start,
+        current,
+        end,
+        interval,
+        recurrences,
+        include_start_date,
+        include_end_date,
+        start_ce,
+        initialized,
+    })
 }
 
 pub fn period_store(o: &Rc<RefCell<PhpObject>>, p: &PeriodObj) {
@@ -500,7 +619,8 @@ pub fn period_store(o: &Rc<RefCell<PhpObject>>, p: &PeriodObj) {
     e.i(p.include_end_date as i64);
     e.s(Some(&String::from_utf8_lossy(&p.start_ce)));
     e.i(p.initialized as i64);
-    o.borrow_mut().set_property(P_PERIOD.to_vec(), Value::String(PhpString::from_vec(e.0)));
+    o.borrow_mut()
+        .set_property(P_PERIOD.to_vec(), Value::String(PhpString::from_vec(e.0)));
 }
 
 /// create_date_period_datetime
@@ -520,22 +640,48 @@ pub fn make_interval_obj(vm: &mut Vm, r: &Option<RelTime>, civil_or_wall: i64) -
         None => Value::Null,
         Some(r) => {
             let o = new_object(vm, b"DateInterval");
-            interval_set(&o, &IntervalObj { diff: r.clone(), civil_or_wall, from_string: false, date_string: Vec::new() });
+            interval_set(
+                &o,
+                &IntervalObj {
+                    diff: r.clone(),
+                    civil_or_wall,
+                    from_string: false,
+                    date_string: Vec::new(),
+                },
+            );
             Value::Object(o)
         }
     }
 }
 
 pub fn period_props(vm: &mut Vm, p: &PeriodObj) -> Vec<(&'static [u8], Value)> {
-    let ce = if p.start_ce.is_empty() { b"DateTime".to_vec() } else { p.start_ce.clone() };
+    let ce = if p.start_ce.is_empty() {
+        b"DateTime".to_vec()
+    } else {
+        p.start_ce.clone()
+    };
     vec![
         (b"start" as &[u8], make_date_obj(vm, &p.start, &ce)),
         (b"current", make_date_obj(vm, &p.current, &ce)),
         (b"end", make_date_obj(vm, &p.end, &ce)),
         (b"interval", make_interval_obj(vm, &p.interval, 0)),
         (b"recurrences", Value::Long(p.recurrences)),
-        (b"include_start_date", if p.include_start_date { Value::True } else { Value::False }),
-        (b"include_end_date", if p.include_end_date { Value::True } else { Value::False }),
+        (
+            b"include_start_date",
+            if p.include_start_date {
+                Value::True
+            } else {
+                Value::False
+            },
+        ),
+        (
+            b"include_end_date",
+            if p.include_end_date {
+                Value::True
+            } else {
+                Value::False
+            },
+        ),
     ]
 }
 
@@ -567,17 +713,34 @@ pub fn arr_val(a: PhpArray) -> Value {
     Value::Array(Rc::new(RefCell::new(a)))
 }
 
-const PERIOD_PROPS: [&[u8]; 7] = [b"start", b"current", b"end", b"interval", b"recurrences", b"include_start_date", b"include_end_date"];
+const PERIOD_PROPS: [&[u8]; 7] = [
+    b"start",
+    b"current",
+    b"end",
+    b"interval",
+    b"recurrences",
+    b"include_start_date",
+    b"include_end_date",
+];
 
 /// DatePeriod's properties are read-only and cannot be unset.
 pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8) -> bool {
-    if base_of(vm, &o.borrow().class_name.clone()) != Some(Base::Period) || !PERIOD_PROPS.contains(&name) {
+    if base_of(vm, &o.borrow().class_name.clone()) != Some(Base::Period)
+        || !PERIOD_PROPS.contains(&name)
+    {
         return true;
     }
     let msg = if kind == 1 {
-        format!("Cannot unset {}::${}", class_display(vm, &o.borrow().class_name.clone()), String::from_utf8_lossy(name))
+        format!(
+            "Cannot unset {}::${}",
+            class_display(vm, &o.borrow().class_name.clone()),
+            String::from_utf8_lossy(name)
+        )
     } else {
-        format!("Cannot modify readonly property DatePeriod::${}", String::from_utf8_lossy(name))
+        format!(
+            "Cannot modify readonly property DatePeriod::${}",
+            String::from_utf8_lossy(name)
+        )
     };
     let exc = vm.create_exception(b"Error", &msg, vm.current_line);
     vm.current_exception = Some(exc);
@@ -591,7 +754,9 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
     let cn = o.borrow().class_name.clone();
     match base_of(vm, &cn)? {
         Base::DateTime | Base::Immutable => {
-            if matches!(name, b"date" | b"timezone_type" | b"timezone") && o.borrow().has_property(P_STATE) {
+            if matches!(name, b"date" | b"timezone_type" | b"timezone")
+                && o.borrow().has_property(P_STATE)
+            {
                 return Some(None);
             }
             None
@@ -633,7 +798,10 @@ pub fn prop_read(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option
                 _ => return Some(Some(Value::Null)),
             };
             let props = period_props(vm, &p);
-            props.into_iter().find(|(k, _)| *k == name).map(|(_, v)| Some(v))
+            props
+                .into_iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| Some(v))
         }
     }
 }
@@ -653,16 +821,28 @@ pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
     };
     if is_date(ba) && is_date(bb) {
         if date_get(&oa).is_none() || date_get(&ob).is_none() {
-            err(vm, b"DateObjectError", "Trying to compare an incomplete DateTime or DateTimeImmutable object");
+            err(
+                vm,
+                b"DateObjectError",
+                "Trying to compare an incomplete DateTime or DateTimeImmutable object",
+            );
         }
     } else if ba == Some(Base::TimeZone) && bb == Some(Base::TimeZone) {
         match (tz_get(&oa), tz_get(&ob)) {
             (Some(x), Some(y)) => {
                 if x.ztype != y.ztype {
-                    err(vm, b"DateException", "Cannot compare two different kinds of DateTimeZone objects");
+                    err(
+                        vm,
+                        b"DateException",
+                        "Cannot compare two different kinds of DateTimeZone objects",
+                    );
                 }
             }
-            _ => err(vm, b"DateObjectError", "Trying to compare uninitialized DateTimeZone objects"),
+            _ => err(
+                vm,
+                b"DateObjectError",
+                "Trying to compare uninitialized DateTimeZone objects",
+            ),
         }
     } else if ba == Some(Base::Interval) && bb == Some(Base::Interval) {
         vm.emit_warning("Cannot compare DateInterval objects");
@@ -678,9 +858,29 @@ pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
     } else if ob.has_property(P_TZ) {
         &[b"timezone_type", b"timezone"]
     } else if ob.has_property(P_IVAL) {
-        &[b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days", b"from_string", b"date_string"]
+        &[
+            b"y",
+            b"m",
+            b"d",
+            b"h",
+            b"i",
+            b"s",
+            b"f",
+            b"invert",
+            b"days",
+            b"from_string",
+            b"date_string",
+        ]
     } else if ob.has_property(P_PERIOD) {
-        &[b"start", b"current", b"end", b"interval", b"recurrences", b"include_start_date", b"include_end_date"]
+        &[
+            b"start",
+            b"current",
+            b"end",
+            b"interval",
+            b"recurrences",
+            b"include_start_date",
+            b"include_end_date",
+        ]
     } else {
         return;
     };

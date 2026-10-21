@@ -13,9 +13,7 @@ use goro_core::vm::{Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::rsa::{
-    make_key_object_pub, resolve_private_key_pub, StoredKey,
-};
+use crate::rsa::{StoredKey, make_key_object_pub, resolve_private_key_pub};
 
 use der::asn1::{
     BitString, Ia5StringRef, OctetString, PrintableStringRef, SetOfVec, Utf8StringRef,
@@ -127,7 +125,9 @@ fn csr_from_object(v: &Value) -> Option<CertReq> {
     };
     if let Value::Object(o) = v {
         let o = o.borrow();
-        if o.class_name.eq_ignore_ascii_case(b"OpenSSLCertificateSigningRequest") {
+        if o.class_name
+            .eq_ignore_ascii_case(b"OpenSSLCertificateSigningRequest")
+        {
             let id = o.get_property(b"__csr_id").to_long();
             if id > 0 {
                 return get_csr(id as u64);
@@ -170,9 +170,7 @@ fn parse_certificate_blob(data: &[u8]) -> Option<Certificate> {
 
 fn parse_csr_blob(data: &[u8]) -> Option<CertReq> {
     if let Ok(s) = std::str::from_utf8(data) {
-        if s.contains("BEGIN CERTIFICATE REQUEST")
-            || s.contains("BEGIN NEW CERTIFICATE REQUEST")
-        {
+        if s.contains("BEGIN CERTIFICATE REQUEST") || s.contains("BEGIN NEW CERTIFICATE REQUEST") {
             // Try standard label parser
             if let Ok(c) = CertReq::from_pem(s.as_bytes()) {
                 return Some(c);
@@ -229,8 +227,16 @@ fn base64_decode_strict(s: &str) -> Result<Vec<u8>, ()> {
     for chunk in clean.chunks(4) {
         let a = dec(chunk[0]).ok_or(())?;
         let b = dec(chunk[1]).ok_or(())?;
-        let c = if chunk[2] == b'=' { None } else { Some(dec(chunk[2]).ok_or(())?) };
-        let d = if chunk[3] == b'=' { None } else { Some(dec(chunk[3]).ok_or(())?) };
+        let c = if chunk[2] == b'=' {
+            None
+        } else {
+            Some(dec(chunk[2]).ok_or(())?)
+        };
+        let d = if chunk[3] == b'=' {
+            None
+        } else {
+            Some(dec(chunk[3]).ok_or(())?)
+        };
         let triple = ((a as u32) << 18)
             | ((b as u32) << 12)
             | ((c.unwrap_or(0) as u32) << 6)
@@ -451,18 +457,17 @@ fn dn_array_to_name(arr: &PhpArray) -> Result<Name, String> {
 
         for value_str in values {
             let oid_str = oid.to_string();
-            let any_val = if oid_str == "1.2.840.113549.1.9.1"
-                || oid_str == "0.9.2342.19200300.100.1.25"
-            {
-                let s = Ia5StringRef::new(&value_str).map_err(|e| e.to_string())?;
-                Any::from(s)
-            } else if oid_str == "2.5.4.6" {
-                let s = PrintableStringRef::new(&value_str).map_err(|e| e.to_string())?;
-                Any::from(s)
-            } else {
-                let s = Utf8StringRef::new(&value_str).map_err(|e| e.to_string())?;
-                Any::from(s)
-            };
+            let any_val =
+                if oid_str == "1.2.840.113549.1.9.1" || oid_str == "0.9.2342.19200300.100.1.25" {
+                    let s = Ia5StringRef::new(&value_str).map_err(|e| e.to_string())?;
+                    Any::from(s)
+                } else if oid_str == "2.5.4.6" {
+                    let s = PrintableStringRef::new(&value_str).map_err(|e| e.to_string())?;
+                    Any::from(s)
+                } else {
+                    let s = Utf8StringRef::new(&value_str).map_err(|e| e.to_string())?;
+                    Any::from(s)
+                };
 
             let atv = AttributeTypeAndValue {
                 oid,
@@ -976,10 +981,7 @@ fn parse_der_length(data: &[u8]) -> Option<(&[u8], &[u8])> {
     if data.len() < hdr_len + len {
         return None;
     }
-    Some((
-        &data[hdr_len..hdr_len + len],
-        &data[hdr_len + len..],
-    ))
+    Some((&data[hdr_len..hdr_len + len], &data[hdr_len + len..]))
 }
 
 // ── openssl_x509_check_private_key ──
@@ -1107,9 +1109,7 @@ pub fn openssl_x509_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value,
     };
     let path = filename.to_string_lossy().to_string();
     if path.len() > 4096 || path.is_empty() {
-        vm.emit_warning(
-            "openssl_x509_export_to_file(output_filename): must be a valid file path",
-        );
+        vm.emit_warning("openssl_x509_export_to_file(output_filename): must be a valid file path");
         return Ok(Value::False);
     }
     match std::fs::write(&path, pem) {
@@ -1289,7 +1289,9 @@ fn read_bits_from_options(v: &Value) -> Option<usize> {
     };
     if let Value::Array(a) = v {
         let a = a.borrow();
-        if let Some(b) = a.get(&ArrayKey::String(PhpString::from_bytes(b"private_key_bits"))) {
+        if let Some(b) = a.get(&ArrayKey::String(PhpString::from_bytes(
+            b"private_key_bits",
+        ))) {
             let b = b.to_long();
             if b > 0 {
                 return Some(b as usize);
@@ -1436,9 +1438,7 @@ pub fn openssl_csr_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     };
     let path = filename.to_string_lossy().to_string();
     if path.len() > 4096 || path.is_empty() {
-        vm.emit_warning(
-            "openssl_csr_export_to_file(output_filename): must be a valid file path",
-        );
+        vm.emit_warning("openssl_csr_export_to_file(output_filename): must be a valid file path");
         return Ok(Value::False);
     }
     match std::fs::write(&path, pem) {
@@ -1653,9 +1653,7 @@ pub fn openssl_csr_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Sanity check on days: openssl uses 30-bit-ish int for days; refuse
     // crazy values to avoid Duration overflow and stack overflow.
     if !(0..=24855).contains(&days) {
-        vm.emit_warning(
-            "openssl_csr_sign(): Days must be between 0 and 24855",
-        );
+        vm.emit_warning("openssl_csr_sign(): Days must be between 0 and 24855");
         return Ok(Value::False);
     }
     let now = std::time::SystemTime::now();

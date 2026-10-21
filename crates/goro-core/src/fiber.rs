@@ -115,8 +115,7 @@ impl PhpFiber {
     where
         F: FnOnce(FiberResume) -> FiberOutcome + 'static,
     {
-        let yielder_ptr: Rc<Cell<*const FiberYielder>> =
-            Rc::new(Cell::new(std::ptr::null()));
+        let yielder_ptr: Rc<Cell<*const FiberYielder>> = Rc::new(Cell::new(std::ptr::null()));
         let yielder_ptr_for_body = yielder_ptr.clone();
         let coroutine = Coroutine::new(move |yielder: &FiberYielder, input: FiberResume| {
             // Stash the yielder pointer so the parent can re-install it on

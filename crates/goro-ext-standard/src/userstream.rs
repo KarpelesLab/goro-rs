@@ -153,7 +153,10 @@ fn notice(vm: &mut Vm, msg: &str) {
 }
 
 fn exc_err(vm: &Vm) -> VmError {
-    VmError { message: "exception".into(), line: vm.current_line }
+    VmError {
+        message: "exception".into(),
+        line: vm.current_line,
+    }
 }
 
 fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
@@ -163,7 +166,10 @@ fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
         vm.create_exception(class, msg, vm.current_line)
     };
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 fn s(v: &[u8]) -> Value {
@@ -204,7 +210,12 @@ enum CallRes {
 
 fn class_lower_of(obj: &Value) -> Vec<u8> {
     match obj {
-        Value::Object(o) => o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect(),
+        Value::Object(o) => o
+            .borrow()
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -219,7 +230,12 @@ fn has_method(vm: &Vm, obj: &Value, name: &[u8]) -> bool {
 
 /// Invoke a method directly (no visibility check, like
 /// zend_call_known_instance_method), with by-ref parameter support.
-fn invoke_method(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<Value>) -> Result<Value, VmError> {
+fn invoke_method(
+    vm: &mut Vm,
+    obj: &Value,
+    method_lower: &[u8],
+    args: Vec<Value>,
+) -> Result<Value, VmError> {
     // Diagnostics raised after the call are attributed to the caller's line.
     let saved_line = vm.current_line;
     let saved_er = vm.error_reporting;
@@ -234,7 +250,12 @@ fn invoke_method(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<Value>
     r
 }
 
-fn invoke_method_inner(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<Value>) -> Result<Value, VmError> {
+fn invoke_method_inner(
+    vm: &mut Vm,
+    obj: &Value,
+    method_lower: &[u8],
+    args: Vec<Value>,
+) -> Result<Value, VmError> {
     let cl = class_lower_of(obj);
     let class = match vm.classes.get(&cl) {
         Some(c) => c,
@@ -255,9 +276,11 @@ fn invoke_method_inner(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<
             for v in args {
                 a.push(v.deref());
             }
-            let display = vm.classes.get(&cl).and_then(|c| {
-                c.get_method(method_lower).map(|m| m.name.clone())
-            }).unwrap_or_else(|| method_lower.to_vec());
+            let display = vm
+                .classes
+                .get(&cl)
+                .and_then(|c| c.get_method(method_lower).map(|m| m.name.clone()))
+                .unwrap_or_else(|| method_lower.to_vec());
             let margs = vec![Value::String(PhpString::from_vec(display)), arr_val(a)];
             vm.called_class_stack.push(class_name);
             vm.push_class_scope(declaring);
@@ -271,9 +294,22 @@ fn invoke_method_inner(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<
     let required = op.required_param_count as usize;
     if args.len() < required {
         let decl_lower: Vec<u8> = declaring.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let decl_name = vm.classes.get(&decl_lower).map(|c| c.name.clone()).unwrap_or(class_name.clone());
-        let mname = vm.classes.get(&cl).and_then(|c| c.get_method(method_lower)).map(|m| m.name.clone()).unwrap_or_default();
-        let q = if declared == required { "exactly" } else { "at least" };
+        let decl_name = vm
+            .classes
+            .get(&decl_lower)
+            .map(|c| c.name.clone())
+            .unwrap_or(class_name.clone());
+        let mname = vm
+            .classes
+            .get(&cl)
+            .and_then(|c| c.get_method(method_lower))
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        let q = if declared == required {
+            "exactly"
+        } else {
+            "at least"
+        };
         let msg = format!(
             "Too few arguments to function {}::{}(), {} passed and {} {} expected",
             goro_core::value::display_class_name(&decl_name),
@@ -309,7 +345,12 @@ fn invoke_method_inner(vm: &mut Vm, obj: &Value, method_lower: &[u8], args: Vec<
 
 /// zend_call_method_if_exists(): returns NotImpl when the object cannot
 /// handle `name`; Err only for fatal (non-exception) errors.
-fn call_method(vm: &mut Vm, obj: &Value, name: &[u8], args: Vec<Value>) -> Result<CallRes, VmError> {
+fn call_method(
+    vm: &mut Vm,
+    obj: &Value,
+    name: &[u8],
+    args: Vec<Value>,
+) -> Result<CallRes, VmError> {
     if !has_method(vm, obj, name) {
         return Ok(CallRes::NotImpl);
     }
@@ -341,7 +382,18 @@ fn call_method(vm: &mut Vm, obj: &Value, name: &[u8], args: Vec<Value>) -> Resul
 // ---------------------------------------------------------------------------
 
 const BUILTIN_WRAPPERS: &[&[u8]] = &[
-    b"php", b"file", b"glob", b"data", b"http", b"ftp", b"phar", b"compress.zlib", b"compress.bzip2", b"https", b"ftps", b"zip",
+    b"php",
+    b"file",
+    b"glob",
+    b"data",
+    b"http",
+    b"ftp",
+    b"phar",
+    b"compress.zlib",
+    b"compress.bzip2",
+    b"https",
+    b"ftps",
+    b"zip",
 ];
 
 fn is_builtin(scheme_lower: &[u8]) -> bool {
@@ -385,10 +437,17 @@ fn user_wrapper(scheme_lower: &[u8]) -> Option<UserWrapperRef> {
 /// wrapper protocol.
 fn scheme_len(path: &[u8]) -> Option<usize> {
     let mut n = 0;
-    while n < path.len() && (path[n].is_ascii_alphanumeric() || matches!(path[n], b'+' | b'-' | b'.')) {
+    while n < path.len()
+        && (path[n].is_ascii_alphanumeric() || matches!(path[n], b'+' | b'-' | b'.'))
+    {
         n += 1;
     }
-    if n < path.len() && path[n] == b':' && n > 1 && (path[n + 1..].starts_with(b"//") || (n == 4 && path[..5].eq_ignore_ascii_case(b"data:"))) {
+    if n < path.len()
+        && path[n] == b':'
+        && n > 1
+        && (path[n + 1..].starts_with(b"//")
+            || (n == 4 && path[..5].eq_ignore_ascii_case(b"data:")))
+    {
         Some(n)
     } else {
         None
@@ -400,7 +459,11 @@ fn ini_bool(vm: &Vm, key: &[u8], default: bool) -> bool {
         Some(v) => {
             let s = v.to_php_string().to_string_lossy().to_ascii_lowercase();
             let t = s.trim();
-            t == "1" || t == "on" || t == "yes" || t == "true" || t.parse::<i64>().map(|n| n != 0).unwrap_or(false)
+            t == "1"
+                || t == "on"
+                || t == "yes"
+                || t == "true"
+                || t.parse::<i64>().map(|n| n != 0).unwrap_or(false)
         }
         None => default,
     }
@@ -433,13 +496,18 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
         if let Some(u) = user_wrapper(&lower) {
             found = Some(Loc::User(u));
         } else if is_builtin(&lower) && !builtin_disabled(&lower) {
-            found = Some(Loc::Builtin { path: path.to_vec() });
+            found = Some(Loc::Builtin {
+                path: path.to_vec(),
+            });
         } else {
             let name = &path[..n.min(31)];
-            warn(vm, &format!(
-                "Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
-                lossy(name)
-            ));
+            warn(
+                vm,
+                &format!(
+                    "Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
+                    lossy(name)
+                ),
+            );
             protocol = None;
         }
     }
@@ -464,17 +532,22 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
         };
         let mut path_for_open = path.to_vec();
         if let Some(n) = protocol {
-            let localhost = path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
+            let localhost =
+                path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
             let after = n + 3;
             if !localhost && after < path.len() && path[after] != b'/' {
                 if options & REPORT_ERRORS != 0 {
-                    warn(vm, &format!("Remote host file access not supported, {}", lossy(path)));
+                    warn(
+                        vm,
+                        &format!("Remote host file access not supported, {}", lossy(path)),
+                    );
                 }
                 return Loc::None;
             }
             let _ = &mut path_for_open;
         }
-        let modified = !DISABLED_BUILTINS.with(|d| d.borrow().is_empty()) || USER_WRAPPERS.with(|w| !w.borrow().is_empty());
+        let modified = !DISABLED_BUILTINS.with(|d| d.borrow().is_empty())
+            || USER_WRAPPERS.with(|w| !w.borrow().is_empty());
         if modified {
             if let Some(f) = found {
                 return f;
@@ -486,7 +559,10 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
                 return Loc::Builtin { path: plain_path };
             }
             if options & REPORT_ERRORS != 0 {
-                warn(vm, "file:// wrapper is disabled in the server configuration");
+                warn(
+                    vm,
+                    "file:// wrapper is disabled in the server configuration",
+                );
             }
             return Loc::None;
         }
@@ -496,14 +572,27 @@ fn locate(vm: &mut Vm, path: &[u8], options: i64) -> Loc {
         let n = protocol.unwrap_or(0);
         let allow_fopen = ini_bool(vm, b"allow_url_fopen", true);
         let allow_include = ini_bool(vm, b"allow_url_include", false);
-        let in_include = options & STREAM_OPEN_FOR_INCLUDE != 0 || IN_USER_INCLUDE.with(|c| c.get());
+        let in_include =
+            options & STREAM_OPEN_FOR_INCLUDE != 0 || IN_USER_INCLUDE.with(|c| c.get());
         if u.is_url && (!allow_fopen || (in_include && !allow_include)) {
             if options & REPORT_ERRORS != 0 {
                 let proto = lossy(&path[..n]);
                 if !allow_fopen {
-                    warn(vm, &format!("{}:// wrapper is disabled in the server configuration by allow_url_fopen=0", proto));
+                    warn(
+                        vm,
+                        &format!(
+                            "{}:// wrapper is disabled in the server configuration by allow_url_fopen=0",
+                            proto
+                        ),
+                    );
                 } else {
-                    warn(vm, &format!("{}:// wrapper is disabled in the server configuration by allow_url_include=0", proto));
+                    warn(
+                        vm,
+                        &format!(
+                            "{}:// wrapper is disabled in the server configuration by allow_url_include=0",
+                            proto
+                        ),
+                    );
                 }
             }
             return Loc::None;
@@ -547,13 +636,21 @@ fn tidy_wrapper_errors() {
 // ---------------------------------------------------------------------------
 
 /// php_stream_context_from_zval(zcontext, no_default)
-fn context_from_arg(vm: &mut Vm, v: Option<&Value>, no_default: bool) -> Result<Option<i64>, VmError> {
+fn context_from_arg(
+    vm: &mut Vm,
+    v: Option<&Value>,
+    no_default: bool,
+) -> Result<Option<i64>, VmError> {
     match v.map(|v| v.deref()) {
         Some(Value::Resource(id)) => {
             let is_ctx = STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&id))
-                && goro_core::value::resource_type_of(id).as_deref() == Some(b"stream-context".as_slice());
+                && goro_core::value::resource_type_of(id).as_deref()
+                    == Some(b"stream-context".as_slice());
             if !is_ctx {
-                let msg = format!("{}(): supplied resource is not a valid Stream-Context resource", cur_fn());
+                let msg = format!(
+                    "{}(): supplied resource is not a valid Stream-Context resource",
+                    cur_fn()
+                );
                 return Err(throw(vm, b"TypeError", &msg));
             }
             Ok(Some(id))
@@ -592,13 +689,25 @@ fn default_context() -> i64 {
 // Wrapper object creation (user_stream_create_object)
 // ---------------------------------------------------------------------------
 
-fn create_object(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>) -> Result<Option<Value>, VmError> {
-    let cl: Vec<u8> = uw.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+fn create_object(
+    vm: &mut Vm,
+    uw: &UserWrapperRef,
+    context: Option<i64>,
+) -> Result<Option<Value>, VmError> {
+    let cl: Vec<u8> = uw
+        .class_name
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
     if !vm.classes.contains_key(&cl) {
         vm.try_autoload_class(&uw.class_name);
     }
     let (canonical, abstract_like, ctor) = match vm.classes.get(&cl) {
-        Some(c) => (c.name.clone(), c.is_abstract || c.is_interface || c.is_trait || c.is_enum, c.get_method(b"__construct").is_some()),
+        Some(c) => (
+            c.name.clone(),
+            c.is_abstract || c.is_interface || c.is_trait || c.is_enum,
+            c.get_method(b"__construct").is_some(),
+        ),
         None => return Ok(None),
     };
     if abstract_like {
@@ -613,31 +722,55 @@ fn create_object(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>) -> Resu
     };
     // add_property_resource()/add_property_null() go through the regular
     // property write: visibility, readonly and property types apply.
-    let pdef = vm.classes.get(&cl).and_then(|c| c.properties.iter().find(|p| p.name == b"context" && !p.is_static).cloned());
+    let pdef = vm.classes.get(&cl).and_then(|c| {
+        c.properties
+            .iter()
+            .find(|p| p.name == b"context" && !p.is_static)
+            .cloned()
+    });
     if let Some(pd) = &pdef {
         let scope: Option<Vec<u8>> = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
         let decl = pd.declaring_class.to_ascii_lowercase();
-        let decl_name = vm.classes.get(&decl).map(|c| c.name.clone()).unwrap_or_else(|| canonical.clone());
+        let decl_name = vm
+            .classes
+            .get(&decl)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| canonical.clone());
         let decl_disp = goro_core::value::display_class_name(&decl_name).to_string();
         let accessible = match pd.visibility {
             Visibility::Public => true,
             Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
             Visibility::Protected => match &scope {
-                Some(sc) => *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc),
+                Some(sc) => {
+                    *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
+                }
                 None => false,
             },
         };
         if !accessible {
-            let vis = if matches!(pd.visibility, Visibility::Private) { "private" } else { "protected" };
+            let vis = if matches!(pd.visibility, Visibility::Private) {
+                "private"
+            } else {
+                "protected"
+            };
             let msg = format!("Cannot access {} property {}::$context", vis, decl_disp);
             return Err(throw(vm, b"Error", &msg));
         }
         if pd.is_readonly && scope.as_deref() != Some(decl.as_slice()) {
             let from = match &scope {
-                Some(sc) => format!("scope {}", vm.classes.get(sc).map(|c| goro_core::value::display_class_name(&c.name).to_string()).unwrap_or_default()),
+                Some(sc) => format!(
+                    "scope {}",
+                    vm.classes
+                        .get(sc)
+                        .map(|c| goro_core::value::display_class_name(&c.name).to_string())
+                        .unwrap_or_default()
+                ),
                 None => "global scope".to_string(),
             };
-            let msg = format!("Cannot initialize readonly property {}::$context from {}", decl_disp, from);
+            let msg = format!(
+                "Cannot initialize readonly property {}::$context from {}",
+                decl_disp, from
+            );
             return Err(throw(vm, b"Error", &msg));
         }
     }
@@ -664,7 +797,12 @@ fn create_object(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>) -> Resu
             return Err(exc_err(vm));
         }
     }
-    if vm.classes.get(&cl).map(|c| c.get_method(b"__destruct").is_some()).unwrap_or(false) {
+    if vm
+        .classes
+        .get(&cl)
+        .map(|c| c.get_method(b"__destruct").is_some())
+        .unwrap_or(false)
+    {
         vm.track_destructible(val.clone());
     }
     Ok(Some(val))
@@ -694,7 +832,9 @@ pub(crate) struct StatBuf {
 /// statbuf_from_array()
 fn statbuf_from_array(arr: &PhpArray) -> StatBuf {
     let g = |k: &[u8]| -> i64 {
-        arr.get(&ArrayKey::String(PhpString::from_bytes(k))).map(|v| v.deref().to_long()).unwrap_or(0)
+        arr.get(&ArrayKey::String(PhpString::from_bytes(k)))
+            .map(|v| v.deref().to_long())
+            .unwrap_or(0)
     };
     StatBuf {
         dev: g(b"dev"),
@@ -777,12 +917,22 @@ fn op_write(vm: &mut Vm, us: &Us, buf: &[u8]) -> Result<i64, VmError> {
         CallRes::Undef => return Ok(-1),
         CallRes::Val(v) => v,
     };
-    let mut didwrite = if matches!(ret.deref(), Value::False) { -1 } else { ret.deref().to_long() };
+    let mut didwrite = if matches!(ret.deref(), Value::False) {
+        -1
+    } else {
+        ret.deref().to_long()
+    };
     if didwrite > 0 && didwrite > count {
-        warn(vm, &format!(
-            "{}::stream_write wrote {} bytes more data than requested ({} written, {} max)",
-            cname, didwrite - count, didwrite, count
-        ));
+        warn(
+            vm,
+            &format!(
+                "{}::stream_write wrote {} bytes more data than requested ({} written, {} max)",
+                cname,
+                didwrite - count,
+                didwrite,
+                count
+            ),
+        );
         didwrite = count;
     }
     Ok(didwrite)
@@ -816,15 +966,24 @@ fn op_read(vm: &mut Vm, us: &Us, count: usize) -> Result<Option<Vec<u8>>, VmErro
             v => v.to_php_string().as_bytes().to_vec(),
         };
         if data.len() > count {
-            warn(vm, &format!(
-                "{}::stream_read - read {} bytes more data than requested ({} read, {} max) - excess data will be lost",
-                cname, data.len() - count, data.len(), count
-            ));
+            warn(
+                vm,
+                &format!(
+                    "{}::stream_read - read {} bytes more data than requested ({} read, {} max) - excess data will be lost",
+                    cname,
+                    data.len() - count,
+                    data.len(),
+                    count
+                ),
+            );
             data.truncate(count);
         }
         match call_method(vm, &obj, b"stream_eof", vec![])? {
             CallRes::NotImpl => {
-                warn(vm, &format!("{}::stream_eof is not implemented! Assuming EOF", cname));
+                warn(
+                    vm,
+                    &format!("{}::stream_eof is not implemented! Assuming EOF", cname),
+                );
                 us.borrow_mut().eof = true;
                 return Ok(None);
             }
@@ -848,7 +1007,10 @@ fn warn_plain(vm: &mut Vm, msg: &str) {
 
 fn has_method_exact(vm: &Vm, obj: &Value, name: &[u8]) -> bool {
     let cl = class_lower_of(obj);
-    vm.classes.get(&cl).map(|c| c.get_method(name).is_some()).unwrap_or(false)
+    vm.classes
+        .get(&cl)
+        .map(|c| c.get_method(name).is_some())
+        .unwrap_or(false)
 }
 
 /// try_convert_to_string() on an object: __toString, or an Error.
@@ -901,7 +1063,12 @@ fn op_flush(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
 fn op_seek(vm: &mut Vm, us: &Us, offset: i64, whence: i64) -> Result<(i32, Option<i64>), VmError> {
     let (obj, cname) = us_obj(us);
     with_no_fclose(us, || -> Result<(i32, Option<i64>), VmError> {
-        let r = call_method(vm, &obj, b"stream_seek", vec![Value::Long(offset), Value::Long(whence)])?;
+        let r = call_method(
+            vm,
+            &obj,
+            b"stream_seek",
+            vec![Value::Long(offset), Value::Long(whence)],
+        )?;
         let ret = match r {
             CallRes::NotImpl => {
                 us.borrow_mut().flags |= FLAG_NO_SEEK;
@@ -914,7 +1081,9 @@ fn op_seek(vm: &mut Vm, us: &Us, offset: i64, whence: i64) -> Result<(i32, Optio
             return Ok((ret, None));
         }
         match call_method(vm, &obj, b"stream_tell", vec![])? {
-            CallRes::Val(v) if matches!(v.deref(), Value::Long(_)) => Ok((0, Some(v.deref().to_long()))),
+            CallRes::Val(v) if matches!(v.deref(), Value::Long(_)) => {
+                Ok((0, Some(v.deref().to_long())))
+            }
             CallRes::NotImpl => {
                 warn(vm, &format!("{}::stream_tell is not implemented!", cname));
                 Ok((-1, None))
@@ -943,7 +1112,9 @@ fn op_stat(vm: &mut Vm, us: &Us) -> Result<Option<StatBuf>, VmError> {
 /// zend_zval_value_name()
 fn zval_type_name(v: &Value) -> String {
     match v.deref() {
-        Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name).to_string(),
+        Value::Object(o) => {
+            goro_core::value::display_class_name(&o.borrow().class_name).to_string()
+        }
         Value::True => "true".to_string(),
         Value::False => "false".to_string(),
         other => Vm::value_type_name(&other),
@@ -955,7 +1126,10 @@ fn op_check_liveness(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
     let (obj, cname) = us_obj(us);
     match call_method(vm, &obj, b"stream_eof", vec![])? {
         CallRes::NotImpl => {
-            warn(vm, &format!("{}::stream_eof is not implemented! Assuming EOF", cname));
+            warn(
+                vm,
+                &format!("{}::stream_eof is not implemented! Assuming EOF", cname),
+            );
             Ok(OPT_ERR)
         }
         CallRes::Undef => Ok(OPT_ERR),
@@ -963,7 +1137,14 @@ fn op_check_liveness(vm: &mut Vm, us: &Us) -> Result<i32, VmError> {
             Value::True => Ok(OPT_ERR),
             Value::False => Ok(OPT_OK),
             other => {
-                warn(vm, &format!("{}::stream_eof value must be of type bool, {} given", cname, zval_type_name(&other)));
+                warn(
+                    vm,
+                    &format!(
+                        "{}::stream_eof value must be of type bool, {} given",
+                        cname,
+                        zval_type_name(&other)
+                    ),
+                );
                 Ok(OPT_ERR)
             }
         },
@@ -1006,7 +1187,13 @@ fn op_lock(vm: &mut Vm, us: &Us, value: i64) -> Result<i32, VmError> {
 fn op_truncate(vm: &mut Vm, us: &Us, size: Option<i64>) -> Result<i32, VmError> {
     let (obj, cname) = us_obj(us);
     let size = match size {
-        None => return Ok(if has_method(vm, &obj, b"stream_truncate") { OPT_OK } else { OPT_ERR }),
+        None => {
+            return Ok(if has_method(vm, &obj, b"stream_truncate") {
+                OPT_OK
+            } else {
+                OPT_ERR
+            });
+        }
         Some(n) => n,
     };
     if size < 0 {
@@ -1014,7 +1201,10 @@ fn op_truncate(vm: &mut Vm, us: &Us, size: Option<i64>) -> Result<i32, VmError> 
     }
     match call_method(vm, &obj, b"stream_truncate", vec![Value::Long(size)])? {
         CallRes::NotImpl => {
-            warn(vm, &format!("{}::stream_truncate is not implemented!", cname));
+            warn(
+                vm,
+                &format!("{}::stream_truncate is not implemented!", cname),
+            );
             Ok(OPT_ERR)
         }
         CallRes::Undef => Ok(OPT_ERR),
@@ -1022,7 +1212,14 @@ fn op_truncate(vm: &mut Vm, us: &Us, size: Option<i64>) -> Result<i32, VmError> 
             Value::True => Ok(OPT_OK),
             Value::False => Ok(OPT_ERR),
             other => {
-                warn(vm, &format!("{}::stream_truncate value must be of type bool, {} given", cname, zval_type_name(&other)));
+                warn(
+                    vm,
+                    &format!(
+                        "{}::stream_truncate value must be of type bool, {} given",
+                        cname,
+                        zval_type_name(&other)
+                    ),
+                );
                 Ok(OPT_ERR)
             }
         },
@@ -1030,23 +1227,44 @@ fn op_truncate(vm: &mut Vm, us: &Us, size: Option<i64>) -> Result<i32, VmError> 
 }
 
 /// user_stream_set_option()
-fn op_set_option(vm: &mut Vm, us: &Us, option: i64, value: i64, ptr: Value) -> Result<i32, VmError> {
+fn op_set_option(
+    vm: &mut Vm,
+    us: &Us,
+    option: i64,
+    value: i64,
+    ptr: Value,
+) -> Result<i32, VmError> {
     let (obj, cname) = us_obj(us);
     let args = vec![Value::Long(option), Value::Long(value), ptr];
     match call_method(vm, &obj, b"stream_set_option", args)? {
         CallRes::NotImpl => {
-            warn(vm, &format!("{}::stream_set_option is not implemented!", cname));
+            warn(
+                vm,
+                &format!("{}::stream_set_option is not implemented!", cname),
+            );
             Ok(OPT_ERR)
         }
         CallRes::Undef => Ok(OPT_ERR),
-        CallRes::Val(v) => Ok(if v.deref().is_truthy() { OPT_OK } else { OPT_ERR }),
+        CallRes::Val(v) => Ok(if v.deref().is_truthy() {
+            OPT_OK
+        } else {
+            OPT_ERR
+        }),
     }
 }
 
 /// _php_stream_set_option() for user streams.
-fn stream_set_option(vm: &mut Vm, us: &Us, option: i64, value: i64, ptr: Option<i64>) -> Result<i32, VmError> {
+fn stream_set_option(
+    vm: &mut Vm,
+    us: &Us,
+    option: i64,
+    value: i64,
+    ptr: Option<i64>,
+) -> Result<i32, VmError> {
     let ret = match option {
-        PHP_STREAM_OPTION_READ_TIMEOUT => op_set_option(vm, us, option, value, Value::Long(ptr.unwrap_or(0)))?,
+        PHP_STREAM_OPTION_READ_TIMEOUT => {
+            op_set_option(vm, us, option, value, Value::Long(ptr.unwrap_or(0)))?
+        }
         PHP_STREAM_OPTION_READ_BUFFER | PHP_STREAM_OPTION_WRITE_BUFFER => {
             op_set_option(vm, us, option, value, Value::Long(ptr.unwrap_or(BUFSIZ)))?
         }
@@ -1066,7 +1284,13 @@ fn stream_set_option(vm: &mut Vm, us: &Us, option: i64, value: i64, ptr: Option<
 }
 
 /// php_userstreamop_cast(): returns the inner stream resource id on success.
-fn op_cast(vm: &mut Vm, us: &Us, fid: i64, for_select: bool, report_errors: bool) -> Result<Option<i64>, VmError> {
+fn op_cast(
+    vm: &mut Vm,
+    us: &Us,
+    fid: i64,
+    for_select: bool,
+    report_errors: bool,
+) -> Result<Option<i64>, VmError> {
     let (obj, cname) = us_obj(us);
     let arg = Value::Long(if for_select { 3 } else { 0 });
     let r = with_no_fclose(us, || call_method(vm, &obj, b"stream_cast", vec![arg]))?;
@@ -1092,14 +1316,20 @@ fn op_cast(vm: &mut Vm, us: &Us, fid: i64, for_select: bool, report_errors: bool
         }
         _ => {
             if report_errors {
-                warn(vm, &format!("{}::stream_cast must return a stream resource", cname));
+                warn(
+                    vm,
+                    &format!("{}::stream_cast must return a stream resource", cname),
+                );
             }
             return Ok(None);
         }
     };
     if inner == fid {
         if report_errors {
-            warn(vm, &format!("{}::stream_cast must not return itself", cname));
+            warn(
+                vm,
+                &format!("{}::stream_cast must not return itself", cname),
+            );
         }
         return Ok(None);
     }
@@ -1107,10 +1337,17 @@ fn op_cast(vm: &mut Vm, us: &Us, fid: i64, for_select: bool, report_errors: bool
         // php_stream_cast(intstream, castas, retptr, show_err=1)
         let r = op_cast(vm, &ius, inner, for_select, report_errors)?;
         if r.is_none() && report_errors {
-            warn(vm, &format!(
-                "Cannot represent a stream of type user-space as a {}",
-                if for_select { "select()able descriptor" } else { "STDIO FILE*" }
-            ));
+            warn(
+                vm,
+                &format!(
+                    "Cannot represent a stream of type user-space as a {}",
+                    if for_select {
+                        "select()able descriptor"
+                    } else {
+                        "STDIO FILE*"
+                    }
+                ),
+            );
         }
         return Ok(r);
     }
@@ -1157,9 +1394,17 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
                 Some(d) => d,
             };
             let justread = data.len();
-            let mut out = if !data.is_empty() { crate::stream_filters::apply_read_chain(vm, fid, &data) } else { Vec::new() };
+            let mut out = if !data.is_empty() {
+                crate::stream_filters::apply_read_chain(vm, fid, &data)
+            } else {
+                Vec::new()
+            };
             if us.borrow().eof {
-                out.extend(crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_READ));
+                out.extend(crate::stream_filters::flush_chain(
+                    vm,
+                    fid,
+                    crate::stream_filters::STREAM_FILTER_READ,
+                ));
             }
             {
                 let mut b = us.borrow_mut();
@@ -1190,7 +1435,12 @@ fn fill_read_buffer(vm: &mut Vm, fid: i64, us: &Us, size: usize) -> Result<bool,
 // The loop mirrors the C one, which also exits after a single pass for
 // non-greedy streams.
 #[allow(clippy::never_loop)]
-fn stream_read(vm: &mut Vm, fid: i64, us: &Us, mut size: usize) -> Result<Option<Vec<u8>>, VmError> {
+fn stream_read(
+    vm: &mut Vm,
+    fid: i64,
+    us: &Us,
+    mut size: usize,
+) -> Result<Option<Vec<u8>>, VmError> {
     let mut out: Vec<u8> = Vec::new();
     while size > 0 {
         {
@@ -1263,7 +1513,12 @@ fn stream_eof(vm: &mut Vm, us: &Us) -> Result<bool, VmError> {
 }
 
 /// _php_stream_get_line(): maxlen None == grow mode
-fn stream_get_line(vm: &mut Vm, fid: i64, us: &Us, maxlen: Option<usize>) -> Result<Option<Vec<u8>>, VmError> {
+fn stream_get_line(
+    vm: &mut Vm,
+    fid: i64,
+    us: &Us,
+    maxlen: Option<usize>,
+) -> Result<Option<Vec<u8>>, VmError> {
     let mut out: Vec<u8> = Vec::new();
     let mut maxlen_left = maxlen.unwrap_or(0);
     if maxlen == Some(0) {
@@ -1328,17 +1583,29 @@ fn search_delim(us: &UserStream, maxlen: usize, skiplen: usize, delim: &[u8]) ->
     if delim.len() == 1 {
         hay.iter().position(|&c| c == delim[0]).map(|p| p + skiplen)
     } else {
-        hay.windows(delim.len()).position(|w| w == delim).map(|p| p + skiplen)
+        hay.windows(delim.len())
+            .position(|w| w == delim)
+            .map(|p| p + skiplen)
     }
 }
 
 /// php_stream_get_record()
-fn stream_get_record(vm: &mut Vm, fid: i64, us: &Us, maxlen: usize, delim: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
+fn stream_get_record(
+    vm: &mut Vm,
+    fid: i64,
+    us: &Us,
+    maxlen: usize,
+    delim: &[u8],
+) -> Result<Option<Vec<u8>>, VmError> {
     if maxlen == 0 {
         return Ok(None);
     }
     let has_delim = !delim.is_empty();
-    let mut found = if has_delim { search_delim(&us.borrow(), maxlen, 0, delim) } else { None };
+    let mut found = if has_delim {
+        search_delim(&us.borrow(), maxlen, 0, delim)
+    } else {
+        None
+    };
     let mut buffered_len = us.borrow().buffered();
     while found.is_none() && buffered_len < maxlen {
         let chunk = us.borrow().chunk_size;
@@ -1351,7 +1618,11 @@ fn stream_get_record(vm: &mut Vm, fid: i64, us: &Us, maxlen: usize, delim: &[u8]
             break;
         }
         if has_delim {
-            let skip = if buffered_len >= delim.len() - 1 { buffered_len - (delim.len() - 1) } else { 0 };
+            let skip = if buffered_len >= delim.len() - 1 {
+                buffered_len - (delim.len() - 1)
+            } else {
+                0
+            };
             found = search_delim(&us.borrow(), maxlen, skip, delim);
             if found.is_some() {
                 break;
@@ -1372,7 +1643,11 @@ fn stream_get_record(vm: &mut Vm, fid: i64, us: &Us, maxlen: usize, delim: &[u8]
             tent_ret_len = b.buffered().min(maxlen);
         }
     }
-    let ret = if tent_ret_len > 0 { stream_read(vm, fid, us, tent_ret_len)?.unwrap_or_default() } else { Vec::new() };
+    let ret = if tent_ret_len > 0 {
+        stream_read(vm, fid, us, tent_ret_len)?.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if found.is_some() {
         let mut b = us.borrow_mut();
         b.readpos += delim.len();
@@ -1441,7 +1716,8 @@ fn stream_write(vm: &mut Vm, fid: i64, us: &Us, buf: &[u8]) -> Result<i64, VmErr
 /// _php_stream_flush()
 fn stream_flush(vm: &mut Vm, fid: i64, us: &Us) -> Result<i32, VmError> {
     if has_write_filters(fid) {
-        let out = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
+        let out =
+            crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
         if !out.is_empty() {
             write_buffer(vm, us, &out)?;
         }
@@ -1531,7 +1807,12 @@ fn stream_seek(vm: &mut Vm, fid: i64, us: &Us, offset: i64, whence: i64) -> Resu
 }
 
 /// _php_stream_copy_to_mem(): None == NULL
-fn copy_to_mem(vm: &mut Vm, fid: i64, us: &Us, maxlen: Option<usize>) -> Result<Option<Vec<u8>>, VmError> {
+fn copy_to_mem(
+    vm: &mut Vm,
+    fid: i64,
+    us: &Us,
+    maxlen: Option<usize>,
+) -> Result<Option<Vec<u8>>, VmError> {
     if maxlen == Some(0) {
         return Ok(Some(Vec::new()));
     }
@@ -1637,7 +1918,9 @@ pub(crate) fn shutdown_streams(vm: &mut Vm) {
             let already = vm.fatal_emitted;
             vm.fatal_emitted = false;
             match stream_free(vm, fid, &us) {
-                Err(e) if vm.current_exception.is_some() || !vm.fatal_emitted => vm.report_uncaught(&e),
+                Err(e) if vm.current_exception.is_some() || !vm.fatal_emitted => {
+                    vm.report_uncaught(&e)
+                }
                 _ => {}
             }
             vm.fatal_emitted |= already;
@@ -1650,7 +1933,14 @@ pub(crate) fn shutdown_streams(vm: &mut Vm) {
 // Wrapper ops (user_stream_wops)
 // ---------------------------------------------------------------------------
 
-fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir: bool, is_url: bool) -> (i64, Us) {
+fn alloc_stream(
+    obj: Value,
+    class_name: Vec<u8>,
+    mode: &str,
+    path: &[u8],
+    is_dir: bool,
+    is_url: bool,
+) -> (i64, Us) {
     let placeholder = std::fs::File::open("/dev/null").or_else(|_| tempfile::tempfile());
     let file = match placeholder {
         Ok(f) => f,
@@ -1661,7 +1951,11 @@ fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir
         if let Some(fh) = h.borrow_mut().get_mut(&fid) {
             fh.uri = lossy(path);
             fh.wrapper_type = "user-space".to_string();
-            fh.stream_type = if is_dir { "dir".to_string() } else { "user-space".to_string() };
+            fh.stream_type = if is_dir {
+                "dir".to_string()
+            } else {
+                "user-space".to_string()
+            };
             fh.user_wrapper = Some(obj.clone());
             fh.user_wrapper_class = Some(class_name.clone());
         }
@@ -1676,7 +1970,11 @@ fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir
         eof: false,
         fatal_error: false,
         chunk_size: CHUNK_SIZE,
-        flags: if is_dir { FLAG_IS_DIR | FLAG_NO_BUFFER } else { 0 },
+        flags: if is_dir {
+            FLAG_IS_DIR | FLAG_NO_BUFFER
+        } else {
+            0
+        },
         mode: mode.to_string(),
         orig_path: lossy(path),
         in_free: false,
@@ -1690,7 +1988,12 @@ fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir
 }
 
 fn recursion_guard(path: &[u8]) -> bool {
-    CURRENT_FILENAME.with(|c| c.borrow().as_deref().map(|p| p.as_bytes() == path).unwrap_or(false))
+    CURRENT_FILENAME.with(|c| {
+        c.borrow()
+            .as_deref()
+            .map(|p| p.as_bytes() == path)
+            .unwrap_or(false)
+    })
 }
 
 fn set_current_filename(path: Option<&[u8]>) {
@@ -1712,7 +2015,10 @@ fn wrapper_open(
     }
     set_current_filename(Some(path));
     let old_in_include = IN_USER_INCLUDE.with(|c| c.get());
-    if !uw.is_url && options & STREAM_OPEN_FOR_INCLUDE != 0 && !ini_bool(vm, b"allow_url_include", false) {
+    if !uw.is_url
+        && options & STREAM_OPEN_FOR_INCLUDE != 0
+        && !ini_bool(vm, b"allow_url_include", false)
+    {
         IN_USER_INCLUDE.with(|c| c.set(true));
     }
     let result = (|| -> Result<Option<(i64, Us, Option<Vec<u8>>)>, VmError> {
@@ -1721,14 +2027,23 @@ fn wrapper_open(
             None => return Ok(None),
         };
         let opened = Rc::new(RefCell::new(Value::Null));
-        let args = vec![s(path), s(mode.as_bytes()), Value::Long(options), Value::Reference(opened.clone())];
+        let args = vec![
+            s(path),
+            s(mode.as_bytes()),
+            Value::Long(options),
+            Value::Reference(opened.clone()),
+        ];
         let cname = match &obj {
             Value::Object(o) => lossy(&o.borrow().class_name),
             _ => String::new(),
         };
         match call_method(vm, &obj, b"stream_open", args)? {
             CallRes::NotImpl => {
-                log_error(vm, options, format!("\"{}::stream_open\" is not implemented", cname));
+                log_error(
+                    vm,
+                    options,
+                    format!("\"{}::stream_open\" is not implemented", cname),
+                );
                 Ok(None)
             }
             CallRes::Undef => Ok(None),
@@ -1745,7 +2060,11 @@ fn wrapper_open(
                     };
                     Ok(Some((fid, us, op)))
                 } else {
-                    log_error(vm, options, format!("\"{}::stream_open\" call failed", cname));
+                    log_error(
+                        vm,
+                        options,
+                        format!("\"{}::stream_open\" call failed", cname),
+                    );
                     Ok(None)
                 }
             }
@@ -1757,7 +2076,13 @@ fn wrapper_open(
 }
 
 /// user_wrapper_opendir()
-fn wrapper_opendir(vm: &mut Vm, uw: &UserWrapperRef, path: &[u8], options: i64, context: Option<i64>) -> Result<Option<(i64, Us)>, VmError> {
+fn wrapper_opendir(
+    vm: &mut Vm,
+    uw: &UserWrapperRef,
+    path: &[u8],
+    options: i64,
+    context: Option<i64>,
+) -> Result<Option<(i64, Us)>, VmError> {
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
         return Ok(None);
@@ -1772,9 +2097,18 @@ fn wrapper_opendir(vm: &mut Vm, uw: &UserWrapperRef, path: &[u8], options: i64, 
             Value::Object(o) => lossy(&o.borrow().class_name),
             _ => String::new(),
         };
-        match call_method(vm, &obj, b"dir_opendir", vec![s(path), Value::Long(options)])? {
+        match call_method(
+            vm,
+            &obj,
+            b"dir_opendir",
+            vec![s(path), Value::Long(options)],
+        )? {
             CallRes::NotImpl => {
-                log_error(vm, options, format!("\"{}::dir_opendir\" is not implemented", cname));
+                log_error(
+                    vm,
+                    options,
+                    format!("\"{}::dir_opendir\" is not implemented", cname),
+                );
                 Ok(None)
             }
             CallRes::Undef => Ok(None),
@@ -1784,9 +2118,15 @@ fn wrapper_opendir(vm: &mut Vm, uw: &UserWrapperRef, path: &[u8], options: i64, 
                         Value::Object(o) => o.borrow().class_name.clone(),
                         _ => Vec::new(),
                     };
-                    Ok(Some(alloc_stream(obj, class_name, "r", path, true, uw.is_url)))
+                    Ok(Some(alloc_stream(
+                        obj, class_name, "r", path, true, uw.is_url,
+                    )))
                 } else {
-                    log_error(vm, options, format!("\"{}::dir_opendir\" call failed", cname));
+                    log_error(
+                        vm,
+                        options,
+                        format!("\"{}::dir_opendir\" call failed", cname),
+                    );
                     Ok(None)
                 }
             }
@@ -1797,7 +2137,12 @@ fn wrapper_opendir(vm: &mut Vm, uw: &UserWrapperRef, path: &[u8], options: i64, 
 }
 
 /// _php_stream_opendir()
-fn opendir_wrapper(vm: &mut Vm, path: &[u8], options: i64, context: Option<i64>) -> Result<Option<(i64, Us)>, VmError> {
+fn opendir_wrapper(
+    vm: &mut Vm,
+    path: &[u8],
+    options: i64,
+    context: Option<i64>,
+) -> Result<Option<(i64, Us)>, VmError> {
     if path.is_empty() {
         return Ok(None);
     }
@@ -1807,7 +2152,12 @@ fn opendir_wrapper(vm: &mut Vm, path: &[u8], options: i64, context: Option<i64>)
         _ => None,
     };
     if stream.is_none() && options & REPORT_ERRORS != 0 {
-        display_wrapper_errors(vm, matches!(loc, Loc::User(_)), path, "Failed to open directory");
+        display_wrapper_errors(
+            vm,
+            matches!(loc, Loc::User(_)),
+            path,
+            "Failed to open directory",
+        );
     }
     tidy_wrapper_errors();
     Ok(stream)
@@ -1858,7 +2208,12 @@ fn op_rewinddir(vm: &mut Vm, us: &Us) -> Result<(), VmError> {
 }
 
 /// user_wrapper_stat_url(): None == failure (-1)
-fn wrapper_url_stat(vm: &mut Vm, uw: &UserWrapperRef, url: &[u8], flags: i64) -> Result<Option<StatBuf>, VmError> {
+fn wrapper_url_stat(
+    vm: &mut Vm,
+    uw: &UserWrapperRef,
+    url: &[u8],
+    flags: i64,
+) -> Result<Option<StatBuf>, VmError> {
     let obj = match create_object(vm, uw, None)? {
         Some(o) => o,
         None => return Ok(None),
@@ -1888,7 +2243,13 @@ fn class_name_of(obj: &Value) -> Vec<u8> {
 }
 
 /// Shared shape of user_wrapper_unlink/rename/mkdir/rmdir/metadata.
-fn wrapper_bool_op(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>, method: &str, args: Vec<Value>) -> Result<bool, VmError> {
+fn wrapper_bool_op(
+    vm: &mut Vm,
+    uw: &UserWrapperRef,
+    context: Option<i64>,
+    method: &str,
+    args: Vec<Value>,
+) -> Result<bool, VmError> {
     let obj = match create_object(vm, uw, context)? {
         Some(o) => o,
         None => return Ok(false),
@@ -1919,7 +2280,11 @@ fn stat_path_any(vm: &mut Vm, path: &[u8], flags: i64) -> Result<Option<StatBuf>
         }
     }
     let local = strip_file_scheme(&lossy(path)).unwrap_or_else(|| lossy(path));
-    let md = if flags & PHP_STREAM_URL_STAT_LINK != 0 { std::fs::symlink_metadata(&local) } else { std::fs::metadata(&local) };
+    let md = if flags & PHP_STREAM_URL_STAT_LINK != 0 {
+        std::fs::symlink_metadata(&local)
+    } else {
+        std::fs::metadata(&local)
+    };
     match md {
         Ok(m) => {
             use std::os::unix::fs::MetadataExt;
@@ -1996,11 +2361,26 @@ fn any_seek(vm: &mut Vm, fid: i64, offset: i64, whence: i64) -> Result<i32, VmEr
     if let Some(us) = get_us(fid) {
         return stream_seek(vm, fid, &us, offset, whence);
     }
-    Ok(call_orig(vm, "fseek", &[Value::Resource(fid), Value::Long(offset), Value::Long(whence)])?.to_long() as i32)
+    Ok(call_orig(
+        vm,
+        "fseek",
+        &[
+            Value::Resource(fid),
+            Value::Long(offset),
+            Value::Long(whence),
+        ],
+    )?
+    .to_long() as i32)
 }
 
 /// Open any path as a stream (php_stream_open_wrapper_ex with REPORT_ERRORS).
-fn any_open(vm: &mut Vm, path: &[u8], mode: &str, options: i64, context: Option<i64>) -> Result<Option<i64>, VmError> {
+fn any_open(
+    vm: &mut Vm,
+    path: &[u8],
+    mode: &str,
+    options: i64,
+    context: Option<i64>,
+) -> Result<Option<i64>, VmError> {
     if needs_locate(path) {
         match open_located(vm, path, mode, options, context)? {
             Opened::Stream(fid, _) => return Ok(Some(fid)),
@@ -2029,7 +2409,13 @@ enum Opened {
 }
 
 /// _php_stream_open_wrapper_ex(): locate the wrapper and open the stream.
-fn open_located(vm: &mut Vm, path: &[u8], mode: &str, options: i64, context: Option<i64>) -> Result<Opened, VmError> {
+fn open_located(
+    vm: &mut Vm,
+    path: &[u8],
+    mode: &str,
+    options: i64,
+    context: Option<i64>,
+) -> Result<Opened, VmError> {
     if path.is_empty() {
         return Err(throw(vm, b"ValueError", "Path must not be empty"));
     }
@@ -2046,7 +2432,10 @@ fn open_located(vm: &mut Vm, path: &[u8], mode: &str, options: i64, context: Opt
             let r = wrapper_open(vm, &uw, path, mode, options & !REPORT_ERRORS, context)?;
             let stream = r.map(|(fid, us, _)| (fid, us));
             if let Some((_, us)) = &stream {
-                if mode.contains('a') && us.borrow().flags & FLAG_NO_SEEK == 0 && us.borrow().position == 0 {
+                if mode.contains('a')
+                    && us.borrow().flags & FLAG_NO_SEEK == 0
+                    && us.borrow().position == 0
+                {
                     if let (0, Some(p)) = op_seek(vm, us, 0, SEEK_CUR)? {
                         us.borrow_mut().position = p;
                     }
@@ -2065,7 +2454,12 @@ fn open_located(vm: &mut Vm, path: &[u8], mode: &str, options: i64, context: Opt
 }
 
 /// _php_stream_copy_to_stream_ex(): (success, bytes)
-fn copy_stream(vm: &mut Vm, src: i64, dest: i64, maxlen: Option<usize>) -> Result<(bool, usize), VmError> {
+fn copy_stream(
+    vm: &mut Vm,
+    src: i64,
+    dest: i64,
+    maxlen: Option<usize>,
+) -> Result<(bool, usize), VmError> {
     if maxlen == Some(0) {
         return Ok((true, 0));
     }
@@ -2127,11 +2521,7 @@ fn run(vm: &mut Vm, name: &'static str, args: &[Value], h: Handler) -> Result<Va
 }
 
 fn b(v: bool) -> Value {
-    if v {
-        Value::True
-    } else {
-        Value::False
-    }
+    if v { Value::True } else { Value::False }
 }
 
 fn int_arg(args: &[Value], i: usize) -> Option<i64> {
@@ -2150,7 +2540,11 @@ fn h_fread(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     };
     let len = int_arg(args, 1).unwrap_or(0);
     if len <= 0 {
-        return Err(throw(vm, b"ValueError", "fread(): Argument #2 ($length) must be greater than 0"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "fread(): Argument #2 ($length) must be greater than 0",
+        ));
     }
     Ok(Some(match stream_read(vm, fid, &us, len as usize)? {
         Some(d) => s(&d),
@@ -2163,7 +2557,10 @@ fn h_fwrite(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         Some(x) => x,
         None => return Ok(None),
     };
-    let data = args.get(1).map(|v| v.deref().to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let data = args
+        .get(1)
+        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     let num = match int_arg(args, 2) {
         None => data.len(),
         Some(n) if n <= 0 => 0,
@@ -2185,7 +2582,11 @@ fn h_fgets(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         None => stream_get_line(vm, fid, &us, None)?,
         Some(n) => {
             if n <= 0 {
-                return Err(throw(vm, b"ValueError", "fgets(): Argument #2 ($length) must be greater than 0"));
+                return Err(throw(
+                    vm,
+                    b"ValueError",
+                    "fgets(): Argument #2 ($length) must be greater than 0",
+                ));
             }
             stream_get_line(vm, fid, &us, Some(n as usize))?
         }
@@ -2223,14 +2624,23 @@ fn h_fclose(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let us = match get_us(fid) {
         Some(u) => u,
         None => {
-            if goro_core::value::is_registered_resource(fid) && !goro_core::value::is_open_resource(fid) {
-                return Err(throw(vm, b"TypeError", "fclose(): Argument #1 ($stream) must be an open stream resource"));
+            if goro_core::value::is_registered_resource(fid)
+                && !goro_core::value::is_open_resource(fid)
+            {
+                return Err(throw(
+                    vm,
+                    b"TypeError",
+                    "fclose(): Argument #1 ($stream) must be an open stream resource",
+                ));
             }
             return Ok(None);
         }
     };
     if us.borrow().flags & FLAG_NO_FCLOSE != 0 {
-        warn(vm, "cannot close the provided stream, as it must not be manually closed");
+        warn(
+            vm,
+            "cannot close the provided stream, as it must not be manually closed",
+        );
         return Ok(Some(Value::False));
     }
     stream_free(vm, fid, &us)?;
@@ -2252,7 +2662,9 @@ fn h_fseek(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     };
     let off = int_arg(args, 1).unwrap_or(0);
     let whence = int_arg(args, 2).unwrap_or(SEEK_SET);
-    Ok(Some(Value::Long(stream_seek(vm, fid, &us, off, whence)? as i64)))
+    Ok(Some(Value::Long(
+        stream_seek(vm, fid, &us, off, whence)? as i64
+    )))
 }
 
 fn h_ftell(_vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2261,7 +2673,11 @@ fn h_ftell(_vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         None => return Ok(None),
     };
     let p = us.borrow().position;
-    Ok(Some(if p == -1 { Value::False } else { Value::Long(p) }))
+    Ok(Some(if p == -1 {
+        Value::False
+    } else {
+        Value::Long(p)
+    }))
 }
 
 fn h_rewind(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2290,7 +2706,11 @@ fn h_ftruncate(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     };
     let size = int_arg(args, 1).unwrap_or(0);
     if size < 0 {
-        return Err(throw(vm, b"ValueError", "ftruncate(): Argument #2 ($size) must be greater than or equal to 0"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "ftruncate(): Argument #2 ($size) must be greater than or equal to 0",
+        ));
     }
     if op_truncate(vm, &us, None)? != OPT_OK {
         warn(vm, "Can't truncate this stream!");
@@ -2307,7 +2727,11 @@ fn h_flock(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let operation = int_arg(args, 1).unwrap_or(0);
     let act = operation & 3;
     if !(1..=3).contains(&act) {
-        return Err(throw(vm, b"ValueError", "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN",
+        ));
     }
     if let Some(Value::Reference(r)) = args.get(2) {
         *r.borrow_mut() = Value::Long(0);
@@ -2334,7 +2758,11 @@ fn h_stream_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
         None => None,
         Some(-1) => None,
         Some(n) if n < 0 => {
-            return Err(throw(vm, b"ValueError", "stream_get_contents(): Argument #2 ($length) must be greater than or equal to -1"))
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "stream_get_contents(): Argument #2 ($length) must be greater than or equal to -1",
+            ));
         }
         Some(n) => Some(n as usize),
     };
@@ -2348,7 +2776,10 @@ fn h_stream_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
             seek_res = stream_seek(vm, fid, &us, desiredpos, SEEK_SET)?;
         }
         if seek_res != 0 {
-            warn(vm, &format!("Failed to seek to position {} in the stream", desiredpos));
+            warn(
+                vm,
+                &format!("Failed to seek to position {} in the stream", desiredpos),
+            );
             return Ok(Some(Value::False));
         }
     }
@@ -2365,16 +2796,22 @@ fn h_stream_get_line(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmErr
     };
     let mut maxlen = int_arg(args, 1).unwrap_or(0);
     if maxlen < 0 {
-        return Err(throw(vm, b"ValueError", "stream_get_line(): Argument #2 ($length) must be greater than or equal to 0"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "stream_get_line(): Argument #2 ($length) must be greater than or equal to 0",
+        ));
     }
     if maxlen == 0 {
         maxlen = CHUNK_SIZE as i64;
     }
     let delim = arg_str(args, 2).unwrap_or_default();
-    Ok(Some(match stream_get_record(vm, fid, &us, maxlen as usize, &delim)? {
-        Some(d) => s(&d),
-        None => Value::False,
-    }))
+    Ok(Some(
+        match stream_get_record(vm, fid, &us, maxlen as usize, &delim)? {
+            Some(d) => s(&d),
+            None => Value::False,
+        },
+    ))
 }
 
 fn h_fpassthru(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2418,13 +2855,22 @@ fn h_stream_get_meta_data(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, 
     };
     let bb = us.borrow();
     let mut a = new_arr();
-    let set = |a: &mut PhpArray, k: &[u8], v: Value| a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
+    let set =
+        |a: &mut PhpArray, k: &[u8], v: Value| a.set(ArrayKey::String(PhpString::from_bytes(k)), v);
     set(&mut a, b"timed_out", Value::False);
     set(&mut a, b"blocked", Value::True);
     set(&mut a, b"eof", b(eof));
     set(&mut a, b"wrapper_data", bb.obj.clone());
     set(&mut a, b"wrapper_type", s(b"user-space"));
-    set(&mut a, b"stream_type", s(if is_dir { b"user-space-dir".as_slice() } else { b"user-space".as_slice() }));
+    set(
+        &mut a,
+        b"stream_type",
+        s(if is_dir {
+            b"user-space-dir".as_slice()
+        } else {
+            b"user-space".as_slice()
+        }),
+    );
     set(&mut a, b"mode", s(bb.mode.as_bytes()));
     set(&mut a, b"unread_bytes", Value::Long(bb.buffered() as i64));
     set(&mut a, b"seekable", b(bb.flags & FLAG_NO_SEEK == 0));
@@ -2438,7 +2884,13 @@ fn h_stream_set_blocking(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
         None => return Ok(None),
     };
     let block = args.get(1).map(|v| v.deref().is_truthy()).unwrap_or(false) as i64;
-    Ok(Some(b(stream_set_option(vm, &us, PHP_STREAM_OPTION_BLOCKING, block, None)? != -1)))
+    Ok(Some(b(stream_set_option(
+        vm,
+        &us,
+        PHP_STREAM_OPTION_BLOCKING,
+        block,
+        None,
+    )? != -1)))
 }
 
 fn h_stream_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2454,7 +2906,13 @@ fn h_stream_set_timeout(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, Vm
         }
         None => 0,
     };
-    Ok(Some(b(stream_set_option(vm, &us, PHP_STREAM_OPTION_READ_TIMEOUT, sec, Some(usec))? == OPT_OK)))
+    Ok(Some(b(stream_set_option(
+        vm,
+        &us,
+        PHP_STREAM_OPTION_READ_TIMEOUT,
+        sec,
+        Some(usec),
+    )? == OPT_OK)))
 }
 
 fn set_buffer(vm: &mut Vm, args: &[Value], option: i64) -> Result<Option<Value>, VmError> {
@@ -2486,7 +2944,11 @@ fn h_stream_set_chunk_size(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>,
     };
     let csize = int_arg(args, 1).unwrap_or(0);
     if csize <= 0 {
-        return Err(throw(vm, b"ValueError", "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0",
+        ));
     }
     let mut bm = us.borrow_mut();
     let old = bm.chunk_size.min(i32::MAX as usize) as i64;
@@ -2508,7 +2970,11 @@ fn h_stream_isatty(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
         None => return Ok(None),
     };
     match op_cast(vm, &us, fid, true, false)? {
-        Some(inner) => Ok(Some(call_orig(vm, "stream_isatty", &[Value::Resource(inner)])?)),
+        Some(inner) => Ok(Some(call_orig(
+            vm,
+            "stream_isatty",
+            &[Value::Resource(inner)],
+        )?)),
         None => Ok(Some(Value::False)),
     }
 }
@@ -2531,11 +2997,18 @@ fn h_stream_copy_to_stream(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>,
     };
     let pos = int_arg(args, 3).unwrap_or(0);
     if pos > 0 && any_seek(vm, src, pos, SEEK_SET)? < 0 {
-        warn(vm, &format!("Failed to seek to position {} in the stream", pos));
+        warn(
+            vm,
+            &format!("Failed to seek to position {} in the stream", pos),
+        );
         return Ok(Some(Value::False));
     }
     let (ok, len) = copy_stream(vm, src, dest, maxlen)?;
-    Ok(Some(if ok { Value::Long(len as i64) } else { Value::False }))
+    Ok(Some(if ok {
+        Value::Long(len as i64)
+    } else {
+        Value::False
+    }))
 }
 
 fn h_fprintf(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2611,11 +3084,18 @@ fn h_stream_select(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
                         1 => libc::POLLOUT,
                         _ => libc::POLLPRI,
                     };
-                    pfds.push(libc::pollfd { fd, events, revents: 0 });
+                    pfds.push(libc::pollfd {
+                        fd,
+                        events,
+                        revents: 0,
+                    });
                     cnt += 1;
                 }
                 None => {
-                    warn(vm, "Cannot represent a stream of type user-space as a select()able descriptor");
+                    warn(
+                        vm,
+                        "Cannot represent a stream of type user-space as a select()able descriptor",
+                    );
                 }
             }
         }
@@ -2631,7 +3111,11 @@ fn h_stream_select(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
         Some(sv) => (sv * 1000 + usec / 1000) as i32,
     };
     let n = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout) };
-    Ok(Some(if n < 0 { Value::False } else { Value::Long(pfds.iter().filter(|p| p.revents != 0).count() as i64) }))
+    Ok(Some(if n < 0 {
+        Value::False
+    } else {
+        Value::Long(pfds.iter().filter(|p| p.revents != 0).count() as i64)
+    }))
 }
 
 fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -2642,7 +3126,11 @@ fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let maxlen = match int_arg(args, 1) {
         None | Some(0) => None,
         Some(n) if n < 0 => {
-            return Err(throw(vm, b"ValueError", "fgetcsv(): Argument #2 ($length) must be between 0 and 2147483647"))
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "fgetcsv(): Argument #2 ($length) must be between 0 and 2147483647",
+            ));
         }
         Some(n) => Some(n as usize + 1),
     };
@@ -2676,7 +3164,11 @@ fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
 
 /// Run an original builtin that formats into a stream against a
 /// php://memory stream and return what it wrote.
-fn format_via_memory(vm: &mut Vm, name: &'static str, rest: &[Value]) -> Result<Option<Vec<u8>>, VmError> {
+fn format_via_memory(
+    vm: &mut Vm,
+    name: &'static str,
+    rest: &[Value],
+) -> Result<Option<Vec<u8>>, VmError> {
     let mem = match fid_of(&call_orig(vm, "fopen", &[s(b"php://memory"), s(b"w+")])?) {
         Some(f) => f,
         None => return Ok(None),
@@ -2820,7 +3312,9 @@ fn h_fopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     if !needs_locate(&p) {
         return Ok(None);
     }
-    let mode = arg_str(args, 1).map(|m| lossy(&m)).unwrap_or_else(|| "r".into());
+    let mode = arg_str(args, 1)
+        .map(|m| lossy(&m))
+        .unwrap_or_else(|| "r".into());
     let ctx = context_from_arg(vm, args.get(3), false)?;
     let options = if use_path { USE_PATH } else { 0 } | REPORT_ERRORS;
     match open_located(vm, &p, &mode, options, ctx)? {
@@ -2844,7 +3338,10 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let use_path = args.get(1).map(|v| v.deref().is_truthy()).unwrap_or(false);
     let p = use_path_resolve(vm, p, use_path)?;
     let filter_inner = p.starts_with(b"php://filter/")
-        && p.windows(9).position(|w| w == b"resource=").map(|i| needs_locate(&p[i + 9..])).unwrap_or(false);
+        && p.windows(9)
+            .position(|w| w == b"resource=")
+            .map(|i| needs_locate(&p[i + 9..]))
+            .unwrap_or(false);
     if !needs_locate(&p) && !filter_inner {
         return Ok(None);
     }
@@ -2852,7 +3349,11 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let maxlen = match int_arg(args, 4) {
         None => None,
         Some(n) if n < 0 => {
-            return Err(throw(vm, b"ValueError", "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0"))
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0",
+            ));
         }
         Some(n) => Some(n as usize),
     };
@@ -2882,12 +3383,27 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
                 if np == p {
                     return Ok(None);
                 }
-                return Ok(Some(call_orig(vm, "file_get_contents", &with_path(args, 0, np))?));
+                return Ok(Some(call_orig(
+                    vm,
+                    "file_get_contents",
+                    &with_path(args, 0, np),
+                )?));
             }
         }
     };
-    if offset != 0 && stream_seek(vm, fid, &us, offset, if offset > 0 { SEEK_SET } else { SEEK_END })? < 0 {
-        warn(vm, &format!("Failed to seek to position {} in the stream", offset));
+    if offset != 0
+        && stream_seek(
+            vm,
+            fid,
+            &us,
+            offset,
+            if offset > 0 { SEEK_SET } else { SEEK_END },
+        )? < 0
+    {
+        warn(
+            vm,
+            &format!("Failed to seek to position {} in the stream", offset),
+        );
         stream_free(vm, fid, &us)?;
         return Ok(Some(Value::False));
     }
@@ -2941,13 +3457,23 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
         a[1] = s(&all);
         return Ok(Some(call_orig(vm, "file_put_contents", &a)?));
     }
-    let mut mode = if flags & 8 != 0 { "ab" } else if flags & 2 != 0 { "cb" } else { "wb" };
+    let mut mode = if flags & 8 != 0 {
+        "ab"
+    } else if flags & 2 != 0 {
+        "cb"
+    } else {
+        "wb"
+    };
     let options = if flags & 1 != 0 { USE_PATH } else { 0 } | REPORT_ERRORS;
     let (fid, us) = match open_located(vm, &p, mode, options, ctx)? {
         Opened::Stream(fid, us) => (fid, us),
         Opened::Failed => return Ok(Some(Value::False)),
         Opened::Builtin(np) => {
-            return Ok(Some(call_orig(vm, "file_put_contents", &with_path(args, 0, np))?));
+            return Ok(Some(call_orig(
+                vm,
+                "file_put_contents",
+                &with_path(args, 0, np),
+            )?));
         }
     };
     if flags & 2 != 0 && (op_lock(vm, &us, 0)? != 0 || op_lock(vm, &us, 2)? != 0) {
@@ -2980,7 +3506,10 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
                     numbytes += sv.len() as i64;
                     let w = stream_write(vm, fid, &us, &sv)?;
                     if w != sv.len() as i64 {
-                        warn(vm, &format!("Failed to write {} bytes to {}", sv.len(), lossy(&p)));
+                        warn(
+                            vm,
+                            &format!("Failed to write {} bytes to {}", sv.len(), lossy(&p)),
+                        );
                         numbytes = -1;
                         break;
                     }
@@ -2991,7 +3520,14 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             Some(sv) => {
                 numbytes = stream_write(vm, fid, &us, &sv)?;
                 if numbytes != -1 && numbytes != sv.len() as i64 {
-                    warn(vm, &format!("Only {} of {} bytes written, possibly out of free disk space", numbytes, sv.len()));
+                    warn(
+                        vm,
+                        &format!(
+                            "Only {} of {} bytes written, possibly out of free disk space",
+                            numbytes,
+                            sv.len()
+                        ),
+                    );
                     numbytes = -1;
                 }
             }
@@ -3002,14 +3538,25 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             if !sv.is_empty() {
                 numbytes = stream_write(vm, fid, &us, &sv)?;
                 if numbytes != -1 && numbytes != sv.len() as i64 {
-                    warn(vm, &format!("Only {} of {} bytes written, possibly out of free disk space", numbytes, sv.len()));
+                    warn(
+                        vm,
+                        &format!(
+                            "Only {} of {} bytes written, possibly out of free disk space",
+                            numbytes,
+                            sv.len()
+                        ),
+                    );
                     numbytes = -1;
                 }
             }
         }
     }
     stream_free(vm, fid, &us)?;
-    Ok(Some(if numbytes < 0 { Value::False } else { Value::Long(numbytes) }))
+    Ok(Some(if numbytes < 0 {
+        Value::False
+    } else {
+        Value::Long(numbytes)
+    }))
 }
 
 fn h_file(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -3022,7 +3569,11 @@ fn h_file(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     }
     let flags = int_arg(args, 1).unwrap_or(0);
     if !(0..=(1 | 2 | 4 | 16)).contains(&flags) {
-        return Err(throw(vm, b"ValueError", "file(): Argument #2 ($flags) must be a valid flag value"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "file(): Argument #2 ($flags) must be a valid flag value",
+        ));
     }
     let include_new_line = flags & 2 == 0;
     let skip_blank_lines = flags & 4 != 0;
@@ -3112,8 +3663,16 @@ fn h_copy(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         Some(p) => p,
         None => return Ok(None),
     };
-    let src_user = needs_locate(&src) && matches!(scheme_len(&src).map(|n| user_wrapper(&src[..n].to_ascii_lowercase())), Some(Some(_)));
-    let dest_user = needs_locate(&dest) && matches!(scheme_len(&dest).map(|n| user_wrapper(&dest[..n].to_ascii_lowercase())), Some(Some(_)));
+    let src_user = needs_locate(&src)
+        && matches!(
+            scheme_len(&src).map(|n| user_wrapper(&src[..n].to_ascii_lowercase())),
+            Some(Some(_))
+        );
+    let dest_user = needs_locate(&dest)
+        && matches!(
+            scheme_len(&dest).map(|n| user_wrapper(&dest[..n].to_ascii_lowercase())),
+            Some(Some(_))
+        );
     if !src_user && !dest_user {
         return Ok(None);
     }
@@ -3125,7 +3684,10 @@ fn h_copy(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         None => safe = true,
         Some(sb) => {
             if sb.mode & 0o170000 == 0o040000 {
-                warn(vm, "The first argument to copy() function cannot be a directory");
+                warn(
+                    vm,
+                    "The first argument to copy() function cannot be a directory",
+                );
                 return Ok(Some(Value::False));
             }
         }
@@ -3136,7 +3698,10 @@ fn h_copy(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
             None => safe = true,
             Some(db) => {
                 if db.mode & 0o170000 == 0o040000 {
-                    warn(vm, "The second argument to copy() function cannot be a directory");
+                    warn(
+                        vm,
+                        "The second argument to copy() function cannot be a directory",
+                    );
                     return Ok(Some(Value::False));
                 }
                 let sb = src_s.unwrap();
@@ -3169,7 +3734,13 @@ fn h_copy(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
 fn h_unlink(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let (uw, p) = path_or_orig!(vm, "unlink", args, 0, 0);
     let ctx = context_from_arg(vm, args.get(1), false)?;
-    Ok(Some(b(wrapper_bool_op(vm, &uw, ctx, "unlink", vec![s(&p)])?)))
+    Ok(Some(b(wrapper_bool_op(
+        vm,
+        &uw,
+        ctx,
+        "unlink",
+        vec![s(&p)],
+    )?)))
 }
 
 fn h_rename(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -3210,7 +3781,13 @@ fn h_rename(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         return Ok(Some(Value::False));
     }
     let ctx = context_from_arg(vm, args.get(2), false)?;
-    Ok(Some(b(wrapper_bool_op(vm, &uw, ctx, "rename", vec![s(&from), s(&to)])?)))
+    Ok(Some(b(wrapper_bool_op(
+        vm,
+        &uw,
+        ctx,
+        "rename",
+        vec![s(&from), s(&to)],
+    )?)))
 }
 
 fn h_mkdir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -3219,17 +3796,41 @@ fn h_mkdir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let recursive = args.get(2).map(|v| v.deref().is_truthy()).unwrap_or(false);
     let ctx = context_from_arg(vm, args.get(3), false)?;
     let options = if recursive { 1 } else { 0 } | REPORT_ERRORS;
-    Ok(Some(b(wrapper_bool_op(vm, &uw, ctx, "mkdir", vec![s(&p), Value::Long(mode), Value::Long(options)])?)))
+    Ok(Some(b(wrapper_bool_op(
+        vm,
+        &uw,
+        ctx,
+        "mkdir",
+        vec![s(&p), Value::Long(mode), Value::Long(options)],
+    )?)))
 }
 
 fn h_rmdir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let (uw, p) = path_or_orig!(vm, "rmdir", args, 0, 0);
     let ctx = context_from_arg(vm, args.get(1), false)?;
-    Ok(Some(b(wrapper_bool_op(vm, &uw, ctx, "rmdir", vec![s(&p), Value::Long(REPORT_ERRORS)])?)))
+    Ok(Some(b(wrapper_bool_op(
+        vm,
+        &uw,
+        ctx,
+        "rmdir",
+        vec![s(&p), Value::Long(REPORT_ERRORS)],
+    )?)))
 }
 
-fn metadata(vm: &mut Vm, uw: &UserWrapperRef, p: &[u8], option: i64, value: Value) -> Result<Option<Value>, VmError> {
-    Ok(Some(b(wrapper_bool_op(vm, uw, None, "stream_metadata", vec![s(p), Value::Long(option), value])?)))
+fn metadata(
+    vm: &mut Vm,
+    uw: &UserWrapperRef,
+    p: &[u8],
+    option: i64,
+    value: Value,
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(b(wrapper_bool_op(
+        vm,
+        uw,
+        None,
+        "stream_metadata",
+        vec![s(p), Value::Long(option), value],
+    )?)))
 }
 
 fn h_touch(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
@@ -3244,7 +3845,11 @@ fn h_touch(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
             a.set(ArrayKey::Int(1), Value::Long(m));
         }
         (None, Some(_)) => {
-            return Err(throw(vm, b"ValueError", "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer"));
+            return Err(throw(
+                vm,
+                b"ValueError",
+                "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer",
+            ));
         }
         (Some(m), Some(at)) => {
             a.set(ArrayKey::Int(0), Value::Long(m));
@@ -3260,30 +3865,70 @@ fn h_chmod(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     metadata(vm, &uw, &p, PHP_STREAM_META_ACCESS, Value::Long(mode))
 }
 
-fn chown_like(vm: &mut Vm, args: &[Value], name: &'static str, argname: &str, opt_name: i64, opt_id: i64) -> Result<Option<Value>, VmError> {
+fn chown_like(
+    vm: &mut Vm,
+    args: &[Value],
+    name: &'static str,
+    argname: &str,
+    opt_name: i64,
+    opt_id: i64,
+) -> Result<Option<Value>, VmError> {
     let (uw, p) = path_or_orig!(vm, name, args, 0, 0);
     match args.get(1).map(|v| v.deref()) {
         Some(Value::Long(n)) => metadata(vm, &uw, &p, opt_id, Value::Long(n)),
         Some(Value::String(sv)) => metadata(vm, &uw, &p, opt_name, Value::String(sv)),
         other => {
-            let t = other.map(|v| zval_type_name(&v)).unwrap_or_else(|| "null".into());
-            let msg = format!("{}(): Argument #2 (${}) must be of type string|int, {} given", name, argname, t);
+            let t = other
+                .map(|v| zval_type_name(&v))
+                .unwrap_or_else(|| "null".into());
+            let msg = format!(
+                "{}(): Argument #2 (${}) must be of type string|int, {} given",
+                name, argname, t
+            );
             Err(throw(vm, b"TypeError", &msg))
         }
     }
 }
 
 fn h_chown(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    chown_like(vm, args, "chown", "user", PHP_STREAM_META_OWNER_NAME, PHP_STREAM_META_OWNER)
+    chown_like(
+        vm,
+        args,
+        "chown",
+        "user",
+        PHP_STREAM_META_OWNER_NAME,
+        PHP_STREAM_META_OWNER,
+    )
 }
 fn h_lchown(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    chown_like(vm, args, "lchown", "user", PHP_STREAM_META_OWNER_NAME, PHP_STREAM_META_OWNER)
+    chown_like(
+        vm,
+        args,
+        "lchown",
+        "user",
+        PHP_STREAM_META_OWNER_NAME,
+        PHP_STREAM_META_OWNER,
+    )
 }
 fn h_chgrp(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    chown_like(vm, args, "chgrp", "group", PHP_STREAM_META_GROUP_NAME, PHP_STREAM_META_GROUP)
+    chown_like(
+        vm,
+        args,
+        "chgrp",
+        "group",
+        PHP_STREAM_META_GROUP_NAME,
+        PHP_STREAM_META_GROUP,
+    )
 }
 fn h_lchgrp(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    chown_like(vm, args, "lchgrp", "group", PHP_STREAM_META_GROUP_NAME, PHP_STREAM_META_GROUP)
+    chown_like(
+        vm,
+        args,
+        "lchgrp",
+        "group",
+        PHP_STREAM_META_GROUP_NAME,
+        PHP_STREAM_META_GROUP,
+    )
 }
 
 // --- stat family (php_stat) --------------------------------------------------
@@ -3312,10 +3957,18 @@ fn is_link_op(t: i32) -> bool {
 }
 
 fn is_exists_check(t: i32) -> bool {
-    matches!(t, FS_EXISTS | FS_IS_W | FS_IS_R | FS_IS_X | FS_IS_FILE | FS_IS_DIR | FS_IS_LINK)
+    matches!(
+        t,
+        FS_EXISTS | FS_IS_W | FS_IS_R | FS_IS_X | FS_IS_FILE | FS_IS_DIR | FS_IS_LINK
+    )
 }
 
-fn php_stat(vm: &mut Vm, args: &[Value], name: &'static str, t: i32) -> Result<Option<Value>, VmError> {
+fn php_stat(
+    vm: &mut Vm,
+    args: &[Value],
+    name: &'static str,
+    t: i32,
+) -> Result<Option<Value>, VmError> {
     let p = match arg_str(args, 0) {
         Some(p) => p,
         None => return Ok(None),
@@ -3344,16 +3997,33 @@ fn php_stat(vm: &mut Vm, args: &[Value], name: &'static str, t: i32) -> Result<O
         flags |= PHP_STREAM_URL_STAT_QUIET;
     }
     let cached = if flags & PHP_STREAM_URL_STAT_LINK != 0 {
-        LSTAT_CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == p).map(|(_, sb)| *sb))
+        LSTAT_CACHE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .filter(|(k, _)| *k == p)
+                .map(|(_, sb)| *sb)
+        })
     } else {
-        STAT_CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == p).map(|(_, sb)| *sb))
+        STAT_CACHE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .filter(|(k, _)| *k == p)
+                .map(|(_, sb)| *sb)
+        })
     };
     let sb = match cached {
         Some(sb) => sb,
         None => match wrapper_url_stat(vm, &uw, &p, flags | 4)? {
             None => {
                 if !is_exists_check(t) {
-                    warn(vm, &format!("{}stat failed for {}", if is_link_op(t) { "L" } else { "" }, lossy(&p)));
+                    warn(
+                        vm,
+                        &format!(
+                            "{}stat failed for {}",
+                            if is_link_op(t) { "L" } else { "" },
+                            lossy(&p)
+                        ),
+                    );
                 }
                 return Ok(Some(Value::False));
             }
@@ -3465,7 +4135,12 @@ fn h_clearstatcache(_vm: &mut Vm, _args: &[Value]) -> Result<Option<Value>, VmEr
 
 // --- directories ---------------------------------------------------------------
 
-fn do_opendir(vm: &mut Vm, args: &[Value], name: &'static str, createobject: bool) -> Result<Option<Value>, VmError> {
+fn do_opendir(
+    vm: &mut Vm,
+    args: &[Value],
+    name: &'static str,
+    createobject: bool,
+) -> Result<Option<Value>, VmError> {
     let p = match arg_str(args, 0) {
         Some(p) => p,
         None => return Ok(None),
@@ -3506,8 +4181,16 @@ fn do_opendir(vm: &mut Vm, args: &[Value], name: &'static str, createobject: boo
 }
 
 /// opendir_wrapper() without re-running locate()'s diagnostics.
-fn opendir_wrapper_located(vm: &mut Vm, path: &[u8], options: i64, context: Option<i64>) -> Result<Option<(i64, Us)>, VmError> {
-    let uw = match scheme_len(path).and_then(|n| user_wrapper(&path[..n].to_ascii_lowercase())).or_else(|| user_wrapper(b"file")) {
+fn opendir_wrapper_located(
+    vm: &mut Vm,
+    path: &[u8],
+    options: i64,
+    context: Option<i64>,
+) -> Result<Option<(i64, Us)>, VmError> {
+    let uw = match scheme_len(path)
+        .and_then(|n| user_wrapper(&path[..n].to_ascii_lowercase()))
+        .or_else(|| user_wrapper(b"file"))
+    {
         Some(u) => u,
         None => return opendir_wrapper(vm, path, options, context),
     };
@@ -3551,7 +4234,11 @@ fn h_scandir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     }
     let order = int_arg(args, 1).unwrap_or(0);
     // scandir() only uses a context when one is passed.
-    let ctx = if args.get(2).map(|v| !matches!(v.deref(), Value::Null | Value::Undef)).unwrap_or(false) {
+    let ctx = if args
+        .get(2)
+        .map(|v| !matches!(v.deref(), Value::Null | Value::Undef))
+        .unwrap_or(false)
+    {
         context_from_arg(vm, args.get(2), false)?
     } else {
         None
@@ -3645,14 +4332,27 @@ fn h_closedir(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
 // --- wrapper registry ------------------------------------------------------------
 
 fn valid_scheme(p: &[u8]) -> bool {
-    !p.is_empty() && p.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+    !p.is_empty()
+        && p.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
 }
 
 fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    let protocol = args.first().map(|v| v.deref().to_php_string().as_bytes().to_vec()).unwrap_or_default();
-    let class = args.get(1).map(|v| v.deref().to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let protocol = args
+        .first()
+        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    let class = args
+        .get(1)
+        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     let flags = int_arg(args, 2).unwrap_or(0);
-    let cl: Vec<u8> = class.strip_prefix(b"\\").unwrap_or(&class).iter().map(|b| b.to_ascii_lowercase()).collect();
+    let cl: Vec<u8> = class
+        .strip_prefix(b"\\")
+        .unwrap_or(&class)
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
     if !vm.classes.contains_key(&cl) {
         vm.try_autoload_class(&class);
     }
@@ -3668,27 +4368,43 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
         }
     };
     let lower: Vec<u8> = protocol.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let exists = (is_builtin(&lower) && !builtin_disabled(&lower)) || USER_WRAPPERS.with(|w| w.borrow().contains_key(&lower));
+    let exists = (is_builtin(&lower) && !builtin_disabled(&lower))
+        || USER_WRAPPERS.with(|w| w.borrow().contains_key(&lower));
     if !valid_scheme(&protocol) || exists {
         if exists {
-            warn(vm, &format!("Protocol {}:// is already defined.", lossy(&protocol)));
+            warn(
+                vm,
+                &format!("Protocol {}:// is already defined.", lossy(&protocol)),
+            );
         } else {
-            warn(vm, &format!(
-                "Invalid protocol scheme specified. Unable to register wrapper class {} to {}://",
-                lossy(&canonical),
-                lossy(&protocol)
-            ));
+            warn(
+                vm,
+                &format!(
+                    "Invalid protocol scheme specified. Unable to register wrapper class {} to {}://",
+                    lossy(&canonical),
+                    lossy(&protocol)
+                ),
+            );
         }
         return Ok(Some(Value::False));
     }
     USER_WRAPPERS.with(|w| {
-        w.borrow_mut().insert(lower, UserWrapper { class_name: canonical, flags });
+        w.borrow_mut().insert(
+            lower,
+            UserWrapper {
+                class_name: canonical,
+                flags,
+            },
+        );
     });
     Ok(Some(Value::True))
 }
 
 fn h_stream_wrapper_unregister(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    let protocol = args.first().map(|v| v.deref().to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let protocol = args
+        .first()
+        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     let lower: Vec<u8> = protocol.iter().map(|b| b.to_ascii_lowercase()).collect();
     if USER_WRAPPERS.with(|w| w.borrow_mut().remove(&lower).is_some()) {
         return Ok(Some(Value::True));
@@ -3697,20 +4413,35 @@ fn h_stream_wrapper_unregister(vm: &mut Vm, args: &[Value]) -> Result<Option<Val
         DISABLED_BUILTINS.with(|d| d.borrow_mut().push(lower));
         return Ok(Some(Value::True));
     }
-    warn(vm, &format!("Unable to unregister protocol {}://", lossy(&protocol)));
+    warn(
+        vm,
+        &format!("Unable to unregister protocol {}://", lossy(&protocol)),
+    );
     Ok(Some(Value::False))
 }
 
 fn h_stream_wrapper_restore(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
-    let protocol = args.first().map(|v| v.deref().to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let protocol = args
+        .first()
+        .map(|v| v.deref().to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     let lower: Vec<u8> = protocol.iter().map(|b| b.to_ascii_lowercase()).collect();
     if !is_builtin(&lower) {
-        warn(vm, &format!("{}:// never existed, nothing to restore", lossy(&protocol)));
+        warn(
+            vm,
+            &format!("{}:// never existed, nothing to restore", lossy(&protocol)),
+        );
         return Ok(Some(Value::False));
     }
     let overridden = USER_WRAPPERS.with(|w| w.borrow().contains_key(&lower));
     if !builtin_disabled(&lower) && !overridden {
-        notice(vm, &format!("{}:// was never changed, nothing to restore", lossy(&protocol)));
+        notice(
+            vm,
+            &format!(
+                "{}:// was never changed, nothing to restore",
+                lossy(&protocol)
+            ),
+        );
         return Ok(Some(Value::True));
     }
     USER_WRAPPERS.with(|w| {
@@ -3765,11 +4496,20 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
             } else {
                 let inc = include_path_value(vm);
                 if kind >= 2 {
-                    let msg = format!("Failed opening required '{}' (include_path='{}')", path, inc);
+                    let msg = format!(
+                        "Failed opening required '{}' (include_path='{}')",
+                        path, inc
+                    );
                     Some(Err(throw(vm, b"Error", &msg)))
                 } else {
-                    vm.emit_warning(&format!("{}(): Failed opening '{}' for inclusion (include_path='{}')", name, path, inc));
-                    Some(Err(VmError { message: String::new(), line: vm.current_line }))
+                    vm.emit_warning(&format!(
+                        "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+                        name, path, inc
+                    ));
+                    Some(Err(VmError {
+                        message: String::new(),
+                        line: vm.current_line,
+                    }))
                 }
             }
         }
@@ -3814,16 +4554,26 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
     while ptr < inc.len() {
         let rest = &inc[ptr..];
         let mut p = 0;
-        while p < rest.len() && (rest[p].is_ascii_alphanumeric() || matches!(rest[p], b'+' | b'-' | b'.')) {
+        while p < rest.len()
+            && (rest[p].is_ascii_alphanumeric() || matches!(rest[p], b'+' | b'-' | b'.'))
+        {
             p += 1;
         }
         let mut is_stream_wrapper = false;
         let mut search_from = p;
-        if p < rest.len() && rest[p] == b':' && p > 1 && rest[p + 1..].starts_with(b"//") && !(p == 2 && &rest[..2] == b"..") {
+        if p < rest.len()
+            && rest[p] == b':'
+            && p > 1
+            && rest[p + 1..].starts_with(b"//")
+            && !(p == 2 && &rest[..2] == b"..")
+        {
             is_stream_wrapper = true;
             search_from = p + 3;
         }
-        let end = rest[search_from.min(rest.len())..].iter().position(|&c| c == b':').map(|e| e + search_from);
+        let end = rest[search_from.min(rest.len())..]
+            .iter()
+            .position(|&c| c == b':')
+            .map(|e| e + search_from);
         let entry = match end {
             Some(e) => &rest[..e],
             None => rest,
@@ -3884,7 +4634,9 @@ fn include_open(vm: &mut Vm, p: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
     let file_size = if has_read_filters(fid) {
         0
     } else {
-        op_stat(vm, &us)?.map(|sb| sb.size.max(0) as usize).unwrap_or(0)
+        op_stat(vm, &us)?
+            .map(|sb| sb.size.max(0) as usize)
+            .unwrap_or(0)
     };
     let mut buf = Vec::new();
     let mut failed = false;
@@ -3935,7 +4687,12 @@ fn include_open(vm: &mut Vm, p: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
 /// php_module_startup(): "Check for deprecated directives".
 fn check_deprecated_directives(vm: &mut Vm) {
     if ini_bool(vm, b"allow_url_include", false) && vm.error_reporting & 8192 != 0 {
-        vm.display_error("Deprecated", "Directive 'allow_url_include' is deprecated", "Unknown", 0);
+        vm.display_error(
+            "Deprecated",
+            "Directive 'allow_url_include' is deprecated",
+            "Unknown",
+            0,
+        );
     }
 }
 

@@ -5,7 +5,7 @@ use crate::funcs::*;
 use crate::state::*;
 use crate::timelib::interval::{add, add_wall, diff, sub, sub_wall};
 use crate::timelib::iso_interval::strtointerval;
-use crate::timelib::parse_date::{fill_holes, parse_from_format, parse_zone, strtotime, Ptr};
+use crate::timelib::parse_date::{Ptr, fill_holes, parse_from_format, parse_zone, strtotime};
 use crate::timelib::tm2unixtime::update_ts;
 use crate::timelib::tz::parse_tzfile;
 use crate::timelib::unixtime2tm::{unixtime2date, unixtime2gmt, unixtime2local, update_from_sse};
@@ -31,7 +31,10 @@ pub fn uninitialized_error(vm: &mut Vm, class_name: &[u8]) -> VmError {
     let lower = class_name.to_ascii_lowercase();
     let display = class_display(vm, class_name);
     let msg = if Base::from_lower(&lower).is_some() || lower == b"datetimeinterface" {
-        format!("Object of type {} has not been correctly initialized by calling parent::__construct() in its constructor", display)
+        format!(
+            "Object of type {} has not been correctly initialized by calling parent::__construct() in its constructor",
+            display
+        )
     } else {
         match base_of(vm, class_name) {
             Some(b) => format!(
@@ -39,7 +42,10 @@ pub fn uninitialized_error(vm: &mut Vm, class_name: &[u8]) -> VmError {
                 display,
                 b.name()
             ),
-            None => format!("Object of type {} not been correctly initialized by calling parent::__construct() in its constructor", display),
+            None => format!(
+                "Object of type {} not been correctly initialized by calling parent::__construct() in its constructor",
+                display
+            ),
         }
     };
     throw(vm, b"DateObjectError", &msg)
@@ -71,7 +77,16 @@ fn need_interval(vm: &mut Vm, o: &Obj) -> R<IntervalObj> {
     }
 }
 
-fn obj_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str, tname: &str, ok: &[Base], nullable: bool) -> R<Option<Obj>> {
+fn obj_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+    tname: &str,
+    ok: &[Base],
+    nullable: bool,
+) -> R<Option<Obj>> {
     let v = match args.get(idx) {
         None | Some(Value::Undef) => return Ok(None),
         Some(v) => v.deref(),
@@ -86,7 +101,11 @@ fn obj_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str, tn
             }
         }
     }
-    let expected = if nullable { format!("?{}", tname) } else { tname.to_string() };
+    let expected = if nullable {
+        format!("?{}", tname)
+    } else {
+        tname.to_string()
+    };
     Err(type_err_class(vm, fname, idx, pname, &expected, &v))
 }
 
@@ -102,9 +121,20 @@ fn clone_obj(vm: &mut Vm, o: &Obj) -> Obj {
 
 /// object_init_ex() refuses abstract classes
 fn check_instantiable(vm: &mut Vm, cls: &[u8]) -> R<()> {
-    let abstract_name = vm.classes.get(&cls.to_ascii_lowercase()).filter(|c| c.is_abstract).map(|c| c.name.clone());
+    let abstract_name = vm
+        .classes
+        .get(&cls.to_ascii_lowercase())
+        .filter(|c| c.is_abstract)
+        .map(|c| c.name.clone());
     if let Some(n) = abstract_name {
-        return Err(throw(vm, b"Error", &format!("Cannot instantiate abstract class {}", String::from_utf8_lossy(&n))));
+        return Err(throw(
+            vm,
+            b"Error",
+            &format!(
+                "Cannot instantiate abstract class {}",
+                String::from_utf8_lossy(&n)
+            ),
+        ));
     }
     Ok(())
 }
@@ -115,12 +145,22 @@ fn cstr(b: &[u8]) -> String {
 }
 
 fn first_error_char(e: &ErrorMessage) -> char {
-    if e.character != 0 { e.character as char } else { ' ' }
+    if e.character != 0 {
+        e.character as char
+    } else {
+        ' '
+    }
 }
 
 /// php_date_initialize. Returns Ok(Some(time)) on success, Ok(None) on parse
 /// failure (exception already thrown when INIT_CTOR is set).
-pub fn date_initialize(vm: &mut Vm, time_str: &[u8], format: Option<&[u8]>, tzobj: Option<&TzObj>, flags: u32) -> R<Option<Time>> {
+pub fn date_initialize(
+    vm: &mut Vm,
+    time_str: &[u8],
+    format: Option<&[u8]>,
+    tzobj: Option<&TzObj>,
+    flags: u32,
+) -> R<Option<Time>> {
     let (mut t, err) = match format {
         Some(f) => parse_from_format(f, time_str),
         None => {
@@ -134,8 +174,18 @@ pub fn date_initialize(vm: &mut Vm, time_str: &[u8], format: Option<&[u8]>, tzob
     update_errors_warnings(Some(&err));
     if flags & INIT_CTOR != 0 && err.error_count() > 0 {
         let e = &err.error_messages[0];
-        let shown = if format.is_none() && time_str.is_empty() { "now".to_string() } else { cstr(time_str) };
-        let msg = format!("Failed to parse time string ({}) at position {} ({}): {}", shown, e.position, first_error_char(e), e.message);
+        let shown = if format.is_none() && time_str.is_empty() {
+            "now".to_string()
+        } else {
+            cstr(time_str)
+        };
+        let msg = format!(
+            "Failed to parse time string ({}) at position {} ({}): {}",
+            shown,
+            e.position,
+            first_error_char(e),
+            e.message
+        );
         return Err(throw(vm, b"DateMalformedStringException", &msg));
     }
     if err.error_count() > 0 {
@@ -157,7 +207,11 @@ pub fn date_initialize(vm: &mut Vm, time_str: &[u8], format: Option<&[u8]>, tzob
                 new_abbr = Some(z.abbr.clone());
             }
             _ => {
-                return Err(throw(vm, b"Error", "The DateTimeZone object has not been correctly initialized by its constructor"));
+                return Err(throw(
+                    vm,
+                    b"Error",
+                    "The DateTimeZone object has not been correctly initialized by its constructor",
+                ));
             }
         }
         ztype = z.ztype;
@@ -219,7 +273,9 @@ fn initialize_from_ts_double(vm: &mut Vm, fname: &str, ts: f64) -> R<Time> {
         );
         throw(vm, b"DateRangeError", &msg)
     };
-    if sec_dval.is_nan() || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&sec_dval) {
+    if sec_dval.is_nan()
+        || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&sec_dval)
+    {
         return Err(range_err(vm));
     }
     let mut sec = sec_dval as i64;
@@ -247,7 +303,11 @@ pub fn fmt_g(v: f64) -> String {
         return if v > 0.0 { "INF".into() } else { "-INF".into() };
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+        return if v.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
     }
     let exp = v.abs().log10().floor() as i32;
     let p = 6;
@@ -255,13 +315,21 @@ pub fn fmt_g(v: f64) -> String {
         let s = format!("{:.*e}", (p - 1) as usize, v);
         // trim mantissa zeros
         let (m, e) = s.split_once('e').unwrap();
-        let m = if m.contains('.') { m.trim_end_matches('0').trim_end_matches('.') } else { m };
+        let m = if m.contains('.') {
+            m.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            m
+        };
         let ev: i32 = e.parse().unwrap();
         format!("{}e{}{:02}", m, if ev < 0 { '-' } else { '+' }, ev.abs())
     } else {
         let decimals = (p - 1 - exp).max(0) as usize;
         let s = format!("{:.*}", decimals, v);
-        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -336,19 +404,36 @@ fn date_modify(vm: &mut Vm, t: &mut Time, modify: &[u8], fname: &str, throw_exc:
 }
 
 fn date_add_impl(t: &Time, iv: &IntervalObj) -> Time {
-    if iv.civil_or_wall == WALL { add_wall(t, &iv.diff) } else { add(t, &iv.diff) }
+    if iv.civil_or_wall == WALL {
+        add_wall(t, &iv.diff)
+    } else {
+        add(t, &iv.diff)
+    }
 }
 
-fn date_sub_impl(vm: &mut Vm, t: &Time, iv: &IntervalObj, fname: &str, throw_exc: bool) -> R<Option<Time>> {
+fn date_sub_impl(
+    vm: &mut Vm,
+    t: &Time,
+    iv: &IntervalObj,
+    fname: &str,
+    throw_exc: bool,
+) -> R<Option<Time>> {
     if iv.diff.have_weekday_relative != 0 || iv.diff.have_special_relative != 0 {
-        let msg = format!("{}(): Only non-special relative time specifications are supported for subtraction", fname);
+        let msg = format!(
+            "{}(): Only non-special relative time specifications are supported for subtraction",
+            fname
+        );
         if throw_exc {
             return Err(throw(vm, b"DateInvalidOperationException", &msg));
         }
         vm.emit_warning(&msg);
         return Ok(None);
     }
-    Ok(Some(if iv.civil_or_wall == WALL { sub_wall(t, &iv.diff) } else { sub(t, &iv.diff) }))
+    Ok(Some(if iv.civil_or_wall == WALL {
+        sub_wall(t, &iv.diff)
+    } else {
+        sub(t, &iv.diff)
+    }))
 }
 
 fn date_timezone_set_impl(t: &mut Time, z: &TzObj) {
@@ -371,7 +456,11 @@ fn offset_of(t: &Time) -> i64 {
         return 0;
     }
     match t.zone_type {
-        ZONETYPE_ID => t.tz_info.as_ref().map(|tz| tz.get_time_zone_info(t.sse).offset as i64).unwrap_or(0),
+        ZONETYPE_ID => t
+            .tz_info
+            .as_ref()
+            .map(|tz| tz.get_time_zone_info(t.sse).offset as i64)
+            .unwrap_or(0),
         ZONETYPE_OFFSET => t.z,
         ZONETYPE_ABBR => t.z + 3600 * t.dst as i64,
         _ => 0,
@@ -458,7 +547,13 @@ fn date_from_hash(vm: &mut Vm, a: &PhpArray) -> R<Option<Time>> {
                 Some(t) => t,
                 None => return Ok(None),
             };
-            let z = TzObj { ztype: ZONETYPE_ID, utc_offset: 0, dst: 0, abbr: String::new(), tz: Some(tzi) };
+            let z = TzObj {
+                ztype: ZONETYPE_ID,
+                utc_offset: 0,
+                dst: 0,
+                abbr: String::new(),
+                tz: Some(tzi),
+            };
             date_initialize(vm, &date, None, Some(&z), 0)
         }
         _ => Ok(None),
@@ -470,10 +565,22 @@ fn prop_visibility(vm: &Vm, class_name: &[u8], prop: &[u8]) -> Option<(bool, boo
     let mut cur = class_name.to_ascii_lowercase();
     for _ in 0..64 {
         let ce = vm.classes.get(&cur)?;
-        if let Some(pd) = ce.properties.iter().find(|p| p.name == prop && !p.is_static) {
+        if let Some(pd) = ce
+            .properties
+            .iter()
+            .find(|p| p.name == prop && !p.is_static)
+        {
             use goro_core::object::Visibility;
-            let decl = vm.classes.get(&pd.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| ce.name.clone());
-            return Some((pd.visibility == Visibility::Private, pd.visibility == Visibility::Protected, decl));
+            let decl = vm
+                .classes
+                .get(&pd.declaring_class)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| ce.name.clone());
+            return Some((
+                pd.visibility == Visibility::Private,
+                pd.visibility == Visibility::Protected,
+                decl,
+            ));
         }
         cur = ce.parent.clone()?.to_ascii_lowercase();
     }
@@ -541,8 +648,28 @@ fn add_common_props(vm: &Vm, o: &Obj, a: &mut PhpArray, internal: &[&[u8]]) {
 
 const DT_INTERNAL: &[&[u8]] = &[b"date", b"timezone_type", b"timezone"];
 const TZ_INTERNAL: &[&[u8]] = &[b"timezone_type", b"timezone"];
-const IV_INTERNAL: &[&[u8]] = &[b"date_string", b"from_string", b"y", b"m", b"d", b"h", b"i", b"s", b"f", b"invert", b"days"];
-const DP_INTERNAL: &[&[u8]] = &[b"start", b"current", b"end", b"interval", b"recurrences", b"include_start_date", b"include_end_date"];
+const IV_INTERNAL: &[&[u8]] = &[
+    b"date_string",
+    b"from_string",
+    b"y",
+    b"m",
+    b"d",
+    b"h",
+    b"i",
+    b"s",
+    b"f",
+    b"invert",
+    b"days",
+];
+const DP_INTERNAL: &[&[u8]] = &[
+    b"start",
+    b"current",
+    b"end",
+    b"interval",
+    b"recurrences",
+    b"include_start_date",
+    b"include_end_date",
+];
 
 fn ret_obj(o: &Obj) -> Value {
     Value::Object(o.clone())
@@ -554,7 +681,8 @@ fn ret_obj(o: &Obj) -> Value {
 fn push_frame(vm: &mut Vm, name: String, args: &[Value], method: bool) {
     let line = vm.current_line;
     let file = vm.current_file.clone();
-    vm.call_stack.push((name, file, line, args.to_vec(), method));
+    vm.call_stack
+        .push((name, file, line, args.to_vec(), method));
 }
 
 fn ctor_result(r: R<()>) -> Result<(), String> {
@@ -573,8 +701,25 @@ pub fn construct_datetime(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
     let r = (|| -> R<()> {
         check_count(vm, &fname, &uargs, 0, 2)?;
         let time_str = str_arg(vm, &fname, &uargs, 0, "datetime", false)?.unwrap_or_default();
-        let tz = obj_arg(vm, &fname, &uargs, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-        let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
+        let tz = obj_arg(
+            vm,
+            &fname,
+            &uargs,
+            1,
+            "timezone",
+            "DateTimeZone",
+            &[Base::TimeZone],
+            true,
+        )?;
+        let tzobj = tz.as_ref().map(|o| {
+            tz_get(o).unwrap_or(TzObj {
+                ztype: 0,
+                utc_offset: 0,
+                dst: 0,
+                abbr: String::new(),
+                tz: None,
+            })
+        });
         if let Some(t) = date_initialize(vm, &time_str, None, tzobj.as_ref(), INIT_CTOR)? {
             date_set(&this, &t);
         }
@@ -600,7 +745,11 @@ pub fn construct_timezone(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
                 tz_set(&this, &z);
                 Ok(())
             }
-            Err(m) => Err(throw(vm, b"DateInvalidTimeZoneException", &format!("DateTimeZone::__construct(): {}", m))),
+            Err(m) => Err(throw(
+                vm,
+                b"DateInvalidTimeZoneException",
+                &format!("DateTimeZone::__construct(): {}", m),
+            )),
         }
     })();
     vm.call_stack.pop();
@@ -611,7 +760,11 @@ fn date_interval_initialize(vm: &mut Vm, format: &[u8]) -> R<RelTime> {
     let res = strtointerval(format);
     let shown = cstr(format);
     if res.errors.error_count() > 0 {
-        return Err(throw(vm, b"DateMalformedIntervalStringException", &format!("Unknown or bad format ({})", shown)));
+        return Err(throw(
+            vm,
+            b"DateMalformedIntervalStringException",
+            &format!("Unknown or bad format ({})", shown),
+        ));
     }
     if let Some(p) = res.period {
         return Ok(p);
@@ -621,7 +774,11 @@ fn date_interval_initialize(vm: &mut Vm, format: &[u8]) -> R<RelTime> {
         update_ts(&mut e, None);
         return Ok(diff(&b, &e));
     }
-    Err(throw(vm, b"DateMalformedIntervalStringException", &format!("Failed to parse interval ({})", shown)))
+    Err(throw(
+        vm,
+        b"DateMalformedIntervalStringException",
+        &format!("Failed to parse interval ({})", shown),
+    ))
 }
 
 pub fn construct_interval(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
@@ -636,7 +793,15 @@ pub fn construct_interval(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
         check_count(vm, fname, &uargs, 1, 1)?;
         let spec = str_arg(vm, fname, &uargs, 0, "duration", false)?.unwrap_or_default();
         let rt = date_interval_initialize(vm, &spec)?;
-        interval_set(&this, &IntervalObj { diff: rt, civil_or_wall: WALL, from_string: false, date_string: Vec::new() });
+        interval_set(
+            &this,
+            &IntervalObj {
+                diff: rt,
+                civil_or_wall: WALL,
+                from_string: false,
+                date_string: Vec::new(),
+            },
+        );
         Ok(())
     })();
     vm.call_stack.pop();
@@ -645,10 +810,20 @@ pub fn construct_interval(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(),
 
 const MAX_RECURRENCES: i64 = i32::MAX as i64 - 8;
 
-fn period_init_iso(vm: &mut Vm, p: &mut PeriodObj, base_ce: &[u8], isostr: &[u8], fname: &str) -> R<i64> {
+fn period_init_iso(
+    vm: &mut Vm,
+    p: &mut PeriodObj,
+    base_ce: &[u8],
+    isostr: &[u8],
+    fname: &str,
+) -> R<i64> {
     let res = strtointerval(isostr);
     if res.errors.error_count() > 0 {
-        return Err(throw(vm, b"DateMalformedPeriodStringException", &format!("Unknown or bad format ({})", cstr(isostr))));
+        return Err(throw(
+            vm,
+            b"DateMalformedPeriodStringException",
+            &format!("Unknown or bad format ({})", cstr(isostr)),
+        ));
     }
     let recurrences = res.recurrences.unwrap_or(0);
     p.start = res.begin;
@@ -656,10 +831,24 @@ fn period_init_iso(vm: &mut Vm, p: &mut PeriodObj, base_ce: &[u8], isostr: &[u8]
     p.interval = res.period;
     let shown = cstr(isostr);
     if p.start.is_none() {
-        return Err(throw(vm, b"DateMalformedPeriodStringException", &format!("{}(): ISO interval must contain a start date, \"{}\" given", fname, shown)));
+        return Err(throw(
+            vm,
+            b"DateMalformedPeriodStringException",
+            &format!(
+                "{}(): ISO interval must contain a start date, \"{}\" given",
+                fname, shown
+            ),
+        ));
     }
     if p.interval.is_none() {
-        return Err(throw(vm, b"DateMalformedPeriodStringException", &format!("{}(): ISO interval must contain an interval, \"{}\" given", fname, shown)));
+        return Err(throw(
+            vm,
+            b"DateMalformedPeriodStringException",
+            &format!(
+                "{}(): ISO interval must contain an interval, \"{}\" given",
+                fname, shown
+            ),
+        ));
     }
     if let Some(s) = p.start.as_mut() {
         update_ts(s, None);
@@ -671,12 +860,22 @@ fn period_init_iso(vm: &mut Vm, p: &mut PeriodObj, base_ce: &[u8], isostr: &[u8]
     Ok(recurrences)
 }
 
-fn period_init_finish(vm: &mut Vm, p: &mut PeriodObj, options: i64, recurrences: i64, fname: &str) -> R<()> {
+fn period_init_finish(
+    vm: &mut Vm,
+    p: &mut PeriodObj,
+    options: i64,
+    recurrences: i64,
+    fname: &str,
+) -> R<()> {
     if p.end.is_none() && !(1..=MAX_RECURRENCES).contains(&recurrences) {
         return Err(throw(
             vm,
             b"DateMalformedPeriodStringException",
-            &format!("{}(): Recurrence count must be greater or equal to 1 and lower than {}", fname, MAX_RECURRENCES + 1),
+            &format!(
+                "{}(): Recurrence count must be greater or equal to 1 and lower than {}",
+                fname,
+                MAX_RECURRENCES + 1
+            ),
         ));
     }
     p.include_start_date = options & 1 == 0;
@@ -686,7 +885,11 @@ fn period_init_finish(vm: &mut Vm, p: &mut PeriodObj, options: i64, recurrences:
         return Err(throw(
             vm,
             b"DateMalformedStringException",
-            &format!("{}(): Recurrence count must be greater or equal to 1 and lower than {} (including options)", fname, MAX_RECURRENCES + 1),
+            &format!(
+                "{}(): Recurrence count must be greater or equal to 1 and lower than {} (including options)",
+                fname,
+                MAX_RECURRENCES + 1
+            ),
         ));
     }
     p.recurrences = recurrences;
@@ -703,14 +906,21 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
     push_frame(vm, "DatePeriod->__construct".into(), &uargs, true);
     let r = (|| -> R<()> {
         let fname = "DatePeriod::__construct";
-        let n = uargs.iter().rposition(|a| !matches!(a, Value::Undef)).map(|p| p + 1).unwrap_or(0);
+        let n = uargs
+            .iter()
+            .rposition(|a| !matches!(a, Value::Undef))
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let a0 = uargs.first().map(|v| v.deref());
         let a1 = uargs.get(1).map(|v| v.deref());
         let a2 = uargs.get(2).map(|v| v.deref());
         let is_date = |vm: &Vm, v: &Option<Value>| matches!(v, Some(Value::Object(o)) if is_date_interface(vm, o));
         let is_iv = |vm: &Vm, v: &Option<Value>| matches!(v, Some(Value::Object(o)) if obj_base(vm, o) == Some(Base::Interval));
         let is_long_like = |v: &Option<Value>| match v {
-            Some(Value::Long(_)) | Some(Value::Double(_)) | Some(Value::True) | Some(Value::False) => true,
+            Some(Value::Long(_))
+            | Some(Value::Double(_))
+            | Some(Value::True)
+            | Some(Value::False) => true,
             Some(Value::String(s)) => numeric_str(s.as_bytes()).is_some(),
             _ => false,
         };
@@ -722,11 +932,25 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
             End,
             Iso,
         }
-        let form = if (3..=4).contains(&n) && is_date(vm, &a0) && is_iv(vm, &a1) && is_long_like(&a2) {
+        let form = if (3..=4).contains(&n)
+            && is_date(vm, &a0)
+            && is_iv(vm, &a1)
+            && is_long_like(&a2)
+        {
             Form::Recur
         } else if (3..=4).contains(&n) && is_date(vm, &a0) && is_iv(vm, &a1) && is_date(vm, &a2) {
             Form::End
-        } else if (1..=2).contains(&n) && matches!(a0, Some(Value::String(_)) | Some(Value::Long(_)) | Some(Value::Double(_)) | Some(Value::Null) | Some(Value::True) | Some(Value::False)) {
+        } else if (1..=2).contains(&n)
+            && matches!(
+                a0,
+                Some(Value::String(_))
+                    | Some(Value::Long(_))
+                    | Some(Value::Double(_))
+                    | Some(Value::Null)
+                    | Some(Value::True)
+                    | Some(Value::False)
+            )
+        {
             Form::Iso
         } else {
             return Err(throw(
@@ -738,10 +962,17 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
         match form {
             Form::Iso => {
                 let iso = str_arg(vm, fname, &uargs, 0, "start", false)?.unwrap_or_default();
-                options = if n == 2 { long_arg(vm, fname, &uargs, 1, "options", false)?.unwrap_or(0) } else { 0 };
+                options = if n == 2 {
+                    long_arg(vm, fname, &uargs, 1, "options", false)?.unwrap_or(0)
+                } else {
+                    0
+                };
                 vm.emit_deprecated("Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead");
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: String::new(), line: vm.current_line });
+                    return Err(VmError {
+                        message: String::new(),
+                        line: vm.current_line,
+                    });
                 }
                 recurrences = period_init_iso(vm, &mut p, b"DateTime", &iso, fname)?;
             }
@@ -774,7 +1005,8 @@ pub fn construct_period(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), S
                     _ => unreachable!(),
                 };
                 if let Form::Recur = form {
-                    recurrences = long_arg(vm, fname, &uargs, 2, "recurrences", false)?.unwrap_or(0);
+                    recurrences =
+                        long_arg(vm, fname, &uargs, 2, "recurrences", false)?.unwrap_or(0);
                 }
                 options = long_arg(vm, fname, &uargs, 3, "options", false)?.unwrap_or(0);
                 p.start = Some(st);
@@ -814,7 +1046,8 @@ pub fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str
             b"createfromformat" => &["format", "datetime", "timezone"],
             b"createfromtimestamp" => &["timestamp"],
             b"createfromimmutable" | b"createfrommutable" | b"createfrominterface" => &["object"],
-            b"gettimezone" | b"getoffset" | b"getmicrosecond" | b"gettimestamp" | b"getlasterrors" | b"__serialize" | b"__wakeup" => &[],
+            b"gettimezone" | b"getoffset" | b"getmicrosecond" | b"gettimestamp"
+            | b"getlasterrors" | b"__serialize" | b"__wakeup" => &[],
             _ => return None,
         },
         (b"datetimezone", m) => match m {
@@ -824,7 +1057,9 @@ pub fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str
             b"listidentifiers" => &["timezoneGroup", "countryCode"],
             b"__unserialize" => &["data"],
             b"__set_state" => &["array"],
-            b"getname" | b"getlocation" | b"listabbreviations" | b"__serialize" | b"__wakeup" => &[],
+            b"getname" | b"getlocation" | b"listabbreviations" | b"__serialize" | b"__wakeup" => {
+                &[]
+            }
             _ => return None,
         },
         (b"dateinterval", m) => match m {
@@ -852,7 +1087,11 @@ pub fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
             if is_static {
                 matches!(
                     method,
-                    b"createfromformat" | b"createfromtimestamp" | b"getlasterrors" | b"__set_state" | b"createfrominterface"
+                    b"createfromformat"
+                        | b"createfromtimestamp"
+                        | b"getlasterrors"
+                        | b"__set_state"
+                        | b"createfrominterface"
                 ) || (class == b"datetime" && method == b"createfromimmutable")
                     || (class == b"datetimeimmutable" && method == b"createfrommutable")
             } else {
@@ -881,16 +1120,31 @@ pub fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
         }
         b"datetimezone" => {
             if is_static {
-                matches!(method, b"listabbreviations" | b"listidentifiers" | b"__set_state")
+                matches!(
+                    method,
+                    b"listabbreviations" | b"listidentifiers" | b"__set_state"
+                )
             } else {
-                matches!(method, b"getname" | b"getoffset" | b"gettransitions" | b"getlocation" | b"__serialize" | b"__unserialize" | b"__wakeup")
+                matches!(
+                    method,
+                    b"getname"
+                        | b"getoffset"
+                        | b"gettransitions"
+                        | b"getlocation"
+                        | b"__serialize"
+                        | b"__unserialize"
+                        | b"__wakeup"
+                )
             }
         }
         b"dateinterval" => {
             if is_static {
                 matches!(method, b"createfromdatestring" | b"__set_state")
             } else {
-                matches!(method, b"format" | b"__serialize" | b"__unserialize" | b"__wakeup")
+                matches!(
+                    method,
+                    b"format" | b"__serialize" | b"__unserialize" | b"__wakeup"
+                )
             }
         }
         b"dateperiod" => {
@@ -899,26 +1153,75 @@ pub fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
             } else {
                 matches!(
                     method,
-                    b"getstartdate" | b"getenddate" | b"getdateinterval" | b"getrecurrences" | b"getiterator" | b"__serialize" | b"__unserialize" | b"__wakeup"
+                    b"getstartdate"
+                        | b"getenddate"
+                        | b"getdateinterval"
+                        | b"getrecurrences"
+                        | b"getiterator"
+                        | b"__serialize"
+                        | b"__unserialize"
+                        | b"__wakeup"
                 )
             }
         }
-        b"internaliterator" => !is_static && matches!(method, b"current" | b"key" | b"next" | b"valid" | b"rewind"),
+        b"internaliterator" => {
+            !is_static && matches!(method, b"current" | b"key" | b"next" | b"valid" | b"rewind")
+        }
         _ => false,
     }
 }
 
 const METHOD_NAMES: &[&str] = &[
-    "format", "modify", "add", "sub", "getTimezone", "setTimezone", "getOffset", "getMicrosecond", "setTime", "setDate",
-    "setISODate", "setTimestamp", "setMicrosecond", "getTimestamp", "diff", "__serialize", "__unserialize", "__wakeup",
-    "__set_state", "createFromFormat", "createFromTimestamp", "getLastErrors", "createFromInterface", "createFromImmutable",
-    "createFromMutable", "getName", "getTransitions", "getLocation", "listAbbreviations", "listIdentifiers",
-    "createFromDateString", "createFromISO8601String", "getStartDate", "getEndDate", "getDateInterval", "getRecurrences",
-    "getIterator", "current", "key", "next", "valid", "rewind",
+    "format",
+    "modify",
+    "add",
+    "sub",
+    "getTimezone",
+    "setTimezone",
+    "getOffset",
+    "getMicrosecond",
+    "setTime",
+    "setDate",
+    "setISODate",
+    "setTimestamp",
+    "setMicrosecond",
+    "getTimestamp",
+    "diff",
+    "__serialize",
+    "__unserialize",
+    "__wakeup",
+    "__set_state",
+    "createFromFormat",
+    "createFromTimestamp",
+    "getLastErrors",
+    "createFromInterface",
+    "createFromImmutable",
+    "createFromMutable",
+    "getName",
+    "getTransitions",
+    "getLocation",
+    "listAbbreviations",
+    "listIdentifiers",
+    "createFromDateString",
+    "createFromISO8601String",
+    "getStartDate",
+    "getEndDate",
+    "getDateInterval",
+    "getRecurrences",
+    "getIterator",
+    "current",
+    "key",
+    "next",
+    "valid",
+    "rewind",
 ];
 
 fn canonical_method(m: &[u8]) -> String {
-    METHOD_NAMES.iter().find(|n| n.as_bytes().eq_ignore_ascii_case(m)).map(|s| s.to_string()).unwrap_or_else(|| String::from_utf8_lossy(m).into_owned())
+    METHOD_NAMES
+        .iter()
+        .find(|n| n.as_bytes().eq_ignore_ascii_case(m))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| String::from_utf8_lossy(m).into_owned())
 }
 
 fn class_canonical(class: &[u8]) -> &'static str {
@@ -928,16 +1231,33 @@ fn class_canonical(class: &[u8]) -> &'static str {
     }
 }
 
-pub fn call_method(vm: &mut Vm, class: &[u8], method: &[u8], called: &[u8], this: Option<&Value>, args: &[Value]) -> Value {
+pub fn call_method(
+    vm: &mut Vm,
+    class: &[u8],
+    method: &[u8],
+    called: &[u8],
+    this: Option<&Value>,
+    args: &[Value],
+) -> Value {
     // When invoked from the engine (e.g. unserialize() calling __unserialize),
     // there is no call frame yet: add an "[internal function]" one.
     let mut pushed = false;
     // Iterator methods driven by foreach run without a frame, as in PHP.
     if this.is_some() && class != b"internaliterator" {
         let frame = format!("{}->{}", class_canonical(class), canonical_method(method));
-        let has = vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&frame)).unwrap_or(false);
+        let has = vm
+            .call_stack
+            .last()
+            .map(|f| f.0.eq_ignore_ascii_case(&frame))
+            .unwrap_or(false);
         if !has {
-            vm.call_stack.push((frame, "[internal function]".to_string(), 0, args.to_vec(), true));
+            vm.call_stack.push((
+                frame,
+                "[internal function]".to_string(),
+                0,
+                args.to_vec(),
+                true,
+            ));
             pushed = true;
         }
     }
@@ -948,7 +1268,14 @@ pub fn call_method(vm: &mut Vm, class: &[u8], method: &[u8], called: &[u8], this
     r
 }
 
-fn call_method_inner(vm: &mut Vm, class: &[u8], method: &[u8], called: &[u8], this: Option<&Value>, args: &[Value]) -> Value {
+fn call_method_inner(
+    vm: &mut Vm,
+    class: &[u8],
+    method: &[u8],
+    called: &[u8],
+    this: Option<&Value>,
+    args: &[Value],
+) -> Value {
     let this_obj = this.and_then(obj_of);
     let r = match class {
         b"datetime" | b"datetimeimmutable" => {
@@ -980,10 +1307,24 @@ fn call_method_inner(vm: &mut Vm, class: &[u8], method: &[u8], called: &[u8], th
 }
 
 fn mname(immutable: bool, m: &str) -> String {
-    format!("{}::{}", if immutable { "DateTimeImmutable" } else { "DateTime" }, m)
+    format!(
+        "{}::{}",
+        if immutable {
+            "DateTimeImmutable"
+        } else {
+            "DateTime"
+        },
+        m
+    )
 }
 
-fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &[Value]) -> R<Value> {
+fn datetime_method(
+    vm: &mut Vm,
+    immutable: bool,
+    method: &[u8],
+    o: &Obj,
+    args: &[Value],
+) -> R<Value> {
     let m = |n: &str| mname(immutable, n);
     match method {
         b"format" => {
@@ -991,13 +1332,21 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             check_count(vm, &f, args, 1, 1)?;
             let fmt = str_arg(vm, &f, args, 0, "format", false)?.unwrap_or_default();
             let t = need_date(vm, o)?;
-            Ok(Value::String(PhpString::from_vec(date_format(&fmt, &t, t.is_localtime != 0))))
+            Ok(Value::String(PhpString::from_vec(date_format(
+                &fmt,
+                &t,
+                t.is_localtime != 0,
+            ))))
         }
         b"modify" => {
             let f = m("modify");
             check_count(vm, &f, args, 1, 1)?;
             let modify = str_arg(vm, &f, args, 0, "modifier", false)?.unwrap_or_default();
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             date_modify(vm, &mut t, &modify, &f, true)?;
             date_set(&target, &t);
@@ -1006,8 +1355,22 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
         b"add" => {
             let f = m("add");
             check_count(vm, &f, args, 1, 1)?;
-            let iv = obj_arg(vm, &f, args, 0, "interval", "DateInterval", &[Base::Interval], false)?.unwrap();
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let iv = obj_arg(
+                vm,
+                &f,
+                args,
+                0,
+                "interval",
+                "DateInterval",
+                &[Base::Interval],
+                false,
+            )?
+            .unwrap();
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let t = need_date(vm, &target)?;
             let ivs = need_interval(vm, &iv)?;
             let nt = date_add_impl(&t, &ivs);
@@ -1017,8 +1380,22 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
         b"sub" => {
             let f = m("sub");
             check_count(vm, &f, args, 1, 1)?;
-            let iv = obj_arg(vm, &f, args, 0, "interval", "DateInterval", &[Base::Interval], false)?.unwrap();
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let iv = obj_arg(
+                vm,
+                &f,
+                args,
+                0,
+                "interval",
+                "DateInterval",
+                &[Base::Interval],
+                false,
+            )?
+            .unwrap();
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let t = need_date(vm, &target)?;
             let ivs = need_interval(vm, &iv)?;
             if let Some(nt) = date_sub_impl(vm, &t, &ivs, &f, true)? {
@@ -1034,8 +1411,22 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
         b"settimezone" => {
             let f = m("setTimezone");
             check_count(vm, &f, args, 1, 1)?;
-            let tz = obj_arg(vm, &f, args, 0, "timezone", "DateTimeZone", &[Base::TimeZone], false)?.unwrap();
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let tz = obj_arg(
+                vm,
+                &f,
+                args,
+                0,
+                "timezone",
+                "DateTimeZone",
+                &[Base::TimeZone],
+                false,
+            )?
+            .unwrap();
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             let z = need_tz(vm, &tz)?;
             date_timezone_set_impl(&mut t, &z);
@@ -1059,7 +1450,11 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             let i = long_arg(vm, &f, args, 1, "minute", false)?.unwrap_or(0);
             let s = long_arg(vm, &f, args, 2, "second", false)?.unwrap_or(0);
             let ms = long_arg(vm, &f, args, 3, "microsecond", false)?.unwrap_or(0);
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             t.h = h;
             t.i = i;
@@ -1076,7 +1471,11 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             let y = long_arg(vm, &f, args, 0, "year", false)?.unwrap_or(0);
             let mo = long_arg(vm, &f, args, 1, "month", false)?.unwrap_or(0);
             let d = long_arg(vm, &f, args, 2, "day", false)?.unwrap_or(0);
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             t.y = y;
             t.m = mo;
@@ -1091,7 +1490,11 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             let y = long_arg(vm, &f, args, 0, "year", false)?.unwrap_or(0);
             let w = long_arg(vm, &f, args, 1, "week", false)?.unwrap_or(0);
             let d = long_arg(vm, &f, args, 2, "dayOfWeek", false)?.unwrap_or(1);
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             isodate_set(&mut t, y, w, d);
             date_set(&target, &t);
@@ -1101,7 +1504,11 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             let f = m("setTimestamp");
             check_count(vm, &f, args, 1, 1)?;
             let ts = long_arg(vm, &f, args, 0, "timestamp", false)?.unwrap_or(0);
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             timestamp_set(&mut t, ts);
             date_set(&target, &t);
@@ -1112,10 +1519,21 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
             check_count(vm, &f, args, 1, 1)?;
             let us = long_arg(vm, &f, args, 0, "microsecond", false)?.unwrap_or(0);
             if !(0..=999999).contains(&us) {
-                return Err(throw(vm, b"DateRangeError", &format!("{}(): Argument #1 ($microsecond) must be between 0 and 999999, {} given", f, us)));
+                return Err(throw(
+                    vm,
+                    b"DateRangeError",
+                    &format!(
+                        "{}(): Argument #1 ($microsecond) must be between 0 and 999999, {} given",
+                        f, us
+                    ),
+                ));
             }
             let _ = need_date(vm, o)?;
-            let target = if immutable { clone_obj(vm, o) } else { o.clone() };
+            let target = if immutable {
+                clone_obj(vm, o)
+            } else {
+                o.clone()
+            };
             let mut t = need_date(vm, &target)?;
             t.us = us;
             date_set(&target, &t);
@@ -1132,7 +1550,17 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
         b"diff" => {
             let f = m("diff");
             check_count(vm, &f, args, 1, 2)?;
-            let other = obj_arg(vm, &f, args, 0, "targetObject", "DateTimeInterface", DATE_BASES, false)?.unwrap();
+            let other = obj_arg(
+                vm,
+                &f,
+                args,
+                0,
+                "targetObject",
+                "DateTimeInterface",
+                DATE_BASES,
+                false,
+            )?
+            .unwrap();
             let absolute = bool_arg(vm, &f, args, 1, "absolute")?.unwrap_or(false);
             let t1 = need_date(vm, o)?;
             let t2 = need_date(vm, &other)?;
@@ -1159,7 +1587,18 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
                     restore_custom_props(vm, o, &ab, DT_INTERNAL);
                     Ok(Value::Null)
                 }
-                None => Err(throw(vm, b"Error", &format!("Invalid serialization data for {} object", if immutable { "DateTimeImmutable" } else { "DateTime" }))),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    &format!(
+                        "Invalid serialization data for {} object",
+                        if immutable {
+                            "DateTimeImmutable"
+                        } else {
+                            "DateTime"
+                        }
+                    ),
+                )),
             }
         }
         b"__wakeup" => {
@@ -1172,7 +1611,18 @@ fn datetime_method(vm: &mut Vm, immutable: bool, method: &[u8], o: &Obj, args: &
                     date_set(o, &t);
                     Ok(Value::Null)
                 }
-                None => Err(throw(vm, b"Error", &format!("Invalid serialization data for {} object", if immutable { "DateTimeImmutable" } else { "DateTime" }))),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    &format!(
+                        "Invalid serialization data for {} object",
+                        if immutable {
+                            "DateTimeImmutable"
+                        } else {
+                            "DateTime"
+                        }
+                    ),
+                )),
             }
         }
         _ => Ok(Value::Null),
@@ -1201,14 +1651,34 @@ pub fn make_diff(vm: &mut Vm, t1: &Time, t2: &Time, absolute: bool) -> Value {
         d.invert = 0;
     }
     let o = new_object(vm, b"DateInterval");
-    interval_set(&o, &IntervalObj { diff: d, civil_or_wall: CIVIL, from_string: false, date_string: Vec::new() });
+    interval_set(
+        &o,
+        &IntervalObj {
+            diff: d,
+            civil_or_wall: CIVIL,
+            from_string: false,
+            date_string: Vec::new(),
+        },
+    );
     Value::Object(o)
 }
 
-fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], args: &[Value]) -> R<Value> {
+fn datetime_static(
+    vm: &mut Vm,
+    immutable: bool,
+    method: &[u8],
+    called: &[u8],
+    args: &[Value],
+) -> R<Value> {
     let m = |n: &str| mname(immutable, n);
     let called_or_base = |vm: &Vm| -> Vec<u8> {
-        if base_of(vm, called).is_some() { called.to_vec() } else if immutable { b"DateTimeImmutable".to_vec() } else { b"DateTime".to_vec() }
+        if base_of(vm, called).is_some() {
+            called.to_vec()
+        } else if immutable {
+            b"DateTimeImmutable".to_vec()
+        } else {
+            b"DateTime".to_vec()
+        }
     };
     match method {
         b"createfromformat" => {
@@ -1216,8 +1686,25 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
             check_count(vm, &f, args, 2, 3)?;
             let format = str_arg(vm, &f, args, 0, "format", false)?.unwrap_or_default();
             let ts = path_arg(vm, &f, args, 1, "datetime")?.unwrap_or_default();
-            let tz = obj_arg(vm, &f, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-            let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
+            let tz = obj_arg(
+                vm,
+                &f,
+                args,
+                2,
+                "timezone",
+                "DateTimeZone",
+                &[Base::TimeZone],
+                true,
+            )?;
+            let tzobj = tz.as_ref().map(|o| {
+                tz_get(o).unwrap_or(TzObj {
+                    ztype: 0,
+                    utc_offset: 0,
+                    dst: 0,
+                    abbr: String::new(),
+                    tz: None,
+                })
+            });
             let cls = called_or_base(vm);
             check_instantiable(vm, &cls)?;
             match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
@@ -1281,14 +1768,29 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
             check_count(vm, &f, args, 1, 1)?;
             let a = array_arg(vm, &f, args, 0, "array")?;
             let ab = a.borrow().clone();
-            let cls: &[u8] = if immutable { b"DateTimeImmutable" } else { b"DateTime" };
+            let cls: &[u8] = if immutable {
+                b"DateTimeImmutable"
+            } else {
+                b"DateTime"
+            };
             match date_from_hash(vm, &ab)? {
                 Some(t) => {
                     let o = new_object(vm, cls);
                     date_set(&o, &t);
                     Ok(Value::Object(o))
                 }
-                None => Err(throw(vm, b"Error", &format!("Invalid serialization data for {} object", if immutable { "DateTimeImmutable" } else { "DateTime" }))),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    &format!(
+                        "Invalid serialization data for {} object",
+                        if immutable {
+                            "DateTimeImmutable"
+                        } else {
+                            "DateTime"
+                        }
+                    ),
+                )),
             }
         }
         _ => Ok(Value::Null),
@@ -1300,7 +1802,11 @@ fn datetime_static(vm: &mut Vm, immutable: bool, method: &[u8], called: &[u8], a
 
 pub fn tz_offset_for(z: &TzObj, t: &Time) -> i64 {
     match z.ztype {
-        ZONETYPE_ID => z.tz.as_ref().map(|tz| tz.get_time_zone_info(t.sse).offset as i64).unwrap_or(0),
+        ZONETYPE_ID => {
+            z.tz.as_ref()
+                .map(|tz| tz.get_time_zone_info(t.sse).offset as i64)
+                .unwrap_or(0)
+        }
         ZONETYPE_OFFSET => z.utc_offset,
         ZONETYPE_ABBR => z.utc_offset + z.dst as i64 * 3600,
         _ => 0,
@@ -1317,26 +1823,49 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
     };
     let mut out = new_arr();
     let fmt = b"x-m-d\\TH:i:sP";
-    let add_el = |vm: &mut Vm, out: &mut PhpArray, ts: i64, offset: i64, isdst: bool, abbr: String| {
-        let mut el = new_arr();
-        arr_set(&mut el, "ts", Value::Long(ts));
-        arr_set(&mut el, "time", Value::String(PhpString::from_vec(php_format_date(vm, fmt, ts, false))));
-        arr_set(&mut el, "offset", Value::Long(offset));
-        arr_set(&mut el, "isdst", if isdst { Value::True } else { Value::False });
-        arr_set(&mut el, "abbr", ss(abbr));
-        out.push(arr_val(el));
-    };
+    let add_el =
+        |vm: &mut Vm, out: &mut PhpArray, ts: i64, offset: i64, isdst: bool, abbr: String| {
+            let mut el = new_arr();
+            arr_set(&mut el, "ts", Value::Long(ts));
+            arr_set(
+                &mut el,
+                "time",
+                Value::String(PhpString::from_vec(php_format_date(vm, fmt, ts, false))),
+            );
+            arr_set(&mut el, "offset", Value::Long(offset));
+            arr_set(
+                &mut el,
+                "isdst",
+                if isdst { Value::True } else { Value::False },
+            );
+            arr_set(&mut el, "abbr", ss(abbr));
+            out.push(arr_val(el));
+        };
     let ty = |i: usize| tz.types[i];
     let add_idx = |vm: &mut Vm, out: &mut PhpArray, i: usize, ts: i64| {
         let t = ty(tz.trans_idx[i] as usize);
-        add_el(vm, out, ts, t.offset as i64, t.isdst != 0, tz.abbr_at(t.abbr_idx));
+        add_el(
+            vm,
+            out,
+            ts,
+            t.offset as i64,
+            t.isdst != 0,
+            tz.abbr_at(t.abbr_idx),
+        );
     };
     let add_nominal = |vm: &mut Vm, out: &mut PhpArray| {
         let t = ty(0);
-        add_el(vm, out, begin, t.offset as i64, t.isdst != 0, tz.abbr_at(t.abbr_idx));
+        add_el(
+            vm,
+            out,
+            begin,
+            t.offset as i64,
+            t.isdst != 0,
+            tz.abbr_at(t.abbr_idx),
+        );
     };
     let mut beg = 0usize;
-    
+
     let found = if begin == i64::MIN {
         add_nominal(vm, &mut out);
         true
@@ -1358,12 +1887,23 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
         }
         f
     };
-    let has_posix_end = tz.posix_info.as_ref().map(|p| p.dst_end.is_some()).unwrap_or(false);
+    let has_posix_end = tz
+        .posix_info
+        .as_ref()
+        .map(|p| p.dst_end.is_some())
+        .unwrap_or(false);
     if !found {
         if tz.timecnt > 0 {
             if has_posix_end {
                 let tto = tz.get_time_zone_info(begin);
-                add_el(vm, &mut out, begin, tto.offset as i64, tto.is_dst != 0, tto.abbr);
+                add_el(
+                    vm,
+                    &mut out,
+                    begin,
+                    tto.offset as i64,
+                    tto.is_dst != 0,
+                    tto.abbr,
+                );
             } else {
                 add_idx(vm, &mut out, tz.timecnt - 1, begin);
             }
@@ -1398,7 +1938,14 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
                     return arr_val(out);
                 }
                 let t = ty(typ);
-                add_el(vm, &mut out, time, t.offset as i64, t.isdst != 0, tz.abbr_at(t.abbr_idx));
+                add_el(
+                    vm,
+                    &mut out,
+                    time,
+                    t.offset as i64,
+                    t.isdst != 0,
+                    tz.abbr_at(t.abbr_idx),
+                );
             }
             y += 1;
         }
@@ -1432,7 +1979,17 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
         b"getoffset" => {
             let f = "DateTimeZone::getOffset";
             check_count(vm, f, args, 1, 1)?;
-            let d = obj_arg(vm, f, args, 0, "datetime", "DateTimeInterface", DATE_BASES, false)?.unwrap();
+            let d = obj_arg(
+                vm,
+                f,
+                args,
+                0,
+                "datetime",
+                "DateTimeInterface",
+                DATE_BASES,
+                false,
+            )?
+            .unwrap();
             let z = need_tz(vm, o)?;
             let t = need_date(vm, &d)?;
             Ok(Value::Long(tz_offset_for(&z, &t)))
@@ -1471,7 +2028,11 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
                     restore_custom_props(vm, o, &ab, TZ_INTERNAL);
                     Ok(Value::Null)
                 }
-                None => Err(throw(vm, b"Error", "Invalid serialization data for DateTimeZone object")),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DateTimeZone object",
+                )),
             }
         }
         b"__wakeup" => {
@@ -1484,7 +2045,11 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
                     tz_set(o, &z);
                     Ok(Value::Null)
                 }
-                None => Err(throw(vm, b"Error", "Invalid serialization data for DateTimeZone object")),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DateTimeZone object",
+                )),
             }
         }
         _ => Ok(Value::Null),
@@ -1506,7 +2071,11 @@ fn timezone_static(vm: &mut Vm, method: &[u8], args: &[Value]) -> R<Value> {
                     tz_set(&o, &z);
                     Ok(Value::Object(o))
                 }
-                None => Err(throw(vm, b"Error", "Invalid serialization data for DateTimeZone object")),
+                None => Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DateTimeZone object",
+                )),
             }
         }
         _ => Ok(Value::Null),
@@ -1531,10 +2100,26 @@ fn interval_from_hash(vm: &mut Vm, a: &PhpArray) -> R<Option<IntervalObj>> {
             );
             return Err(throw(vm, b"Error", &msg));
         }
-        return Ok(Some(IntervalObj { diff: t.relative.clone(), civil_or_wall: CIVIL, from_string: true, date_string: dsb }));
+        return Ok(Some(IntervalObj {
+            diff: t.relative.clone(),
+            civil_or_wall: CIVIL,
+            from_string: true,
+            date_string: dsb,
+        }));
     }
     let mut d = RelTime::default();
-    let scalar = |v: &Value| matches!(v, Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_) | Value::String(_) | Value::Undef);
+    let scalar = |v: &Value| {
+        matches!(
+            v,
+            Value::Null
+                | Value::True
+                | Value::False
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::String(_)
+                | Value::Undef
+        )
+    };
     let rd = |k: &[u8], def: i64| -> i64 {
         match arr_get(a, k) {
             Some(v) if scalar(v) => v.to_long(),
@@ -1570,17 +2155,28 @@ fn interval_from_hash(vm: &mut Vm, a: &PhpArray) -> R<Option<IntervalObj>> {
         Some(v) => v.to_long(),
         None => CIVIL,
     };
-    Ok(Some(IntervalObj { diff: d, civil_or_wall, from_string: false, date_string: Vec::new() }))
+    Ok(Some(IntervalObj {
+        diff: d,
+        civil_or_wall,
+        from_string: false,
+        date_string: Vec::new(),
+    }))
 }
 
 /// zend_dval_to_lval (PHP 8.5: warns when out of range)
 pub fn dval_to_lval(vm: &mut Vm, d: f64) -> i64 {
     if !d.is_finite() {
-        vm.emit_warning(&format!("The float {} is not representable as an int, cast occurred", goro_core::value::format_php_float(d)));
+        vm.emit_warning(&format!(
+            "The float {} is not representable as an int, cast occurred",
+            goro_core::value::format_php_float(d)
+        ));
         return 0;
     }
     if !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
-        vm.emit_warning(&format!("The float {} is not representable as an int, cast occurred", goro_core::value::format_php_float(d)));
+        vm.emit_warning(&format!(
+            "The float {} is not representable as an int, cast occurred",
+            goro_core::value::format_php_float(d)
+        ));
         let two64 = 18446744073709551616.0f64;
         let mut dmod = d % two64;
         if dmod < 0.0 {
@@ -1602,7 +2198,15 @@ fn a64i(s: &str) -> i64 {
     while end < b.len() && b[end].is_ascii_digit() {
         end += 1;
     }
-    t[..end].parse::<i64>().unwrap_or_else(|_| if t.starts_with('-') && end > 1 { i64::MIN } else if end > 0 && b[0] != b'-' && end > (b[0] == b'+') as usize { i64::MAX } else { 0 })
+    t[..end].parse::<i64>().unwrap_or_else(|_| {
+        if t.starts_with('-') && end > 1 {
+            i64::MIN
+        } else if end > 0 && b[0] != b'-' && end > (b[0] == b'+') as usize {
+            i64::MAX
+        } else {
+            0
+        }
+    })
 }
 
 fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value> {
@@ -1612,7 +2216,9 @@ fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             check_count(vm, f, args, 1, 1)?;
             let fmt = str_arg(vm, f, args, 0, "format", false)?.unwrap_or_default();
             let iv = need_interval(vm, o)?;
-            Ok(Value::String(PhpString::from_vec(interval_format(&fmt, &iv.diff))))
+            Ok(Value::String(PhpString::from_vec(interval_format(
+                &fmt, &iv.diff,
+            ))))
         }
         b"__serialize" => {
             check_count(vm, "DateInterval::__serialize", args, 0, 0)?;
@@ -1653,7 +2259,13 @@ pub fn interval_from_date_string(vm: &mut Vm, s: &[u8], throw_exc: bool, fname: 
     let (t, err) = strtotime(s);
     if err.error_count() > 0 {
         let e = &err.error_messages[0];
-        let msg = format!("Unknown or bad format ({}) at position {} ({}): {}", cstr(s), e.position, first_error_char(e), e.message);
+        let msg = format!(
+            "Unknown or bad format ({}) at position {} ({}): {}",
+            cstr(s),
+            e.position,
+            first_error_char(e),
+            e.message
+        );
         if throw_exc {
             return Err(throw(vm, b"DateMalformedIntervalStringException", &msg));
         }
@@ -1669,7 +2281,15 @@ pub fn interval_from_date_string(vm: &mut Vm, s: &[u8], throw_exc: bool, fname: 
         return Ok(Value::False);
     }
     let o = new_object(vm, b"DateInterval");
-    interval_set(&o, &IntervalObj { diff: t.relative.clone(), civil_or_wall: CIVIL, from_string: true, date_string: s.to_vec() });
+    interval_set(
+        &o,
+        &IntervalObj {
+            diff: t.relative.clone(),
+            civil_or_wall: CIVIL,
+            from_string: true,
+            date_string: s.to_vec(),
+        },
+    );
     Ok(Value::Object(o))
 }
 
@@ -1740,14 +2360,21 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             check_count(vm, "DatePeriod::getRecurrences", args, 0, 0)?;
             let p = need_period(vm, o);
             let r = p.recurrences - p.include_start_date as i64 - p.include_end_date as i64;
-            if r == 0 { Ok(Value::Null) } else { Ok(Value::Long(r)) }
+            if r == 0 {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Long(r))
+            }
         }
         b"getiterator" => {
             check_count(vm, "DatePeriod::getIterator", args, 0, 0)?;
             let it = new_object(vm, b"InternalIterator");
             {
                 let mut ib = it.borrow_mut();
-                ib.set_property(b"__timestamp_iter_period".to_vec(), Value::Object(o.clone()));
+                ib.set_property(
+                    b"__timestamp_iter_period".to_vec(),
+                    Value::Object(o.clone()),
+                );
                 ib.set_property(b"__timestamp_iter_index".to_vec(), Value::Long(0));
                 ib.set_property(b"__timestamp_iter_started".to_vec(), Value::False);
             }
@@ -1776,7 +2403,11 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             // php_date_period_initialize_from_hash does no rollback on error
             period_set(vm, o, &p);
             if !ok {
-                return Err(throw(vm, b"Error", "Invalid serialization data for DatePeriod object"));
+                return Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DatePeriod object",
+                ));
             }
             restore_custom_props(vm, o, &ab, DP_INTERNAL);
             Ok(Value::Null)
@@ -1788,7 +2419,11 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             }
             let mut p = need_period(vm, o);
             if !period_from_hash(vm, &mut p, &a) {
-                return Err(throw(vm, b"Error", "Invalid serialization data for DatePeriod object"));
+                return Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DatePeriod object",
+                ));
             }
             period_set(vm, o, &p);
             Ok(Value::Null)
@@ -1838,10 +2473,12 @@ fn period_from_hash(vm: &mut Vm, p: &mut PeriodObj, a: &PhpArray) -> bool {
         Ok(None) => {}
     }
     match arr_get(a, b"interval") {
-        Some(Value::Object(o)) if o.borrow().class_name.eq_ignore_ascii_case(b"DateInterval") => match interval_get(o) {
-            Some(iv) => p.interval = Some(iv.diff),
-            None => return false,
-        },
+        Some(Value::Object(o)) if o.borrow().class_name.eq_ignore_ascii_case(b"DateInterval") => {
+            match interval_get(o) {
+                Some(iv) => p.interval = Some(iv.diff),
+                None => return false,
+            }
+        }
         _ => return false,
     }
     match arr_get(a, b"recurrences") {
@@ -1869,7 +2506,11 @@ fn period_static(vm: &mut Vm, method: &[u8], called: &[u8], args: &[Value]) -> R
             check_count(vm, f, args, 1, 2)?;
             let iso = str_arg(vm, f, args, 0, "specification", false)?.unwrap_or_default();
             let options = long_arg(vm, f, args, 1, "options", false)?.unwrap_or(0);
-            let cls: Vec<u8> = if base_of(vm, called) == Some(Base::Period) { called.to_vec() } else { b"DatePeriod".to_vec() };
+            let cls: Vec<u8> = if base_of(vm, called) == Some(Base::Period) {
+                called.to_vec()
+            } else {
+                b"DatePeriod".to_vec()
+            };
             check_instantiable(vm, &cls)?;
             let o = new_object(vm, &cls);
             let mut p = PeriodObj::default();
@@ -1886,7 +2527,11 @@ fn period_static(vm: &mut Vm, method: &[u8], called: &[u8], args: &[Value]) -> R
             let o = new_object(vm, b"DatePeriod");
             let mut p = PeriodObj::default();
             if !period_from_hash(vm, &mut p, &ab) {
-                return Err(throw(vm, b"Error", "Invalid serialization data for DatePeriod object"));
+                return Err(throw(
+                    vm,
+                    b"Error",
+                    "Invalid serialization data for DatePeriod object",
+                ));
             }
             period_set(vm, &o, &p);
             Ok(Value::Object(o))
@@ -1916,10 +2561,18 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
         _ => return Ok(Value::Null),
     };
     // InternalIterator implicitly rewinds before first use.
-    if method != b"rewind" && !it.borrow().get_property(b"__timestamp_iter_started").is_truthy() {
+    if method != b"rewind"
+        && !it
+            .borrow()
+            .get_property(b"__timestamp_iter_started")
+            .is_truthy()
+    {
         iterator_method(vm, b"rewind", it)?;
     }
-    let index = it.borrow().get_property(b"__timestamp_iter_index").to_long();
+    let index = it
+        .borrow()
+        .get_property(b"__timestamp_iter_index")
+        .to_long();
     let mut p = period_get(&period).unwrap_or_default();
     match method {
         b"rewind" => {
@@ -1947,7 +2600,11 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
             };
             let r = if let Some(end) = &p.end {
                 if cur.sse == end.sse {
-                    if p.include_end_date { cur.us <= end.us } else { cur.us < end.us }
+                    if p.include_end_date {
+                        cur.us <= end.us
+                    } else {
+                        cur.us < end.us
+                    }
                 } else {
                     cur.sse < end.sse
                 }
@@ -1969,7 +2626,8 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
                 period_advance(cur, &iv);
             }
             period_set(vm, &period, &p);
-            it.borrow_mut().set_property(b"__timestamp_iter_index".to_vec(), Value::Long(index + 1));
+            it.borrow_mut()
+                .set_property(b"__timestamp_iter_index".to_vec(), Value::Long(index + 1));
             Ok(Value::Null)
         }
         _ => Ok(Value::Null),
@@ -1982,8 +2640,25 @@ fn iterator_method(vm: &mut Vm, method: &[u8], it: &Obj) -> R<Value> {
 fn date_create_common(vm: &mut Vm, args: &[Value], fname: &str, cls: &[u8]) -> R<Value> {
     check_count(vm, fname, args, 0, 2)?;
     let time_str = str_arg(vm, fname, args, 0, "datetime", false)?.unwrap_or_default();
-    let tz = obj_arg(vm, fname, args, 1, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-    let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
+    let tz = obj_arg(
+        vm,
+        fname,
+        args,
+        1,
+        "timezone",
+        "DateTimeZone",
+        &[Base::TimeZone],
+        true,
+    )?;
+    let tzobj = tz.as_ref().map(|o| {
+        tz_get(o).unwrap_or(TzObj {
+            ztype: 0,
+            utc_offset: 0,
+            dst: 0,
+            abbr: String::new(),
+            tz: None,
+        })
+    });
     match date_initialize(vm, &time_str, None, tzobj.as_ref(), 0)? {
         Some(t) => {
             let o = new_object(vm, cls);
@@ -2002,12 +2677,34 @@ pub fn date_create_immutable_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     date_create_common(vm, args, "date_create_immutable", b"DateTimeImmutable")
 }
 
-fn date_create_from_format_common(vm: &mut Vm, args: &[Value], fname: &str, cls: &[u8]) -> R<Value> {
+fn date_create_from_format_common(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    cls: &[u8],
+) -> R<Value> {
     check_count(vm, fname, args, 2, 3)?;
     let format = str_arg(vm, fname, args, 0, "format", false)?.unwrap_or_default();
     let ts = path_arg(vm, fname, args, 1, "datetime")?.unwrap_or_default();
-    let tz = obj_arg(vm, fname, args, 2, "timezone", "DateTimeZone", &[Base::TimeZone], true)?;
-    let tzobj = tz.as_ref().map(|o| tz_get(o).unwrap_or(TzObj { ztype: 0, utc_offset: 0, dst: 0, abbr: String::new(), tz: None }));
+    let tz = obj_arg(
+        vm,
+        fname,
+        args,
+        2,
+        "timezone",
+        "DateTimeZone",
+        &[Base::TimeZone],
+        true,
+    )?;
+    let tzobj = tz.as_ref().map(|o| {
+        tz_get(o).unwrap_or(TzObj {
+            ztype: 0,
+            utc_offset: 0,
+            dst: 0,
+            abbr: String::new(),
+            tz: None,
+        })
+    });
     match date_initialize(vm, &ts, Some(&format), tzobj.as_ref(), INIT_FORMAT)? {
         Some(t) => {
             let o = new_object(vm, cls);
@@ -2023,12 +2720,28 @@ pub fn date_create_from_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 }
 
 pub fn date_create_immutable_from_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
-    date_create_from_format_common(vm, args, "date_create_immutable_from_format", b"DateTimeImmutable")
+    date_create_from_format_common(
+        vm,
+        args,
+        "date_create_immutable_from_format",
+        b"DateTimeImmutable",
+    )
 }
 
-fn date_obj_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, mutable_only: bool) -> R<Obj> {
-    let (tn, ok): (&str, &[Base]) = if mutable_only { ("DateTime", &[Base::DateTime]) } else { ("DateTimeInterface", DATE_BASES) };
-    Ok(obj_arg(vm, fname, args, idx, "object", tn, ok, false)?.unwrap_or_else(|| Rc::new(RefCell::new(PhpObject::new(Vec::new(), 0)))))
+fn date_obj_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    mutable_only: bool,
+) -> R<Obj> {
+    let (tn, ok): (&str, &[Base]) = if mutable_only {
+        ("DateTime", &[Base::DateTime])
+    } else {
+        ("DateTimeInterface", DATE_BASES)
+    };
+    Ok(obj_arg(vm, fname, args, idx, "object", tn, ok, false)?
+        .unwrap_or_else(|| Rc::new(RefCell::new(PhpObject::new(Vec::new(), 0)))))
 }
 
 fn need_args(vm: &mut Vm, fname: &str, args: &[Value], min: usize, max: usize) -> R<()> {
@@ -2040,7 +2753,11 @@ pub fn date_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let o = date_obj_arg(vm, "date_format", args, 0, false)?;
     let fmt = str_arg(vm, "date_format", args, 1, "format", false)?.unwrap_or_default();
     let t = need_date(vm, &o)?;
-    Ok(Value::String(PhpString::from_vec(date_format(&fmt, &t, t.is_localtime != 0))))
+    Ok(Value::String(PhpString::from_vec(date_format(
+        &fmt,
+        &t,
+        t.is_localtime != 0,
+    ))))
 }
 
 pub fn date_modify_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
@@ -2058,7 +2775,17 @@ pub fn date_modify_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 pub fn date_add_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     need_args(vm, "date_add", args, 2, 2)?;
     let o = date_obj_arg(vm, "date_add", args, 0, true)?;
-    let iv = obj_arg(vm, "date_add", args, 1, "interval", "DateInterval", &[Base::Interval], false)?.unwrap();
+    let iv = obj_arg(
+        vm,
+        "date_add",
+        args,
+        1,
+        "interval",
+        "DateInterval",
+        &[Base::Interval],
+        false,
+    )?
+    .unwrap();
     let t = need_date(vm, &o)?;
     let ivs = need_interval(vm, &iv)?;
     date_set(&o, &date_add_impl(&t, &ivs));
@@ -2068,7 +2795,17 @@ pub fn date_add_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 pub fn date_sub_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     need_args(vm, "date_sub", args, 2, 2)?;
     let o = date_obj_arg(vm, "date_sub", args, 0, true)?;
-    let iv = obj_arg(vm, "date_sub", args, 1, "interval", "DateInterval", &[Base::Interval], false)?.unwrap();
+    let iv = obj_arg(
+        vm,
+        "date_sub",
+        args,
+        1,
+        "interval",
+        "DateInterval",
+        &[Base::Interval],
+        false,
+    )?
+    .unwrap();
     let t = need_date(vm, &o)?;
     let ivs = need_interval(vm, &iv)?;
     if let Some(nt) = date_sub_impl(vm, &t, &ivs, "date_sub", false)? {
@@ -2087,7 +2824,17 @@ pub fn date_timezone_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 pub fn date_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     need_args(vm, "date_timezone_set", args, 2, 2)?;
     let o = date_obj_arg(vm, "date_timezone_set", args, 0, true)?;
-    let tz = obj_arg(vm, "date_timezone_set", args, 1, "timezone", "DateTimeZone", &[Base::TimeZone], false)?.unwrap();
+    let tz = obj_arg(
+        vm,
+        "date_timezone_set",
+        args,
+        1,
+        "timezone",
+        "DateTimeZone",
+        &[Base::TimeZone],
+        false,
+    )?
+    .unwrap();
     let mut t = need_date(vm, &o)?;
     let z = need_tz(vm, &tz)?;
     date_timezone_set_impl(&mut t, &z);
@@ -2104,8 +2851,28 @@ pub fn date_offset_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 pub fn date_diff_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     need_args(vm, "date_diff", args, 2, 3)?;
-    let o1 = obj_arg(vm, "date_diff", args, 0, "baseObject", "DateTimeInterface", DATE_BASES, false)?.unwrap();
-    let o2 = obj_arg(vm, "date_diff", args, 1, "targetObject", "DateTimeInterface", DATE_BASES, false)?.unwrap();
+    let o1 = obj_arg(
+        vm,
+        "date_diff",
+        args,
+        0,
+        "baseObject",
+        "DateTimeInterface",
+        DATE_BASES,
+        false,
+    )?
+    .unwrap();
+    let o2 = obj_arg(
+        vm,
+        "date_diff",
+        args,
+        1,
+        "targetObject",
+        "DateTimeInterface",
+        DATE_BASES,
+        false,
+    )?
+    .unwrap();
     let absolute = bool_arg(vm, "date_diff", args, 2, "absolute")?.unwrap_or(false);
     let t1 = need_date(vm, &o1)?;
     let t2 = need_date(vm, &o2)?;
@@ -2198,7 +2965,17 @@ pub fn timezone_open_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 }
 
 fn tz_obj_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> R<Obj> {
-    Ok(obj_arg(vm, fname, args, 0, "object", "DateTimeZone", &[Base::TimeZone], false)?.unwrap())
+    Ok(obj_arg(
+        vm,
+        fname,
+        args,
+        0,
+        "object",
+        "DateTimeZone",
+        &[Base::TimeZone],
+        false,
+    )?
+    .unwrap())
 }
 
 pub fn timezone_name_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
@@ -2211,7 +2988,17 @@ pub fn timezone_name_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 pub fn timezone_offset_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     need_args(vm, "timezone_offset_get", args, 2, 2)?;
     let o = tz_obj_arg(vm, "timezone_offset_get", args)?;
-    let d = obj_arg(vm, "timezone_offset_get", args, 1, "datetime", "DateTimeInterface", DATE_BASES, false)?.unwrap();
+    let d = obj_arg(
+        vm,
+        "timezone_offset_get",
+        args,
+        1,
+        "datetime",
+        "DateTimeInterface",
+        DATE_BASES,
+        false,
+    )?
+    .unwrap();
     let z = need_tz(vm, &o)?;
     let t = need_date(vm, &d)?;
     Ok(Value::Long(tz_offset_for(&z, &t)))
@@ -2244,8 +3031,20 @@ pub fn date_interval_create_from_date_string_fn(vm: &mut Vm, args: &[Value]) -> 
 pub fn date_interval_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let f = "date_interval_format";
     need_args(vm, f, args, 2, 2)?;
-    let o = obj_arg(vm, f, args, 0, "object", "DateInterval", &[Base::Interval], false)?.unwrap();
+    let o = obj_arg(
+        vm,
+        f,
+        args,
+        0,
+        "object",
+        "DateInterval",
+        &[Base::Interval],
+        false,
+    )?
+    .unwrap();
     let fmt = str_arg(vm, f, args, 1, "format", false)?.unwrap_or_default();
     let iv = need_interval(vm, &o)?;
-    Ok(Value::String(PhpString::from_vec(interval_format(&fmt, &iv.diff))))
+    Ok(Value::String(PhpString::from_vec(interval_format(
+        &fmt, &iv.diff,
+    ))))
 }

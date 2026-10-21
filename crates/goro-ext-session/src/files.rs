@@ -7,7 +7,7 @@ use std::os::unix::io::AsRawFd;
 
 use goro_core::vm::Vm;
 
-use crate::{err, err_plain, ps, strtol, valid_key, E_NOTICE, E_WARNING};
+use crate::{E_NOTICE, E_WARNING, err, err_plain, ps, strtol, valid_key};
 
 const FILE_PREFIX: &[u8] = b"sess_";
 const MAXPATHLEN: usize = 4096;
@@ -37,7 +37,8 @@ fn lossy(b: &[u8]) -> String {
 
 fn path_create(data: &FilesData, key: &[u8]) -> Option<Vec<u8>> {
     if key.len() <= data.dirdepth
-        || MAXPATHLEN < data.basedir.len() + 2 * data.dirdepth + key.len() + 5 + FILE_PREFIX.len() + 1
+        || MAXPATHLEN
+            < data.basedir.len() + 2 * data.dirdepth + key.len() + 5 + FILE_PREFIX.len() + 1
     {
         return None;
     }
@@ -68,16 +69,24 @@ fn files_open(vm: &mut Vm, data: &mut FilesData, key: &[u8]) {
     data.last_key = None;
     data.fd = None;
     if !valid_key(key) {
-        err(vm, E_WARNING, "Session ID is too long or contains illegal characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed");
+        err(
+            vm,
+            E_WARNING,
+            "Session ID is too long or contains illegal characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed",
+        );
         return;
     }
     let path = match path_create(data, key) {
         Some(p) => p,
         None => {
-            err(vm, E_WARNING, &format!(
-                "Failed to create session data file path. Too short session ID, invalid save_path or path length exceeds {} characters",
-                MAXPATHLEN
-            ));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "Failed to create session data file path. Too short session ID, invalid save_path or path length exceeds {} characters",
+                    MAXPATHLEN
+                ),
+            );
             return;
         }
     };
@@ -94,18 +103,33 @@ fn files_open(vm: &mut Vm, data: &mut FilesData, key: &[u8]) {
             if let Ok(md) = f.metadata() {
                 let (uid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
                 if md.uid() != 0 && md.uid() != uid && md.uid() != euid && uid != 0 {
-                    err(vm, E_WARNING, "Session data file is not created by your uid");
+                    err(
+                        vm,
+                        E_WARNING,
+                        "Session data file is not created by your uid",
+                    );
                     return;
                 }
             }
             unsafe {
-                while libc::flock(f.as_raw_fd(), libc::LOCK_EX) == -1 && *libc::__errno_location() == libc::EINTR {}
+                while libc::flock(f.as_raw_fd(), libc::LOCK_EX) == -1
+                    && *libc::__errno_location() == libc::EINTR
+                {}
             }
             data.fd = Some(f);
         }
         Err(e) => {
             let code = e.raw_os_error().unwrap_or(0);
-            err(vm, E_WARNING, &format!("open({}, O_RDWR) failed: {} ({})", lossy(&path), strerror(code), code));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "open({}, O_RDWR) failed: {} ({})",
+                    lossy(&path),
+                    strerror(code),
+                    code
+                ),
+            );
         }
     }
 }
@@ -128,7 +152,11 @@ fn files_write(vm: &mut Vm, data: &mut FilesData, key: &[u8], val: &[u8]) -> boo
         }
         Err(e) => {
             let code = e.raw_os_error().unwrap_or(0);
-            err(vm, E_WARNING, &format!("Write failed: {} ({})", strerror(code), code));
+            err(
+                vm,
+                E_WARNING,
+                &format!("Write failed: {} ({})", strerror(code), code),
+            );
             false
         }
     }
@@ -160,7 +188,11 @@ pub(crate) fn open(vm: &mut Vm, save_path: &[u8]) -> bool {
     if argv.len() > 1 {
         let (v, _, overflow) = strtol(argv[0], 10);
         if overflow {
-            err_plain(vm, E_WARNING, "The first parameter in session.save_path is invalid");
+            err_plain(
+                vm,
+                E_WARNING,
+                "The first parameter in session.save_path is invalid",
+            );
             return false;
         }
         dirdepth = v as usize;
@@ -168,7 +200,11 @@ pub(crate) fn open(vm: &mut Vm, save_path: &[u8]) -> bool {
     if argv.len() > 2 {
         let (v, _, overflow) = strtol(argv[1], 8);
         if overflow || !(0..=0o7777).contains(&v) {
-            err_plain(vm, E_WARNING, "The second parameter in session.save_path is invalid");
+            err_plain(
+                vm,
+                E_WARNING,
+                "The second parameter in session.save_path is invalid",
+            );
             return false;
         }
         filemode = v as u32;
@@ -238,7 +274,11 @@ pub(crate) fn read(vm: &mut Vm, key: &[u8]) -> Option<Vec<u8>> {
             }
             Err(e) => {
                 let code = e.raw_os_error().unwrap_or(0);
-                err(vm, E_WARNING, &format!("Read failed: {} ({})", strerror(code), code));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!("Read failed: {} ({})", strerror(code), code),
+                );
                 None
             }
         }
@@ -308,7 +348,11 @@ pub(crate) fn gc(vm: &mut Vm, maxlifetime: i64) -> i64 {
         Some(d) => d,
         None => return -1,
     };
-    let r = if data.dirdepth == 0 { cleanup_dir(vm, &data.basedir, maxlifetime) } else { -1 };
+    let r = if data.dirdepth == 0 {
+        cleanup_dir(vm, &data.basedir, maxlifetime)
+    } else {
+        -1
+    };
     put(data);
     r
 }
@@ -319,7 +363,16 @@ fn cleanup_dir(vm: &mut Vm, dirname: &[u8], maxlifetime: i64) -> i64 {
         Ok(r) => r,
         Err(e) => {
             let code = e.raw_os_error().unwrap_or(0);
-            err(vm, E_NOTICE, &format!("ps_files_cleanup_dir: opendir({}) failed: {} ({})", d, strerror(code), code));
+            err(
+                vm,
+                E_NOTICE,
+                &format!(
+                    "ps_files_cleanup_dir: opendir({}) failed: {} ({})",
+                    d,
+                    strerror(code),
+                    code
+                ),
+            );
             return -1;
         }
     };
@@ -353,7 +406,12 @@ fn key_exists_in(data: &FilesData, key: &[u8]) -> bool {
 
 /// PS_VALIDATE_SID_FUNC(files): true when the session exists.
 pub(crate) fn key_exists(key: &[u8]) -> bool {
-    ps(|p| p.mod_data.as_ref().map(|d| key_exists_in(d, key)).unwrap_or(false))
+    ps(|p| {
+        p.mod_data
+            .as_ref()
+            .map(|d| key_exists_in(d, key))
+            .unwrap_or(false)
+    })
 }
 
 /// PS_CREATE_SID_FUNC(files)

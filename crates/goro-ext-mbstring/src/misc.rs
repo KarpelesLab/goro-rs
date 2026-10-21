@@ -7,8 +7,8 @@ use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
+use crate::mbfl::Encoding;
 use crate::mbfl::tables::translit_kana_jisx0201_jisx0208::*;
-use crate::mbfl::{Encoding};
 use crate::mbstring::*;
 use crate::state;
 use crate::zpp::*;
@@ -30,7 +30,13 @@ fn jp_kana_convert(input: &[u8], enc: &Encoding, mode: u32) -> Vec<u8> {
         let next = if i + 1 < n { w[i + 1] } else { 0 };
         let mut consumed = false;
         let mut second = 0u32;
-        out.push(mb_convert_kana_codepoint(w[i], next, &mut consumed, &mut second, mode));
+        out.push(mb_convert_kana_codepoint(
+            w[i],
+            next,
+            &mut consumed,
+            &mut second,
+            mode,
+        ));
         if second != 0 {
             out.push(second);
         }
@@ -58,7 +64,13 @@ fn mb_convert_kana(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else if let Some(i) = KANA_FLAGS.iter().position(|&x| x == c) {
                 opt |= 1 << i;
             } else {
-                return Err(arg_value_error(vm, f, 2, "mode", &format!("contains invalid flag: '{}'", c as char)));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    2,
+                    "mode",
+                    &format!("contains invalid flag: '{}'", c as char),
+                ));
             }
         }
         let bad = ((opt & 0xFF00) >> 8) & opt;
@@ -72,22 +84,58 @@ fn mb_convert_kana(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if (flag2 == 'r' || flag2 == 'n') && (opt & MBFL_ZEN2HAN_ALL as u32) != 0 {
                 flag2 = 'a';
             }
-            return Err(arg_value_error(vm, f, 2, "mode", &format!("must not combine '{}' and '{}' flags", flag1, flag2)));
+            return Err(arg_value_error(
+                vm,
+                f,
+                2,
+                "mode",
+                &format!("must not combine '{}' and '{}' flags", flag1, flag2),
+            ));
         }
         if (opt & MBFL_HAN2ZEN_HIRAGANA as u32) != 0 && (opt & MBFL_HAN2ZEN_KATAKANA as u32) != 0 {
-            return Err(arg_value_error(vm, f, 2, "mode", "must not combine 'H' and 'K' flags"));
+            return Err(arg_value_error(
+                vm,
+                f,
+                2,
+                "mode",
+                "must not combine 'H' and 'K' flags",
+            ));
         }
         if (opt & MBFL_ZEN2HAN_HIRAGANA as u32) != 0 {
             if (opt & MBFL_ZENKAKU_HIRA2KATA as u32) != 0 {
-                return Err(arg_value_error(vm, f, 2, "mode", "must not combine 'h' and 'C' flags"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    2,
+                    "mode",
+                    "must not combine 'h' and 'C' flags",
+                ));
             } else if (opt & MBFL_ZENKAKU_KATA2HIRA as u32) != 0 {
-                return Err(arg_value_error(vm, f, 2, "mode", "must not combine 'h' and 'c' flags"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    2,
+                    "mode",
+                    "must not combine 'h' and 'c' flags",
+                ));
             }
         } else if (opt & MBFL_ZEN2HAN_KATAKANA as u32) != 0 {
             if (opt & MBFL_ZENKAKU_HIRA2KATA as u32) != 0 {
-                return Err(arg_value_error(vm, f, 2, "mode", "must not combine 'k' and 'C' flags"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    2,
+                    "mode",
+                    "must not combine 'k' and 'C' flags",
+                ));
             } else if (opt & MBFL_ZENKAKU_KATA2HIRA as u32) != 0 {
-                return Err(arg_value_error(vm, f, 2, "mode", "must not combine 'k' and 'c' flags"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    2,
+                    "mode",
+                    "must not combine 'k' and 'c' flags",
+                ));
             }
         }
         opt
@@ -142,7 +190,12 @@ fn collect_strings(v: &Value, out: &mut Vec<Vec<u8>>, path: &mut Vec<usize>) -> 
                 return true;
             }
             path.push(p);
-            let vals: Vec<Value> = o.borrow().properties.iter().map(|(_, v)| v.clone()).collect();
+            let vals: Vec<Value> = o
+                .borrow()
+                .properties
+                .iter()
+                .map(|(_, v)| v.clone())
+                .collect();
             for e in vals {
                 if collect_strings(&e, out, path) {
                     path.pop();
@@ -157,7 +210,12 @@ fn collect_strings(v: &Value, out: &mut Vec<Vec<u8>>, path: &mut Vec<usize>) -> 
 }
 
 /// Converts strings in place (through references). Returns false on recursion.
-fn convert_value(v: &Value, from: &Encoding, to: &Encoding, path: &mut Vec<usize>) -> Option<Value> {
+fn convert_value(
+    v: &Value,
+    from: &Encoding,
+    to: &Encoding,
+    path: &mut Vec<usize>,
+) -> Option<Value> {
     if path.len() > 256 {
         return None;
     }
@@ -182,7 +240,11 @@ fn convert_value(v: &Value, from: &Encoding, to: &Encoding, path: &mut Vec<usize
                 return None;
             }
             path.push(p);
-            let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let entries: Vec<(ArrayKey, Value)> = a
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let mut na = PhpArray::new();
             for (k, e) in entries {
                 match convert_value(&e, from, to, path) {
@@ -247,7 +309,13 @@ fn mb_convert_variables(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
     if elist.is_empty() {
-        return Err(arg_value_error(vm, f, 2, "from_encoding", "must specify at least one encoding"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            2,
+            "from_encoding",
+            "must specify at least one encoding",
+        ));
     }
     let vars = &args[2.min(args.len())..];
     let from = if elist.len() == 1 {
@@ -273,7 +341,12 @@ fn mb_convert_variables(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for v in vars {
         if let Value::Reference(r) = v {
             let inner = r.borrow().clone();
-            match convert_value(&inner, from, to, &mut vec![Rc::as_ptr(r) as *const () as usize]) {
+            match convert_value(
+                &inner,
+                from,
+                to,
+                &mut vec![Rc::as_ptr(r) as *const () as usize],
+            ) {
                 Some(nv) => *r.borrow_mut() = nv,
                 None => {
                     vm.emit_warning("mb_convert_variables(): Cannot handle recursive references");

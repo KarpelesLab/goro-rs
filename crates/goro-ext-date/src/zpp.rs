@@ -12,7 +12,10 @@ pub type R<T> = Result<T, VmError>;
 pub fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
     let exc = vm.create_exception(class, msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
 pub fn type_name(v: &Value) -> String {
@@ -26,33 +29,81 @@ pub fn present(args: &[Value], idx: usize) -> bool {
 }
 
 pub fn check_count(vm: &mut Vm, fname: &str, args: &[Value], min: usize, max: usize) -> R<()> {
-    let n = args.iter().rposition(|a| !matches!(a, Value::Undef)).map(|p| p + 1).unwrap_or(0);
+    let n = args
+        .iter()
+        .rposition(|a| !matches!(a, Value::Undef))
+        .map(|p| p + 1)
+        .unwrap_or(0);
     if n < min {
         let msg = if min == max {
-            format!("{}() expects exactly {} argument{}, {} given", fname, min, if min == 1 { "" } else { "s" }, n)
+            format!(
+                "{}() expects exactly {} argument{}, {} given",
+                fname,
+                min,
+                if min == 1 { "" } else { "s" },
+                n
+            )
         } else {
-            format!("{}() expects at least {} argument{}, {} given", fname, min, if min == 1 { "" } else { "s" }, n)
+            format!(
+                "{}() expects at least {} argument{}, {} given",
+                fname,
+                min,
+                if min == 1 { "" } else { "s" },
+                n
+            )
         };
         return Err(throw(vm, b"ArgumentCountError", &msg));
     }
     if n > max {
         let msg = if min == max {
-            format!("{}() expects exactly {} argument{}, {} given", fname, max, if max == 1 { "" } else { "s" }, n)
+            format!(
+                "{}() expects exactly {} argument{}, {} given",
+                fname,
+                max,
+                if max == 1 { "" } else { "s" },
+                n
+            )
         } else {
-            format!("{}() expects at most {} argument{}, {} given", fname, max, if max == 1 { "" } else { "s" }, n)
+            format!(
+                "{}() expects at most {} argument{}, {} given",
+                fname,
+                max,
+                if max == 1 { "" } else { "s" },
+                n
+            )
         };
         return Err(throw(vm, b"ArgumentCountError", &msg));
     }
     Ok(())
 }
 
-fn arg_err(vm: &mut Vm, fname: &str, idx: usize, pname: &str, expected: &str, v: &Value) -> VmError {
-    let msg = format!("{}(): Argument #{} (${}) must be of type {}, {} given", fname, idx + 1, pname, expected, type_name(v));
+fn arg_err(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    expected: &str,
+    v: &Value,
+) -> VmError {
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type {}, {} given",
+        fname,
+        idx + 1,
+        pname,
+        expected,
+        type_name(v)
+    );
     throw(vm, b"TypeError", &msg)
 }
 
 fn null_deprecation(vm: &mut Vm, fname: &str, idx: usize, pname: &str, expected: &str) {
-    let msg = format!("{}(): Passing null to parameter #{} (${}) of type {} is deprecated", fname, idx + 1, pname, expected);
+    let msg = format!(
+        "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+        fname,
+        idx + 1,
+        pname,
+        expected
+    );
     vm.emit_deprecated(&msg);
 }
 
@@ -121,7 +172,15 @@ fn double_fits_long(d: f64) -> bool {
     d.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d)
 }
 
-fn float_to_long(vm: &mut Vm, fname: &str, idx: usize, pname: &str, d: f64, orig: &Value, from_string: Option<&[u8]>) -> R<i64> {
+fn float_to_long(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    d: f64,
+    orig: &Value,
+    from_string: Option<&[u8]>,
+) -> R<i64> {
     if !double_fits_long(d) {
         return Err(arg_err(vm, fname, idx, pname, "int", orig));
     }
@@ -142,7 +201,14 @@ fn float_to_long(vm: &mut Vm, fname: &str, idx: usize, pname: &str, d: f64, orig
 }
 
 /// Z_PARAM_LONG / Z_PARAM_LONG_OR_NULL. Returns None if absent (or null and nullable).
-pub fn long_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str, nullable: bool) -> R<Option<i64>> {
+pub fn long_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+    nullable: bool,
+) -> R<Option<i64>> {
     let v = match args.get(idx) {
         None | Some(Value::Undef) => return Ok(None),
         Some(v) => v.deref(),
@@ -162,14 +228,37 @@ pub fn long_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &st
         Value::False => Ok(Some(0)),
         Value::String(s) => match numeric_str(s.as_bytes()) {
             Some(Ok(l)) => Ok(Some(l)),
-            Some(Err(d)) => float_to_long(vm, fname, idx, pname, d, &v, Some(s.as_bytes())).map(Some),
-            None => Err(arg_err(vm, fname, idx, pname, if nullable { "?int" } else { "int" }, &v)),
+            Some(Err(d)) => {
+                float_to_long(vm, fname, idx, pname, d, &v, Some(s.as_bytes())).map(Some)
+            }
+            None => Err(arg_err(
+                vm,
+                fname,
+                idx,
+                pname,
+                if nullable { "?int" } else { "int" },
+                &v,
+            )),
         },
-        _ => Err(arg_err(vm, fname, idx, pname, if nullable { "?int" } else { "int" }, &v)),
+        _ => Err(arg_err(
+            vm,
+            fname,
+            idx,
+            pname,
+            if nullable { "?int" } else { "int" },
+            &v,
+        )),
     }
 }
 
-pub fn double_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str, nullable: bool) -> R<Option<f64>> {
+pub fn double_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+    nullable: bool,
+) -> R<Option<f64>> {
     let v = match args.get(idx) {
         None | Some(Value::Undef) => return Ok(None),
         Some(v) => v.deref(),
@@ -190,13 +279,33 @@ pub fn double_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &
         Value::String(s) => match numeric_str(s.as_bytes()) {
             Some(Ok(l)) => Ok(Some(l as f64)),
             Some(Err(d)) => Ok(Some(d)),
-            None => Err(arg_err(vm, fname, idx, pname, if nullable { "?float" } else { "float" }, &v)),
+            None => Err(arg_err(
+                vm,
+                fname,
+                idx,
+                pname,
+                if nullable { "?float" } else { "float" },
+                &v,
+            )),
         },
-        _ => Err(arg_err(vm, fname, idx, pname, if nullable { "?float" } else { "float" }, &v)),
+        _ => Err(arg_err(
+            vm,
+            fname,
+            idx,
+            pname,
+            if nullable { "?float" } else { "float" },
+            &v,
+        )),
     }
 }
 
-pub fn bool_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str) -> R<Option<bool>> {
+pub fn bool_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> R<Option<bool>> {
     let v = match args.get(idx) {
         None | Some(Value::Undef) => return Ok(None),
         Some(v) => v.deref(),
@@ -214,7 +323,14 @@ pub fn bool_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &st
 }
 
 /// Z_PARAM_STRING / Z_PARAM_STR (and _OR_NULL).
-pub fn str_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str, nullable: bool) -> R<Option<Vec<u8>>> {
+pub fn str_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+    nullable: bool,
+) -> R<Option<Vec<u8>>> {
     let v = match args.get(idx) {
         None | Some(Value::Undef) => return Ok(None),
         Some(v) => v.deref(),
@@ -229,36 +345,72 @@ pub fn str_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str
             }
         }
         Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
-        Value::Long(_) | Value::Double(_) | Value::True | Value::False => Ok(Some(v.to_php_string().as_bytes().to_vec())),
+        Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+            Ok(Some(v.to_php_string().as_bytes().to_vec()))
+        }
         Value::Object(o) => {
             let has_tostring = {
                 let cl = o.borrow().class_name.to_ascii_lowercase();
-                vm.classes.get(&cl).map(|c| c.find_method_in_chain_has(b"__tostring")).unwrap_or(false)
+                vm.classes
+                    .get(&cl)
+                    .map(|c| c.find_method_in_chain_has(b"__tostring"))
+                    .unwrap_or(false)
             };
             if has_tostring {
                 if let Some(r) = vm.call_object_method(&v, b"__toString", &[]) {
                     return Ok(Some(r.to_php_string().as_bytes().to_vec()));
                 }
             }
-            Err(arg_err(vm, fname, idx, pname, if nullable { "?string" } else { "string" }, &v))
+            Err(arg_err(
+                vm,
+                fname,
+                idx,
+                pname,
+                if nullable { "?string" } else { "string" },
+                &v,
+            ))
         }
-        _ => Err(arg_err(vm, fname, idx, pname, if nullable { "?string" } else { "string" }, &v)),
+        _ => Err(arg_err(
+            vm,
+            fname,
+            idx,
+            pname,
+            if nullable { "?string" } else { "string" },
+            &v,
+        )),
     }
 }
 
 /// Z_PARAM_PATH: like a string but must not contain NUL bytes.
-pub fn path_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str) -> R<Option<Vec<u8>>> {
+pub fn path_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> R<Option<Vec<u8>>> {
     let s = str_arg(vm, fname, args, idx, pname, false)?;
     if let Some(ref b) = s {
         if b.contains(&0) {
-            let msg = format!("{}(): Argument #{} (${}) must not contain any null bytes", fname, idx + 1, pname);
+            let msg = format!(
+                "{}(): Argument #{} (${}) must not contain any null bytes",
+                fname,
+                idx + 1,
+                pname
+            );
             return Err(throw(vm, b"ValueError", &msg));
         }
     }
     Ok(s)
 }
 
-pub fn array_arg(vm: &mut Vm, fname: &str, args: &[Value], idx: usize, pname: &str) -> R<Rc<RefCell<goro_core::array::PhpArray>>> {
+pub fn array_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> R<Rc<RefCell<goro_core::array::PhpArray>>> {
     let v = args.get(idx).cloned().unwrap_or(Value::Undef).deref();
     match v {
         Value::Array(a) => Ok(a),
@@ -281,7 +433,14 @@ pub fn ss(v: String) -> Value {
     Value::String(PhpString::from_string(v))
 }
 
-pub fn type_err_class(vm: &mut Vm, fname: &str, idx: usize, pname: &str, expected: &str, v: &Value) -> VmError {
+pub fn type_err_class(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    expected: &str,
+    v: &Value,
+) -> VmError {
     arg_err(vm, fname, idx, pname, expected, v)
 }
 

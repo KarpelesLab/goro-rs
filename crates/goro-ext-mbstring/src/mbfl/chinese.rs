@@ -3,12 +3,14 @@
 //! (C: the second half of mbfilter_cjk.c)
 
 use super::common::{mbfl_bisec_srch, mbfl_bisec_srch2};
-use super::tables::filt_cjk::{gb18030_2022_pua_tbl3, gb18030_pua_tbl3, mblen_table_81_to_fe, mblen_table_euccn};
+use super::tables::filt_cjk::{
+    gb18030_2022_pua_tbl3, gb18030_pua_tbl3, mblen_table_81_to_fe, mblen_table_euccn,
+};
 use super::tables::unicode_table_big5::*;
 use super::tables::unicode_table_cns11643::*;
 use super::tables::unicode_table_cp936::*;
-use super::tables::unicode_table_gb18030::*;
 use super::tables::unicode_table_gb2312::*;
+use super::tables::unicode_table_gb18030::*;
 use super::tables::unicode_table_uhc::*;
 use super::*;
 
@@ -36,7 +38,11 @@ fn mb_euccn_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                     w = 0x30FB;
                 } else if w == 0x186A {
                     w = 0x2015;
-                } else if (0x1921..=0x192A).contains(&w) || w == 0x1963 || (0x1C59..=0x1C7E).contains(&w) || (0x1DBB..=0x1DC4).contains(&w) {
+                } else if (0x1921..=0x192A).contains(&w)
+                    || w == 0x1963
+                    || (0x1C59..=0x1C7E).contains(&w)
+                    || (0x1DBB..=0x1DC4).contains(&w)
+                {
                     w = 0;
                 } else {
                     w = cp936_ucs_table[w as usize] as u32;
@@ -131,7 +137,11 @@ fn mb_euctw_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
             p += 1;
             if (0xA1..=0xFE).contains(&c2) {
                 let w = (c as u32 - 0xA1) * 94 + (c2 as u32 - 0xA1);
-                let w = if (w as i32) < cns11643_1_ucs_table_size { cns11643_1_ucs_table[w as usize] as u32 } else { 0 };
+                let w = if (w as i32) < cns11643_1_ucs_table_size {
+                    cns11643_1_ucs_table[w as usize] as u32
+                } else {
+                    0
+                };
                 out.push(if w == 0 { MBFL_BAD_INPUT } else { w });
             } else {
                 out.push(MBFL_BAD_INPUT);
@@ -144,7 +154,9 @@ fn mb_euctw_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                 let c3 = input[p];
                 p += 1;
                 if c3 >= 0xA1
-                    && ((plane == 0 && ((0xA1..=0xA6).contains(&c3) || (0xC2..=0xFD).contains(&c3)) && c3 != 0xC3)
+                    && ((plane == 0
+                        && ((0xA1..=0xA6).contains(&c3) || (0xC2..=0xFD).contains(&c3))
+                        && c3 != 0xC3)
                         || (plane == 1 && c3 <= 0xF2)
                         || (plane == 13 && c3 <= 0xE7))
                     && p < e
@@ -203,7 +215,12 @@ fn mb_wchar_to_euctw(input: &[u32], buf: &mut ConvBuf, _end: bool) {
                     buf.add2((((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
                 }
             } else {
-                buf.add4(0x8E, (0xA0 + plane) as u8, (((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
+                buf.add4(
+                    0x8E,
+                    (0xA0 + plane) as u8,
+                    (((s >> 8) & 0xFF) | 0x80) as u8,
+                    ((s & 0xFF) | 0x80) as u8,
+                );
             }
         }
     }
@@ -410,7 +427,9 @@ fn gb18030_to_wchar_impl(input: &[u8], out: &mut Vec<u32>, y2022: bool) {
             let c2 = input[p];
             p += 1;
 
-            if ((0x81..=0x84).contains(&c) || (0x90..=0xE3).contains(&c)) && (0x30..=0x39).contains(&c2) {
+            if ((0x81..=0x84).contains(&c) || (0x90..=0xE3).contains(&c))
+                && (0x30..=0x39).contains(&c2)
+            {
                 if p >= e {
                     out.push(MBFL_BAD_INPUT);
                     break;
@@ -422,11 +441,18 @@ fn gb18030_to_wchar_impl(input: &[u8], out: &mut Vec<u32>, y2022: bool) {
                     p += 1;
                     if (0x30..=0x39).contains(&c4) {
                         if (0x90..=0xE3).contains(&c) {
-                            let w = (((c as u32 - 0x90) * 10 + (c2 as u32 - 0x30)) * 126 + (c3 as u32 - 0x81)) * 10 + (c4 as u32 - 0x30) + 0x10000;
+                            let w = (((c as u32 - 0x90) * 10 + (c2 as u32 - 0x30)) * 126
+                                + (c3 as u32 - 0x81))
+                                * 10
+                                + (c4 as u32 - 0x30)
+                                + 0x10000;
                             out.push(if w > 0x10FFFF { MBFL_BAD_INPUT } else { w });
                         } else {
                             // Unicode BMP
-                            let w = (((c as u32 - 0x81) * 10 + (c2 as u32 - 0x30)) * 126 + (c3 as u32 - 0x81)) * 10 + (c4 as u32 - 0x30);
+                            let w = (((c as u32 - 0x81) * 10 + (c2 as u32 - 0x30)) * 126
+                                + (c3 as u32 - 0x81))
+                                * 10
+                                + (c4 as u32 - 0x30);
                             if !y2022 {
                                 if w <= 39419 {
                                     out.push(gb_bmp_4byte(w));
@@ -469,18 +495,38 @@ fn gb18030_to_wchar_impl(input: &[u8], out: &mut Vec<u32>, y2022: bool) {
                 } else {
                     out.push(MBFL_BAD_INPUT);
                 }
-            } else if ((0xAA..=0xAF).contains(&c) || (0xF8..=0xFE).contains(&c)) && (0xA1..=0xFE).contains(&c2) {
+            } else if ((0xAA..=0xAF).contains(&c) || (0xF8..=0xFE).contains(&c))
+                && (0xA1..=0xFE).contains(&c2)
+            {
                 // UDA part 1, 2: U+E000-U+E4C5
-                out.push(94 * (if c >= 0xF8 { c as u32 - 0xF2 } else { c as u32 - 0xAA }) + (c2 as u32 - 0xA1) + 0xE000);
+                out.push(
+                    94 * (if c >= 0xF8 {
+                        c as u32 - 0xF2
+                    } else {
+                        c as u32 - 0xAA
+                    }) + (c2 as u32 - 0xA1)
+                        + 0xE000,
+                );
             } else if (0xA1..=0xA7).contains(&c) && c2 >= 0x40 && c2 < 0xA1 && c2 != 0x7F {
                 // UDA part 3: U+E4C6-U+E765
-                out.push(96 * (c as u32 - 0xA1) + c2 as u32 - (if c2 >= 0x80 { 0x41 } else { 0x40 }) + 0xE4C6);
+                out.push(
+                    96 * (c as u32 - 0xA1) + c2 as u32 - (if c2 >= 0x80 { 0x41 } else { 0x40 })
+                        + 0xE4C6,
+                );
             } else if c2 >= 0x40 && c2 != 0x7F && c2 != 0xFF {
                 let w = (c as u32 - 0x81) * 192 + c2 as u32 - 0x40;
                 if w >= 0x192B {
                     if w <= 0x1EBE {
-                        if w != 0x1963 && w != 0x1DBF && !(0x1E49..=0x1E55).contains(&w) && w != 0x1E7F {
-                            let tbl: &[u16] = if y2022 { &gb18030_2022_pua_tbl1 } else { &cp936_pua_tbl1 };
+                        if w != 0x1963
+                            && w != 0x1DBF
+                            && !(0x1E49..=0x1E55).contains(&w)
+                            && w != 0x1E7F
+                        {
+                            let tbl: &[u16] = if y2022 {
+                                &gb18030_2022_pua_tbl1
+                            } else {
+                                &cp936_pua_tbl1
+                            };
                             out.push(tbl[(w - 0x192B) as usize] as u32);
                             continue;
                         }
@@ -489,7 +535,11 @@ fn gb18030_to_wchar_impl(input: &[u8], out: &mut Vec<u32>, y2022: bool) {
                             out.push(cp936_pua_tbl2[(w - 0x413A) as usize] as u32);
                             continue;
                         } else if (0x5DD0..=0x5E20).contains(&w) {
-                            let tbl: &[u16] = if y2022 { &gb18030_2022_pua_tbl3 } else { &gb18030_pua_tbl3 };
+                            let tbl: &[u16] = if y2022 {
+                                &gb18030_2022_pua_tbl3
+                            } else {
+                                &gb18030_pua_tbl3
+                            };
                             let c = tbl[(w - 0x5DD0) as usize] as u32;
                             if c != 0 {
                                 out.push(c);
@@ -498,7 +548,10 @@ fn gb18030_to_wchar_impl(input: &[u8], out: &mut Vec<u32>, y2022: bool) {
                         }
                     }
                 }
-                if (0x81..=0xA9).contains(&c) || ((0xB0..=0xF7).contains(&c) && c2 >= 0xA1) || ((0xAA..=0xFE).contains(&c) && c2 <= 0xA0) {
+                if (0x81..=0xA9).contains(&c)
+                    || ((0xB0..=0xF7).contains(&c) && c2 >= 0xA1)
+                    || ((0xAA..=0xFE).contains(&c) && c2 <= 0xA0)
+                {
                     out.push(cp936_ucs_table[w as usize] as u32);
                 } else {
                     out.push(MBFL_BAD_INPUT);
@@ -570,7 +623,12 @@ fn gb18030_emit(s: u32, w: u32, buf: &mut ConvBuf) {
     } else if s < 0x80 {
         buf.add(s as u8);
     } else if s > 0xFFFFFF {
-        buf.add4(((s >> 24) & 0xFF) as u8, ((s >> 16) & 0xFF) as u8, ((s >> 8) & 0xFF) as u8, (s & 0xFF) as u8);
+        buf.add4(
+            ((s >> 24) & 0xFF) as u8,
+            ((s >> 16) & 0xFF) as u8,
+            ((s >> 8) & 0xFF) as u8,
+            (s & 0xFF) as u8,
+        );
     } else {
         buf.add2(((s >> 8) & 0xFF) as u8, (s & 0xFF) as u8);
     }
@@ -613,7 +671,8 @@ fn hff_lookup(w: u32) -> u32 {
 #[inline]
 fn gb18030_c_tbl(w: u32) -> u32 {
     let n = mbfl_gb18030_c_tbl_max;
-    if w >= mbfl_gb18030_c_tbl_key[0] as u32 && w <= mbfl_gb18030_c_tbl_key[(n - 1) as usize] as u32 {
+    if w >= mbfl_gb18030_c_tbl_key[0] as u32 && w <= mbfl_gb18030_c_tbl_key[(n - 1) as usize] as u32
+    {
         let i = mbfl_bisec_srch2(w as i32, &mbfl_gb18030_c_tbl_key, n);
         if i >= 0 {
             return mbfl_gb18030_c_tbl_val[i as usize] as u32;
@@ -629,9 +688,17 @@ fn mb_wchar_to_gb18030(input: &[u32], buf: &mut ConvBuf, _end: bool) {
             buf.add(0);
             continue;
         } else if inr(w, ucs_a1_cp936_table_min, ucs_a1_cp936_table_max) {
-            s = if w == 0x1F9 { 0xA8BF } else { ucs_a1_cp936_table[(w as i32 - ucs_a1_cp936_table_min) as usize] as u32 };
+            s = if w == 0x1F9 {
+                0xA8BF
+            } else {
+                ucs_a1_cp936_table[(w as i32 - ucs_a1_cp936_table_min) as usize] as u32
+            };
         } else if inr(w, ucs_a2_cp936_table_min, ucs_a2_cp936_table_max) {
-            s = if w == 0x20AC { 0xA2E3 } else { ucs_a2_cp936_table[(w as i32 - ucs_a2_cp936_table_min) as usize] as u32 };
+            s = if w == 0x20AC {
+                0xA2E3
+            } else {
+                ucs_a2_cp936_table[(w as i32 - ucs_a2_cp936_table_min) as usize] as u32
+            };
         } else if inr(w, ucs_a3_cp936_table_min, ucs_a3_cp936_table_max) {
             s = ucs_a3_cp936_table[(w as i32 - ucs_a3_cp936_table_min) as usize] as u32;
         } else if inr(w, ucs_i_cp936_table_min, ucs_i_cp936_table_max) {
@@ -672,9 +739,17 @@ fn mb_wchar_to_gb18030_2022(input: &[u32], buf: &mut ConvBuf, _end: bool) {
             buf.add(0);
             continue;
         } else if inr(w, ucs_a1_cp936_table_min, ucs_a1_cp936_table_max) {
-            s = if w == 0x1F9 { 0xA8BF } else { ucs_a1_cp936_table[(w as i32 - ucs_a1_cp936_table_min) as usize] as u32 };
+            s = if w == 0x1F9 {
+                0xA8BF
+            } else {
+                ucs_a1_cp936_table[(w as i32 - ucs_a1_cp936_table_min) as usize] as u32
+            };
         } else if inr(w, ucs_a2_cp936_table_min, ucs_a2_cp936_table_max) {
-            s = if w == 0x20AC { 0xA2E3 } else { ucs_a2_cp936_table[(w as i32 - ucs_a2_cp936_table_min) as usize] as u32 };
+            s = if w == 0x20AC {
+                0xA2E3
+            } else {
+                ucs_a2_cp936_table[(w as i32 - ucs_a2_cp936_table_min) as usize] as u32
+            };
         } else if inr(w, ucs_a3_cp936_table_min, ucs_a3_cp936_table_max) {
             s = ucs_a3_cp936_table[(w as i32 - ucs_a3_cp936_table_min) as usize] as u32;
         } else if (0x9FB4..=0x9FBB).contains(&w) {
@@ -755,9 +830,19 @@ fn mb_cp936_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                 continue;
             }
             if ((0xAA..=0xAF).contains(&c) || (0xF8..=0xFE).contains(&c)) && c2 >= 0xA1 {
-                out.push(94 * (if c >= 0xF8 { c as u32 - 0xF2 } else { c as u32 - 0xAA }) + (c2 as u32 - 0xA1) + 0xE000);
+                out.push(
+                    94 * (if c >= 0xF8 {
+                        c as u32 - 0xF2
+                    } else {
+                        c as u32 - 0xAA
+                    }) + (c2 as u32 - 0xA1)
+                        + 0xE000,
+                );
             } else if (0xA1..=0xA7).contains(&c) && c2 < 0xA1 {
-                out.push(96 * (c as u32 - 0xA1) + c2 as u32 - (if c2 >= 0x80 { 0x41 } else { 0x40 }) + 0xE4C6);
+                out.push(
+                    96 * (c as u32 - 0xA1) + c2 as u32 - (if c2 >= 0x80 { 0x41 } else { 0x40 })
+                        + 0xE4C6,
+                );
             } else {
                 let w = (c as u32 - 0x81) * 192 + c2 as u32 - 0x40;
                 if w >= 0x192B {
@@ -917,7 +1002,11 @@ static cp950_pua_tbl: [[u16; 4]; 5] = [
 
 #[inline]
 fn is_in_cp950_pua(c1: u32, c: u32) -> bool {
-    if (0xfa..=0xfe).contains(&c1) || (0x8e..=0xa0).contains(&c1) || (0x81..=0x8d).contains(&c1) || (0xc7..=0xc8).contains(&c1) {
+    if (0xfa..=0xfe).contains(&c1)
+        || (0x8e..=0xa0).contains(&c1)
+        || (0x81..=0x8d).contains(&c1)
+        || (0xc7..=0xc8).contains(&c1)
+    {
         (0x40..=0x7e).contains(&c) || (0xa1..=0xfe).contains(&c)
     } else if c1 == 0xc6 {
         (0xa1..=0xfe).contains(&c)
@@ -941,7 +1030,8 @@ fn mb_big5_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
             let c2 = input[p];
             p += 1;
             if (0x40..=0x7E).contains(&c2) || (0xA1..=0xFE).contains(&c2) {
-                let idx = (c as u32 - 0xA1) * 157 + c2 as u32 - (if c2 <= 0x7E { 0x40 } else { 0xA1 - 0x3F });
+                let idx = (c as u32 - 0xA1) * 157 + c2 as u32
+                    - (if c2 <= 0x7E { 0x40 } else { 0xA1 - 0x3F });
                 let mut w = big5_ucs_table[idx as usize] as u32;
                 if w == 0 {
                     if c == 0xC8 {
@@ -1014,8 +1104,13 @@ fn mb_cp950_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
             if (0x40..=0x7E).contains(&c2) || (0xA1..=0xFE).contains(&c2) {
                 let (c, c2) = (c as u32, c2 as u32);
                 // Note: (c - 0xA1) may be negative in C (signed int arithmetic)
-                let idx = (c as i32 - 0xA1) * 157 + c2 as i32 - (if c2 <= 0x7E { 0x40 } else { 0xA1 - 0x3F });
-                let mut w = if idx >= 0 && idx < big5_ucs_table_size { big5_ucs_table[idx as usize] as u32 } else { 0 };
+                let idx = (c as i32 - 0xA1) * 157 + c2 as i32
+                    - (if c2 <= 0x7E { 0x40 } else { 0xA1 - 0x3F });
+                let mut w = if idx >= 0 && idx < big5_ucs_table_size {
+                    big5_ucs_table[idx as usize] as u32
+                } else {
+                    0
+                };
 
                 if is_in_cp950_pua(c, c2) {
                     let s = (c << 8) | c2;
@@ -1027,7 +1122,9 @@ fn mb_cp950_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                         k += 1;
                     }
                     if (cp950_pua_tbl[k][2] & 0xFF) == 0x40 {
-                        w = 157 * (c - (cp950_pua_tbl[k][2] as u32 >> 8)) + c2 - (if c2 >= 0xA1 { 0x62 } else { 0x40 }) + cp950_pua_tbl[k][0] as u32;
+                        w = 157 * (c - (cp950_pua_tbl[k][2] as u32 >> 8)) + c2
+                            - (if c2 >= 0xA1 { 0x62 } else { 0x40 })
+                            + cp950_pua_tbl[k][0] as u32;
                     } else {
                         w = s - cp950_pua_tbl[k][2] as u32 + cp950_pua_tbl[k][0] as u32;
                     }
@@ -1195,7 +1292,10 @@ fn mb_hz_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
             } else {
                 out.push(MBFL_BAD_INPUT);
             }
-        } else if ((c > 0x20 && c <= 0x29) || (0x30..=0x77).contains(&c)) && p < e && *state == HZ_GB2312 {
+        } else if ((c > 0x20 && c <= 0x29) || (0x30..=0x77).contains(&c))
+            && p < e
+            && *state == HZ_GB2312
+        {
             let c2 = input[p];
             p += 1;
             if c > 0x20 && c < 0x7F && c2 > 0x20 && c2 < 0x7F {
@@ -1206,7 +1306,11 @@ fn mb_hz_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
                     s = 0x2015;
                 } else if s == 0x186C {
                     s = 0x2225;
-                } else if (0x1920..=0x192A).contains(&s) || s == 0x1963 || (0x1C60..=0x1C7F).contains(&s) || (0x1DBB..=0x1DC4).contains(&s) {
+                } else if (0x1920..=0x192A).contains(&s)
+                    || s == 0x1963
+                    || (0x1C60..=0x1C7F).contains(&s)
+                    || (0x1DBB..=0x1DC4).contains(&s)
+                {
                     s = 0;
                 } else {
                     s = cp936_ucs_table[s as usize] as u32;
@@ -1227,7 +1331,15 @@ fn mb_wchar_to_hz(input: &[u32], buf: &mut ConvBuf, end: bool) {
     for &w in input {
         let mut s: u32 = 0;
         if inr(w, ucs_a1_cp936_table_min, ucs_a1_cp936_table_max) {
-            if !(w == 0xB7 || w == 0x144 || w == 0x148 || w == 0x251 || w == 0x261 || w == 0x2CA || w == 0x2CB || w == 0x2D9) {
+            if !(w == 0xB7
+                || w == 0x144
+                || w == 0x148
+                || w == 0x251
+                || w == 0x261
+                || w == 0x2CA
+                || w == 0x2CB
+                || w == 0x2D9)
+            {
                 s = ucs_a1_cp936_table[(w as i32 - ucs_a1_cp936_table_min) as usize] as u32;
             }
         } else if inr(w, ucs_a2_cp936_table_min, ucs_a2_cp936_table_max) {

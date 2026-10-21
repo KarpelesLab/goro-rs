@@ -18,13 +18,28 @@ fn make_conversion_map(vm: &mut Vm, func: &str, args: &[Value]) -> Result<Vec<u3
     let arr = match args.get(1).map(|v| v.deref()) {
         Some(Value::Array(a)) => a,
         other => {
-            let t = other.as_ref().map(type_name).unwrap_or_else(|| "null".to_string());
-            return Err(type_error(vm, format!("{}(): Argument #2 ($map) must be of type array, {} given", func, t)));
+            let t = other
+                .as_ref()
+                .map(type_name)
+                .unwrap_or_else(|| "null".to_string());
+            return Err(type_error(
+                vm,
+                format!(
+                    "{}(): Argument #2 ($map) must be of type array, {} given",
+                    func, t
+                ),
+            ));
         }
     };
     let vals: Vec<Value> = arr.borrow().values().cloned().collect();
     if !vals.len().is_multiple_of(4) {
-        return Err(arg_value_error(vm, func, 2, "map", "must have a multiple of 4 elements"));
+        return Err(arg_value_error(
+            vm,
+            func,
+            2,
+            "map",
+            "must have a multiple of 4 elements",
+        ));
     }
     let mut map = Vec::with_capacity(vals.len());
     for v in vals {
@@ -49,16 +64,33 @@ fn make_conversion_map(vm: &mut Vm, func: &str, args: &[Value]) -> Result<Vec<u3
                     f as i64
                 } else {
                     // leading-numeric strings give a warning; others fail
-                    let digits: String = tt.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+                    let digits: String = tt
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '-')
+                        .collect();
                     if !digits.is_empty() && digits != "-" {
                         vm.emit_warning("A non-numeric value encountered");
                         digits.parse::<i64>().unwrap_or(0)
                     } else {
-                        return Err(arg_value_error(vm, func, 2, "map", "must only be composed of values of type int"));
+                        return Err(arg_value_error(
+                            vm,
+                            func,
+                            2,
+                            "map",
+                            "must only be composed of values of type int",
+                        ));
                     }
                 }
             }
-            _ => return Err(arg_value_error(vm, func, 2, "map", "must only be composed of values of type int")),
+            _ => {
+                return Err(arg_value_error(
+                    vm,
+                    func,
+                    2,
+                    "map",
+                    "must only be composed of values of type int",
+                ));
+            }
         };
         map.push(n as u32);
     }
@@ -114,7 +146,14 @@ fn mb_encode_numericentity(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let s = str_arg(vm, f, args, 0, "string")?;
     if let Some(v) = args.get(1) {
         if !matches!(v.deref(), Value::Array(_)) {
-            return Err(type_error(vm, format!("{}(): Argument #2 ($map) must be of type array, {} given", f, type_name(&v.deref()))));
+            return Err(type_error(
+                vm,
+                format!(
+                    "{}(): Argument #2 ($map) must be of type array, {} given",
+                    f,
+                    type_name(&v.deref())
+                ),
+            ));
         }
     }
     let enc = encoding_arg(vm, f, args, 2, "encoding")?;
@@ -139,7 +178,9 @@ const DEC_ENTITY_MAXLEN: usize = 12;
 const HEX_ENTITY_MAXLEN: usize = 11;
 
 fn is_hex(w: u32) -> bool {
-    (b'0' as u32..=b'9' as u32).contains(&w) || (b'A' as u32..=b'F' as u32).contains(&w) || (b'a' as u32..=b'f' as u32).contains(&w)
+    (b'0' as u32..=b'9' as u32).contains(&w)
+        || (b'A' as u32..=b'F' as u32).contains(&w)
+        || (b'a' as u32..=b'f' as u32).contains(&w)
 }
 
 fn entity_decode(input: &[u8], enc: &Encoding, map: &[u32]) -> Vec<u8> {
@@ -234,7 +275,14 @@ fn mb_decode_numericentity(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let s = str_arg(vm, f, args, 0, "string")?;
     if let Some(v) = args.get(1) {
         if !matches!(v.deref(), Value::Array(_)) {
-            return Err(type_error(vm, format!("{}(): Argument #2 ($map) must be of type array, {} given", f, type_name(&v.deref()))));
+            return Err(type_error(
+                vm,
+                format!(
+                    "{}(): Argument #2 ($map) must be of type array, {} given",
+                    f,
+                    type_name(&v.deref())
+                ),
+            ));
         }
     }
     let enc = encoding_arg(vm, f, args, 2, "encoding")?;

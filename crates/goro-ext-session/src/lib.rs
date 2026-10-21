@@ -1,10 +1,10 @@
 //! ext/session, ported from php-src ext/session/session.c, mod_files.c,
 //! mod_user.c and mod_user_class.c.
 
-mod var;
 mod files;
 mod rewrite;
 mod upload;
+mod var;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -222,7 +222,10 @@ pub(crate) struct FnGuard;
 
 impl FnGuard {
     pub(crate) fn new(vm: &Vm, name: &str) -> FnGuard {
-        FN_STACK.with(|s| s.borrow_mut().push((name.to_string(), vm.current_file.clone(), vm.current_line)));
+        FN_STACK.with(|s| {
+            s.borrow_mut()
+                .push((name.to_string(), vm.current_file.clone(), vm.current_line))
+        });
         FnGuard
     }
 }
@@ -273,17 +276,27 @@ pub(crate) fn err(vm: &mut Vm, level: i64, msg: &str) {
                 Phase::Runtime => "Unknown",
             };
             if origin == "PHP Startup" {
-                let dse = vm.constants.get(b"display_startup_errors".as_slice()).map(|v| {
-                    let b = v.to_php_string();
-                    ini_bool(b.as_bytes()) || b.as_bytes().eq_ignore_ascii_case(b"stderr") || b.as_bytes().eq_ignore_ascii_case(b"stdout")
-                });
+                let dse = vm
+                    .constants
+                    .get(b"display_startup_errors".as_slice())
+                    .map(|v| {
+                        let b = v.to_php_string();
+                        ini_bool(b.as_bytes())
+                            || b.as_bytes().eq_ignore_ascii_case(b"stderr")
+                            || b.as_bytes().eq_ignore_ascii_case(b"stdout")
+                    });
                 if dse == Some(false) {
                     return;
                 }
             }
             if vm.error_reporting & level != 0 || level == E_ERROR {
                 let (hs, os) = (vm.headers_sent, vm.output_start.clone());
-                vm.display_error(level_label(level), &format!("{}: {}", origin, msg), "Unknown", 0);
+                vm.display_error(
+                    level_label(level),
+                    &format!("{}: {}", origin, msg),
+                    "Unknown",
+                    0,
+                );
                 if origin == "PHP Startup" {
                     // MINIT messages bypass the SAPI output layer.
                     vm.headers_sent = hs;
@@ -322,7 +335,12 @@ pub(crate) fn throw(vm: &mut Vm, class: &[u8], msg: &str) {
     let mut line = vm.current_line;
     if let Some((fname, file, l)) = top {
         line = l;
-        if !vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&fname)).unwrap_or(false) {
+        if !vm
+            .call_stack
+            .last()
+            .map(|f| f.0.eq_ignore_ascii_case(&fname))
+            .unwrap_or(false)
+        {
             let is_method = fname.contains("::");
             vm.call_stack.push((fname, file, l, Vec::new(), is_method));
             pushed = true;
@@ -345,7 +363,11 @@ fn lossy(b: &[u8]) -> String {
 
 fn headers_already_sent_error(vm: &mut Vm, level: i64, msg: &str) {
     match vm.output_start.clone() {
-        Some((f, l)) => err(vm, level, &format!("{} (sent from {} on line {})", msg, f, l)),
+        Some((f, l)) => err(
+            vm,
+            level,
+            &format!("{} (sent from {} on line {})", msg, f, l),
+        ),
         None => err(vm, level, msg),
     }
 }
@@ -353,8 +375,16 @@ fn headers_already_sent_error(vm: &mut Vm, level: i64, msg: &str) {
 fn already_started_error(vm: &mut Vm, level: i64, msg: &str) {
     let (at, auto) = ps(|p| (p.started_at.clone(), p.auto_start));
     match at {
-        Some((f, l)) => err(vm, level, &format!("{} (started from {} on line {})", msg, f, l)),
-        None if auto => err(vm, level, &format!("{} (session started automatically)", msg)),
+        Some((f, l)) => err(
+            vm,
+            level,
+            &format!("{} (started from {} on line {})", msg, f, l),
+        ),
+        None if auto => err(
+            vm,
+            level,
+            &format!("{} (session started automatically)", msg),
+        ),
         None => err(vm, level, msg),
     }
 }
@@ -400,17 +430,28 @@ const INI_ENTRIES: &[(&str, &str, bool)] = &[
     ("session.upload_progress.enabled", "1", true),
     ("session.upload_progress.cleanup", "1", true),
     ("session.upload_progress.prefix", "upload_progress_", true),
-    ("session.upload_progress.name", "PHP_SESSION_UPLOAD_PROGRESS", true),
+    (
+        "session.upload_progress.name",
+        "PHP_SESSION_UPLOAD_PROGRESS",
+        true,
+    ),
     ("session.upload_progress.freq", "1%", true),
     ("session.upload_progress.min_freq", "1", true),
     // url_scanner_ex (ext/standard)
-    ("session.trans_sid_tags", "a=href,area=href,frame=src,form=", false),
+    (
+        "session.trans_sid_tags",
+        "a=href,area=href,frame=src,form=",
+        false,
+    ),
     ("session.trans_sid_hosts", "", false),
 ];
 
 /// zend_ini_parse_bool
 fn ini_bool(v: &[u8]) -> bool {
-    if v.eq_ignore_ascii_case(b"true") || v.eq_ignore_ascii_case(b"yes") || v.eq_ignore_ascii_case(b"on") {
+    if v.eq_ignore_ascii_case(b"true")
+        || v.eq_ignore_ascii_case(b"yes")
+        || v.eq_ignore_ascii_case(b"on")
+    {
         true
     } else {
         atol(v) != 0
@@ -469,11 +510,19 @@ fn is_numeric_str(v: &[u8]) -> bool {
 
 fn check_active_and_output(vm: &mut Vm, stage: Stage) -> bool {
     if ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, "Session ini settings cannot be changed when a session is active");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session ini settings cannot be changed when a session is active",
+        );
         return false;
     }
     if vm.headers_sent && stage != Stage::Deactivate {
-        headers_already_sent_error(vm, E_WARNING, "Session ini settings cannot be changed after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session ini settings cannot be changed after headers have already been sent",
+        );
         return false;
     }
     true
@@ -517,10 +566,16 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 || is_numeric_str(value)
                 || value.iter().any(|c| SESSION_FORBIDDEN_CHARS.contains(c))
             {
-                if stage != Stage::Deactivate { err(vm, E_WARNING, &format!(
-                    "session.name \"{}\" must not be numeric, empty, contain null bytes or any of the following characters \"=,;.[ \\t\\r\\n\\013\\014\"",
-                    lossy(cstr(value))
-                )); }
+                if stage != Stage::Deactivate {
+                    err(
+                        vm,
+                        E_WARNING,
+                        &format!(
+                            "session.name \"{}\" must not be numeric, empty, contain null bytes or any of the following characters \"=,;.[ \\t\\r\\n\\013\\014\"",
+                            lossy(cstr(value))
+                        ),
+                    );
+                }
                 return false;
             }
             ps(|p| p.session_name = value.to_vec());
@@ -531,16 +586,31 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 return false;
             }
             let tmp = find_module(cstr(value));
-            let err_type = if stage == Stage::Runtime { E_WARNING } else { E_ERROR };
+            let err_type = if stage == Stage::Runtime {
+                E_WARNING
+            } else {
+                E_ERROR
+            };
             let activated = ps(|p| p.modules_activated);
             if activated && tmp.is_none() {
                 if stage != Stage::Deactivate {
-                    err(vm, err_type, &format!("Session save handler \"{}\" cannot be found", lossy(cstr(value))));
+                    err(
+                        vm,
+                        err_type,
+                        &format!(
+                            "Session save handler \"{}\" cannot be found",
+                            lossy(cstr(value))
+                        ),
+                    );
                 }
                 return false;
             }
             if !ps(|p| p.set_handler) && tmp == Some(Module::User) {
-                err(vm, err_type, "Session save handler \"user\" cannot be set by ini_set()");
+                err(
+                    vm,
+                    err_type,
+                    "Session save handler \"user\" cannot be set by ini_set()",
+                );
                 return false;
             }
             ps(|p| {
@@ -559,12 +629,23 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             }
             let (v, warn) = goro_core::ini_quantity::parse_quantity(value, true);
             if let Some(w) = warn {
-                err_plain(vm, E_WARNING, &w.replace("Invalid quantity", &format!("Invalid \"{}\" setting.", name)));
+                err_plain(
+                    vm,
+                    E_WARNING,
+                    &w.replace(
+                        "Invalid quantity",
+                        &format!("Invalid \"{}\" setting.", name),
+                    ),
+                );
             }
             let v = v as i64;
             if key == "gc_probability" {
                 if v < 0 {
-                    err(vm, E_WARNING, "session.gc_probability must be greater than or equal to 0");
+                    err(
+                        vm,
+                        E_WARNING,
+                        "session.gc_probability must be greater than or equal to 0",
+                    );
                     return false;
                 }
                 ps(|p| p.gc_probability = v);
@@ -582,7 +663,13 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 return false;
             }
             let v = atol(value);
-            ps(|p| if key == "gc_maxlifetime" { p.gc_maxlifetime = v } else { p.cache_expire = v });
+            ps(|p| {
+                if key == "gc_maxlifetime" {
+                    p.gc_maxlifetime = v
+                } else {
+                    p.cache_expire = v
+                }
+            });
             true
         }
         "serialize_handler" => {
@@ -591,9 +678,20 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             }
             let tmp = find_serializer(cstr(value));
             if ps(|p| p.modules_activated) && tmp.is_none() {
-                let et = if stage == Stage::Runtime { E_WARNING } else { E_ERROR };
+                let et = if stage == Stage::Runtime {
+                    E_WARNING
+                } else {
+                    E_ERROR
+                };
                 if stage != Stage::Deactivate {
-                    err(vm, et, &format!("Serialization handler \"{}\" cannot be found", lossy(cstr(value))));
+                    err(
+                        vm,
+                        et,
+                        &format!(
+                            "Serialization handler \"{}\" cannot be found",
+                            lossy(cstr(value))
+                        ),
+                    );
                 }
                 return false;
             }
@@ -628,7 +726,8 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             });
             true
         }
-        "cookie_secure" | "cookie_partitioned" | "cookie_httponly" | "use_cookies" | "use_strict_mode" | "lazy_write" => {
+        "cookie_secure" | "cookie_partitioned" | "cookie_httponly" | "use_cookies"
+        | "use_strict_mode" | "lazy_write" => {
             if !check_active_and_output(vm, stage) {
                 return false;
             }
@@ -650,7 +749,11 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             let b = ini_bool(value);
             ps(|p| p.use_only_cookies = b);
             if !b {
-                err(vm, E_DEPRECATED, "Disabling session.use_only_cookies INI setting is deprecated");
+                err(
+                    vm,
+                    E_DEPRECATED,
+                    "Disabling session.use_only_cookies INI setting is deprecated",
+                );
             }
             true
         }
@@ -661,7 +764,11 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             let b = ini_bool(value);
             ps(|p| p.use_trans_sid = b);
             if b {
-                err(vm, E_DEPRECATED, "Enabling session.use_trans_sid INI setting is deprecated");
+                err(
+                    vm,
+                    E_DEPRECATED,
+                    "Enabling session.use_trans_sid INI setting is deprecated",
+                );
             }
             true
         }
@@ -670,7 +777,11 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
                 return false;
             }
             if !value.is_empty() {
-                err(vm, E_DEPRECATED, "Usage of session.referer_check INI setting is deprecated");
+                err(
+                    vm,
+                    E_DEPRECATED,
+                    "Usage of session.referer_check INI setting is deprecated",
+                );
             }
             ps(|p| p.extern_referer_chk = value.to_vec());
             true
@@ -683,17 +794,35 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             let full = used == value.len() && !value.is_empty();
             let is_len = key == "sid_length";
             if val != if is_len { 32 } else { 4 } {
-                err(vm, E_DEPRECATED, &format!("session.{} INI setting is deprecated", key));
+                err(
+                    vm,
+                    E_DEPRECATED,
+                    &format!("session.{} INI setting is deprecated", key),
+                );
             }
-            let (lo, hi) = if is_len { (22, PS_MAX_SID_LENGTH as i64) } else { (4, 6) };
+            let (lo, hi) = if is_len {
+                (22, PS_MAX_SID_LENGTH as i64)
+            } else {
+                (4, 6)
+            };
             if full && val >= lo && val <= hi {
-                ps(|p| if is_len { p.sid_length = val } else { p.sid_bits_per_character = val });
+                ps(|p| {
+                    if is_len {
+                        p.sid_length = val
+                    } else {
+                        p.sid_bits_per_character = val
+                    }
+                });
                 return true;
             }
-            err(vm, E_WARNING, &format!(
-                "session.configuration \"session.{}\" must be between {} and {}",
-                key, lo, hi
-            ));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "session.configuration \"session.{}\" must be between {} and {}",
+                    key, lo, hi
+                ),
+            );
             false
         }
         "upload_progress.enabled" => {
@@ -715,12 +844,20 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
         "upload_progress.freq" => {
             let tmp = atol(value);
             if tmp < 0 {
-                err(vm, E_WARNING, "session.upload_progress.freq must be greater than or equal to 0");
+                err(
+                    vm,
+                    E_WARNING,
+                    "session.upload_progress.freq must be greater than or equal to 0",
+                );
                 return false;
             }
             if value.last() == Some(&b'%') {
                 if tmp > 100 {
-                    err(vm, E_WARNING, "session.upload_progress.freq must be less than or equal to 100%");
+                    err(
+                        vm,
+                        E_WARNING,
+                        "session.upload_progress.freq must be less than or equal to 100%",
+                    );
                     return false;
                 }
                 ps(|p| p.rfc1867_freq = -tmp);
@@ -734,7 +871,9 @@ fn on_update(vm: &mut Vm, name: &str, value: &[u8], stage: Stage) -> bool {
             ps(|p| p.rfc1867_min_freq = f);
             true
         }
-        "trans_sid_tags" | "trans_sid_hosts" => rewrite::on_update_ini(vm, key, value, stage == Stage::Startup),
+        "trans_sid_tags" | "trans_sid_hosts" => {
+            rewrite::on_update_ini(vm, key, value, stage == Stage::Startup)
+        }
         _ => true,
     }
 }
@@ -747,7 +886,9 @@ fn cstr(v: &[u8]) -> &[u8] {
 }
 
 pub(crate) fn basedir_ok(vm: &mut Vm, path: &[u8]) -> bool {
-    let fname = FN_STACK.with(|s| s.borrow().last().map(|f| f.0.clone())).unwrap_or_default();
+    let fname = FN_STACK
+        .with(|s| s.borrow().last().map(|f| f.0.clone()))
+        .unwrap_or_default();
     goro_core::basedir::check_open_basedir_ex(vm, &fname, &lossy(path), true)
 }
 
@@ -756,7 +897,10 @@ fn ini_entry(name: &[u8]) -> Option<&'static (&'static str, &'static str, bool)>
 }
 
 fn ini_get_str(vm: &Vm, name: &str) -> Vec<u8> {
-    vm.constants.get(name.as_bytes()).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default()
+    vm.constants
+        .get(name.as_bytes())
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default()
 }
 
 /// zend_alter_ini_entry(name, value, PHP_INI_USER, PHP_INI_STAGE_RUNTIME)
@@ -772,13 +916,18 @@ fn alter_ini(vm: &mut Vm, name: &[u8], value: &[u8]) -> bool {
         return false;
     }
     record_modified(vm, name);
-    vm.constants.insert(name.to_vec(), Value::String(PhpString::from_bytes(value)));
+    vm.constants
+        .insert(name.to_vec(), Value::String(PhpString::from_bytes(value)));
     true
 }
 
 /// EG(modified_ini_directives): remember the value to restore at request end.
 fn record_modified(vm: &Vm, name: &[u8]) {
-    let orig = vm.constants.get(name).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let orig = vm
+        .constants
+        .get(name)
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     MODIFIED.with(|m| {
         let mut m = m.borrow_mut();
         if !m.iter().any(|(n, _)| n.as_slice() == name) {
@@ -794,7 +943,8 @@ fn ini_deactivate(vm: &mut Vm) {
         if let Some(e) = ini_entry(&name) {
             on_update(vm, e.0, &orig, Stage::Deactivate);
         }
-        vm.constants.insert(name, Value::String(PhpString::from_vec(orig)));
+        vm.constants
+            .insert(name, Value::String(PhpString::from_vec(orig)));
     }
 }
 
@@ -824,12 +974,18 @@ fn startup(vm: &mut Vm) {
     let (hs, os) = (vm.headers_sent, vm.output_start.clone());
     vm.headers_sent = false;
     for (name, default, _) in INI_ENTRIES {
-        let configured = vm.constants.get(name.as_bytes()).map(|v| v.to_php_string().as_bytes().to_vec());
-        let val = configured.clone().unwrap_or_else(|| default.as_bytes().to_vec());
+        let configured = vm
+            .constants
+            .get(name.as_bytes())
+            .map(|v| v.to_php_string().as_bytes().to_vec());
+        let val = configured
+            .clone()
+            .unwrap_or_else(|| default.as_bytes().to_vec());
         if !on_update(vm, name, &val, Stage::Startup) {
             // Keep the default when the configured value is rejected.
             on_update_silent(vm, name, default.as_bytes());
-            vm.constants.insert(name.as_bytes().to_vec(), s(default.as_bytes()));
+            vm.constants
+                .insert(name.as_bytes().to_vec(), s(default.as_bytes()));
         }
     }
     ps(|p| p.modules_activated = true);
@@ -903,7 +1059,11 @@ fn set_session_vars(vm: &mut Vm, v: Value) {
 
 fn encode_loop(vm: &mut Vm) -> Option<Vec<(Vec<u8>, Value)>> {
     let arr = session_vars_arr()?;
-    let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut out = Vec::new();
     for (k, v) in entries {
         match k {
@@ -933,7 +1093,14 @@ fn session_encode_data(vm: &mut Vm) -> Option<Vec<u8>> {
             for (key, v) in encode_loop(vm)? {
                 buf.extend_from_slice(&key);
                 if key.contains(&b'|') {
-                    err(vm, E_WARNING, &format!("Failed to write session data. Data contains invalid key \"{}\"", lossy(cstr(&key))));
+                    err(
+                        vm,
+                        E_WARNING,
+                        &format!(
+                            "Failed to write session data. Data contains invalid key \"{}\"",
+                            lossy(cstr(&key))
+                        ),
+                    );
                     return None;
                 }
                 buf.push(b'|');
@@ -969,7 +1136,11 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
             let mut pos = 0;
             let ok = var::unserialize_into(vm, data, &mut pos, &mut st, 0);
             st.finish(vm);
-            let v = if ok { st.tops[0].clone().deref() } else { Value::Null };
+            let v = if ok {
+                st.tops[0].clone().deref()
+            } else {
+                Value::Null
+            };
             let v = match v {
                 Value::Array(_) => v,
                 Value::Null => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
@@ -1016,14 +1187,16 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                 // php_set_session_var: replaces (and frees) the old value now.
                 if let Some(arr) = session_vars_arr_mut() {
                     let v = st.tops.get(idx).cloned().unwrap_or(Value::Null);
-                    arr.borrow_mut().set(ArrayKey::String(PhpString::from_vec(name)), v);
+                    arr.borrow_mut()
+                        .set(ArrayKey::String(PhpString::from_vec(name)), v);
                 }
             }
             // php_session_normalize_vars: variables a later R: turned into references.
             if let Some(arr) = session_vars_arr_mut() {
                 for (i, n) in names.iter().enumerate() {
                     if let Some(v @ Value::Reference(_)) = st.tops.get(i) {
-                        arr.borrow_mut().set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
+                        arr.borrow_mut()
+                            .set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
                     }
                 }
             }
@@ -1041,15 +1214,27 @@ fn session_decode_data(vm: &mut Vm, data: &[u8]) -> R<bool> {
         let _ = session_destroy_internal(vm);
         track_init(vm);
         if vm.error_reporting & E_WARNING != 0 {
-            vm.display_error("Warning", "Unknown: Failed to decode session object. Session has been destroyed", "Unknown", 0);
+            vm.display_error(
+                "Warning",
+                "Unknown: Failed to decode session object. Session has been destroyed",
+                "Unknown",
+                0,
+            );
         }
-        return Err(VmError { message: "bailout".into(), line: vm.current_line });
+        return Err(VmError {
+            message: "bailout".into(),
+            line: vm.current_line,
+        });
     }
     if !ok {
         // php_session_cancel_decode
         session_destroy_internal(vm)?;
         track_init(vm);
-        err(vm, E_WARNING, "Failed to decode session object. Session has been destroyed");
+        err(
+            vm,
+            E_WARNING,
+            "Failed to decode session object. Session has been destroyed",
+        );
         return Ok(false);
     }
     Ok(true)
@@ -1065,7 +1250,13 @@ fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
     let mut filled = 0;
     while filled < n {
-        let r = unsafe { libc::getrandom(buf[filled..].as_mut_ptr() as *mut libc::c_void, n - filled, 0) };
+        let r = unsafe {
+            libc::getrandom(
+                buf[filled..].as_mut_ptr() as *mut libc::c_void,
+                n - filled,
+                0,
+            )
+        };
         if r <= 0 {
             break;
         }
@@ -1106,7 +1297,8 @@ pub(crate) fn valid_key(key: &[u8]) -> bool {
     if key.is_empty() || key.len() > PS_MAX_SID_LENGTH {
         return false;
     }
-    key.iter().all(|&c| c.is_ascii_alphanumeric() || c == b',' || c == b'-')
+    key.iter()
+        .all(|&c| c.is_ascii_alphanumeric() || c == b',' || c == b'-')
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,7 +1317,11 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
     }
     if ps(|p| p.in_save_handler) {
         ps(|p| p.in_save_handler = false);
-        err(vm, E_WARNING, "Cannot call session save handler in a recursive manner");
+        err(
+            vm,
+            E_WARNING,
+            "Cannot call session save handler in a recursive manner",
+        );
         return Ok(None);
     }
     ps(|p| p.in_save_handler = true);
@@ -1137,16 +1333,19 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
             Some(_) => (fname.clone(), true),
             None => (fname.clone(), false),
         };
-        vm.call_stack.push((name, file, line, Vec::new(), is_method));
+        vm.call_stack
+            .push((name, file, line, Vec::new(), is_method));
     }
     let (cname, is_method) = callable_frame_name(&func);
-    vm.call_stack.push((cname, String::new(), 0, args.to_vec(), is_method));
+    vm.call_stack
+        .push((cname, String::new(), 0, args.to_vec(), is_method));
     let r = vm.call_callback(&func, args);
     vm.call_stack.pop();
     if pushed_outer {
         vm.call_stack.pop();
     }
-    let at_shutdown = PHASE.with(|p| p.get()) == Phase::RequestShutdown && FN_STACK.with(|s| s.borrow().is_empty());
+    let at_shutdown = PHASE.with(|p| p.get()) == Phase::RequestShutdown
+        && FN_STACK.with(|s| s.borrow().is_empty());
     match r {
         Ok(v) if vm.current_exception.is_none() => {
             ps(|p| p.in_save_handler = false);
@@ -1162,7 +1361,10 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
             if at_shutdown {
                 // No user frame left: the exception is fatal (bailout),
                 // leaving the handler marked as running.
-                let e = r.err().unwrap_or(VmError { message: "Uncaught exception".into(), line: 0 });
+                let e = r.err().unwrap_or(VmError {
+                    message: "Uncaught exception".into(),
+                    line: 0,
+                });
                 vm.report_uncaught(&e);
                 return Err(e);
             }
@@ -1186,14 +1388,22 @@ fn callable_frame_name(f: &Value) -> (String, bool) {
                         let c = goro_core::value::display_class_name(&o.borrow().class_name);
                         return (format!("{}::{}", c, m), true);
                     }
-                    other => return (format!("{}::{}", other.to_php_string().to_string_lossy(), m), false),
+                    other => {
+                        return (
+                            format!("{}::{}", other.to_php_string().to_string_lossy(), m),
+                            false,
+                        );
+                    }
                 }
             }
             ("{closure}".into(), false)
         }
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+            {
                 ("{closure}".into(), false)
             } else {
                 (lossy(b), false)
@@ -1215,13 +1425,20 @@ fn verify_bool(vm: &mut Vm, v: &Option<Value>) -> bool {
         Value::False => false,
         Value::Long(-1) | Value::Long(0) => {
             if !pending(vm) {
-                err(vm, E_DEPRECATED, "Session callback must have a return value of type bool, int returned");
+                err(
+                    vm,
+                    E_DEPRECATED,
+                    "Session callback must have a return value of type bool, int returned",
+                );
             }
             matches!(v, Value::Long(0))
         }
         other => {
             if !pending(vm) {
-                let msg = format!("Session callback must have a return value of type bool, {} returned", Vm::value_type_name(other));
+                let msg = format!(
+                    "Session callback must have a return value of type bool, {} returned",
+                    Vm::value_type_name(other)
+                );
                 throw(vm, b"TypeError", &msg);
             }
             false
@@ -1369,7 +1586,11 @@ pub(crate) fn mod_update_timestamp(vm: &mut Vm, m: Module, key: &[u8], val: &[u8
         Module::Files => Ok(files::update_timestamp(vm, key, val)),
         Module::User => {
             let n = names();
-            let f = if n.update_timestamp.is_some() { n.update_timestamp } else { n.write };
+            let f = if n.update_timestamp.is_some() {
+                n.update_timestamp
+            } else {
+                n.write
+            };
             let r = call_handler(vm, &f, &[s(key), s(val)])?;
             Ok(verify_bool(vm, &r))
         }
@@ -1460,7 +1681,8 @@ fn session_abort_internal(vm: &mut Vm) -> R<bool> {
 fn session_gc_internal(vm: &mut Vm, immediate: bool) -> R<i64> {
     let mut deleted = -1;
     if has_mod_data() {
-        let (prob, div, maxl, m) = ps(|p| (p.gc_probability, p.gc_divisor, p.gc_maxlifetime, p.module));
+        let (prob, div, maxl, m) =
+            ps(|p| (p.gc_probability, p.gc_divisor, p.gc_maxlifetime, p.module));
         let mut collect = immediate;
         if !collect && prob > 0 {
             let r = u64::from_le_bytes(random_bytes(8).try_into().unwrap_or([0; 8]));
@@ -1482,7 +1704,11 @@ fn session_initialize(vm: &mut Vm) -> R<bool> {
         Some(m) => m,
         None => {
             ps(|p| p.status = Status::Disabled);
-            err(vm, E_WARNING, "No storage module chosen - failed to initialize session");
+            err(
+                vm,
+                E_WARNING,
+                "No storage module chosen - failed to initialize session",
+            );
             return Ok(false);
         }
     };
@@ -1490,12 +1716,24 @@ fn session_initialize(vm: &mut Vm) -> R<bool> {
     if !mod_open(vm, m, &save_path, &name)? {
         session_abort_internal(vm)?;
         if !pending(vm) {
-            err(vm, E_WARNING, &format!("Failed to initialize storage module: {} (path: {})", m.name(), lossy(&save_path)));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "Failed to initialize storage module: {} (path: {})",
+                    m.name(),
+                    lossy(&save_path)
+                ),
+            );
         }
         return Ok(false);
     }
     let id = ps(|p| p.id.clone());
-    if id.as_ref().map(|i| i.is_empty() || i[0] == 0).unwrap_or(true) {
+    if id
+        .as_ref()
+        .map(|i| i.is_empty() || i[0] == 0)
+        .unwrap_or(true)
+    {
         let nid = mod_create_sid(vm, m)?;
         match nid {
             Some(n) => ps(|p| p.id = Some(n)),
@@ -1503,7 +1741,15 @@ fn session_initialize(vm: &mut Vm) -> R<bool> {
                 ps(|p| p.id = None);
                 session_abort_internal(vm)?;
                 if !pending(vm) {
-                    throw(vm, b"Error", &format!("Failed to create session ID: {} (path: {})", m.name(), lossy(&save_path)));
+                    throw(
+                        vm,
+                        b"Error",
+                        &format!(
+                            "Failed to create session ID: {} (path: {})",
+                            m.name(),
+                            lossy(&save_path)
+                        ),
+                    );
                 }
                 return Ok(false);
             }
@@ -1536,7 +1782,15 @@ fn session_initialize(vm: &mut Vm) -> R<bool> {
         None => {
             session_abort_internal(vm)?;
             if !pending(vm) {
-                err(vm, E_WARNING, &format!("Failed to read session data: {} (path: {})", m.name(), lossy(&save_path)));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!(
+                        "Failed to read session data: {} (path: {})",
+                        m.name(),
+                        lossy(&save_path)
+                    ),
+                );
             }
             return Ok(false);
         }
@@ -1570,7 +1824,11 @@ fn save_current_state(vm: &mut Vm, write: bool) -> R<()> {
                     let same = ps(|p| p.lazy_write && p.session_vars.as_ref() == Some(&val));
                     if same {
                         ret = mod_update_timestamp(vm, m, &id, &val)?;
-                        handler_fn = if class_name.is_some() { "updateTimestamp" } else { "update_timestamp" };
+                        handler_fn = if class_name.is_some() {
+                            "updateTimestamp"
+                        } else {
+                            "update_timestamp"
+                        };
                     } else {
                         ret = mod_write(vm, m, &id, &val)?;
                     }
@@ -1583,24 +1841,36 @@ fn save_current_state(vm: &mut Vm, write: bool) -> R<()> {
         if !ret && !pending(vm) {
             let (user_impl, save_path) = ps(|p| (p.mod_user_implemented, p.save_path.clone()));
             if !user_impl {
-                err(vm, E_WARNING, &format!(
-                    "Failed to write session data ({}). Please verify that the current setting of session.save_path is correct ({})",
-                    m.map(|m| m.name()).unwrap_or(""),
-                    lossy(&save_path)
-                ));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!(
+                        "Failed to write session data ({}). Please verify that the current setting of session.save_path is correct ({})",
+                        m.map(|m| m.name()).unwrap_or(""),
+                        lossy(&save_path)
+                    ),
+                );
             } else if let Some(cn) = class_name {
-                err(vm, E_WARNING, &format!(
-                    "Failed to write session data using user defined save handler. (session.save_path: {}, handler: {}::{})",
-                    lossy(&save_path),
-                    lossy(&cn),
-                    handler_fn
-                ));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!(
+                        "Failed to write session data using user defined save handler. (session.save_path: {}, handler: {}::{})",
+                        lossy(&save_path),
+                        lossy(&cn),
+                        handler_fn
+                    ),
+                );
             } else {
-                err(vm, E_WARNING, &format!(
-                    "Failed to write session data using user defined save handler. (session.save_path: {}, handler: {})",
-                    lossy(&save_path),
-                    handler_fn
-                ));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!(
+                        "Failed to write session data using user defined save handler. (session.save_path: {}, handler: {})",
+                        lossy(&save_path),
+                        handler_fn
+                    ),
+                );
             }
         }
     }
@@ -1639,7 +1909,9 @@ fn url_encode(s: &[u8]) -> Vec<u8> {
 
 fn gmt_date(t: i64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let days = t.div_euclid(86400);
     let secs = t.rem_euclid(86400);
     let wd = DAYS[days.rem_euclid(7) as usize];
@@ -1676,7 +1948,11 @@ fn now() -> i64 {
 /// php_session_send_cookie
 fn send_cookie(vm: &mut Vm) -> bool {
     if vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session cookie cannot be sent after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cookie cannot be sent after headers have already been sent",
+        );
         return false;
     }
     let p = PS.with(|p| {
@@ -1695,7 +1971,11 @@ fn send_cookie(vm: &mut Vm) -> bool {
     });
     let (partitioned, secure, name, id, lifetime, path, domain, httponly, samesite) = p;
     if partitioned && !secure {
-        err(vm, E_WARNING, "Partitioned session cookie cannot be used without also configuring it as secure");
+        err(
+            vm,
+            E_WARNING,
+            "Partitioned session cookie cannot be used without also configuring it as secure",
+        );
         return false;
     }
     let mut c = Vec::new();
@@ -1742,7 +2022,10 @@ fn send_cookie(vm: &mut Vm) -> bool {
 
 fn cookie_has_session_name(vm: &Vm, name: &[u8]) -> bool {
     match vm.get_global(b"_COOKIE").map(|v| v.deref()) {
-        Some(Value::Array(a)) => a.borrow().get(&ArrayKey::String(PhpString::from_bytes(name))).is_some(),
+        Some(Value::Array(a)) => a
+            .borrow()
+            .get(&ArrayKey::String(PhpString::from_bytes(name)))
+            .is_some(),
         _ => false,
     }
 }
@@ -1750,7 +2033,11 @@ fn cookie_has_session_name(vm: &Vm, name: &[u8]) -> bool {
 /// php_session_reset_id
 fn session_reset_id(vm: &mut Vm) -> R<bool> {
     if ps(|p| p.id.is_none()) {
-        err(vm, E_WARNING, "Cannot set session ID - session ID is not initialized");
+        err(
+            vm,
+            E_WARNING,
+            "Cannot set session ID - session ID is not initialized",
+        );
         return Ok(false);
     }
     if ps(|p| p.use_cookies && p.send_cookie) {
@@ -1759,7 +2046,13 @@ fn session_reset_id(vm: &mut Vm) -> R<bool> {
         }
         ps(|p| p.send_cookie = false);
     }
-    let (define_sid, name, id) = ps(|p| (p.define_sid, p.session_name.clone(), p.id.clone().unwrap_or_default()));
+    let (define_sid, name, id) = ps(|p| {
+        (
+            p.define_sid,
+            p.session_name.clone(),
+            p.id.clone().unwrap_or_default(),
+        )
+    });
     let sid = if define_sid {
         let mut v = name.clone();
         v.push(b'=');
@@ -1771,12 +2064,15 @@ fn session_reset_id(vm: &mut Vm) -> R<bool> {
     if !vm.constants.contains_key(b"SID".as_slice()) {
         vm.internal_deprecated_constants.insert(
             b"SID".to_vec(),
-            "Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated".to_string(),
+            "Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated"
+                .to_string(),
         );
     }
-    vm.constants.insert(b"SID".to_vec(), Value::String(PhpString::from_vec(sid)));
+    vm.constants
+        .insert(b"SID".to_vec(), Value::String(PhpString::from_vec(sid)));
 
-    let (use_trans_sid, use_only_cookies, use_cookies) = ps(|p| (p.use_trans_sid, p.use_only_cookies, p.use_cookies));
+    let (use_trans_sid, use_only_cookies, use_cookies) =
+        ps(|p| (p.use_trans_sid, p.use_only_cookies, p.use_cookies));
     let mut apply = false;
     if use_trans_sid && !use_only_cookies {
         apply = true;
@@ -1820,7 +2116,11 @@ fn proposed_id(v: &Value) {
 fn session_start_internal(vm: &mut Vm) -> R<bool> {
     match ps(|p| p.status) {
         Status::Active => {
-            already_started_error(vm, E_NOTICE, "Ignoring session_start() because a session has already been started");
+            already_started_error(
+                vm,
+                E_NOTICE,
+                "Ignoring session_start() because a session has already been started",
+            );
             return Ok(false);
         }
         Status::Disabled => {
@@ -1829,7 +2129,14 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
                 match find_module(&value) {
                     Some(m) => ps(|p| p.module = Some(m)),
                     None => {
-                        err(vm, E_WARNING, &format!("Cannot find session save handler \"{}\" - session startup failed", lossy(&value)));
+                        err(
+                            vm,
+                            E_WARNING,
+                            &format!(
+                                "Cannot find session save handler \"{}\" - session startup failed",
+                                lossy(&value)
+                            ),
+                        );
                         return Ok(false);
                     }
                 }
@@ -1839,7 +2146,14 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
                 match find_serializer(&value) {
                     Some(s) => ps(|p| p.serializer = Some(s)),
                     None => {
-                        err(vm, E_WARNING, &format!("Cannot find session serialization handler \"{}\" - session startup failed", lossy(&value)));
+                        err(
+                            vm,
+                            E_WARNING,
+                            &format!(
+                                "Cannot find session serialization handler \"{}\" - session startup failed",
+                                lossy(&value)
+                            ),
+                        );
                         return Ok(false);
                     }
                 }
@@ -1861,7 +2175,10 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
         if ps(|p| p.use_cookies) {
             let name = ps(|p| p.session_name.clone());
             if let Some(Value::Array(a)) = vm.get_global(b"_COOKIE").map(|v| v.deref()) {
-                let v = a.borrow().get(&ArrayKey::String(PhpString::from_vec(name))).cloned();
+                let v = a
+                    .borrow()
+                    .get(&ArrayKey::String(PhpString::from_vec(name)))
+                    .cloned();
                 if let Some(v) = v {
                     proposed_id(&v);
                     ps(|p| {
@@ -1878,9 +2195,14 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
             let chk = ps(|p| p.extern_referer_chk.clone());
             if ps(|p| p.id.is_some()) && !chk.is_empty() {
                 if let Some(Value::Array(srv)) = vm.get_global(b"_SERVER").map(|v| v.deref()) {
-                    let r = srv.borrow().get(&ArrayKey::String(PhpString::from_bytes(b"HTTP_REFERER"))).cloned();
+                    let r = srv
+                        .borrow()
+                        .get(&ArrayKey::String(PhpString::from_bytes(b"HTTP_REFERER")))
+                        .cloned();
                     if let Some(Value::String(r)) = r {
-                        if !r.is_empty() && !r.as_bytes().windows(chk.len()).any(|w| w == chk.as_slice()) {
+                        if !r.is_empty()
+                            && !r.as_bytes().windows(chk.len()).any(|w| w == chk.as_slice())
+                        {
                             ps(|p| p.id = None);
                         }
                     }
@@ -1889,7 +2211,11 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
         }
     }
     // Check session id for dangerous characters
-    if ps(|p| p.id.as_ref().map(|id| cstr(id).iter().any(|c| b"\r\n\t <>'\"\\".contains(c))).unwrap_or(false)) {
+    if ps(|p| {
+        p.id.as_ref()
+            .map(|id| cstr(id).iter().any(|c| b"\r\n\t <>'\"\\".contains(c)))
+            .unwrap_or(false)
+    }) {
         ps(|p| p.id = None);
     }
     let ok = session_initialize(vm)?;
@@ -1910,7 +2236,10 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
 fn last_modified(vm: &Vm) {
     let path = vm.current_file.clone();
     let main_path = vm.get_global(b"_SERVER").and_then(|s| match s.deref() {
-        Value::Array(a) => a.borrow().get(&ArrayKey::String(PhpString::from_bytes(b"PATH_TRANSLATED"))).map(|v| v.to_php_string().to_string_lossy()),
+        Value::Array(a) => a
+            .borrow()
+            .get(&ArrayKey::String(PhpString::from_bytes(b"PATH_TRANSLATED")))
+            .map(|v| v.to_php_string().to_string_lossy()),
         _ => None,
     });
     let p = main_path.unwrap_or(path);
@@ -1932,7 +2261,11 @@ fn cache_limiter(vm: &mut Vm) -> R<i32> {
     }
     if vm.headers_sent {
         session_abort_internal(vm)?;
-        headers_already_sent_error(vm, E_WARNING, "Session cache limiter cannot be sent after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cache limiter cannot be sent after headers have already been sent",
+        );
         return Ok(-2);
     }
     let add = |l: &str| goro_ext_standard::misc::sapi_add_header(l.as_bytes(), true);
@@ -2020,7 +2353,12 @@ fn zend_zval_type_name(v: &Value) -> String {
 fn obj_to_string(vm: &mut Vm, v: &Value) -> Option<Vec<u8>> {
     if let Value::Object(o) = v {
         let cl = o.borrow().class_name.to_ascii_lowercase();
-        if vm.classes.get(&cl).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false) {
+        if vm
+            .classes
+            .get(&cl)
+            .map(|c| c.get_method(b"__tostring").is_some())
+            .unwrap_or(false)
+        {
             let r = vm.call_object_method(v, b"__toString", &[])?;
             return Some(r.to_php_string().as_bytes().to_vec());
         }
@@ -2030,7 +2368,15 @@ fn obj_to_string(vm: &mut Vm, v: &Value) -> Option<Vec<u8>> {
 
 /// Z_PARAM_STR / P (path: no NUL) with optional nullability.
 /// Ok(None) = null passed to nullable. Err(()) = exception thrown.
-fn str_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, nullable: bool, path: bool) -> Result<Option<Vec<u8>>, ()> {
+fn str_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    i: usize,
+    pname: &str,
+    nullable: bool,
+    path: bool,
+) -> Result<Option<Vec<u8>>, ()> {
     let v = match args.get(i) {
         Some(v) => v.deref(),
         None => return Ok(None),
@@ -2069,7 +2415,12 @@ fn str_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, null
         }
     };
     if path && b.contains(&0) {
-        let msg = format!("{}(): Argument #{} (${}) must not contain any null bytes", fname, i + 1, pname);
+        let msg = format!(
+            "{}(): Argument #{} (${}) must not contain any null bytes",
+            fname,
+            i + 1,
+            pname
+        );
         throw(vm, b"ValueError", &msg);
         return Err(());
     }
@@ -2084,7 +2435,14 @@ fn err_deprecated_null(vm: &mut Vm, fname: &str, n: usize, pname: &str, ty: &str
     vm.emit_deprecated(&msg);
 }
 
-fn long_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, nullable: bool) -> Result<Option<i64>, ()> {
+fn long_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    i: usize,
+    pname: &str,
+    nullable: bool,
+) -> Result<Option<i64>, ()> {
     let v = match args.get(i) {
         Some(v) => v.deref(),
         None => return Ok(None),
@@ -2099,7 +2457,10 @@ fn long_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, nul
             if f.is_finite() && f.fract() == 0.0 {
                 Ok(Some(*f as i64))
             } else if f.is_finite() {
-                let msg = format!("Implicit conversion from float {} to int loses precision", goro_core::value::format_php_float_repr(*f));
+                let msg = format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_core::value::format_php_float_repr(*f)
+                );
                 vm.emit_deprecated(&msg);
                 Ok(Some(*f as i64))
             } else {
@@ -2125,7 +2486,14 @@ fn long_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, nul
     }
 }
 
-fn bool_arg(vm: &mut Vm, fname: &str, args: &[Value], i: usize, pname: &str, nullable: bool) -> Result<Option<bool>, ()> {
+fn bool_arg(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    i: usize,
+    pname: &str,
+    nullable: bool,
+) -> Result<Option<bool>, ()> {
     let v = match args.get(i) {
         Some(v) => v.deref(),
         None => return Ok(None),
@@ -2164,11 +2532,25 @@ fn b(v: bool) -> Value {
 
 fn php_can_change_session_setting(vm: &mut Vm, setting: &str, check_cookies: bool) -> bool {
     if ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, &format!("Session {} cannot be changed when a session is active", setting));
+        already_started_error(
+            vm,
+            E_WARNING,
+            &format!(
+                "Session {} cannot be changed when a session is active",
+                setting
+            ),
+        );
         return false;
     }
     if vm.headers_sent && (!check_cookies || ps(|p| p.use_cookies)) {
-        headers_already_sent_error(vm, E_WARNING, &format!("Session {} cannot be changed after headers have already been sent", setting));
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            &format!(
+                "Session {} cannot be changed after headers have already been sent",
+                setting
+            ),
+        );
         return false;
     }
     true
@@ -2198,32 +2580,57 @@ fn f_session_set_cookie_params(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let mut samesite: Option<Vec<u8>> = None;
 
     if !ps(|p| p.use_cookies) {
-        err(vm, E_WARNING, "Session cookies cannot be used when session.use_cookies is disabled");
+        err(
+            vm,
+            E_WARNING,
+            "Session cookies cannot be used when session.use_cookies is disabled",
+        );
         return Ok(Value::False);
     }
     if ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, "Session cookie parameters cannot be changed when a session is active");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session cookie parameters cannot be changed when a session is active",
+        );
         return Ok(Value::False);
     }
     if vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session cookie parameters cannot be changed after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cookie parameters cannot be changed after headers have already been sent",
+        );
         return Ok(Value::False);
     }
     if let Some(opts) = options {
-        let bad = [(path.is_some(), 2), (domain.is_some(), 3), (secure.is_some(), 4), (httponly.is_some(), 5)];
+        let bad = [
+            (path.is_some(), 2),
+            (domain.is_some(), 3),
+            (secure.is_some(), 4),
+            (httponly.is_some(), 5),
+        ];
         for (is_set, n) in bad {
             if is_set {
-                throw(vm, b"ValueError", &format!(
-                    "{}(): Argument #{} (${}) must be null when argument #1 ($lifetime_or_options) is an array",
-                    fname,
-                    n,
-                    ["", "", "path", "domain", "secure", "httponly"][n]
-                ));
+                throw(
+                    vm,
+                    b"ValueError",
+                    &format!(
+                        "{}(): Argument #{} (${}) must be null when argument #1 ($lifetime_or_options) is an array",
+                        fname,
+                        n,
+                        ["", "", "path", "domain", "secure", "httponly"][n]
+                    ),
+                );
                 return Ok(Value::Null);
             }
         }
         let mut found = 0;
-        let entries: Vec<(ArrayKey, Value)> = opts.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = opts
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (k, v) in entries {
             let v = v.deref();
             match k {
@@ -2264,17 +2671,32 @@ fn f_session_set_cookie_params(vm: &mut Vm, args: &[Value]) -> R<Value> {
                             samesite = Some(sval(vm, &v));
                             found += 1;
                         }
-                        _ => err(vm, E_WARNING, &format!(
-                            "Argument #1 ($lifetime_or_options) contains an unrecognized key \"{}\"",
-                            lossy(key.as_bytes())
-                        )),
+                        _ => err(
+                            vm,
+                            E_WARNING,
+                            &format!(
+                                "Argument #1 ($lifetime_or_options) contains an unrecognized key \"{}\"",
+                                lossy(key.as_bytes())
+                            ),
+                        ),
                     }
                 }
-                ArrayKey::Int(_) => err(vm, E_WARNING, "Argument #1 ($lifetime_or_options) cannot contain numeric keys"),
+                ArrayKey::Int(_) => err(
+                    vm,
+                    E_WARNING,
+                    "Argument #1 ($lifetime_or_options) cannot contain numeric keys",
+                ),
             }
         }
         if found == 0 {
-            throw(vm, b"ValueError", &format!("{}(): Argument #1 ($lifetime_or_options) must contain at least 1 valid key", fname));
+            throw(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($lifetime_or_options) must contain at least 1 valid key",
+                    fname
+                ),
+            );
             return Ok(Value::Null);
         }
     }
@@ -2314,7 +2736,10 @@ fn long_arg_strict_arr(vm: &mut Vm, fname: &str, v: &Value) -> Result<i64, ()> {
                     fname,
                     zend_zval_type_name(v)
                 );
-                o.borrow_mut().set_property(b"message".to_vec(), Value::String(PhpString::from_string(msg)));
+                o.borrow_mut().set_property(
+                    b"message".to_vec(),
+                    Value::String(PhpString::from_string(msg)),
+                );
             }
             Err(())
         }
@@ -2372,11 +2797,22 @@ fn f_session_module_name(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let ret = s(ps(|p| p.module.map(|m| m.name()).unwrap_or("")).as_bytes());
     if let Some(n) = name {
         if n.eq_ignore_ascii_case(b"user") {
-            throw(vm, b"ValueError", &format!("{}(): Argument #1 ($module) cannot be \"user\"", fname));
+            throw(
+                vm,
+                b"ValueError",
+                &format!("{}(): Argument #1 ($module) cannot be \"user\"", fname),
+            );
             return Ok(Value::Null);
         }
         if find_module(cstr(&n)).is_none() {
-            err(vm, E_WARNING, &format!("Session handler module \"{}\" cannot be found", lossy(cstr(&n))));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "Session handler module \"{}\" cannot be found",
+                    lossy(cstr(&n))
+                ),
+            );
             return Ok(Value::False);
         }
         if has_mod_data() {
@@ -2392,11 +2828,19 @@ fn f_session_module_name(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 fn can_session_handler_be_changed(vm: &mut Vm) -> bool {
     if ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, "Session save handler cannot be changed when a session is active");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session save handler cannot be changed when a session is active",
+        );
         return false;
     }
     if vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session save handler cannot be changed after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session save handler cannot be changed after headers have already been sent",
+        );
         return false;
     }
     true
@@ -2413,7 +2857,12 @@ fn is_shutdown_entry(cb: &Value) -> bool {
 }
 
 fn class_has_method(vm: &Vm, cl: &[u8], m: &[u8]) -> bool {
-    if vm.classes.get(cl).map(|c| c.get_method(m).is_some()).unwrap_or(false) {
+    if vm
+        .classes
+        .get(cl)
+        .map(|c| c.get_method(m).is_some())
+        .unwrap_or(false)
+    {
         return true;
     }
     // Inherited from SessionHandler (native)
@@ -2439,12 +2888,19 @@ fn callback_error(vm: &mut Vm, fname: &str, n: usize, pname: &str, v: &Value, nu
             if let Some(p) = sb.windows(2).position(|w| w == b"::") {
                 let cls = &sb[..p];
                 if vm.classes.contains_key(&cls.to_ascii_lowercase()) {
-                    format!("class {} does not have a method \"{}\"", lossy(cls), lossy(&sb[p + 2..]))
+                    format!(
+                        "class {} does not have a method \"{}\"",
+                        lossy(cls),
+                        lossy(&sb[p + 2..])
+                    )
                 } else {
                     format!("class \"{}\" not found", lossy(cls))
                 }
             } else {
-                format!("function \"{}\" not found or invalid function name", lossy(sb))
+                format!(
+                    "function \"{}\" not found or invalid function name",
+                    lossy(sb)
+                )
             }
         }
         Value::Array(a) => {
@@ -2461,7 +2917,11 @@ fn callback_error(vm: &mut Vm, fname: &str, n: usize, pname: &str, v: &Value, nu
                     ),
                     (Value::String(c), Value::String(m)) => {
                         if vm.classes.contains_key(&c.as_bytes().to_ascii_lowercase()) {
-                            format!("class {} does not have a method \"{}\"", lossy(c.as_bytes()), lossy(m.as_bytes()))
+                            format!(
+                                "class {} does not have a method \"{}\"",
+                                lossy(c.as_bytes()),
+                                lossy(m.as_bytes())
+                            )
                         } else {
                             format!("class \"{}\" not found", lossy(c.as_bytes()))
                         }
@@ -2504,12 +2964,16 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
             type_err(vm, fname, 1, "open", "SessionHandlerInterface", &obj);
             return Ok(Value::Null);
         }
-        let register_shutdown = tryarg!(bool_arg(vm, fname, args, 1, "close", false)).unwrap_or(true);
+        let register_shutdown =
+            tryarg!(bool_arg(vm, fname, args, 1, "close", false)).unwrap_or(true);
         if !can_session_handler_be_changed(vm) {
             return Ok(Value::False);
         }
         let (class_name, cl) = match &obj {
-            Value::Object(o) => (o.borrow().class_name.clone(), o.borrow().class_name.to_ascii_lowercase()),
+            Value::Object(o) => (
+                o.borrow().class_name.clone(),
+                o.borrow().class_name.to_ascii_lowercase(),
+            ),
             _ => unreachable!(),
         };
         let mk = |m: &str| -> Value {
@@ -2518,19 +2982,30 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
             a.push(Value::String(PhpString::from_string(m.to_string())));
             Value::Array(Rc::new(RefCell::new(a)))
         };
-        let create_sid = if vm.class_implements_interface(&cl, b"sessionidinterface") || class_has_method(vm, &cl, b"create_sid") {
+        let create_sid = if vm.class_implements_interface(&cl, b"sessionidinterface")
+            || class_has_method(vm, &cl, b"create_sid")
+        {
             Some(mk("create_sid"))
         } else {
             None
         };
-        let (validate, update) = if vm.class_implements_interface(&cl, b"sessionupdatetimestamphandlerinterface") {
-            (Some(mk("validateId")), Some(mk("updateTimestamp")))
-        } else {
-            (
-                if class_has_method(vm, &cl, b"validateid") { Some(mk("validateId")) } else { None },
-                if class_has_method(vm, &cl, b"updatetimestamp") { Some(mk("updateTimestamp")) } else { None },
-            )
-        };
+        let (validate, update) =
+            if vm.class_implements_interface(&cl, b"sessionupdatetimestamphandlerinterface") {
+                (Some(mk("validateId")), Some(mk("updateTimestamp")))
+            } else {
+                (
+                    if class_has_method(vm, &cl, b"validateid") {
+                        Some(mk("validateId"))
+                    } else {
+                        None
+                    },
+                    if class_has_method(vm, &cl, b"updatetimestamp") {
+                        Some(mk("updateTimestamp"))
+                    } else {
+                        None
+                    },
+                )
+            };
         let n = UserNames {
             open: Some(mk("open")),
             close: Some(mk("close")),
@@ -2543,15 +3018,18 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
             update_timestamp: update,
         };
         let old = ps(|p| {
-            p.mod_user_class_name = Some(goro_core::value::display_class_name(&class_name).into_bytes());
+            p.mod_user_class_name =
+                Some(goro_core::value::display_class_name(&class_name).into_bytes());
             std::mem::replace(&mut p.mod_user_names, n)
         });
         // Releasing the previous handler object may destroy it.
         drop(old);
         vm.run_pending_destructors_pub();
-        vm.shutdown_functions.retain(|(cb, _)| !is_shutdown_entry(cb));
+        vm.shutdown_functions
+            .retain(|(cb, _)| !is_shutdown_entry(cb));
         if register_shutdown {
-            vm.shutdown_functions.push((s(b"session_register_shutdown"), Vec::new()));
+            vm.shutdown_functions
+                .push((s(b"session_register_shutdown"), Vec::new()));
         }
         if ps(|p| p.status != Status::Active && p.module != Some(Module::User)) {
             set_user_save_handler_ini(vm);
@@ -2559,11 +3037,25 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
         return Ok(Value::True);
     }
 
-    err(vm, E_DEPRECATED, "Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated");
+    err(
+        vm,
+        E_DEPRECATED,
+        "Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated",
+    );
     if vm.current_exception.is_some() {
         return Ok(Value::Null);
     }
-    const PNAMES: [&str; 9] = ["open", "close", "read", "write", "destroy", "gc", "create_sid", "validate_sid", "update_timestamp"];
+    const PNAMES: [&str; 9] = [
+        "open",
+        "close",
+        "read",
+        "write",
+        "destroy",
+        "gc",
+        "create_sid",
+        "validate_sid",
+        "update_timestamp",
+    ];
     if args.len() < 6 || args.len() > 9 {
         arg_count_error(vm, fname, 6, 9, args.len());
         return Ok(Value::Null);
@@ -2588,7 +3080,8 @@ fn f_session_set_save_handler(vm: &mut Vm, args: &[Value]) -> R<Value> {
         return Ok(Value::False);
     }
     ps(|p| p.mod_user_class_name = None);
-    vm.shutdown_functions.retain(|(cb, _)| !is_shutdown_entry(cb));
+    vm.shutdown_functions
+        .retain(|(cb, _)| !is_shutdown_entry(cb));
     if ps(|p| p.module != Some(Module::User)) {
         set_user_save_handler_ini(vm);
     }
@@ -2658,21 +3151,43 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     }
     let del = tryarg!(bool_arg(vm, fname, args, 0, "delete_old_session", false)).unwrap_or(false);
     if ps(|p| p.status) != Status::Active {
-        already_started_error(vm, E_WARNING, "Session ID cannot be regenerated when there is no active session");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session ID cannot be regenerated when there is no active session",
+        );
         return Ok(Value::False);
     }
     if vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session ID cannot be regenerated after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session ID cannot be regenerated after headers have already been sent",
+        );
         return Ok(Value::False);
     }
     let m = ps(|p| p.module).unwrap_or(Module::Files);
-    let (id, save_path, name) = ps(|p| (p.id.clone().unwrap_or_default(), p.save_path.clone(), p.session_name.clone()));
+    let (id, save_path, name) = ps(|p| {
+        (
+            p.id.clone().unwrap_or_default(),
+            p.save_path.clone(),
+            p.session_name.clone(),
+        )
+    });
     if del {
         if !mod_destroy(vm, m, &id)? {
             mod_close(vm, m)?;
             ps(|p| p.status = Status::None);
             if !pending(vm) {
-                err(vm, E_WARNING, &format!("Session object destruction failed. ID: {} (path: {})", m.name(), lossy(&save_path)));
+                err(
+                    vm,
+                    E_WARNING,
+                    &format!(
+                        "Session object destruction failed. ID: {} (path: {})",
+                        m.name(),
+                        lossy(&save_path)
+                    ),
+                );
             }
             return Ok(Value::False);
         }
@@ -2682,7 +3197,15 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
         if !ret {
             mod_close(vm, m)?;
             ps(|p| p.status = Status::None);
-            err(vm, E_WARNING, &format!("Session write failed. ID: {} (path: {})", m.name(), lossy(&save_path)));
+            err(
+                vm,
+                E_WARNING,
+                &format!(
+                    "Session write failed. ID: {} (path: {})",
+                    m.name(),
+                    lossy(&save_path)
+                ),
+            );
             return Ok(Value::False);
         }
     }
@@ -2694,7 +3217,15 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     if !mod_open(vm, m, &save_path, &name)? {
         ps(|p| p.status = Status::None);
         if !pending(vm) {
-            throw(vm, b"Error", &format!("Failed to open session: {} (path: {})", m.name(), lossy(&save_path)));
+            throw(
+                vm,
+                b"Error",
+                &format!(
+                    "Failed to open session: {} (path: {})",
+                    m.name(),
+                    lossy(&save_path)
+                ),
+            );
         }
         return Ok(Value::Null);
     }
@@ -2703,7 +3234,15 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
         None => {
             ps(|p| p.status = Status::None);
             if !pending(vm) {
-                throw(vm, b"Error", &format!("Failed to create new session ID: {} (path: {})", m.name(), lossy(&save_path)));
+                throw(
+                    vm,
+                    b"Error",
+                    &format!(
+                        "Failed to create new session ID: {} (path: {})",
+                        m.name(),
+                        lossy(&save_path)
+                    ),
+                );
             }
             return Ok(Value::Null);
         }
@@ -2730,7 +3269,15 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
                         mod_close(vm, m)?;
                         ps(|p| p.status = Status::None);
                         if !pending(vm) {
-                            throw(vm, b"Error", &format!("Failed to create session ID by collision: {} (path: {})", m.name(), lossy(&save_path)));
+                            throw(
+                                vm,
+                                b"Error",
+                                &format!(
+                                    "Failed to create session ID by collision: {} (path: {})",
+                                    m.name(),
+                                    lossy(&save_path)
+                                ),
+                            );
                         }
                         return Ok(Value::Null);
                     }
@@ -2743,7 +3290,15 @@ fn f_session_regenerate_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
         mod_close(vm, m)?;
         ps(|p| p.status = Status::None);
         if !pending(vm) {
-            throw(vm, b"Error", &format!("Failed to create(read) session ID: {} (path: {})", m.name(), lossy(&save_path)));
+            throw(
+                vm,
+                b"Error",
+                &format!(
+                    "Failed to create(read) session ID: {} (path: {})",
+                    m.name(),
+                    lossy(&save_path)
+                ),
+            );
         }
         return Ok(Value::Null);
     }
@@ -2767,11 +3322,22 @@ fn f_session_create_id(vm: &mut Vm, args: &[Value]) -> R<Value> {
     if let Some(p) = prefix {
         if !p.is_empty() {
             if p.len() > PS_MAX_SID_LENGTH {
-                throw(vm, b"ValueError", &format!("{}(): Argument #1 ($prefix) cannot be longer than {} characters", fname, PS_MAX_SID_LENGTH));
+                throw(
+                    vm,
+                    b"ValueError",
+                    &format!(
+                        "{}(): Argument #1 ($prefix) cannot be longer than {} characters",
+                        fname, PS_MAX_SID_LENGTH
+                    ),
+                );
                 return Ok(Value::Null);
             }
             if !valid_key(&p) {
-                err(vm, E_WARNING, "Prefix cannot contain special characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed");
+                err(
+                    vm,
+                    E_WARNING,
+                    "Prefix cannot contain special characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed",
+                );
                 return Ok(Value::False);
             }
             id.extend_from_slice(&p);
@@ -2831,11 +3397,19 @@ fn f_session_cache_limiter(vm: &mut Vm, args: &[Value]) -> R<Value> {
     }
     let limiter = tryarg!(str_arg(vm, fname, args, 0, "value", true, false));
     if limiter.is_some() && ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, "Session cache limiter cannot be changed when a session is active");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session cache limiter cannot be changed when a session is active",
+        );
         return Ok(Value::False);
     }
     if limiter.is_some() && vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session cache limiter cannot be changed after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cache limiter cannot be changed after headers have already been sent",
+        );
         return Ok(Value::False);
     }
     let ret = s(&ps(|p| p.cache_limiter.clone()));
@@ -2853,11 +3427,19 @@ fn f_session_cache_expire(vm: &mut Vm, args: &[Value]) -> R<Value> {
     }
     let expires = tryarg!(long_arg(vm, fname, args, 0, "value", true));
     if expires.is_some() && ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_WARNING, "Session cache expiration cannot be changed when a session is active");
+        already_started_error(
+            vm,
+            E_WARNING,
+            "Session cache expiration cannot be changed when a session is active",
+        );
         return Ok(Value::Long(ps(|p| p.cache_expire)));
     }
     if expires.is_some() && vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session cache expiration cannot be changed after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cache expiration cannot be changed after headers have already been sent",
+        );
         return Ok(Value::False);
     }
     let ret = Value::Long(ps(|p| p.cache_expire));
@@ -2887,7 +3469,11 @@ fn f_session_decode(vm: &mut Vm, args: &[Value]) -> R<Value> {
     }
     let data = tryarg!(str_arg(vm, fname, args, 0, "data", false, false)).unwrap_or_default();
     if ps(|p| p.status) != Status::Active {
-        err(vm, E_WARNING, "Session data cannot be decoded when there is no active session");
+        err(
+            vm,
+            E_WARNING,
+            "Session data cannot be decoded when there is no active session",
+        );
         return Ok(Value::False);
     }
     Ok(b(session_decode_data(vm, &data)?))
@@ -2908,21 +3494,40 @@ fn f_session_start(vm: &mut Vm, args: &[Value]) -> R<Value> {
         }
     };
     if ps(|p| p.status) == Status::Active {
-        already_started_error(vm, E_NOTICE, "Ignoring session_start() because a session is already active");
+        already_started_error(
+            vm,
+            E_NOTICE,
+            "Ignoring session_start() because a session is already active",
+        );
         return Ok(Value::True);
     }
     if ps(|p| p.use_cookies) && vm.headers_sent {
-        headers_already_sent_error(vm, E_WARNING, "Session cannot be started after headers have already been sent");
+        headers_already_sent_error(
+            vm,
+            E_WARNING,
+            "Session cannot be started after headers have already been sent",
+        );
         return Ok(Value::False);
     }
     let mut read_and_close = false;
     if let Some(opts) = options {
-        let entries: Vec<(ArrayKey, Value)> = opts.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = opts
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (k, v) in entries {
             let key = match k {
                 ArrayKey::String(s) => s.as_bytes().to_vec(),
                 ArrayKey::Int(_) => {
-                    throw(vm, b"ValueError", &format!("{}(): Argument #1 ($options) must be of type array with keys as string", fname));
+                    throw(
+                        vm,
+                        b"ValueError",
+                        &format!(
+                            "{}(): Argument #1 ($options) must be of type array with keys as string",
+                            fname
+                        ),
+                    );
                     return Ok(Value::Null);
                 }
             };
@@ -2931,18 +3536,28 @@ fn f_session_start(vm: &mut Vm, args: &[Value]) -> R<Value> {
                 Value::String(_) | Value::True | Value::False | Value::Long(_) => {
                     if key == b"read_and_close" {
                         let tmp = match &v {
-                            Value::String(sv) => match goro_core::value::parse_numeric_string(sv.as_bytes()) {
-                                Some(f) if f.fract() == 0.0 && !sv.as_bytes().contains(&b'.') => f as i64,
-                                _ => {
-                                    throw(vm, b"TypeError", &format!(
-                                        "{}(): Option \"{}\" value must be of type compatible with int, \"{}\" given",
-                                        fname,
-                                        lossy(&key),
-                                        lossy(sv.as_bytes())
-                                    ));
-                                    return Ok(Value::Null);
+                            Value::String(sv) => {
+                                match goro_core::value::parse_numeric_string(sv.as_bytes()) {
+                                    Some(f)
+                                        if f.fract() == 0.0 && !sv.as_bytes().contains(&b'.') =>
+                                    {
+                                        f as i64
+                                    }
+                                    _ => {
+                                        throw(
+                                            vm,
+                                            b"TypeError",
+                                            &format!(
+                                                "{}(): Option \"{}\" value must be of type compatible with int, \"{}\" given",
+                                                fname,
+                                                lossy(&key),
+                                                lossy(sv.as_bytes())
+                                            ),
+                                        );
+                                        return Ok(Value::Null);
+                                    }
                                 }
-                            },
+                            }
                             other => other.to_long(),
                         };
                         read_and_close = tmp > 0;
@@ -2951,17 +3566,25 @@ fn f_session_start(vm: &mut Vm, args: &[Value]) -> R<Value> {
                         let mut ini = b"session.".to_vec();
                         ini.extend_from_slice(&key);
                         if !alter_ini(vm, &ini, &val) {
-                            err(vm, E_WARNING, &format!("Setting option \"{}\" failed", lossy(&key)));
+                            err(
+                                vm,
+                                E_WARNING,
+                                &format!("Setting option \"{}\" failed", lossy(&key)),
+                            );
                         }
                     }
                 }
                 other => {
-                    throw(vm, b"TypeError", &format!(
-                        "{}(): Option \"{}\" must be of type string|int|bool, {} given",
-                        fname,
-                        lossy(&key),
-                        Vm::value_type_name(other)
-                    ));
+                    throw(
+                        vm,
+                        b"TypeError",
+                        &format!(
+                            "{}(): Option \"{}\" must be of type string|int|bool, {} given",
+                            fname,
+                            lossy(&key),
+                            Vm::value_type_name(other)
+                        ),
+                    );
                     return Ok(Value::Null);
                 }
             }
@@ -3011,7 +3634,11 @@ fn f_session_gc(vm: &mut Vm, args: &[Value]) -> R<Value> {
         return Ok(Value::Null);
     }
     if ps(|p| p.status) != Status::Active {
-        err(vm, E_WARNING, "Session cannot be garbage collected when there is no active session");
+        err(
+            vm,
+            E_WARNING,
+            "Session cannot be garbage collected when there is no active session",
+        );
         return Ok(Value::False);
     }
     let n = session_gc_internal(vm, true)?;
@@ -3088,7 +3715,8 @@ fn f_session_register_shutdown(vm: &mut Vm, args: &[Value]) -> R<Value> {
     if !check_args(vm, fname, args, 0, 0) {
         return Ok(Value::Null);
     }
-    vm.shutdown_functions.push((s(b"session_write_close"), Vec::new()));
+    vm.shutdown_functions
+        .push((s(b"session_write_close"), Vec::new()));
     Ok(Value::Null)
 }
 
@@ -3097,7 +3725,10 @@ fn f_session_register_shutdown(vm: &mut Vm, args: &[Value]) -> R<Value> {
 // ---------------------------------------------------------------------------
 
 fn session_handler_has_method(m: &[u8]) -> bool {
-    matches!(m, b"open" | b"close" | b"read" | b"write" | b"destroy" | b"gc" | b"create_sid")
+    matches!(
+        m,
+        b"open" | b"close" | b"read" | b"write" | b"destroy" | b"gc" | b"create_sid"
+    )
 }
 
 fn sh_has_method(_class: &[u8], method: &[u8], is_static: bool) -> bool {
@@ -3134,11 +3765,28 @@ fn sh_sanity(vm: &mut Vm, is_open: bool) -> Result<Module, Value> {
     Ok(dm)
 }
 
-fn sh_call(vm: &mut Vm, _native: &[u8], method: &[u8], _called: &[u8], _this: Option<&Value>, args: &[Value]) -> Value {
+fn sh_call(
+    vm: &mut Vm,
+    _native: &[u8],
+    method: &[u8],
+    _called: &[u8],
+    _this: Option<&Value>,
+    args: &[Value],
+) -> Value {
     let frame = format!("SessionHandler::{}", lossy(method));
-    let pushed = !vm.call_stack.last().map(|f| f.0.eq_ignore_ascii_case(&frame)).unwrap_or(false);
+    let pushed = !vm
+        .call_stack
+        .last()
+        .map(|f| f.0.eq_ignore_ascii_case(&frame))
+        .unwrap_or(false);
     if pushed {
-        vm.call_stack.push((frame, vm.current_file.clone(), vm.current_line, args.to_vec(), true));
+        vm.call_stack.push((
+            frame,
+            vm.current_file.clone(),
+            vm.current_line,
+            args.to_vec(),
+            true,
+        ));
     }
     let r = sh_call_frame(vm, method, args);
     if pushed {
@@ -3187,8 +3835,10 @@ fn sh_call_inner(vm: &mut Vm, method: &[u8], args: &[Value]) -> R<Value> {
             if !check_args(vm, &fname, args, 2, 2) {
                 return Ok(Value::Null);
             }
-            let path = tryarg!(str_arg(vm, &fname, args, 0, "path", false, false)).unwrap_or_default();
-            let name = tryarg!(str_arg(vm, &fname, args, 1, "name", false, false)).unwrap_or_default();
+            let path =
+                tryarg!(str_arg(vm, &fname, args, 0, "path", false, false)).unwrap_or_default();
+            let name =
+                tryarg!(str_arg(vm, &fname, args, 1, "name", false, false)).unwrap_or_default();
             let dm = sanity!(false);
             let r = match mod_open(vm, dm, &path, &name) {
                 Ok(r) => r,
@@ -3233,7 +3883,8 @@ fn sh_call_inner(vm: &mut Vm, method: &[u8], args: &[Value]) -> R<Value> {
                 return Ok(Value::Null);
             }
             let key = tryarg!(str_arg(vm, &fname, args, 0, "id", false, false)).unwrap_or_default();
-            let val = tryarg!(str_arg(vm, &fname, args, 1, "data", false, false)).unwrap_or_default();
+            let val =
+                tryarg!(str_arg(vm, &fname, args, 1, "data", false, false)).unwrap_or_default();
             let dm = sanity!(true);
             Ok(b(mod_write(vm, dm, &key, &val)?))
         }
@@ -3280,7 +3931,10 @@ fn register_classes(vm: &mut Vm) {
     iface(b"SessionIdInterface");
     iface(b"SessionUpdateTimestampHandlerInterface");
     let mut sh = ClassEntry::new(b"SessionHandler".to_vec());
-    sh.interfaces = vec![b"SessionHandlerInterface".to_vec(), b"SessionIdInterface".to_vec()];
+    sh.interfaces = vec![
+        b"SessionHandlerInterface".to_vec(),
+        b"SessionIdInterface".to_vec(),
+    ];
     vm.classes.insert(b"sessionhandler".to_vec(), sh);
     let h = NativeClassHandler {
         has_method: sh_has_method,
@@ -3291,7 +3945,8 @@ fn register_classes(vm: &mut Vm) {
         prop_read: None,
         param_names: Some(sh_param_names),
     };
-    vm.native_class_handlers.insert(b"sessionhandler".to_vec(), h);
+    vm.native_class_handlers
+        .insert(b"sessionhandler".to_vec(), h);
     let _ = Visibility::Public;
 }
 
@@ -3356,30 +4011,62 @@ pub fn register(vm: &mut Vm) {
         (b"session_save_path", f_session_save_path, &[b"path"]),
         (b"session_id", f_session_id, &[b"id"]),
         (b"session_create_id", f_session_create_id, &[b"prefix"]),
-        (b"session_regenerate_id", f_session_regenerate_id, &[b"delete_old_session"]),
+        (
+            b"session_regenerate_id",
+            f_session_regenerate_id,
+            &[b"delete_old_session"],
+        ),
         (b"session_decode", f_session_decode, &[b"data"]),
         (b"session_encode", f_session_encode, &[]),
         (b"session_destroy", f_session_destroy, &[]),
         (b"session_unset", f_session_unset, &[]),
         (b"session_gc", f_session_gc, &[]),
-        (b"session_get_cookie_params", f_session_get_cookie_params, &[]),
+        (
+            b"session_get_cookie_params",
+            f_session_get_cookie_params,
+            &[],
+        ),
         (b"session_write_close", f_session_write_close, &[]),
         (b"session_abort", f_session_abort, &[]),
         (b"session_reset", f_session_reset, &[]),
         (b"session_status", f_session_status, &[]),
-        (b"session_register_shutdown", f_session_register_shutdown, &[]),
+        (
+            b"session_register_shutdown",
+            f_session_register_shutdown,
+            &[],
+        ),
         (b"session_commit", f_session_commit, &[]),
         (
             b"session_set_save_handler",
             f_session_set_save_handler,
-            &[b"open", b"close", b"read", b"write", b"destroy", b"gc", b"create_sid", b"validate_sid", b"update_timestamp"],
+            &[
+                b"open",
+                b"close",
+                b"read",
+                b"write",
+                b"destroy",
+                b"gc",
+                b"create_sid",
+                b"validate_sid",
+                b"update_timestamp",
+            ],
         ),
-        (b"session_cache_limiter", f_session_cache_limiter, &[b"value"]),
+        (
+            b"session_cache_limiter",
+            f_session_cache_limiter,
+            &[b"value"],
+        ),
         (b"session_cache_expire", f_session_cache_expire, &[b"value"]),
         (
             b"session_set_cookie_params",
             f_session_set_cookie_params,
-            &[b"lifetime_or_options", b"path", b"domain", b"secure", b"httponly"],
+            &[
+                b"lifetime_or_options",
+                b"path",
+                b"domain",
+                b"secure",
+                b"httponly",
+            ],
         ),
         (b"session_start", f_session_start, &[b"options"]),
     ];
@@ -3388,13 +4075,19 @@ pub fn register(vm: &mut Vm) {
     }
     rewrite::register(vm);
 
-    vm.constants.insert(b"PHP_SESSION_DISABLED".to_vec(), Value::Long(0));
-    vm.constants.insert(b"PHP_SESSION_NONE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"PHP_SESSION_ACTIVE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"PHP_SESSION_DISABLED".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"PHP_SESSION_NONE".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"PHP_SESSION_ACTIVE".to_vec(), Value::Long(2));
 
     for (name, default, _) in INI_ENTRIES {
-        vm.constants.entry(name.as_bytes().to_vec()).or_insert_with(|| s(default.as_bytes()));
-        vm.ini_set_hooks.insert(name.as_bytes().to_vec(), ini_set_hook);
+        vm.constants
+            .entry(name.as_bytes().to_vec())
+            .or_insert_with(|| s(default.as_bytes()));
+        vm.ini_set_hooks
+            .insert(name.as_bytes().to_vec(), ini_set_hook);
     }
     register_classes(vm);
     vm.startup_hooks.push(startup);

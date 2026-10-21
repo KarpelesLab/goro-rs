@@ -26,7 +26,11 @@ fn url_decode(s: &[u8]) -> Vec<u8> {
         let c = s[i];
         if c == b'+' {
             out.push(b' ');
-        } else if c == b'%' && i + 2 < s.len() && s[i + 1].is_ascii_hexdigit() && s[i + 2].is_ascii_hexdigit() {
+        } else if c == b'%'
+            && i + 2 < s.len()
+            && s[i + 1].is_ascii_hexdigit()
+            && s[i + 2].is_ascii_hexdigit()
+        {
             let h = |b: u8| -> u8 {
                 match b {
                     b'0'..=b'9' => b - b'0',
@@ -49,7 +53,11 @@ fn numeric_key(s: &[u8]) -> Option<i64> {
     if s.is_empty() || s.len() > 20 {
         return None;
     }
-    let (neg, digits) = if s[0] == b'-' { (true, &s[1..]) } else { (false, s) };
+    let (neg, digits) = if s[0] == b'-' {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
     if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -68,12 +76,17 @@ fn sym_key(s: &[u8]) -> ArrayKey {
 }
 
 fn is_forbidden(mangled: &[u8], pre: &[u8]) -> bool {
-    (mangled.starts_with(b"__Host-") && !pre.starts_with(b"__Host-")) || (mangled.starts_with(b"__Secure-") && !pre.starts_with(b"__Secure-"))
+    (mangled.starts_with(b"__Host-") && !pre.starts_with(b"__Host-"))
+        || (mangled.starts_with(b"__Secure-") && !pre.starts_with(b"__Secure-"))
 }
 
 /// C: `php_register_variable_ex`
 pub fn register_variable(vm: &mut Vm, track: &Rc<RefCell<PhpArray>>, var_name: &[u8], val: Value) {
-    let max_nesting = vm.constants.get(b"max_input_nesting_level".as_ref()).map(|v| v.to_long()).unwrap_or(64);
+    let max_nesting = vm
+        .constants
+        .get(b"max_input_nesting_level".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(64);
     // C string semantics: stop at the first NUL
     let var_name = match var_name.iter().position(|&c| c == 0) {
         Some(p) => &var_name[..p],
@@ -203,7 +216,13 @@ pub fn register_variable(vm: &mut Vm, track: &Rc<RefCell<PhpArray>>, var_name: &
     }
 }
 
-fn plain_var(symtable: &Rc<RefCell<PhpArray>>, var: &[u8], index: Option<(usize, usize)>, orig: &[u8], val: Value) {
+fn plain_var(
+    symtable: &Rc<RefCell<PhpArray>>,
+    var: &[u8],
+    index: Option<(usize, usize)>,
+    orig: &[u8],
+    val: Value,
+) {
     match index {
         None => symtable.borrow_mut().push(val),
         Some((s, l)) => {
@@ -218,7 +237,9 @@ fn plain_var(symtable: &Rc<RefCell<PhpArray>>, var: &[u8], index: Option<(usize,
 
 /// php_strtok_r: split on any separator byte, skipping empty tokens
 fn strtok<'a>(s: &'a [u8], seps: &[u8]) -> Vec<&'a [u8]> {
-    s.split(|c| seps.contains(c)).filter(|t| !t.is_empty()).collect()
+    s.split(|c| seps.contains(c))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// C: `_php_mb_encoding_handler_ex`. Returns the detected encoding.
@@ -252,7 +273,11 @@ pub fn encoding_handler(
             }
         }
     }
-    let max_input_vars = vm.constants.get(b"max_input_vars".as_ref()).map(|v| v.to_long()).unwrap_or(1000);
+    let max_input_vars = vm
+        .constants
+        .get(b"max_input_vars".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(1000);
     if list.len() as i64 > max_input_vars.saturating_mul(2) {
         vm.emit_warning(&format!(
             "mb_parse_str(): Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
@@ -281,7 +306,10 @@ pub fn encoding_handler(
     let mut n = 0;
     while n < list.len() {
         let (var, val) = if from.no != EncNo::Pass && to.no != EncNo::Pass {
-            (convert_ex(&list[n], to, from), convert_ex(&list[n + 1], to, from))
+            (
+                convert_ex(&list[n], to, from),
+                convert_ex(&list[n + 1], to, from),
+            )
         } else {
             (list[n].clone(), list[n + 1].clone())
         };

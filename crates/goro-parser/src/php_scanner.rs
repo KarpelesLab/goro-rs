@@ -277,7 +277,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn starts_ci(&self, i: usize, lit: &[u8]) -> bool {
-        lit.iter().enumerate().all(|(k, &c)| self.at(i + k).eq_ignore_ascii_case(&c))
+        lit.iter()
+            .enumerate()
+            .all(|(k, &c)| self.at(i + k).eq_ignore_ascii_case(&c))
     }
 
     fn starts(&self, i: usize, lit: &[u8]) -> bool {
@@ -312,7 +314,8 @@ impl<'a> Scanner<'a> {
         if self.line_pos < start {
             let seg = &self.s[self.line_pos..start];
             for (k, &c) in seg.iter().enumerate() {
-                if c == b'\r' && seg.get(k + 1).copied().unwrap_or_else(|| self.at(start)) != b'\n' {
+                if c == b'\r' && seg.get(k + 1).copied().unwrap_or_else(|| self.at(start)) != b'\n'
+                {
                     line += 1;
                 }
             }
@@ -320,7 +323,12 @@ impl<'a> Scanner<'a> {
         self.line = line;
         self.line_pos = start;
         self.pos = end;
-        Some(ScanToken { id, start, end, line })
+        Some(ScanToken {
+            id,
+            start,
+            end,
+            line,
+        })
     }
 
     /// {WHITESPACE_OR_COMMENTS}* starting at `i`; returns the end position.
@@ -431,10 +439,22 @@ impl<'a> Scanner<'a> {
                 }
             }
         };
-        consider(self.prefixed_num(i, b'b', |c| c == b'0' || c == b'1'), b'b', &mut best);
-        consider(self.prefixed_num(i, b'o', |c| (b'0'..=b'7').contains(&c)), b'o', &mut best);
+        consider(
+            self.prefixed_num(i, b'b', |c| c == b'0' || c == b'1'),
+            b'b',
+            &mut best,
+        );
+        consider(
+            self.prefixed_num(i, b'o', |c| (b'0'..=b'7').contains(&c)),
+            b'o',
+            &mut best,
+        );
         consider(self.lnum(i), b'l', &mut best);
-        consider(self.prefixed_num(i, b'x', |c| c.is_ascii_hexdigit()), b'h', &mut best);
+        consider(
+            self.prefixed_num(i, b'x', |c| c.is_ascii_hexdigit()),
+            b'h',
+            &mut best,
+        );
         let dn = self.dnum_ends(i);
         for &e in &dn {
             consider(Some(e), b'd', &mut best);
@@ -454,7 +474,11 @@ impl<'a> Scanner<'a> {
             }
         }
         let (end, kind) = best?;
-        let text: Vec<u8> = self.s[i..end].iter().copied().filter(|&c| c != b'_').collect();
+        let text: Vec<u8> = self.s[i..end]
+            .iter()
+            .copied()
+            .filter(|&c| c != b'_')
+            .collect();
         let overflow = |digits: &[u8], radix: u32| -> bool {
             let mut v: u128 = 0;
             for &c in digits {
@@ -465,13 +489,38 @@ impl<'a> Scanner<'a> {
         };
         let id = match kind {
             b'd' => T_DNUMBER,
-            b'h' => if overflow(&text[2..], 16) { T_DNUMBER } else { T_LNUMBER },
-            b'b' => if overflow(&text[2..], 2) { T_DNUMBER } else { T_LNUMBER },
-            b'o' => if overflow(&text[2..], 8) { T_DNUMBER } else { T_LNUMBER },
+            b'h' => {
+                if overflow(&text[2..], 16) {
+                    T_DNUMBER
+                } else {
+                    T_LNUMBER
+                }
+            }
+            b'b' => {
+                if overflow(&text[2..], 2) {
+                    T_DNUMBER
+                } else {
+                    T_LNUMBER
+                }
+            }
+            b'o' => {
+                if overflow(&text[2..], 8) {
+                    T_DNUMBER
+                } else {
+                    T_LNUMBER
+                }
+            }
             _ => {
                 if text[0] == b'0' {
-                    let cut = text.iter().position(|&c| c == b'8' || c == b'9').unwrap_or(text.len());
-                    if overflow(&text[..cut], 8) { T_DNUMBER } else { T_LNUMBER }
+                    let cut = text
+                        .iter()
+                        .position(|&c| c == b'8' || c == b'9')
+                        .unwrap_or(text.len());
+                    if overflow(&text[..cut], 8) {
+                        T_DNUMBER
+                    } else {
+                        T_LNUMBER
+                    }
                 } else if overflow(&text, 10) {
                     T_DNUMBER
                 } else {
@@ -621,9 +670,16 @@ impl<'a> Scanner<'a> {
             _ => return None,
         };
         let label = self.s[lstart..lend].to_vec();
-        self.state = if quote == b'\'' { St::Nowdoc } else { St::Heredoc };
+        self.state = if quote == b'\'' {
+            St::Nowdoc
+        } else {
+            St::Heredoc
+        };
         let len = label.len();
-        self.heredocs.push(HeredocLabel { label, indentation: 0 });
+        self.heredocs.push(HeredocLabel {
+            label,
+            indentation: 0,
+        });
         let mut cur = end;
         let mut indentation = 0;
         while cur < n && matches!(self.s[cur], b' ' | b'\t') {
@@ -633,7 +689,10 @@ impl<'a> Scanner<'a> {
         if cur == n {
             return Some(self.tok(T_START_HEREDOC, p, end));
         }
-        if len < n - cur && self.s[cur..cur + len] == self.s[lstart..lend] && !is_label_char(self.at(cur + len)) {
+        if len < n - cur
+            && self.s[cur..cur + len] == self.s[lstart..lend]
+            && !is_label_char(self.at(cur + len))
+        {
             if let Some(h) = self.heredocs.last_mut() {
                 h.indentation = indentation;
             }
@@ -938,7 +997,11 @@ impl<'a> Scanner<'a> {
         match word.as_slice() {
             b"yield" => {
                 let w = self.skip_ws_comments(e);
-                if w > e && self.starts_ci(w, b"from") && !is_label_char(self.at(w + 4)) && w + 4 <= n {
+                if w > e
+                    && self.starts_ci(w, b"from")
+                    && !is_label_char(self.at(w + 4))
+                    && w + 4 <= n
+                {
                     return self.tok(T_YIELD_FROM, p, w + 4);
                 }
                 return self.tok(T_YIELD, p, e);
@@ -975,7 +1038,7 @@ impl<'a> Scanner<'a> {
         if p >= n {
             return None;
         }
-        
+
         let cursor = if self.starts(p, b"<?=") {
             self.state = St::InScripting;
             return self.tok(T_OPEN_TAG_WITH_ECHO, p, p + 3);
@@ -1022,7 +1085,8 @@ impl<'a> Scanner<'a> {
                     || self.at(cur + 1) == b'='
                     || (self.starts_ci(cur + 1, b"php")
                         && cur + 4 <= n
-                        && (cur + 4 == n || matches!(self.at(cur + 4), b' ' | b'\t' | b'\n' | b'\r')))
+                        && (cur + 4 == n
+                            || matches!(self.at(cur + 4), b' ' | b'\t' | b'\n' | b'\r')))
                 {
                     cur -= 1;
                     break;
@@ -1184,7 +1248,10 @@ impl<'a> Scanner<'a> {
                     if cur == n {
                         return self.tok(T_ENCAPSED_AND_WHITESPACE, p, n);
                     }
-                    if is_label_start(self.s[cur]) && len < n - cur && self.s[cur..cur + len] == label[..] {
+                    if is_label_start(self.s[cur])
+                        && len < n - cur
+                        && self.s[cur..cur + len] == label[..]
+                    {
                         if is_label_char(self.at(cur + len)) {
                             continue;
                         }
@@ -1427,13 +1494,18 @@ mod tests {
     #[test]
     #[ignore]
     fn dump() {
-        let Ok(path) = std::env::var("SCAN_DUMP") else { return };
+        let Ok(path) = std::env::var("SCAN_DUMP") else {
+            return;
+        };
         let data = std::fs::read(path).unwrap();
         let mut out = String::new();
         for case in data.split(|&c| c == 1) {
             out.push_str("===\n");
             for t in scan_all(case, false, false) {
-                let text: String = case[t.start..t.end].iter().map(|b| format!("{:02x}", b)).collect();
+                let text: String = case[t.start..t.end]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
                 if t.id < 256 {
                     out.push_str(&format!("C {}\n", text));
                 } else {

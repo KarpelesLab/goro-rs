@@ -23,15 +23,35 @@ fn is_base64_end(c: u8) -> bool {
     c >= DASH
 }
 
-static BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-static BASE64_TABLE_IMAP: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+static BASE64_TABLE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static BASE64_TABLE_IMAP: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
 
 /* ===== UTF-7 ===== */
 
 fn is_optional_direct(c: u8) -> bool {
     matches!(
         c,
-        b'!' | b'"' | b'#' | b'$' | b'%' | b'&' | b'*' | b';' | b'<' | b'=' | b'>' | b'@' | b'[' | b']' | b'^' | b'_' | b'`' | b'{' | b'|' | b'}'
+        b'!' | b'"'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b';'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'@'
+            | b'['
+            | b']'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'{'
+            | b'|'
+            | b'}'
     )
 }
 
@@ -91,7 +111,14 @@ fn handle_utf16_cp_utf7(cp: u16, out: &mut Vec<u32>, surrogate1: &mut u16) {
     }
 }
 
-fn handle_base64_end_utf7(n: u8, p: &mut usize, out: &mut Vec<u32>, base64: &mut bool, abrupt: bool, surrogate1: &mut u16) {
+fn handle_base64_end_utf7(
+    n: u8,
+    p: &mut usize,
+    out: &mut Vec<u32>,
+    base64: &mut bool,
+    abrupt: bool,
+    surrogate1: &mut u16,
+) {
     if abrupt || *surrogate1 != 0 {
         out.push(MBFL_BAD_INPUT);
         *surrogate1 = 0;
@@ -150,7 +177,14 @@ fn mb_utf7_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
 
             let n4 = next!();
             if is_base64_end(n4) {
-                handle_base64_end_utf7(n4, &mut p, out, &mut base64, (n3 & 0x3) != 0, &mut surrogate1);
+                handle_base64_end_utf7(
+                    n4,
+                    &mut p,
+                    out,
+                    &mut base64,
+                    (n3 & 0x3) != 0,
+                    &mut surrogate1,
+                );
                 continue;
             } else if p == e {
                 handle_base64_end_utf7(n4, &mut p, out, &mut base64, true, &mut surrogate1);
@@ -166,7 +200,10 @@ fn mb_utf7_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
                 handle_base64_end_utf7(n6, &mut p, out, &mut base64, true, &mut surrogate1);
                 continue;
             }
-            let cp = ((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4);
+            let cp = ((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4);
             handle_utf16_cp_utf7(cp as u16, out, &mut surrogate1);
             if p == e {
                 if (n6 & 0xF) != 0 || surrogate1 != 0 {
@@ -178,7 +215,14 @@ fn mb_utf7_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
 
             let n7 = next!();
             if is_base64_end(n7) {
-                handle_base64_end_utf7(n7, &mut p, out, &mut base64, (n6 & 0xF) != 0, &mut surrogate1);
+                handle_base64_end_utf7(
+                    n7,
+                    &mut p,
+                    out,
+                    &mut base64,
+                    (n6 & 0xF) != 0,
+                    &mut surrogate1,
+                );
                 continue;
             } else if p == e {
                 handle_base64_end_utf7(n7, &mut p, out, &mut base64, true, &mut surrogate1);
@@ -234,7 +278,10 @@ fn encode_b64_cp(mut w: u32, nbits: &mut u8, cache: &mut u8, buf: &mut ConvBuf, 
     let bits: u64;
     if w >= MBFL_WCSPLANE_SUPMIN {
         w -= 0x10000;
-        bits = ((*cache as u64) << 32) | 0xD800DC00u64 | (((w & 0xFFC00) as u64) << 6) | (w & 0x3FF) as u64;
+        bits = ((*cache as u64) << 32)
+            | 0xD800DC00u64
+            | (((w & 0xFFC00) as u64) << 6)
+            | (w & 0x3FF) as u64;
         *nbits += 32;
     } else {
         bits = ((*cache as u64) << 16) | w as u64;
@@ -377,7 +424,10 @@ fn mb_check_utf7(input: &[u8]) -> bool {
             if is_base64_end(n6) {
                 return false;
             }
-            let cp2 = (((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4)) as u16;
+            let cp2 = (((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4)) as u16;
             if !is_utf16_cp_valid_utf7(cp2, is_surrogate) {
                 return false;
             }
@@ -481,7 +531,13 @@ fn handle_utf16_cp_imap(cp: u16, out: &mut Vec<u32>, surrogate1: &mut u16) {
     }
 }
 
-fn handle_base64_end_imap(n: u8, out: &mut Vec<u32>, base64: &mut bool, abrupt: bool, surrogate1: &mut u16) {
+fn handle_base64_end_imap(
+    n: u8,
+    out: &mut Vec<u32>,
+    base64: &mut bool,
+    abrupt: bool,
+    surrogate1: &mut u16,
+) {
     if abrupt || n == ILLEGAL || *surrogate1 != 0 {
         out.push(MBFL_BAD_INPUT);
         *surrogate1 = 0;
@@ -550,7 +606,10 @@ fn mb_utf7imap_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) {
                 handle_base64_end_imap(n6, out, &mut base64, true, &mut surrogate1);
                 continue;
             }
-            let cp = ((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4);
+            let cp = ((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4);
             handle_utf16_cp_imap(cp as u16, out, &mut surrogate1);
             if p == e {
                 if (n6 & 0xF) != 0 || surrogate1 != 0 {
@@ -728,7 +787,10 @@ fn mb_check_utf7imap(input: &[u8]) -> bool {
             if is_base64_end(n6) {
                 return false;
             }
-            let cp2 = (((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4)) as u16;
+            let cp2 = (((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4)) as u16;
             if !is_utf16_cp_valid_imap(cp2, is_surrogate) {
                 return false;
             }

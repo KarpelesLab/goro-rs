@@ -1,8 +1,8 @@
-use std::rc::Rc;
-use std::collections::HashSet;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
+use std::collections::HashSet;
+use std::rc::Rc;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"var_dump", var_dump);
@@ -64,18 +64,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let t = goro_core::value::resource_type_of(*id)
                     .map(|v| String::from_utf8_lossy(&v).to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
-                vm.write_output(
-                    format!("{}resource({}) of type ({})\n", prefix, id, t).as_bytes(),
-                );
+                vm.write_output(format!("{}resource({}) of type ({})\n", prefix, id, t).as_bytes());
             } else if goro_core::value::is_registered_resource(*id) {
                 // Closed resource: PHP shows "resource(N) of type (Unknown)"
                 vm.write_output(
                     format!("{}resource({}) of type (Unknown)\n", prefix, id).as_bytes(),
                 );
             } else {
-                vm.write_output(
-                    format!("{}resource(Unknown)\n", prefix).as_bytes(),
-                );
+                vm.write_output(format!("{}resource(Unknown)\n", prefix).as_bytes());
             }
         }
         Value::Double(f) => {
@@ -86,17 +82,23 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             } else {
                 goro_core::value::format_php_float_with_precision_pub(*f, sp as usize)
             };
-            vm.write_output(
-                format!("{}float({})\n", prefix, formatted).as_bytes(),
-            );
+            vm.write_output(format!("{}float({})\n", prefix, formatted).as_bytes());
         }
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+                || b.starts_with(b"__closure_fcc_")
+            {
                 // Closures should be displayed as Closure objects
                 // Look up the closure function to get name, file, line info
                 let closure_name_str = s.to_string_lossy();
-                let fn_lower = closure_name_str.as_bytes().iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<u8>>();
+                let fn_lower = closure_name_str
+                    .as_bytes()
+                    .iter()
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect::<Vec<u8>>();
 
                 // Collect closure info before writing output
                 struct ClosureDisplayInfo {
@@ -108,7 +110,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 }
 
                 // Check if this is an FCC (first-class callable) with a known target
-                let fcc_target = vm.user_functions.get(&fn_lower)
+                let fcc_target = vm
+                    .user_functions
+                    .get(&fn_lower)
                     .and_then(|op| op.fcc_target_name.clone());
 
                 if let Some(target_name) = fcc_target {
@@ -116,100 +120,167 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let target_display = String::from_utf8_lossy(&target_name).to_string();
 
                     // Look up the target function's parameters
-                    let target_lower: Vec<u8> = target_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let target_params: Vec<(String, bool)> = if let Some(target_op) = vm.user_functions.get(&target_lower) {
+                    let target_lower: Vec<u8> =
+                        target_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let target_params: Vec<(String, bool)> = if let Some(target_op) =
+                        vm.user_functions.get(&target_lower)
+                    {
                         let param_count = target_op.param_count as usize;
                         let mut params = Vec::new();
                         for i in 0..param_count {
                             if let Some(cv_name) = target_op.cv_names.get(i) {
                                 let pname = format!("${}", String::from_utf8_lossy(cv_name));
-                                let has_default = target_op.param_has_default.get(i).copied().unwrap_or(false);
+                                let has_default =
+                                    target_op.param_has_default.get(i).copied().unwrap_or(false);
                                 params.push((pname, has_default));
                             }
                         }
                         params
                     } else if let Some(param_names) = vm.builtin_param_names.get(&target_lower) {
                         // Built-in function: get parameter names from registered info
-                        param_names.iter().map(|name| {
-                            let pname = format!("${}", String::from_utf8_lossy(name));
-                            (pname, false) // We don't track defaults for builtins in detail
-                        }).collect()
+                        param_names
+                            .iter()
+                            .map(|name| {
+                                let pname = format!("${}", String::from_utf8_lossy(name));
+                                (pname, false) // We don't track defaults for builtins in detail
+                            })
+                            .collect()
                     } else {
                         Vec::new()
                     };
 
                     let has_params = !target_params.is_empty();
                     let prop_count = 1 + if has_params { 1 } else { 0 }; // function[, parameter]
-                    vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
+                    vm.write_output(
+                        format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes(),
+                    );
                     vm.write_output(format!("{}  [\"function\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, target_display.len(), target_display).as_bytes());
+                    vm.write_output(
+                        format!(
+                            "{}  string({}) \"{}\"\n",
+                            prefix,
+                            target_display.len(),
+                            target_display
+                        )
+                        .as_bytes(),
+                    );
                     if has_params {
                         vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
-                        vm.write_output(format!("{}  array({}) {{\n", prefix, target_params.len()).as_bytes());
+                        vm.write_output(
+                            format!("{}  array({}) {{\n", prefix, target_params.len()).as_bytes(),
+                        );
                         for (pname, has_default) in &target_params {
-                            let label = if *has_default { "<optional>" } else { "<required>" };
-                            vm.write_output(format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes());
-                            vm.write_output(format!("{}    string({}) \"{}\"\n", prefix, label.len(), label).as_bytes());
-                        }
-                        vm.write_output(format!("{}  }}\n", prefix).as_bytes());
-                    }
-                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
-                } else {
-                let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
-                    let file = String::from_utf8_lossy(&op.filename).to_string();
-                    let line = op.decl_line;
-                    let name = if op.name.starts_with(b"__closure_fcc_") {
-                        "{closure}".to_string()
-                    } else if !op.display_name.is_empty() {
-                        String::from_utf8_lossy(&op.display_name).to_string()
-                    } else {
-                        format!("{{closure:{}:{}}}", file, line)
-                    };
-                    let param_count = op.param_count as usize;
-                    let mut params = Vec::new();
-                    for i in 0..param_count {
-                        if let Some(cv_name) = op.cv_names.get(i) {
-                            let pname = format!("${}", String::from_utf8_lossy(cv_name));
-                            let has_default = op.param_has_default.get(i).copied().unwrap_or(false);
-                            params.push((pname, has_default));
-                        }
-                    }
-                    let is_variadic_last = op.variadic_param.is_some();
-                    ClosureDisplayInfo { name, file, line, params, is_variadic_last }
-                });
-                if let Some(info) = closure_info {
-                    let has_params = !info.params.is_empty();
-                    let prop_count = 3 + if has_params { 1 } else { 0 }; // name, file, line[, parameter]
-                    vm.write_output(format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes());
-                    vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, info.name.len(), info.name).as_bytes());
-                    vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  string({}) \"{}\"\n", prefix, info.file.len(), info.file).as_bytes());
-                    vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
-                    vm.write_output(format!("{}  int({})\n", prefix, info.line).as_bytes());
-                    if has_params {
-                        vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
-                        vm.write_output(format!("{}  array({}) {{\n", prefix, info.params.len()).as_bytes());
-                        for (i, (pname, has_default)) in info.params.iter().enumerate() {
-                            let is_variadic = info.is_variadic_last && i == info.params.len() - 1;
-                            let label = if is_variadic {
-                                "<optional>"
-                            } else if *has_default {
+                            let label = if *has_default {
                                 "<optional>"
                             } else {
                                 "<required>"
                             };
-                            vm.write_output(format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes());
-                            vm.write_output(format!("{}    string({}) \"{}\"\n", prefix, label.len(), label).as_bytes());
+                            vm.write_output(
+                                format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes(),
+                            );
+                            vm.write_output(
+                                format!("{}    string({}) \"{}\"\n", prefix, label.len(), label)
+                                    .as_bytes(),
+                            );
                         }
                         vm.write_output(format!("{}  }}\n", prefix).as_bytes());
                     }
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 } else {
-                    vm.write_output(
-                        format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix).as_bytes(),
-                    );
-                }
+                    let closure_info = vm.user_functions.get(&fn_lower).map(|op| {
+                        let file = String::from_utf8_lossy(&op.filename).to_string();
+                        let line = op.decl_line;
+                        let name = if op.name.starts_with(b"__closure_fcc_") {
+                            "{closure}".to_string()
+                        } else if !op.display_name.is_empty() {
+                            String::from_utf8_lossy(&op.display_name).to_string()
+                        } else {
+                            format!("{{closure:{}:{}}}", file, line)
+                        };
+                        let param_count = op.param_count as usize;
+                        let mut params = Vec::new();
+                        for i in 0..param_count {
+                            if let Some(cv_name) = op.cv_names.get(i) {
+                                let pname = format!("${}", String::from_utf8_lossy(cv_name));
+                                let has_default =
+                                    op.param_has_default.get(i).copied().unwrap_or(false);
+                                params.push((pname, has_default));
+                            }
+                        }
+                        let is_variadic_last = op.variadic_param.is_some();
+                        ClosureDisplayInfo {
+                            name,
+                            file,
+                            line,
+                            params,
+                            is_variadic_last,
+                        }
+                    });
+                    if let Some(info) = closure_info {
+                        let has_params = !info.params.is_empty();
+                        let prop_count = 3 + if has_params { 1 } else { 0 }; // name, file, line[, parameter]
+                        vm.write_output(
+                            format!("{}object(Closure)#1 ({}) {{\n", prefix, prop_count).as_bytes(),
+                        );
+                        vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
+                        vm.write_output(
+                            format!(
+                                "{}  string({}) \"{}\"\n",
+                                prefix,
+                                info.name.len(),
+                                info.name
+                            )
+                            .as_bytes(),
+                        );
+                        vm.write_output(format!("{}  [\"file\"]=>\n", prefix).as_bytes());
+                        vm.write_output(
+                            format!(
+                                "{}  string({}) \"{}\"\n",
+                                prefix,
+                                info.file.len(),
+                                info.file
+                            )
+                            .as_bytes(),
+                        );
+                        vm.write_output(format!("{}  [\"line\"]=>\n", prefix).as_bytes());
+                        vm.write_output(format!("{}  int({})\n", prefix, info.line).as_bytes());
+                        if has_params {
+                            vm.write_output(format!("{}  [\"parameter\"]=>\n", prefix).as_bytes());
+                            vm.write_output(
+                                format!("{}  array({}) {{\n", prefix, info.params.len()).as_bytes(),
+                            );
+                            for (i, (pname, has_default)) in info.params.iter().enumerate() {
+                                let is_variadic =
+                                    info.is_variadic_last && i == info.params.len() - 1;
+                                let label = if is_variadic {
+                                    "<optional>"
+                                } else if *has_default {
+                                    "<optional>"
+                                } else {
+                                    "<required>"
+                                };
+                                vm.write_output(
+                                    format!("{}    [\"{}\"]=>\n", prefix, pname).as_bytes(),
+                                );
+                                vm.write_output(
+                                    format!(
+                                        "{}    string({}) \"{}\"\n",
+                                        prefix,
+                                        label.len(),
+                                        label
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                            vm.write_output(format!("{}  }}\n", prefix).as_bytes());
+                        }
+                        vm.write_output(format!("{}}}\n", prefix).as_bytes());
+                    } else {
+                        vm.write_output(
+                            format!("{}object(Closure)#1 (0) {{\n{}}}\n", prefix, prefix)
+                                .as_bytes(),
+                        );
+                    }
                 }
             } else {
                 vm.write_output(format!("{}string({}) \"", prefix, s.len()).as_bytes());
@@ -248,7 +319,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let class_name = goro_core::value::display_class_name(&obj_borrow.class_name);
                 let case_name = obj_borrow.get_property(b"name");
                 let case_name_str = case_name.to_php_string().to_string_lossy();
-                vm.write_output(format!("{}enum({}::{})\n", prefix, class_name, case_name_str).as_bytes());
+                vm.write_output(
+                    format!("{}enum({}::{})\n", prefix, class_name, case_name_str).as_bytes(),
+                );
                 return;
             }
             // An object already being dumped prints just *RECURSION*.
@@ -279,7 +352,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 } else {
                     None
                 };
-                vm.write_output(format!("{}object(WeakReference)#{} (1) {{\n", prefix, oid).as_bytes());
+                vm.write_output(
+                    format!("{}object(WeakReference)#{} (1) {{\n", prefix, oid).as_bytes(),
+                );
                 if !seen.insert(oid) {
                     vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
@@ -300,17 +375,22 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             if class_lower == b"weakmap" {
                 drop(obj_borrow);
                 // Get live entries from weak_map_entries
-                let entries: Vec<(Value, Value)> = if let Some(wm_entries) = vm.weak_map_entries.get(&oid) {
-                    wm_entries.iter()
-                        .filter_map(|(_, weak, val)| {
-                            weak.upgrade().map(|strong| (Value::Object(strong), val.clone()))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let entries: Vec<(Value, Value)> =
+                    if let Some(wm_entries) = vm.weak_map_entries.get(&oid) {
+                        wm_entries
+                            .iter()
+                            .filter_map(|(_, weak, val)| {
+                                weak.upgrade()
+                                    .map(|strong| (Value::Object(strong), val.clone()))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 let count = entries.len();
-                vm.write_output(format!("{}object(WeakMap)#{} ({}) {{\n", prefix, oid, count).as_bytes());
+                vm.write_output(
+                    format!("{}object(WeakMap)#{} ({}) {{\n", prefix, oid, count).as_bytes(),
+                );
                 if !seen.insert(oid) {
                     vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
@@ -334,7 +414,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // takes precedence over the storage view: PHP calls the override.
             let has_user_debug_info = {
                 let class_entry = vm.classes.get(&class_lower).cloned();
-                class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
+                class_entry
+                    .as_ref()
+                    .and_then(|c| c.get_method(b"__debuginfo"))
+                    .is_some()
             };
             if has_user_debug_info {
                 // Release our borrow: __debugInfo() may modify the object
@@ -358,14 +441,21 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let class_name_owned = class_name.to_string();
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}{}object({})#{} ({}) {{\n", prefix, udbg_lazy_prefix, class_name_owned, oid, count).as_bytes(),
+                        format!(
+                            "{}{}object({})#{} ({}) {{\n",
+                            prefix, udbg_lazy_prefix, class_name_owned, oid, count
+                        )
+                        .as_bytes(),
                     );
                     if !seen.insert(oid) {
                         vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
                         vm.write_output(format!("{}}}\n", prefix).as_bytes());
                         return;
                     }
-                    let items: Vec<_> = arr_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let items: Vec<_> = arr_borrow
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
                     drop(arr_borrow);
                     for (key, value) in &items {
                         match key {
@@ -373,7 +463,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                                 vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
                             }
                             goro_core::array::ArrayKey::String(s) => {
-                                vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
+                                vm.write_output(
+                                    &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"]
+                                        .concat(),
+                                );
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
@@ -394,10 +487,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 return;
             }
             // Check if this is an SPL class with __spl_array - display array contents instead
-            let is_spl_array_class = matches!(
-                class_lower.as_slice(),
-                b"splfixedarray"
-            );
+            let is_spl_array_class = matches!(class_lower.as_slice(), b"splfixedarray");
             // SplDoublyLinkedList/SplStack/SplQueue have special var_dump format
             let is_spl_dll_class = matches!(
                 class_lower.as_slice(),
@@ -442,7 +532,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 vm.write_output(
                     format!("{}object({})#{} (1) {{\n", prefix, class_name_owned, oid).as_bytes(),
                 );
-                vm.write_output(format!("{}  [\"storage\":\"SplObjectStorage\":private]=>\n", prefix).as_bytes());
+                vm.write_output(
+                    format!("{}  [\"storage\":\"SplObjectStorage\":private]=>\n", prefix)
+                        .as_bytes(),
+                );
                 // Build the storage array view: [0 => {"obj" => X, "inf" => Y}, ...]
                 let mut storage_view = goro_core::array::PhpArray::new();
                 if let (Value::Array(objs), Value::Array(infos)) = (&objs_val, &infos_val) {
@@ -451,11 +544,15 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     for (idx, ((_, o), (_, inf))) in ob.iter().zip(inb.iter()).enumerate() {
                         let mut entry = goro_core::array::PhpArray::new();
                         entry.set(
-                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"obj")),
+                            goro_core::array::ArrayKey::String(
+                                goro_core::string::PhpString::from_bytes(b"obj"),
+                            ),
                             o.clone(),
                         );
                         entry.set(
-                            goro_core::array::ArrayKey::String(goro_core::string::PhpString::from_bytes(b"inf")),
+                            goro_core::array::ArrayKey::String(
+                                goro_core::string::PhpString::from_bytes(b"inf"),
+                            ),
                             inf.clone(),
                         );
                         storage_view.set(
@@ -464,7 +561,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         );
                     }
                 }
-                let view_val = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(storage_view)));
+                let view_val =
+                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(storage_view)));
                 var_dump_value(vm, &view_val, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
@@ -547,8 +645,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let _std_prop_list = (flags_val & 1) != 0;
                 let class_name_owned = class_name.to_string();
                 // Count visible properties (non-internal)
-                let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
+                let extra_props: Vec<_> = obj_borrow
+                    .properties
+                    .iter()
+                    .filter(|(name, val)| {
+                        !is_internal_property(name) && !matches!(val, Value::Undef)
+                    })
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 let prop_count = 1 + extra_props.len(); // storage + any extra properties
@@ -574,10 +676,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // Show private storage property — declaring class is the
                 // closest built-in ArrayObject/ArrayIterator ancestor, not
                 // the actual subclass.
-                let storage_decl = String::from_utf8_lossy(
-                    array_object_class_lower.unwrap_or(b"ArrayObject"),
-                ).to_string();
-                vm.write_output(format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, storage_decl).as_bytes());
+                let storage_decl =
+                    String::from_utf8_lossy(array_object_class_lower.unwrap_or(b"ArrayObject"))
+                        .to_string();
+                vm.write_output(
+                    format!("{}  [\"storage\":\"{}\":private]=>\n", prefix, storage_decl)
+                        .as_bytes(),
+                );
                 var_dump_value(vm, &spl_arr, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
@@ -588,7 +693,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // SplDoublyLinkedList/SplStack/SplQueue: show flags and dllist private properties
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
-                let flags_val = if let Value::Long(f) = iter_mode { f } else {
+                let flags_val = if let Value::Long(f) = iter_mode {
+                    f
+                } else {
                     match class_lower.as_slice() {
                         b"splstack" => 6,
                         b"splqueue" => 4,
@@ -598,20 +705,28 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let class_name_owned = class_name.to_string();
                 drop(obj_borrow);
                 vm.write_output(
-                    format!(
-                        "{}object({})#{} (2) {{\n",
-                        prefix, class_name_owned, oid
-                    )
-                    .as_bytes(),
+                    format!("{}object({})#{} (2) {{\n", prefix, class_name_owned, oid).as_bytes(),
                 );
                 if !seen.insert(oid) {
                     vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                     return;
                 }
-                vm.write_output(format!("{}  [\"flags\":\"SplDoublyLinkedList\":private]=>\n", prefix).as_bytes());
+                vm.write_output(
+                    format!(
+                        "{}  [\"flags\":\"SplDoublyLinkedList\":private]=>\n",
+                        prefix
+                    )
+                    .as_bytes(),
+                );
                 var_dump_value(vm, &Value::Long(flags_val), indent + 2, seen);
-                vm.write_output(format!("{}  [\"dllist\":\"SplDoublyLinkedList\":private]=>\n", prefix).as_bytes());
+                vm.write_output(
+                    format!(
+                        "{}  [\"dllist\":\"SplDoublyLinkedList\":private]=>\n",
+                        prefix
+                    )
+                    .as_bytes(),
+                );
                 var_dump_value(vm, &spl_arr, indent + 2, seen);
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
@@ -645,7 +760,8 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                             }
                             goro_core::array::ArrayKey::String(s) => {
                                 vm.write_output(
-                                    &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat(),
+                                    &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"]
+                                        .concat(),
                                 );
                             }
                         }
@@ -660,18 +776,26 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // Check if class has __debugInfo method (user-defined or SPL built-in)
             let has_debug_info = {
                 let class_entry = vm.classes.get(&class_lower).cloned();
-                class_entry.as_ref().and_then(|c| c.get_method(b"__debuginfo")).is_some()
+                class_entry
+                    .as_ref()
+                    .and_then(|c| c.get_method(b"__debuginfo"))
+                    .is_some()
             };
             // Also check SPL built-in __debugInfo
-            let is_spl_debug = !has_debug_info && matches!(
-                class_lower.as_slice(),
-                b"splfileinfo" | b"splfileobject" | b"spltempfileobject"
-                    | b"directoryiterator" | b"filesystemiterator"
-                    | b"recursivedirectoryiterator" | b"globiterator"
-                    | b"random\\engine\\mt19937"
-                    | b"random\\engine\\xoshiro256starstar"
-                    | b"random\\engine\\pcgoneseq128xslrr64"
-            );
+            let is_spl_debug = !has_debug_info
+                && matches!(
+                    class_lower.as_slice(),
+                    b"splfileinfo"
+                        | b"splfileobject"
+                        | b"spltempfileobject"
+                        | b"directoryiterator"
+                        | b"filesystemiterator"
+                        | b"recursivedirectoryiterator"
+                        | b"globiterator"
+                        | b"random\\engine\\mt19937"
+                        | b"random\\engine\\xoshiro256starstar"
+                        | b"random\\engine\\pcgoneseq128xslrr64"
+                );
 
             if has_debug_info || is_spl_debug {
                 // Call __debugInfo() and use the returned array for display.
@@ -703,14 +827,21 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     let class_name_owned = class_name.to_string();
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}{}object({})#{} ({}) {{\n", prefix, dbg_lazy_prefix, class_name_owned, oid, count).as_bytes(),
+                        format!(
+                            "{}{}object({})#{} ({}) {{\n",
+                            prefix, dbg_lazy_prefix, class_name_owned, oid, count
+                        )
+                        .as_bytes(),
                     );
                     if !seen.insert(oid) {
                         vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
                         vm.write_output(format!("{}}}\n", prefix).as_bytes());
                         return;
                     }
-                    let items: Vec<_> = arr_borrow.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let items: Vec<_> = arr_borrow
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
                     drop(arr_borrow);
                     for (key, value) in &items {
                         match key {
@@ -729,16 +860,39 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                                         let name = &bytes[2 + end..];
                                         let name_str = String::from_utf8_lossy(name);
                                         if cls == b"*" {
-                                            vm.write_output(format!("{}  [\"{}\":protected]=>\n", prefix, name_str).as_bytes());
+                                            vm.write_output(
+                                                format!(
+                                                    "{}  [\"{}\":protected]=>\n",
+                                                    prefix, name_str
+                                                )
+                                                .as_bytes(),
+                                            );
                                         } else {
                                             let cls_str = String::from_utf8_lossy(cls);
-                                            vm.write_output(format!("{}  [\"{}\":\"{}\":private]=>\n", prefix, name_str, cls_str).as_bytes());
+                                            vm.write_output(
+                                                format!(
+                                                    "{}  [\"{}\":\"{}\":private]=>\n",
+                                                    prefix, name_str, cls_str
+                                                )
+                                                .as_bytes(),
+                                            );
                                         }
                                     } else {
-                                        vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
+                                        vm.write_output(
+                                            &[
+                                                prefix.as_bytes(),
+                                                b"  [\"",
+                                                s.as_bytes(),
+                                                b"\"]=>\n",
+                                            ]
+                                            .concat(),
+                                        );
                                     }
                                 } else {
-                                    vm.write_output(&[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"].concat());
+                                    vm.write_output(
+                                        &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"]
+                                            .concat(),
+                                    );
                                 }
                             }
                         }
@@ -753,9 +907,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 
             // Count visible properties excluding uninitialized typed properties
             // PHP counts only initialized properties in the object header count
-            let prop_count = obj_borrow.properties.iter()
+            let prop_count = obj_borrow
+                .properties
+                .iter()
                 .filter(|(name, val)| {
-                    if is_internal_property(name) { return false; }
+                    if is_internal_property(name) {
+                        return false;
+                    }
                     // Uninitialized properties (Value::Undef) are displayed but not counted
                     if matches!(val, Value::Undef) {
                         return false;
@@ -775,7 +933,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 if let Value::Object(real) = obj_borrow.get_property(b"__lazy_real") {
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}lazy proxy object({})#{} (1) {{\n", prefix, class_name, oid).as_bytes(),
+                        format!(
+                            "{}lazy proxy object({})#{} (1) {{\n",
+                            prefix, class_name, oid
+                        )
+                        .as_bytes(),
                     );
                     if !seen.insert(oid) {
                         vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
@@ -812,10 +974,21 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // Properties are in declaration order (Vec preserves insertion order)
             // Unshared references (held only by this slot) print without `&`;
             // deref them before cloning bumps their refcount.
-            let props: Vec<_> = obj_borrow.properties.iter().map(|(k, v)| (k.clone(), match v {
-                Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => r.borrow().clone(),
-                _ => v.clone(),
-            })).collect();
+            let props: Vec<_> = obj_borrow
+                .properties
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        match v {
+                            Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
+                                r.borrow().clone()
+                            }
+                            _ => v.clone(),
+                        },
+                    )
+                })
+                .collect();
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {
@@ -829,7 +1002,10 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 let (bare_name, mangled_decl): (Vec<u8>, Option<Vec<u8>>) =
                     if name.first() == Some(&0) {
                         if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
-                            (name[1 + sep + 1..].to_vec(), Some(name[1..1 + sep].to_vec()))
+                            (
+                                name[1 + sep + 1..].to_vec(),
+                                Some(name[1..1 + sep].to_vec()),
+                            )
                         } else {
                             (name.clone(), None)
                         }
@@ -843,27 +1019,39 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // the declaring class encoded in the key.
                 let prop_def = class_info.as_ref().and_then(|c| {
                     let decl_lower = mangled_decl.as_ref().map(|d| {
-                        d.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>()
+                        d.iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect::<Vec<u8>>()
                     });
                     c.properties
                         .iter()
                         .filter(|p| p.name == bare_name && !p.is_static)
                         .find(|p| match &decl_lower {
                             Some(dl) => {
-                                let pdl: Vec<u8> =
-                                    p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let pdl: Vec<u8> = p
+                                    .declaring_class
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 pdl == *dl
                             }
                             None => true,
                         })
-                        .or_else(|| c.properties.iter().find(|p| p.name == bare_name && !p.is_static))
+                        .or_else(|| {
+                            c.properties
+                                .iter()
+                                .find(|p| p.name == bare_name && !p.is_static)
+                        })
                 });
                 let vis = prop_def.map(|p| p.visibility);
                 // Integer property keys only arise from object_properties_load()
                 // (e.g. GMP::__unserialize); other objects always use string keys.
                 let is_int_key = !bare_name.is_empty()
                     && (bare_name[0] == b'-' || bare_name[0].is_ascii_digit())
-                    && bare_name.iter().enumerate().all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
+                    && bare_name
+                        .iter()
+                        .enumerate()
+                        .all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
                     && bare_name.iter().any(|&b| b.is_ascii_digit())
                     && {
                         // Avoid "01" matches: PHP only treats canonical integer strings
@@ -884,12 +1072,15 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         }
                         Some(goro_core::object::Visibility::Private) => {
                             // PHP shows the declaring class, not the object class.
-                            let decl_raw = mangled_decl.clone()
+                            let decl_raw = mangled_decl
+                                .clone()
                                 .or_else(|| prop_def.map(|p| p.declaring_class.clone()))
                                 .unwrap_or_else(|| obj_class_name.clone());
                             let decl_lower: Vec<u8> =
                                 decl_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let canonical = vm.classes.get(&decl_lower)
+                            let canonical = vm
+                                .classes
+                                .get(&decl_lower)
                                 .map(|c| c.name.clone())
                                 .unwrap_or(decl_raw);
                             let class_name = goro_core::value::display_class_name(&canonical);
@@ -897,8 +1088,14 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         }
                         _ => match &mangled_decl {
                             // Undeclared property stored under a mangled name.
-                            Some(d) if d.as_slice() == b"*" => format!("\"{}\":protected", name_str),
-                            Some(d) => format!("\"{}\":\"{}\":private", name_str, goro_core::value::display_class_name(d)),
+                            Some(d) if d.as_slice() == b"*" => {
+                                format!("\"{}\":protected", name_str)
+                            }
+                            Some(d) => format!(
+                                "\"{}\":\"{}\":private",
+                                name_str,
+                                goro_core::value::display_class_name(d)
+                            ),
                             None => format!("\"{}\"", name_str),
                         },
                     }
@@ -909,7 +1106,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     if let Some(ptype) = prop_type {
                         let type_name = vm.param_type_name(ptype);
                         vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                        vm.write_output(format!("{}  uninitialized({})\n", prefix, type_name).as_bytes());
+                        vm.write_output(
+                            format!("{}  uninitialized({})\n", prefix, type_name).as_bytes(),
+                        );
                     }
                     continue;
                 }
@@ -926,7 +1125,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     // may be mangled (\0Class\0name), so compare bare names.
                     if props.iter().any(|(n, _)| {
                         let bare: &[u8] = if n.first() == Some(&0) {
-                            n[1..].iter().position(|&b| b == 0)
+                            n[1..]
+                                .iter()
+                                .position(|&b| b == 0)
                                 .map(|sep| &n[1 + sep + 1..])
                                 .unwrap_or(n.as_slice())
                         } else {
@@ -938,11 +1139,18 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     }
                     let name_str = String::from_utf8_lossy(&prop_def.name);
                     let display_name = match prop_def.visibility {
-                        goro_core::object::Visibility::Protected => format!("\"{}\":protected", name_str),
+                        goro_core::object::Visibility::Protected => {
+                            format!("\"{}\":protected", name_str)
+                        }
                         goro_core::object::Visibility::Private => {
-                            let decl_lower: Vec<u8> =
-                                prop_def.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let canonical = vm.classes.get(&decl_lower)
+                            let decl_lower: Vec<u8> = prop_def
+                                .declaring_class
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            let canonical = vm
+                                .classes
+                                .get(&decl_lower)
                                 .map(|c| c.name.clone())
                                 .unwrap_or_else(|| prop_def.declaring_class.clone());
                             let class_name = goro_core::value::display_class_name(&canonical);
@@ -952,7 +1160,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                     };
                     let type_name = vm.param_type_name(prop_def.property_type.as_ref().unwrap());
                     vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                    vm.write_output(format!("{}  uninitialized({})\n", prefix, type_name).as_bytes());
+                    vm.write_output(
+                        format!("{}  uninitialized({})\n", prefix, type_name).as_bytes(),
+                    );
                 }
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
@@ -967,7 +1177,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             // - Plain functions: keep as-is
             let name_str = if !gen_ref.op_array.display_name.is_empty() {
                 String::from_utf8_lossy(&gen_ref.op_array.display_name).to_string()
-            } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
+            } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
+                && !raw_name.starts_with("__closure_fcc_")
+            {
                 let file = String::from_utf8_lossy(&gen_ref.op_array.filename).to_string();
                 format!("{{closure:{}:{}}}", file, gen_ref.op_array.decl_line)
             } else if let Some(ref scope) = gen_ref.class_scope {
@@ -985,11 +1197,13 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let gen_ptr = generator.as_ptr() as u64;
             let gen_id = (gen_ptr >> 4) % 10000 + 1;
             vm.write_output(
-                format!("{}object(Generator)#{} ({}) {{\n", prefix, gen_id, prop_count).as_bytes(),
+                format!(
+                    "{}object(Generator)#{} ({}) {{\n",
+                    prefix, gen_id, prop_count
+                )
+                .as_bytes(),
             );
-            vm.write_output(
-                format!("{}  [\"function\"]=>\n", prefix).as_bytes(),
-            );
+            vm.write_output(format!("{}  [\"function\"]=>\n", prefix).as_bytes());
             vm.write_output(
                 format!("{}  string({}) \"{}\"\n", prefix, name_str.len(), name_str).as_bytes(),
             );
@@ -1029,8 +1243,10 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let classes: goro_core::vm::ClassMap = vm.classes.clone();
     // Snapshot closure metadata so print_r can render closure values like
     // PHP does (with name/file/line/parameters), without holding a vm borrow.
-    let closure_info_table: std::collections::HashMap<Vec<u8>, ClosurePrintInfo> =
-        vm.user_functions.iter().filter_map(|(k, op)| {
+    let closure_info_table: std::collections::HashMap<Vec<u8>, ClosurePrintInfo> = vm
+        .user_functions
+        .iter()
+        .filter_map(|(k, op)| {
             let name = if op.name.starts_with(b"__closure_fcc_") {
                 "{closure}".to_string()
             } else if !op.display_name.is_empty() {
@@ -1048,8 +1264,17 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     params.push((pname, has_default));
                 }
             }
-            Some((k.clone(), ClosurePrintInfo { name, file, line, params }))
-        }).collect();
+            Some((
+                k.clone(),
+                ClosurePrintInfo {
+                    name,
+                    file,
+                    line,
+                    params,
+                },
+            ))
+        })
+        .collect();
 
     if return_output {
         let mut buf = Vec::new();
@@ -1081,8 +1306,14 @@ fn render_closure_print_r(buf: &mut Vec<u8>, indent: usize, info: &ClosurePrintI
         buf.extend_from_slice(format!("{}    [parameter] => Array\n", prefix).as_bytes());
         buf.extend_from_slice(format!("{}        (\n", prefix).as_bytes());
         for (pname, has_default) in &info.params {
-            let label = if *has_default { "<optional>" } else { "<required>" };
-            buf.extend_from_slice(format!("{}            [{}] => {}\n", prefix, pname, label).as_bytes());
+            let label = if *has_default {
+                "<optional>"
+            } else {
+                "<required>"
+            };
+            buf.extend_from_slice(
+                format!("{}            [{}] => {}\n", prefix, pname, label).as_bytes(),
+            );
         }
         buf.extend_from_slice(format!("{}        )\n\n", prefix).as_bytes());
     }
@@ -1104,7 +1335,10 @@ fn print_r_value(
     let key = match val {
         Value::Array(a) => Some(std::rc::Rc::as_ptr(a) as *const u8 as usize),
         Value::Object(o) => {
-            if o.try_borrow().map(|b| b.has_property(b"__enum_case")).unwrap_or(true) {
+            if o.try_borrow()
+                .map(|b| b.has_property(b"__enum_case"))
+                .unwrap_or(true)
+            {
                 None
             } else {
                 Some(std::rc::Rc::as_ptr(o) as *const u8 as usize)
@@ -1154,7 +1388,11 @@ fn print_r_value_inner(
         Value::Double(f) => buf.extend_from_slice(Value::Double(*f).to_php_string().as_bytes()),
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+                || b.starts_with(b"__closure_fcc_")
+            {
                 let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
                 if let Some(info) = closure_info_table.get(&lower) {
                     render_closure_print_r(buf, indent, info);
@@ -1180,7 +1418,11 @@ fn print_r_value_inner(
                 if len >= 2 {
                     if let Some(Value::String(s)) = arr_b.values().next() {
                         let b = s.as_bytes();
-                        if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                        if b.starts_with(b"__closure_")
+                            || b.starts_with(b"__arrow_")
+                            || b.starts_with(b"__bound_closure_")
+                            || b.starts_with(b"__closure_fcc_")
+                        {
                             let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
                             if let Some(info) = closure_info_table.get(&lower) {
                                 render_closure_print_r(buf, indent, info);
@@ -1258,10 +1500,7 @@ fn print_r_value_inner(
                 class_lower.as_slice(),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
             );
-            let is_spl_array_class = matches!(
-                class_lower.as_slice(),
-                b"splfixedarray"
-            );
+            let is_spl_array_class = matches!(class_lower.as_slice(), b"splfixedarray");
             let is_spl_dllist_class = matches!(
                 class_lower.as_slice(),
                 b"spldoublylinkedlist" | b"splstack" | b"splqueue"
@@ -1274,8 +1513,16 @@ fn print_r_value_inner(
                 drop(obj_borrow);
                 buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
                 buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
-                buf.extend_from_slice(format!("{}    [flags:{}:private] => {}\n", prefix, class_name, flags_val).as_bytes());
-                buf.extend_from_slice(format!("{}    [dllist:{}:private] => ", prefix, class_name).as_bytes());
+                buf.extend_from_slice(
+                    format!(
+                        "{}    [flags:{}:private] => {}\n",
+                        prefix, class_name, flags_val
+                    )
+                    .as_bytes(),
+                );
+                buf.extend_from_slice(
+                    format!("{}    [dllist:{}:private] => ", prefix, class_name).as_bytes(),
+                );
                 print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -1285,8 +1532,12 @@ fn print_r_value_inner(
             if is_array_object_class {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 // Show extra props first
-                let extra_props: Vec<_> = obj_borrow.properties.iter()
-                    .filter(|(name, val)| !is_internal_property(name) && !matches!(val, Value::Undef))
+                let extra_props: Vec<_> = obj_borrow
+                    .properties
+                    .iter()
+                    .filter(|(name, val)| {
+                        !is_internal_property(name) && !matches!(val, Value::Undef)
+                    })
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
                 drop(obj_borrow);
@@ -1298,7 +1549,9 @@ fn print_r_value_inner(
                     print_r_value(value, buf, indent + 8, classes, closure_info_table);
                     buf.push(b'\n');
                 }
-                buf.extend_from_slice(format!("{}    [storage:{}:private] => ", prefix, class_name).as_bytes());
+                buf.extend_from_slice(
+                    format!("{}    [storage:{}:private] => ", prefix, class_name).as_bytes(),
+                );
                 print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
                 buf.push(b'\n');
                 buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
@@ -1315,7 +1568,9 @@ fn print_r_value_inner(
                     for (key, value) in arr_clone.iter() {
                         match key {
                             goro_core::array::ArrayKey::Int(n) => {
-                                buf.extend_from_slice(format!("{}    [{}] => ", prefix, n).as_bytes());
+                                buf.extend_from_slice(
+                                    format!("{}    [{}] => ", prefix, n).as_bytes(),
+                                );
                             }
                             goro_core::array::ArrayKey::String(s) => {
                                 buf.extend_from_slice(
@@ -1346,7 +1601,10 @@ fn print_r_value_inner(
                 let (bare_name, mangled_decl): (Vec<u8>, Option<Vec<u8>>) =
                     if name.first() == Some(&0) {
                         if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
-                            (name[1 + sep + 1..].to_vec(), Some(name[1..1 + sep].to_vec()))
+                            (
+                                name[1 + sep + 1..].to_vec(),
+                                Some(name[1..1 + sep].to_vec()),
+                            )
                         } else {
                             (name.clone(), None)
                         }
@@ -1360,20 +1618,29 @@ fn print_r_value_inner(
                 // Instance properties are non-static, so prefer a non-static def.
                 let prop_info = class_info.and_then(|c| {
                     let decl_lower = mangled_decl.as_ref().map(|d| {
-                        d.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>()
+                        d.iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect::<Vec<u8>>()
                     });
                     c.properties
                         .iter()
                         .filter(|p| p.name == bare_name && !p.is_static)
                         .find(|p| match &decl_lower {
                             Some(dl) => {
-                                let pdl: Vec<u8> =
-                                    p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let pdl: Vec<u8> = p
+                                    .declaring_class
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 pdl == *dl
                             }
                             None => true,
                         })
-                        .or_else(|| c.properties.iter().find(|p| p.name == bare_name && !p.is_static))
+                        .or_else(|| {
+                            c.properties
+                                .iter()
+                                .find(|p| p.name == bare_name && !p.is_static)
+                        })
                         .map(|p| (p.visibility, p.declaring_class.clone()))
                 });
                 let display_name = match prop_info {
@@ -1381,12 +1648,14 @@ fn print_r_value_inner(
                         format!("{}:protected", name_str)
                     }
                     Some((goro_core::object::Visibility::Private, decl)) => {
-                        let decl_raw = mangled_decl.clone()
+                        let decl_raw = mangled_decl
+                            .clone()
                             .or(if decl.is_empty() { None } else { Some(decl) })
                             .unwrap_or_else(|| class_name.clone().into_bytes());
                         let decl_lower: Vec<u8> =
                             decl_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let canonical = classes.get(&decl_lower)
+                        let canonical = classes
+                            .get(&decl_lower)
                             .map(|c| c.name.clone())
                             .unwrap_or(decl_raw);
                         let decl_disp = goro_core::value::display_class_name(&canonical);
@@ -1427,7 +1696,10 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if is_lazy {
             vm.maybe_run_lazy_init(&obj);
             if vm.current_exception.is_some() {
-                return Err(VmError { message: "Uncaught exception".to_string(), line: 0 });
+                return Err(VmError {
+                    message: "Uncaught exception".to_string(),
+                    line: 0,
+                });
             }
             Value::Object(vm.proxy_redirect(&obj))
         } else {
@@ -1440,7 +1712,12 @@ fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // (zend_hooked_object_build_properties()).
     let val_owned: Value = match &val_owned {
         Value::Object(obj) => {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if vm.class_has_hooked_props(&class_lower) {
                 let props = vm.hooked_object_build_properties(obj)?;
                 let (cn, id) = {
@@ -1493,7 +1770,9 @@ fn var_export_escape(buf: &mut Vec<u8>, s: &[u8], nul_concat: bool) {
 /// Port of php_var_export_ex().
 fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
     match val {
-        Value::Null | Value::Undef | Value::Resource(_) | Value::Generator(_) => buf.extend_from_slice(b"NULL"),
+        Value::Null | Value::Undef | Value::Resource(_) | Value::Generator(_) => {
+            buf.extend_from_slice(b"NULL")
+        }
         Value::True => buf.extend_from_slice(b"true"),
         Value::False => buf.extend_from_slice(b"false"),
         Value::Long(n) => {
@@ -1512,10 +1791,15 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
         }
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+            {
                 // Closures are objects without __set_state support.
                 buf.extend_from_slice(b"\\Closure::__set_state(array(\n");
-                if level > 1 { var_export_spaces(buf, level - 1); }
+                if level > 1 {
+                    var_export_spaces(buf, level - 1);
+                }
                 buf.extend_from_slice(b"))");
                 return;
             }
@@ -1540,8 +1824,11 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 var_export_spaces(buf, level - 1);
             }
             buf.extend_from_slice(b"array (\n");
-            let items: Vec<(goro_core::array::ArrayKey, Value)> =
-                arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let items: Vec<(goro_core::array::ArrayKey, Value)> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (key, value) in &items {
                 var_export_spaces(buf, level + 1);
                 match key {
@@ -1558,7 +1845,9 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 var_export_value(vm, value, buf, level + 2);
                 buf.extend_from_slice(b",\n");
             }
-            VAR_EXPORT_STACK.with(|st| { st.borrow_mut().pop(); });
+            VAR_EXPORT_STACK.with(|st| {
+                st.borrow_mut().pop();
+            });
             if level > 1 {
                 var_export_spaces(buf, level - 1);
             }
@@ -1573,23 +1862,48 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             }
             let (class_name, is_enum, class_lower) = {
                 let ob = obj.borrow();
-                let cl: Vec<u8> = ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let name = vm.classes.get(&cl).map(|c| c.name.clone()).unwrap_or_else(|| ob.class_name.clone());
-                (goro_core::value::display_class_name(&name), ob.has_property(b"__enum_case"), cl)
+                let cl: Vec<u8> = ob
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let name = vm
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| ob.class_name.clone());
+                (
+                    goro_core::value::display_class_name(&name),
+                    ob.has_property(b"__enum_case"),
+                    cl,
+                )
             };
             // Properties as exposed for var_export (zend_get_properties_for).
             let is_array_object = {
                 let mut c = class_lower.clone();
                 let mut found = false;
                 for _ in 0..32 {
-                    if matches!(c.as_slice(), b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator") {
+                    if matches!(
+                        c.as_slice(),
+                        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
+                    ) {
                         found = true;
                         break;
                     }
-                    let next = vm.classes.get(&c).and_then(|ce| ce.parent.clone())
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                    let next = vm
+                        .classes
+                        .get(&c)
+                        .and_then(|ce| ce.parent.clone())
+                        .map(|p| {
+                            p.iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect::<Vec<u8>>()
+                        })
                         .or_else(|| goro_core::vm::get_builtin_parent(&c).map(|p| p.to_vec()));
-                    match next { Some(n) => c = n, None => break }
+                    match next {
+                        Some(n) => c = n,
+                        None => break,
+                    }
                 }
                 found
             };
@@ -1598,17 +1912,22 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             {
                 // ArrayObject without STD_PROP_LIST exports its storage.
                 match obj.borrow().get_property(b"__spl_array") {
-                    Value::Array(a) => a.borrow().iter().map(|(k, v)| {
-                        let kb = match k {
-                            goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
-                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
-                        };
-                        (kb, v.clone())
-                    }).collect(),
+                    Value::Array(a) => a
+                        .borrow()
+                        .iter()
+                        .map(|(k, v)| {
+                            let kb = match k {
+                                goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                                goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                            };
+                            (kb, v.clone())
+                        })
+                        .collect(),
                     _ => Vec::new(),
                 }
             } else {
-                crate::serialize::mangled_props(vm, &obj.borrow()).into_iter()
+                crate::serialize::mangled_props(vm, &obj.borrow())
+                    .into_iter()
                     .filter(|e| !matches!(e.value, Value::Undef))
                     .map(|e| (e.php_key, e.value))
                     .collect()
@@ -1635,10 +1954,14 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             if !is_enum {
                 for (key, value) in &props {
                     var_export_spaces(buf, level + 2);
-                    let name = crate::serialize::unmangle(key).map(|(_, n)| n.to_vec()).unwrap_or_else(|| key.clone());
+                    let name = crate::serialize::unmangle(key)
+                        .map(|(_, n)| n.to_vec())
+                        .unwrap_or_else(|| key.clone());
                     let is_int = is_array_object && !name.is_empty() && {
                         let s = std::str::from_utf8(&name).unwrap_or("");
-                        s.parse::<i64>().map(|n| n.to_string() == s).unwrap_or(false)
+                        s.parse::<i64>()
+                            .map(|n| n.to_string() == s)
+                            .unwrap_or(false)
                     };
                     if is_int {
                         buf.extend_from_slice(&name);
@@ -1652,7 +1975,9 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                     buf.extend_from_slice(b",\n");
                 }
             }
-            VAR_EXPORT_STACK.with(|st| { st.borrow_mut().pop(); });
+            VAR_EXPORT_STACK.with(|st| {
+                st.borrow_mut().pop();
+            });
             if level > 1 && !is_enum {
                 var_export_spaces(buf, level - 1);
             }
@@ -1754,7 +2079,16 @@ fn var_dump_mangled_table(
         vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
         return;
     }
-    vm.write_output(format!("{}object({})#{} ({}) {{\n", prefix, class_name, oid, table.len()).as_bytes());
+    vm.write_output(
+        format!(
+            "{}object({})#{} ({}) {{\n",
+            prefix,
+            class_name,
+            oid,
+            table.len()
+        )
+        .as_bytes(),
+    );
     let items: Vec<_> = table.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (key, value) in &items {
         match key {
@@ -1768,16 +2102,26 @@ fn var_dump_mangled_table(
                         let cls = &bytes[1..1 + end];
                         let name_str = String::from_utf8_lossy(&bytes[2 + end..]);
                         if cls == b"*" {
-                            vm.write_output(format!("{}  [\"{}\":protected]=>\n", prefix, name_str).as_bytes());
+                            vm.write_output(
+                                format!("{}  [\"{}\":protected]=>\n", prefix, name_str).as_bytes(),
+                            );
                         } else {
                             let cls_str = String::from_utf8_lossy(cls);
-                            vm.write_output(format!("{}  [\"{}\":\"{}\":private]=>\n", prefix, name_str, cls_str).as_bytes());
+                            vm.write_output(
+                                format!(
+                                    "{}  [\"{}\":\"{}\":private]=>\n",
+                                    prefix, name_str, cls_str
+                                )
+                                .as_bytes(),
+                            );
                         }
                         var_dump_value(vm, value, indent + 2, seen);
                         continue;
                     }
                 }
-                vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes());
+                vm.write_output(
+                    format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                );
             }
         }
         var_dump_value(vm, value, indent + 2, seen);

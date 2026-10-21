@@ -21,7 +21,11 @@ fn day_of_week_ex(y: i64, m: i64, d: i64, iso: bool) -> i64 {
     let c1 = century_value(positive_mod(y, 400) / 100);
     let y1 = positive_mod(y, 100);
     let mi = m.clamp(0, 12) as usize;
-    let m1 = if is_leap(y) { M_TABLE_LEAP[mi] } else { M_TABLE_COMMON[mi] };
+    let m1 = if is_leap(y) {
+        M_TABLE_LEAP[mi]
+    } else {
+        M_TABLE_COMMON[mi]
+    };
     let mut dow = positive_mod(c1 + y1 + m1 + (y1 / 4) + d, 7);
     if iso && dow == 0 {
         dow = 7;
@@ -44,12 +48,21 @@ pub const ML_TABLE_LEAP: [i64; 13] = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31,
 
 pub fn day_of_year(y: i64, m: i64, d: i64) -> i64 {
     let mi = m.clamp(0, 12) as usize;
-    (if is_leap(y) { D_TABLE_LEAP[mi] } else { D_TABLE_COMMON[mi] }) + d - 1
+    (if is_leap(y) {
+        D_TABLE_LEAP[mi]
+    } else {
+        D_TABLE_COMMON[mi]
+    }) + d
+        - 1
 }
 
 pub fn days_in_month(y: i64, m: i64) -> i64 {
     let mi = m.clamp(0, 12) as usize;
-    if is_leap(y) { ML_TABLE_LEAP[mi] } else { ML_TABLE_COMMON[mi] }
+    if is_leap(y) {
+        ML_TABLE_LEAP[mi]
+    } else {
+        ML_TABLE_COMMON[mi]
+    }
 }
 
 /// Returns (iw, iy)
@@ -123,7 +136,11 @@ pub fn date_from_isodate(iy: i64, iw: i64, id: i64) -> (i64, i64, i64) {
         y += 1;
         leap = is_leap(y);
     }
-    let table = if leap { &ML_TABLE_LEAP } else { &ML_TABLE_COMMON };
+    let table = if leap {
+        &ML_TABLE_LEAP
+    } else {
+        &ML_TABLE_COMMON
+    };
     let mut m = 1;
     while daynr > table[m as usize] {
         daynr -= table[m as usize];

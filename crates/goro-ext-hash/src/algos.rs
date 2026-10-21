@@ -71,7 +71,12 @@ pub fn murmur3a_hash(data: &[u8], seed: u32) -> u32 {
     let n = data.len();
     let blocks = n / 4;
     for i in 0..blocks {
-        let mut k = u32::from_le_bytes([data[i*4], data[i*4+1], data[i*4+2], data[i*4+3]]);
+        let mut k = u32::from_le_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]);
         k = k.wrapping_mul(0xcc9e2d51);
         k = k.rotate_left(15);
         k = k.wrapping_mul(0x1b873593);
@@ -79,10 +84,14 @@ pub fn murmur3a_hash(data: &[u8], seed: u32) -> u32 {
         h = h.rotate_left(13);
         h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
     }
-    let tail = &data[blocks*4..];
+    let tail = &data[blocks * 4..];
     let mut k1: u32 = 0;
-    if tail.len() >= 3 { k1 ^= (tail[2] as u32) << 16; }
-    if tail.len() >= 2 { k1 ^= (tail[1] as u32) << 8; }
+    if tail.len() >= 3 {
+        k1 ^= (tail[2] as u32) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= (tail[1] as u32) << 8;
+    }
     if !tail.is_empty() {
         k1 ^= tail[0] as u32;
         k1 = k1.wrapping_mul(0xcc9e2d51);
@@ -114,52 +123,130 @@ pub fn murmur3c_hash(data: &[u8], seed: u32) -> [u8; 16] {
     let n = data.len();
     let blocks = n / 16;
     for i in 0..blocks {
-        let mut k1 = u32::from_le_bytes([data[i*16], data[i*16+1], data[i*16+2], data[i*16+3]]);
-        let mut k2 = u32::from_le_bytes([data[i*16+4], data[i*16+5], data[i*16+6], data[i*16+7]]);
-        let mut k3 = u32::from_le_bytes([data[i*16+8], data[i*16+9], data[i*16+10], data[i*16+11]]);
-        let mut k4 = u32::from_le_bytes([data[i*16+12], data[i*16+13], data[i*16+14], data[i*16+15]]);
+        let mut k1 = u32::from_le_bytes([
+            data[i * 16],
+            data[i * 16 + 1],
+            data[i * 16 + 2],
+            data[i * 16 + 3],
+        ]);
+        let mut k2 = u32::from_le_bytes([
+            data[i * 16 + 4],
+            data[i * 16 + 5],
+            data[i * 16 + 6],
+            data[i * 16 + 7],
+        ]);
+        let mut k3 = u32::from_le_bytes([
+            data[i * 16 + 8],
+            data[i * 16 + 9],
+            data[i * 16 + 10],
+            data[i * 16 + 11],
+        ]);
+        let mut k4 = u32::from_le_bytes([
+            data[i * 16 + 12],
+            data[i * 16 + 13],
+            data[i * 16 + 14],
+            data[i * 16 + 15],
+        ]);
 
-        k1 = k1.wrapping_mul(c1); k1 = k1.rotate_left(15); k1 = k1.wrapping_mul(c2); h1 ^= k1;
-        h1 = h1.rotate_left(19); h1 = h1.wrapping_add(h2); h1 = h1.wrapping_mul(5).wrapping_add(0x561ccd1b);
+        k1 = k1.wrapping_mul(c1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(c2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(19);
+        h1 = h1.wrapping_add(h2);
+        h1 = h1.wrapping_mul(5).wrapping_add(0x561ccd1b);
 
-        k2 = k2.wrapping_mul(c2); k2 = k2.rotate_left(16); k2 = k2.wrapping_mul(c3); h2 ^= k2;
-        h2 = h2.rotate_left(17); h2 = h2.wrapping_add(h3); h2 = h2.wrapping_mul(5).wrapping_add(0x0bcaa747);
+        k2 = k2.wrapping_mul(c2);
+        k2 = k2.rotate_left(16);
+        k2 = k2.wrapping_mul(c3);
+        h2 ^= k2;
+        h2 = h2.rotate_left(17);
+        h2 = h2.wrapping_add(h3);
+        h2 = h2.wrapping_mul(5).wrapping_add(0x0bcaa747);
 
-        k3 = k3.wrapping_mul(c3); k3 = k3.rotate_left(17); k3 = k3.wrapping_mul(c4); h3 ^= k3;
-        h3 = h3.rotate_left(15); h3 = h3.wrapping_add(h4); h3 = h3.wrapping_mul(5).wrapping_add(0x96cd1c35);
+        k3 = k3.wrapping_mul(c3);
+        k3 = k3.rotate_left(17);
+        k3 = k3.wrapping_mul(c4);
+        h3 ^= k3;
+        h3 = h3.rotate_left(15);
+        h3 = h3.wrapping_add(h4);
+        h3 = h3.wrapping_mul(5).wrapping_add(0x96cd1c35);
 
-        k4 = k4.wrapping_mul(c4); k4 = k4.rotate_left(18); k4 = k4.wrapping_mul(c1); h4 ^= k4;
-        h4 = h4.rotate_left(13); h4 = h4.wrapping_add(h1); h4 = h4.wrapping_mul(5).wrapping_add(0x32ac3b17);
+        k4 = k4.wrapping_mul(c4);
+        k4 = k4.rotate_left(18);
+        k4 = k4.wrapping_mul(c1);
+        h4 ^= k4;
+        h4 = h4.rotate_left(13);
+        h4 = h4.wrapping_add(h1);
+        h4 = h4.wrapping_mul(5).wrapping_add(0x32ac3b17);
     }
 
-    let tail = &data[blocks*16..];
+    let tail = &data[blocks * 16..];
     let mut k1: u32 = 0;
     let mut k2: u32 = 0;
     let mut k3: u32 = 0;
     let mut k4: u32 = 0;
     let l = tail.len();
-    if l >= 15 { k4 ^= (tail[14] as u32) << 16; }
-    if l >= 14 { k4 ^= (tail[13] as u32) << 8; }
-    if l >= 13 { k4 ^= tail[12] as u32;
-        k4 = k4.wrapping_mul(c4); k4 = k4.rotate_left(18); k4 = k4.wrapping_mul(c1); h4 ^= k4;
+    if l >= 15 {
+        k4 ^= (tail[14] as u32) << 16;
     }
-    if l >= 12 { k3 ^= (tail[11] as u32) << 24; }
-    if l >= 11 { k3 ^= (tail[10] as u32) << 16; }
-    if l >= 10 { k3 ^= (tail[9] as u32) << 8; }
-    if l >= 9 { k3 ^= tail[8] as u32;
-        k3 = k3.wrapping_mul(c3); k3 = k3.rotate_left(17); k3 = k3.wrapping_mul(c4); h3 ^= k3;
+    if l >= 14 {
+        k4 ^= (tail[13] as u32) << 8;
     }
-    if l >= 8 { k2 ^= (tail[7] as u32) << 24; }
-    if l >= 7 { k2 ^= (tail[6] as u32) << 16; }
-    if l >= 6 { k2 ^= (tail[5] as u32) << 8; }
-    if l >= 5 { k2 ^= tail[4] as u32;
-        k2 = k2.wrapping_mul(c2); k2 = k2.rotate_left(16); k2 = k2.wrapping_mul(c3); h2 ^= k2;
+    if l >= 13 {
+        k4 ^= tail[12] as u32;
+        k4 = k4.wrapping_mul(c4);
+        k4 = k4.rotate_left(18);
+        k4 = k4.wrapping_mul(c1);
+        h4 ^= k4;
     }
-    if l >= 4 { k1 ^= (tail[3] as u32) << 24; }
-    if l >= 3 { k1 ^= (tail[2] as u32) << 16; }
-    if l >= 2 { k1 ^= (tail[1] as u32) << 8; }
-    if l >= 1 { k1 ^= tail[0] as u32;
-        k1 = k1.wrapping_mul(c1); k1 = k1.rotate_left(15); k1 = k1.wrapping_mul(c2); h1 ^= k1;
+    if l >= 12 {
+        k3 ^= (tail[11] as u32) << 24;
+    }
+    if l >= 11 {
+        k3 ^= (tail[10] as u32) << 16;
+    }
+    if l >= 10 {
+        k3 ^= (tail[9] as u32) << 8;
+    }
+    if l >= 9 {
+        k3 ^= tail[8] as u32;
+        k3 = k3.wrapping_mul(c3);
+        k3 = k3.rotate_left(17);
+        k3 = k3.wrapping_mul(c4);
+        h3 ^= k3;
+    }
+    if l >= 8 {
+        k2 ^= (tail[7] as u32) << 24;
+    }
+    if l >= 7 {
+        k2 ^= (tail[6] as u32) << 16;
+    }
+    if l >= 6 {
+        k2 ^= (tail[5] as u32) << 8;
+    }
+    if l >= 5 {
+        k2 ^= tail[4] as u32;
+        k2 = k2.wrapping_mul(c2);
+        k2 = k2.rotate_left(16);
+        k2 = k2.wrapping_mul(c3);
+        h2 ^= k2;
+    }
+    if l >= 4 {
+        k1 ^= (tail[3] as u32) << 24;
+    }
+    if l >= 3 {
+        k1 ^= (tail[2] as u32) << 16;
+    }
+    if l >= 2 {
+        k1 ^= (tail[1] as u32) << 8;
+    }
+    if l >= 1 {
+        k1 ^= tail[0] as u32;
+        k1 = k1.wrapping_mul(c1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(c2);
+        h1 ^= k1;
     }
 
     h1 ^= n as u32;
@@ -167,7 +254,9 @@ pub fn murmur3c_hash(data: &[u8], seed: u32) -> [u8; 16] {
     h3 ^= n as u32;
     h4 ^= n as u32;
 
-    h1 = h1.wrapping_add(h2); h1 = h1.wrapping_add(h3); h1 = h1.wrapping_add(h4);
+    h1 = h1.wrapping_add(h2);
+    h1 = h1.wrapping_add(h3);
+    h1 = h1.wrapping_add(h4);
     h2 = h2.wrapping_add(h1);
     h3 = h3.wrapping_add(h1);
     h4 = h4.wrapping_add(h1);
@@ -177,7 +266,9 @@ pub fn murmur3c_hash(data: &[u8], seed: u32) -> [u8; 16] {
     h3 = fmix32(h3);
     h4 = fmix32(h4);
 
-    h1 = h1.wrapping_add(h2); h1 = h1.wrapping_add(h3); h1 = h1.wrapping_add(h4);
+    h1 = h1.wrapping_add(h2);
+    h1 = h1.wrapping_add(h3);
+    h1 = h1.wrapping_add(h4);
     h2 = h2.wrapping_add(h1);
     h3 = h3.wrapping_add(h1);
     h4 = h4.wrapping_add(h1);
@@ -201,43 +292,99 @@ pub fn murmur3f_hash(data: &[u8], seed: u64) -> [u8; 16] {
     let blocks = n / 16;
     for i in 0..blocks {
         let mut k1 = u64::from_le_bytes([
-            data[i*16], data[i*16+1], data[i*16+2], data[i*16+3],
-            data[i*16+4], data[i*16+5], data[i*16+6], data[i*16+7],
+            data[i * 16],
+            data[i * 16 + 1],
+            data[i * 16 + 2],
+            data[i * 16 + 3],
+            data[i * 16 + 4],
+            data[i * 16 + 5],
+            data[i * 16 + 6],
+            data[i * 16 + 7],
         ]);
         let mut k2 = u64::from_le_bytes([
-            data[i*16+8], data[i*16+9], data[i*16+10], data[i*16+11],
-            data[i*16+12], data[i*16+13], data[i*16+14], data[i*16+15],
+            data[i * 16 + 8],
+            data[i * 16 + 9],
+            data[i * 16 + 10],
+            data[i * 16 + 11],
+            data[i * 16 + 12],
+            data[i * 16 + 13],
+            data[i * 16 + 14],
+            data[i * 16 + 15],
         ]);
 
-        k1 = k1.wrapping_mul(c1); k1 = k1.rotate_left(31); k1 = k1.wrapping_mul(c2); h1 ^= k1;
-        h1 = h1.rotate_left(27); h1 = h1.wrapping_add(h2); h1 = h1.wrapping_mul(5).wrapping_add(0x52dce729);
+        k1 = k1.wrapping_mul(c1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(c2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(27);
+        h1 = h1.wrapping_add(h2);
+        h1 = h1.wrapping_mul(5).wrapping_add(0x52dce729);
 
-        k2 = k2.wrapping_mul(c2); k2 = k2.rotate_left(33); k2 = k2.wrapping_mul(c1); h2 ^= k2;
-        h2 = h2.rotate_left(31); h2 = h2.wrapping_add(h1); h2 = h2.wrapping_mul(5).wrapping_add(0x38495ab5);
+        k2 = k2.wrapping_mul(c2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(c1);
+        h2 ^= k2;
+        h2 = h2.rotate_left(31);
+        h2 = h2.wrapping_add(h1);
+        h2 = h2.wrapping_mul(5).wrapping_add(0x38495ab5);
     }
 
-    let tail = &data[blocks*16..];
+    let tail = &data[blocks * 16..];
     let mut k1: u64 = 0;
     let mut k2: u64 = 0;
     let l = tail.len();
-    if l >= 15 { k2 ^= (tail[14] as u64) << 48; }
-    if l >= 14 { k2 ^= (tail[13] as u64) << 40; }
-    if l >= 13 { k2 ^= (tail[12] as u64) << 32; }
-    if l >= 12 { k2 ^= (tail[11] as u64) << 24; }
-    if l >= 11 { k2 ^= (tail[10] as u64) << 16; }
-    if l >= 10 { k2 ^= (tail[9] as u64) << 8; }
-    if l >= 9 { k2 ^= tail[8] as u64;
-        k2 = k2.wrapping_mul(c2); k2 = k2.rotate_left(33); k2 = k2.wrapping_mul(c1); h2 ^= k2;
+    if l >= 15 {
+        k2 ^= (tail[14] as u64) << 48;
     }
-    if l >= 8 { k1 ^= (tail[7] as u64) << 56; }
-    if l >= 7 { k1 ^= (tail[6] as u64) << 48; }
-    if l >= 6 { k1 ^= (tail[5] as u64) << 40; }
-    if l >= 5 { k1 ^= (tail[4] as u64) << 32; }
-    if l >= 4 { k1 ^= (tail[3] as u64) << 24; }
-    if l >= 3 { k1 ^= (tail[2] as u64) << 16; }
-    if l >= 2 { k1 ^= (tail[1] as u64) << 8; }
-    if l >= 1 { k1 ^= tail[0] as u64;
-        k1 = k1.wrapping_mul(c1); k1 = k1.rotate_left(31); k1 = k1.wrapping_mul(c2); h1 ^= k1;
+    if l >= 14 {
+        k2 ^= (tail[13] as u64) << 40;
+    }
+    if l >= 13 {
+        k2 ^= (tail[12] as u64) << 32;
+    }
+    if l >= 12 {
+        k2 ^= (tail[11] as u64) << 24;
+    }
+    if l >= 11 {
+        k2 ^= (tail[10] as u64) << 16;
+    }
+    if l >= 10 {
+        k2 ^= (tail[9] as u64) << 8;
+    }
+    if l >= 9 {
+        k2 ^= tail[8] as u64;
+        k2 = k2.wrapping_mul(c2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(c1);
+        h2 ^= k2;
+    }
+    if l >= 8 {
+        k1 ^= (tail[7] as u64) << 56;
+    }
+    if l >= 7 {
+        k1 ^= (tail[6] as u64) << 48;
+    }
+    if l >= 6 {
+        k1 ^= (tail[5] as u64) << 40;
+    }
+    if l >= 5 {
+        k1 ^= (tail[4] as u64) << 32;
+    }
+    if l >= 4 {
+        k1 ^= (tail[3] as u64) << 24;
+    }
+    if l >= 3 {
+        k1 ^= (tail[2] as u64) << 16;
+    }
+    if l >= 2 {
+        k1 ^= (tail[1] as u64) << 8;
+    }
+    if l >= 1 {
+        k1 ^= tail[0] as u64;
+        k1 = k1.wrapping_mul(c1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(c2);
+        h1 ^= k1;
     }
 
     h1 ^= n as u64;

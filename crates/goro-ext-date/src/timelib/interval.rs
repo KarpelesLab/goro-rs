@@ -25,7 +25,11 @@ fn sort_old_to_new(one: &Time, two: &Time) -> bool {
 
 pub fn diff_days(one: &Time, two: &Time) -> i64 {
     if same_timezone(one, two) {
-        let (earliest, latest) = if time_compare(one, two) < 0 { (one, two) } else { (two, one) };
+        let (earliest, latest) = if time_compare(one, two) < 0 {
+            (one, two)
+        } else {
+            (two, one)
+        };
         let earliest_time = hmsf_to_decimal_hour(earliest.h, earliest.i, earliest.s, earliest.us);
         let latest_time = hmsf_to_decimal_hour(latest.h, latest.i, latest.s, latest.us);
         let mut days = (epoch_days_from_time(one) - epoch_days_from_time(two)).abs();
@@ -42,7 +46,11 @@ pub fn diff_days(one: &Time, two: &Time) -> i64 {
 fn diff_with_tzid(one_in: &Time, two_in: &Time) -> RelTime {
     let mut rt = RelTime::default();
     let swapped = sort_old_to_new(one_in, two_in);
-    let (mut one, mut two) = if swapped { (two_in.clone(), one_in.clone()) } else { (one_in.clone(), two_in.clone()) };
+    let (mut one, mut two) = if swapped {
+        (two_in.clone(), one_in.clone())
+    } else {
+        (one_in.clone(), two_in.clone())
+    };
     if swapped {
         rt.invert = 1;
     }
@@ -88,9 +96,11 @@ fn diff_with_tzid(one_in: &Time, two_in: &Time) -> RelTime {
     } else if one.dst == 0 && two.dst == 1 {
         if let Some(tzi) = &two.tz_info {
             if let Some((_trans_offset, trans_transition_time, _)) = tzi.get_offset_info(two.sse) {
-                if !((one.sse + SECS_PER_DAY > trans_transition_time) && (one.sse + SECS_PER_DAY <= (trans_transition_time + dst_corr)))
+                if !((one.sse + SECS_PER_DAY > trans_transition_time)
+                    && (one.sse + SECS_PER_DAY <= (trans_transition_time + dst_corr)))
                     && two.sse >= trans_transition_time
-                    && ((two.sse - one.sse + dst_corr) % SECS_PER_DAY) > (two.sse - trans_transition_time)
+                    && ((two.sse - one.sse + dst_corr) % SECS_PER_DAY)
+                        > (two.sse - trans_transition_time)
                 {
                     rt.h -= dst_h_corr;
                     rt.i -= dst_m_corr;
@@ -99,7 +109,9 @@ fn diff_with_tzid(one_in: &Time, two_in: &Time) -> RelTime {
         }
     } else if two.sse - one.sse >= SECS_PER_DAY {
         if let Some(tzi) = &two.tz_info {
-            if let Some((trans_offset, trans_transition_time, _)) = tzi.get_offset_info(two.sse - two.z) {
+            if let Some((trans_offset, trans_transition_time, _)) =
+                tzi.get_offset_info(two.sse - two.z)
+            {
                 dst_corr = one.z - trans_offset as i64;
                 if two.sse >= trans_transition_time - dst_corr && two.sse < trans_transition_time {
                     rt.d -= 1;
@@ -118,7 +130,11 @@ pub fn diff(one_in: &Time, two_in: &Time) -> RelTime {
     }
     let mut rt = RelTime::default();
     let swapped = sort_old_to_new(one_in, two_in);
-    let (mut one, mut two) = if swapped { (two_in.clone(), one_in.clone()) } else { (one_in.clone(), two_in.clone()) };
+    let (mut one, mut two) = if swapped {
+        (two_in.clone(), one_in.clone())
+    } else {
+        (one_in.clone(), two_in.clone())
+    };
     if swapped {
         rt.invert = 1;
     }

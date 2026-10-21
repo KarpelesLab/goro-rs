@@ -49,7 +49,11 @@ fn numeric_key(s: &[u8]) -> Option<i64> {
     if s.is_empty() || s.len() > 20 {
         return None;
     }
-    let (neg, digits) = if s[0] == b'-' { (true, &s[1..]) } else { (false, s) };
+    let (neg, digits) = if s[0] == b'-' {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
     if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -120,7 +124,13 @@ struct Ctx<'a> {
 }
 
 /// php_register_variable_ex
-fn register_variable(ctx: &mut Ctx, var_name: &[u8], val: Value, track: &Rc<RefCell<PhpArray>>, is_cookie: bool) {
+fn register_variable(
+    ctx: &mut Ctx,
+    var_name: &[u8],
+    val: Value,
+    track: &Rc<RefCell<PhpArray>>,
+    is_cookie: bool,
+) {
     let mut var_name = cstr(var_name);
     while var_name.first() == Some(&b' ') {
         var_name = &var_name[1..];
@@ -168,7 +178,9 @@ fn register_variable(ctx: &mut Ctx, var_name: &[u8], val: Value, track: &Rc<RefC
             pos += 1;
             let index_s = pos;
             let mut p = pos;
-            if p < rest.len() && (rest[p] as char).is_ascii_whitespace() || (p < rest.len() && rest[p] == 0x0b) {
+            if p < rest.len() && (rest[p] as char).is_ascii_whitespace()
+                || (p < rest.len() && rest[p] == 0x0b)
+            {
                 p += 1;
             }
             let new_index: Option<Vec<u8>>;
@@ -188,7 +200,11 @@ fn register_variable(ctx: &mut Ctx, var_name: &[u8], val: Value, track: &Rc<RefC
                         let mut name = index.clone().unwrap_or_default();
                         name.push(b'_');
                         for &c in &rest[index_s..] {
-                            name.push(if c == b' ' || c == b'.' || c == b'[' { b'_' } else { c });
+                            name.push(if c == b' ' || c == b'.' || c == b'[' {
+                                b'_'
+                            } else {
+                                c
+                            });
                         }
                         // plain var with the whole mangled name
                         plain_var(&cur, Some(name), val, orig, is_cookie, track);
@@ -249,7 +265,14 @@ fn register_variable(ctx: &mut Ctx, var_name: &[u8], val: Value, track: &Rc<RefC
     }
 }
 
-fn plain_var(arr: &Rc<RefCell<PhpArray>>, index: Option<Vec<u8>>, val: Value, orig: &[u8], is_cookie: bool, top: &Rc<RefCell<PhpArray>>) {
+fn plain_var(
+    arr: &Rc<RefCell<PhpArray>>,
+    index: Option<Vec<u8>>,
+    val: Value,
+    orig: &[u8],
+    is_cookie: bool,
+    top: &Rc<RefCell<PhpArray>>,
+) {
     match index {
         None => {
             let _ = arr.borrow_mut().try_push(val);
@@ -269,7 +292,9 @@ fn plain_var(arr: &Rc<RefCell<PhpArray>>, index: Option<Vec<u8>>, val: Value, or
 
 /// php_strtok_r over a set of separator bytes, skipping empty tokens.
 fn strtok<'a>(s: &'a [u8], seps: &[u8]) -> Vec<&'a [u8]> {
-    s.split(|c| seps.contains(c)).filter(|t| !t.is_empty()).collect()
+    s.split(|c| seps.contains(c))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 fn emit_startup(vm: &mut Vm, level: &str, msg: &str) {
@@ -284,7 +309,14 @@ fn emit_startup(vm: &mut Vm, level: &str, msg: &str) {
 }
 
 /// php_default_treat_data for GET / COOKIE / STRING
-fn treat_data(ctx: &mut Ctx, data: &[u8], is_cookie: bool, separators: &[u8], max_vars: i64, arr: &Rc<RefCell<PhpArray>>) {
+fn treat_data(
+    ctx: &mut Ctx,
+    data: &[u8],
+    is_cookie: bool,
+    separators: &[u8],
+    max_vars: i64,
+    arr: &Rc<RefCell<PhpArray>>,
+) {
     let data = cstr(data);
     if data.is_empty() {
         return;
@@ -305,10 +337,14 @@ fn treat_data(ctx: &mut Ctx, data: &[u8], is_cookie: bool, separators: &[u8], ma
         let eq = var.iter().position(|&c| c == b'=');
         count += 1;
         if count > max_vars {
-            emit_startup(ctx.vm, "Warning", &format!(
-                "PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                max_vars
-            ));
+            emit_startup(
+                ctx.vm,
+                "Warning",
+                &format!(
+                    "PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                    max_vars
+                ),
+            );
             break;
         }
         let (name, value) = match eq {
@@ -318,8 +354,18 @@ fn treat_data(ctx: &mut Ctx, data: &[u8], is_cookie: bool, separators: &[u8], ma
             }
             None => (var.to_vec(), Vec::new()),
         };
-        let name = if is_cookie { name } else { url_decode(&name, true) };
-        register_variable(ctx, &name, Value::String(PhpString::from_vec(value)), arr, is_cookie);
+        let name = if is_cookie {
+            name
+        } else {
+            url_decode(&name, true)
+        };
+        register_variable(
+            ctx,
+            &name,
+            Value::String(PhpString::from_vec(value)),
+            arr,
+            is_cookie,
+        );
     }
 }
 
@@ -328,22 +374,40 @@ fn std_post_handler(ctx: &mut Ctx, body: &[u8], max_vars: i64, arr: &Rc<RefCell<
     let mut cnt: i64 = 0;
     let mut ptr = 0usize;
     while ptr < body.len() {
-        let vsep = body[ptr..].iter().position(|&c| c == b'&').map(|p| ptr + p).unwrap_or(body.len());
+        let vsep = body[ptr..]
+            .iter()
+            .position(|&c| c == b'&')
+            .map(|p| ptr + p)
+            .unwrap_or(body.len());
         let seg = &body[ptr..vsep];
         let (k, v) = match seg.iter().position(|&c| c == b'=') {
             Some(p) => (&seg[..p], &seg[p + 1..]),
             None => (seg, &b""[..]),
         };
         let key = url_decode(k, true);
-        let val = if v.is_empty() { Vec::new() } else { url_decode(v, true) };
-        register_variable(ctx, &key, Value::String(PhpString::from_vec(val)), arr, false);
+        let val = if v.is_empty() {
+            Vec::new()
+        } else {
+            url_decode(v, true)
+        };
+        register_variable(
+            ctx,
+            &key,
+            Value::String(PhpString::from_vec(val)),
+            arr,
+            false,
+        );
         ptr = vsep + if vsep != body.len() { 1 } else { 0 };
         cnt += 1;
         if cnt > max_vars {
-            emit_startup(ctx.vm, "Warning", &format!(
-                "PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                max_vars
-            ));
+            emit_startup(
+                ctx.vm,
+                "Warning",
+                &format!(
+                    "PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                    max_vars
+                ),
+            );
             return;
         }
     }
@@ -351,7 +415,10 @@ fn std_post_handler(ctx: &mut Ctx, body: &[u8], max_vars: i64, arr: &Rc<RefCell<
 
 fn parse_quantity(s: &str) -> i64 {
     let s = s.trim();
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+')
+        .collect();
     let n: i64 = digits.parse().unwrap_or(0);
     let mult = match s[digits.len()..].trim().chars().next() {
         Some('k') | Some('K') => 1024,
@@ -367,7 +434,8 @@ fn ini_bool(v: Option<String>, default: bool) -> bool {
         None => default,
         Some(s) => {
             let l = s.trim().to_ascii_lowercase();
-            matches!(l.as_str(), "1" | "on" | "yes" | "true") || l.parse::<i64>().map(|n| n != 0).unwrap_or(false)
+            matches!(l.as_str(), "1" | "on" | "yes" | "true")
+                || l.parse::<i64>().map(|n| n != 0).unwrap_or(false)
         }
     }
 }
@@ -410,7 +478,8 @@ impl<'a> MultipartBuffer<'a> {
 
     fn fill_buffer(&mut self) -> usize {
         if self.bytes_in_buffer > 0 && self.begin != 0 {
-            self.buffer.copy_within(self.begin..self.begin + self.bytes_in_buffer, 0);
+            self.buffer
+                .copy_within(self.begin..self.begin + self.bytes_in_buffer, 0);
         }
         self.begin = 0;
         let to_read = self.bufsize - self.bytes_in_buffer;
@@ -568,7 +637,10 @@ impl<'a> MultipartBuffer<'a> {
 }
 
 fn get_hdr<'b>(headers: &'b [(Vec<u8>, Vec<u8>)], key: &[u8]) -> Option<&'b [u8]> {
-    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_slice())
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.as_slice())
 }
 
 /// php_ap_getword
@@ -609,7 +681,10 @@ fn substring_conf(s: &[u8], len: usize, quote: u8) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < len && i < s.len() && s[i] != quote {
-        if s[i] == b'\\' && i + 1 < s.len() && (s[i + 1] == b'\\' || (quote != 0 && s[i + 1] == quote)) {
+        if s[i] == b'\\'
+            && i + 1 < s.len()
+            && (s[i + 1] == b'\\' || (quote != 0 && s[i + 1] == quote))
+        {
             i += 1;
             out.push(s[i]);
         } else {
@@ -634,7 +709,10 @@ fn getword_conf(s: &[u8]) -> Vec<u8> {
         let q = s[0];
         substring_conf(&s[1..], s.len() - 1, q)
     } else {
-        let end = s.iter().position(|c| (*c as char).is_ascii_whitespace()).unwrap_or(s.len());
+        let end = s
+            .iter()
+            .position(|c| (*c as char).is_ascii_whitespace())
+            .unwrap_or(s.len());
         substring_conf(s, end, 0)
     }
 }
@@ -711,12 +789,16 @@ fn rfc1867_handler(
     post: &Rc<RefCell<PhpArray>>,
     files: &Rc<RefCell<PhpArray>>,
 ) -> usize {
-    let warn = |vm: &mut Vm, m: &str| emit_startup(vm, "Warning", &format!("PHP Request Startup: {}", m));
+    let warn =
+        |vm: &mut Vm, m: &str| emit_startup(vm, "Warning", &format!("PHP Request Startup: {}", m));
     if cfg.post_max_size > 0 && content_length > cfg.post_max_size {
-        warn(ctx.vm, &format!(
-            "POST Content-Length of {} bytes exceeds the limit of {} bytes",
-            content_length, cfg.post_max_size
-        ));
+        warn(
+            ctx.vm,
+            &format!(
+                "POST Content-Length of {} bytes exceeds the limit of {} bytes",
+                content_length, cfg.post_max_size
+            ),
+        );
         return 0;
     }
     let mut body_parts_cnt = cfg.max_body_parts;
@@ -754,7 +836,10 @@ fn rfc1867_handler(
         boundary = &boundary[..p];
     }
     if boundary.len() > FILLUNIT - 4 {
-        warn(ctx.vm, "Boundary too large in multipart/form-data POST data");
+        warn(
+            ctx.vm,
+            "Boundary too large in multipart/form-data POST data",
+        );
         return 0;
     }
 
@@ -769,7 +854,11 @@ fn rfc1867_handler(
     let cb = ctx.vm.rfc1867_callback;
     let mut skip_all = false;
     if let Some(f) = cb {
-        let ev = Event::Start { content_length, query_string: &cfg.query_string, cookie: &cfg.cookie };
+        let ev = Event::Start {
+            content_length,
+            query_string: &cfg.query_string,
+            cookie: &cfg.cookie,
+        };
         if !f(ctx.vm, &ev) {
             skip_all = true;
         }
@@ -786,10 +875,13 @@ fn rfc1867_handler(
         };
         body_parts_cnt -= 1;
         if body_parts_cnt < 0 {
-            warn(ctx.vm, &format!(
-                "Multipart body parts limit exceeded {}. To increase the limit change max_multipart_body_parts in php.ini.",
-                body_parts_limit
-            ));
+            warn(
+                ctx.vm,
+                &format!(
+                    "Multipart body parts limit exceeded {}. To increase the limit change max_multipart_body_parts in php.ini.",
+                    body_parts_limit
+                ),
+            );
             break;
         }
         let mut param: Option<Vec<u8>> = None;
@@ -821,23 +913,40 @@ fn rfc1867_handler(
                 count += 1;
                 if count <= cfg.max_input_vars {
                     if let Some(f) = cb {
-                        let ev = Event::FormData { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), value: &value };
+                        let ev = Event::FormData {
+                            post_bytes_processed: mb.src_pos as i64,
+                            name: cstr(&param),
+                            value: &value,
+                        };
                         if !f(ctx.vm, &ev) {
                             continue;
                         }
                     }
                     if !protected.contains(&normalize_protected_variable(&param)) {
-                        register_variable(ctx, &param, Value::String(PhpString::from_vec(value.clone())), post, false);
+                        register_variable(
+                            ctx,
+                            &param,
+                            Value::String(PhpString::from_vec(value.clone())),
+                            post,
+                            false,
+                        );
                     }
                 } else {
                     if count == cfg.max_input_vars + 1 {
-                        warn(ctx.vm, &format!(
-                            "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                            cfg.max_input_vars
-                        ));
+                        warn(
+                            ctx.vm,
+                            &format!(
+                                "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                                cfg.max_input_vars
+                            ),
+                        );
                     }
                     if let Some(f) = cb {
-                        let ev = Event::FormData { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), value: &value };
+                        let ev = Event::FormData {
+                            post_bytes_processed: mb.src_pos as i64,
+                            name: cstr(&param),
+                            value: &value,
+                        };
                         f(ctx.vm, &ev);
                     }
                 }
@@ -848,7 +957,9 @@ fn rfc1867_handler(
                     let num: String = t
                         .chars()
                         .enumerate()
-                        .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && (*c == '-' || *c == '+')))
+                        .take_while(|(i, c)| {
+                            c.is_ascii_digit() || (*i == 0 && (*c == '-' || *c == '+'))
+                        })
                         .map(|(_, c)| c)
                         .collect();
                     max_file_size = num.parse().unwrap_or(0);
@@ -863,7 +974,10 @@ fn rfc1867_handler(
             skip_upload = true;
             if upload_cnt == 0 {
                 upload_cnt -= 1;
-                warn(ctx.vm, "Maximum number of allowable file uploads has been exceeded");
+                warn(
+                    ctx.vm,
+                    "Maximum number of allowable file uploads has been exceeded",
+                );
             }
         }
         if param.is_none() && filename.is_none() {
@@ -903,7 +1017,11 @@ fn rfc1867_handler(
         }
         if !skip_upload {
             if let Some(f) = cb {
-                let ev = Event::FileStart { post_bytes_processed: mb.src_pos as i64, name: cstr(&param), filename: cstr(&filename) };
+                let ev = Event::FileStart {
+                    post_bytes_processed: mb.src_pos as i64,
+                    name: cstr(&param),
+                    filename: cstr(&filename),
+                };
                 if !f(ctx.vm, &ev) {
                     continue;
                 }
@@ -936,14 +1054,21 @@ fn rfc1867_handler(
                     Err(_) => cancel_upload = 6,
                 },
                 Err(_) => {
-                    warn(ctx.vm, "File upload error - unable to create a temporary file");
+                    warn(
+                        ctx.vm,
+                        "File upload error - unable to create a temporary file",
+                    );
                     cancel_upload = 6;
                 }
             }
         }
         while cancel_upload == 0 && !blen_data.is_empty() {
             if let Some(f) = cb {
-                let ev = Event::FileData { post_bytes_processed: mb.src_pos as i64, offset, length: blen_data.len() as i64 };
+                let ev = Event::FileData {
+                    post_bytes_processed: mb.src_pos as i64,
+                    offset,
+                    length: blen_data.len() as i64,
+                };
                 if !f(ctx.vm, &ev) {
                     cancel_upload = 8;
                     continue;
@@ -971,8 +1096,14 @@ fn rfc1867_handler(
             cancel_upload = 3;
         }
         if let Some(f) = cb {
-            let tn = temp.as_ref().map(|(p, _)| p.to_string_lossy().as_bytes().to_vec());
-            let ev = Event::FileEnd { post_bytes_processed: mb.src_pos as i64, temp_filename: tn.as_deref(), cancel_upload };
+            let tn = temp
+                .as_ref()
+                .map(|(p, _)| p.to_string_lossy().as_bytes().to_vec());
+            let ev = Event::FileEnd {
+                post_bytes_processed: mb.src_pos as i64,
+                temp_filename: tn.as_deref(),
+                cancel_upload,
+            };
             if !f(ctx.vm, &ev) {
                 cancel_upload = 8;
             }
@@ -1014,14 +1145,30 @@ fn rfc1867_handler(
             }
             v
         };
-        let reg = |ctx: &mut Ctx, protected: &Vec<Vec<u8>>, name: Vec<u8>, val: Value, override_: bool| {
+        let reg = |ctx: &mut Ctx,
+                   protected: &Vec<Vec<u8>>,
+                   name: Vec<u8>,
+                   val: Value,
+                   override_: bool| {
             if override_ || !protected.contains(&normalize_protected_variable(&name)) {
                 register_variable(ctx, &name, val, files, false);
             }
         };
         let fname_c = cstr(&filename).to_vec();
-        reg(ctx, &protected, name_for("name"), sval(ap_basename(&fname_c)), false);
-        reg(ctx, &protected, name_for("full_path"), sval(&fname_c), false);
+        reg(
+            ctx,
+            &protected,
+            name_for("name"),
+            sval(ap_basename(&fname_c)),
+            false,
+        );
+        reg(
+            ctx,
+            &protected,
+            name_for("full_path"),
+            sval(&fname_c),
+            false,
+        );
         let ctype: Vec<u8> = if cancel_upload != 0 {
             Vec::new()
         } else {
@@ -1040,13 +1187,30 @@ fn rfc1867_handler(
         protected.push(normalize_protected_variable(&pc));
         let tmp_field = name_for("tmp_name");
         protected.push(normalize_protected_variable(&tmp_field));
-        reg(ctx, &protected, tmp_field, sval(&temp_name.unwrap_or_default()), true);
-        reg(ctx, &protected, name_for("error"), Value::Long(cancel_upload), false);
+        reg(
+            ctx,
+            &protected,
+            tmp_field,
+            sval(&temp_name.unwrap_or_default()),
+            true,
+        );
+        reg(
+            ctx,
+            &protected,
+            name_for("error"),
+            Value::Long(cancel_upload),
+            false,
+        );
         let size = if cancel_upload != 0 { 0 } else { total_bytes };
         reg(ctx, &protected, name_for("size"), Value::Long(size), false);
     }
     if let Some(f) = cb {
-        f(ctx.vm, &Event::End { post_bytes_processed: mb.src_pos as i64 });
+        f(
+            ctx.vm,
+            &Event::End {
+                post_bytes_processed: mb.src_pos as i64,
+            },
+        );
     }
     mb.src_pos
 }
@@ -1059,23 +1223,47 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 /// Registers all superglobals into `vm`, and sets the php://input body.
 /// sapi_module.treat_data(PARSE_STRING, ...) as used by parse_str().
 pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
-    let ini = |k: &str| vm.constants.get(k.as_bytes()).map(|v| v.to_php_string().to_string_lossy());
-    let max_vars = ini("max_input_vars").map(|v| parse_quantity(&v)).unwrap_or(1000);
-    let max_nesting = ini("max_input_nesting_level").map(|v| parse_quantity(&v)).unwrap_or(64);
+    let ini = |k: &str| {
+        vm.constants
+            .get(k.as_bytes())
+            .map(|v| v.to_php_string().to_string_lossy())
+    };
+    let max_vars = ini("max_input_vars")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(1000);
+    let max_nesting = ini("max_input_nesting_level")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(64);
     let display_errors = ini_bool(ini("display_errors"), true);
-    let arg_sep: Vec<u8> = ini("arg_separator.input").filter(|s| !s.is_empty()).unwrap_or_else(|| "&".into()).into_bytes();
-    let mut ctx = Ctx { max_nesting, display_errors, vm };
+    let arg_sep: Vec<u8> = ini("arg_separator.input")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "&".into())
+        .into_bytes();
+    let mut ctx = Ctx {
+        max_nesting,
+        display_errors,
+        vm,
+    };
     treat_data(&mut ctx, data, false, &arg_sep, max_vars, arr);
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     let variables_order = ini("variables_order").unwrap_or_else(|| "EGPCS".to_string());
     let has = |c: char| variables_order.chars().any(|x| x.eq_ignore_ascii_case(&c));
-    let max_vars = ini("max_input_vars").map(|v| parse_quantity(&v)).unwrap_or(1000);
-    let max_nesting = ini("max_input_nesting_level").map(|v| parse_quantity(&v)).unwrap_or(64);
+    let max_vars = ini("max_input_vars")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(1000);
+    let max_nesting = ini("max_input_nesting_level")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(64);
     let display_errors = ini_bool(ini("display_errors"), true);
-    let arg_sep: Vec<u8> = ini("arg_separator.input").filter(|s| !s.is_empty()).unwrap_or_else(|| "&".into()).into_bytes();
-    let post_max_size = ini("post_max_size").map(|v| parse_quantity(&v)).unwrap_or(8 * 1024 * 1024);
+    let arg_sep: Vec<u8> = ini("arg_separator.input")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "&".into())
+        .into_bytes();
+    let post_max_size = ini("post_max_size")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(8 * 1024 * 1024);
     let enable_post = ini_bool(ini("enable_post_data_reading"), true);
 
     let get = new_arr();
@@ -1085,7 +1273,11 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     let mut input_body: Vec<u8> = Vec::new();
 
     {
-        let mut ctx = Ctx { max_nesting, display_errors, vm };
+        let mut ctx = Ctx {
+            max_nesting,
+            display_errors,
+            vm,
+        };
 
         // sapi_activate: read POST data
         let is_post = req.request_method.as_deref().is_some_and(|m| m == b"POST");
@@ -1095,14 +1287,21 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         if req.cgi {
             if enable_post && is_post && req.content_type.is_some() {
                 let ct = req.content_type.clone().unwrap();
-                let end = ct.iter().position(|&c| c == b';' || c == b',' || c == b' ').unwrap_or(ct.len());
+                let end = ct
+                    .iter()
+                    .position(|&c| c == b';' || c == b',' || c == b' ')
+                    .unwrap_or(ct.len());
                 let base = ct[..end].to_ascii_lowercase();
                 let std_reader = |ctx: &mut Ctx| -> bool {
                     if post_max_size > 0 && req.content_length > post_max_size {
-                        emit_startup(ctx.vm, "Warning", &format!(
-                            "PHP Request Startup: POST Content-Length of {} bytes exceeds the limit of {} bytes",
-                            req.content_length, post_max_size
-                        ));
+                        emit_startup(
+                            ctx.vm,
+                            "Warning",
+                            &format!(
+                                "PHP Request Startup: POST Content-Length of {} bytes exceeds the limit of {} bytes",
+                                req.content_length, post_max_size
+                            ),
+                        );
                         return false;
                     }
                     true
@@ -1128,18 +1327,32 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                 Some("std") if buffered => std_post_handler(&mut ctx, &req.body, max_vars, &post),
                 Some("rfc1867") => {
                     let cfg = UploadCfg {
-                        max_file_uploads: ini("max_file_uploads").map(|v| parse_quantity(&v)).unwrap_or(20),
-                        max_body_parts: ini("max_multipart_body_parts").map(|v| parse_quantity(&v)).unwrap_or(-1),
+                        max_file_uploads: ini("max_file_uploads")
+                            .map(|v| parse_quantity(&v))
+                            .unwrap_or(20),
+                        max_body_parts: ini("max_multipart_body_parts")
+                            .map(|v| parse_quantity(&v))
+                            .unwrap_or(-1),
                         post_max_size,
                         max_input_vars: max_vars,
-                        upload_max_filesize: ini("upload_max_filesize").map(|v| parse_quantity(&v)).unwrap_or(2 * 1024 * 1024),
+                        upload_max_filesize: ini("upload_max_filesize")
+                            .map(|v| parse_quantity(&v))
+                            .unwrap_or(2 * 1024 * 1024),
                         file_uploads: ini_bool(ini("file_uploads"), true),
                         upload_tmp_dir: ini("upload_tmp_dir"),
                         query_string: req.query_string.clone(),
                         cookie: req.cookie_data.clone().unwrap_or_default(),
                     };
                     let ct = req.content_type.clone().unwrap_or_default();
-                    let used = rfc1867_handler(&mut ctx, &ct, &req.body, req.content_length, &cfg, &post, &files);
+                    let used = rfc1867_handler(
+                        &mut ctx,
+                        &ct,
+                        &req.body,
+                        req.content_length,
+                        &cfg,
+                        &post,
+                        &files,
+                    );
                     if used >= req.body.len() {
                         consumed_all = true;
                     } else {
@@ -1204,11 +1417,17 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         vm.set_global(b"argc".to_vec(), argc.clone());
         if has('S') {
             let copy = Rc::new(RefCell::new(argv.borrow().clone()));
-            server.borrow_mut().set(sym_key(b"argv"), Value::Array(copy));
+            server
+                .borrow_mut()
+                .set(sym_key(b"argv"), Value::Array(copy));
             server.borrow_mut().set(sym_key(b"argc"), argc);
         }
     } else if has('S') && ini_bool(ini("register_argc_argv"), false) {
-        emit_startup(vm, "Deprecated", "Deriving $_SERVER['argv'] from the query string is deprecated. Configure register_argc_argv=0 to turn this message off");
+        emit_startup(
+            vm,
+            "Deprecated",
+            "Deriving $_SERVER['argv'] from the query string is deprecated. Configure register_argc_argv=0 to turn this message off",
+        );
         let argv = new_arr();
         let qs = cstr(&req.query_string);
         let mut count = 0;
@@ -1218,12 +1437,18 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                 count += 1;
             }
         }
-        server.borrow_mut().set(sym_key(b"argv"), Value::Array(argv));
-        server.borrow_mut().set(sym_key(b"argc"), Value::Long(count));
+        server
+            .borrow_mut()
+            .set(sym_key(b"argv"), Value::Array(argv));
+        server
+            .borrow_mut()
+            .set(sym_key(b"argc"), Value::Long(count));
     }
     // $_REQUEST
     let request = new_arr();
-    let order = ini("request_order").filter(|s| !s.is_empty()).unwrap_or_else(|| variables_order.clone());
+    let order = ini("request_order")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| variables_order.clone());
     let mut done = [false; 3];
     for c in order.chars() {
         let (i, src) = match c.to_ascii_uppercase() {
@@ -1290,24 +1515,41 @@ fn is_uploaded(path: &[u8]) -> bool {
 }
 
 fn is_uploaded_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let p = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
-    Ok(if is_uploaded(p.as_bytes()) { Value::True } else { Value::False })
+    let p = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
+    Ok(if is_uploaded(p.as_bytes()) {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn move_uploaded_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let from = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
-    let to = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let from = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
+    let to = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
     if !is_uploaded(from.as_bytes()) {
         return Ok(Value::False);
     }
     let f = from.to_string_lossy();
     let t = to.to_string_lossy();
-    let ok = std::fs::rename(&f, &t).is_ok() || (std::fs::copy(&f, &t).is_ok() && std::fs::remove_file(&f).is_ok());
+    let ok = std::fs::rename(&f, &t).is_ok()
+        || (std::fs::copy(&f, &t).is_ok() && std::fs::remove_file(&f).is_ok());
     if ok {
         UPLOADED_FILES.with(|u| u.borrow_mut().retain(|x| x != from.as_bytes()));
         Ok(Value::True)
     } else {
-        vm.emit_warning(&format!("move_uploaded_file({}): Failed to open stream: Permission denied", t));
+        vm.emit_warning(&format!(
+            "move_uploaded_file({}): Failed to open stream: Permission denied",
+            t
+        ));
         Ok(Value::False)
     }
 }

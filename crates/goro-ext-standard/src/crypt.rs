@@ -451,17 +451,19 @@ const BF_N: usize = 16;
 const BF_ITOA64: &[u8; 64] = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 const BF_ATOI64: [u8; 0x60] = [
-    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 0, 1,
-    54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 64, 64, 64, 64, 64,
-    64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 64, 64, 64, 64, 64,
-    64, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
-    43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 0, 1, 54, 55, 56, 57, 58, 59, 60, 61,
+    62, 63, 64, 64, 64, 64, 64, 64, 64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 64, 64, 64, 64, 64, 64, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+    37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 64, 64, 64, 64, 64,
 ];
 
-const BF_MAGIC_W: [u32; 6] = [0x4F727068, 0x65616E42, 0x65686F6C, 0x64657253, 0x63727944, 0x6F756274];
+const BF_MAGIC_W: [u32; 6] = [
+    0x4F727068, 0x65616E42, 0x65686F6C, 0x64657253, 0x63727944, 0x6F756274,
+];
 
-const BF_FLAGS_BY_SUBTYPE: [u8; 26] = [2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0];
+const BF_FLAGS_BY_SUBTYPE: [u8; 26] = [
+    2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0,
+];
 
 fn bf_safe_atoi64(c: u8) -> Option<u32> {
     let t = (c as u32).wrapping_sub(0x20);
@@ -651,11 +653,19 @@ fn bf_crypt(key: &[u8], setting: &[u8], min: u32) -> Option<Vec<u8>> {
     let salt_bytes = bf_decode(setting, 7, 16)?;
     let mut salt = [0u32; 4];
     for (k, w) in salt.iter_mut().enumerate() {
-        *w = u32::from_be_bytes([salt_bytes[4 * k], salt_bytes[4 * k + 1], salt_bytes[4 * k + 2], salt_bytes[4 * k + 3]]);
+        *w = u32::from_be_bytes([
+            salt_bytes[4 * k],
+            salt_bytes[4 * k + 1],
+            salt_bytes[4 * k + 2],
+            salt_bytes[4 * k + 3],
+        ]);
     }
 
     let (expanded, initial) = bf_set_key(key, flags);
-    let mut ctx = BfCtx { s: [0u32; 1024], p: initial };
+    let mut ctx = BfCtx {
+        s: [0u32; 1024],
+        p: initial,
+    };
     for b in 0..4 {
         ctx.s[b * 256..(b + 1) * 256].copy_from_slice(&BF_INIT_S[b]);
     }
@@ -732,82 +742,70 @@ fn bf_crypt(key: &[u8], setting: &[u8], min: u32) -> Option<Vec<u8>> {
 // ===================================================================
 
 const DES_IP: [u8; 64] = [
-    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
-    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
-    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
-    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
+    64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61,
+    53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
 ];
 
 const DES_KEY_PERM: [u8; 56] = [
-    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
-    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
-    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
-    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4,
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60,
+    52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29,
+    21, 13, 5, 28, 20, 12, 4,
 ];
 
 const DES_KEY_SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
 
 const DES_COMP_PERM: [u8; 48] = [
-    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10,
-    23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
-    41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48,
-    44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2, 41, 52,
+    31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
 ];
 
 const DES_SBOX: [[u8; 64]; 8] = [
     [
-        14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
-        0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
-        4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0,
-        15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13,
+        14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12,
+        11, 9, 5, 3, 8, 4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9,
+        1, 7, 5, 11, 3, 14, 10, 0, 6, 13,
     ],
     [
-        15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10,
-        3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
-        0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15,
-        13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9,
+        15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10, 3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1,
+        10, 6, 9, 11, 5, 0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15, 13, 8, 10, 1, 3, 15,
+        4, 2, 11, 6, 7, 12, 0, 5, 14, 9,
     ],
     [
-        10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8,
-        13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
-        13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7,
-        1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12,
+        10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5,
+        14, 12, 11, 15, 1, 13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6,
+        9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12,
     ],
     [
-        7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15,
-        13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
-        10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4,
-        3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14,
+        7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15, 13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2,
+        12, 1, 10, 14, 9, 10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4, 3, 15, 0, 6, 10, 1,
+        13, 8, 9, 4, 5, 11, 12, 7, 2, 14,
     ],
     [
-        2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9,
-        14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
-        4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14,
-        11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3,
+        2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9, 14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15,
+        10, 3, 9, 8, 6, 4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14, 11, 8, 12, 7, 1, 14,
+        2, 13, 6, 15, 0, 9, 10, 4, 5, 3,
     ],
     [
-        12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11,
-        10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
-        9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6,
-        4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13,
+        12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11, 10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13,
+        14, 0, 11, 3, 8, 9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6, 4, 3, 2, 12, 9, 5,
+        15, 10, 11, 14, 1, 7, 6, 0, 8, 13,
     ],
     [
-        4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1,
-        13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
-        1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2,
-        6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12,
+        4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1, 13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5,
+        12, 2, 15, 8, 6, 1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2, 6, 11, 13, 8, 1, 4,
+        10, 7, 9, 5, 0, 15, 14, 2, 3, 12,
     ],
     [
-        13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7,
-        1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
-        7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8,
-        2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11,
+        13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7, 1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6,
+        11, 0, 14, 9, 2, 7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8, 2, 1, 14, 7, 4, 10,
+        8, 13, 15, 12, 9, 0, 3, 5, 6, 11,
     ],
 ];
 
 const DES_PBOX: [u8; 32] = [
-    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
-    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25,
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19,
+    13, 30, 6, 22, 11, 4, 25,
 ];
 
 const BITS8: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01];
@@ -971,7 +969,12 @@ struct DesData {
 
 impl DesData {
     fn new() -> Self {
-        DesData { saltbits: 0, old_salt: 0, en_keysl: [0; 16], en_keysr: [0; 16] }
+        DesData {
+            saltbits: 0,
+            old_salt: 0,
+            en_keysl: [0; 16],
+            en_keysr: [0; 16],
+        }
     }
 
     fn setup_salt(&mut self, salt: u32) {
@@ -1238,23 +1241,45 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"password_needs_rehash", vec![s(), sin(), a()]);
 
     let names = |n: &[&[u8]]| n.iter().map(|p| p.to_vec()).collect::<Vec<_>>();
-    vm.builtin_param_names.insert(b"crypt".to_vec(), names(&[b"string", b"salt"]));
-    vm.builtin_param_names.insert(b"password_hash".to_vec(), names(&[b"password", b"algo", b"options"]));
-    vm.builtin_param_names.insert(b"password_verify".to_vec(), names(&[b"password", b"hash"]));
-    vm.builtin_param_names.insert(b"password_get_info".to_vec(), names(&[b"hash"]));
-    vm.builtin_param_names.insert(b"password_needs_rehash".to_vec(), names(&[b"hash", b"algo", b"options"]));
-    vm.builtin_param_names.insert(b"password_algos".to_vec(), vec![]);
+    vm.builtin_param_names
+        .insert(b"crypt".to_vec(), names(&[b"string", b"salt"]));
+    vm.builtin_param_names.insert(
+        b"password_hash".to_vec(),
+        names(&[b"password", b"algo", b"options"]),
+    );
+    vm.builtin_param_names
+        .insert(b"password_verify".to_vec(), names(&[b"password", b"hash"]));
+    vm.builtin_param_names
+        .insert(b"password_get_info".to_vec(), names(&[b"hash"]));
+    vm.builtin_param_names.insert(
+        b"password_needs_rehash".to_vec(),
+        names(&[b"hash", b"algo", b"options"]),
+    );
+    vm.builtin_param_names
+        .insert(b"password_algos".to_vec(), vec![]);
 
-    vm.constants.insert(b"PASSWORD_BCRYPT_DEFAULT_COST".to_vec(), Value::Long(PHP_PASSWORD_BCRYPT_COST));
+    vm.constants.insert(
+        b"PASSWORD_BCRYPT_DEFAULT_COST".to_vec(),
+        Value::Long(PHP_PASSWORD_BCRYPT_COST),
+    );
 }
 
 fn throw(vm: &mut Vm, class: &[u8], msg: &str) -> VmError {
     let exc = vm.create_exception(class, msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg.to_string(), line: vm.current_line }
+    VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    }
 }
 
-fn check_arg_count(vm: &mut Vm, fname: &str, args: &[Value], min: usize, max: usize) -> Result<(), VmError> {
+fn check_arg_count(
+    vm: &mut Vm,
+    fname: &str,
+    args: &[Value],
+    min: usize,
+    max: usize,
+) -> Result<(), VmError> {
     let n = args.len();
     if n >= min && n <= max {
         return Ok(());
@@ -1279,14 +1304,29 @@ fn check_arg_count(vm: &mut Vm, fname: &str, args: &[Value], min: usize, max: us
 
 fn has_tostring(vm: &Vm, v: &Value) -> bool {
     if let Value::Object(o) = v {
-        let lower: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        return vm.classes.get(&lower).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+        let lower: Vec<u8> = o
+            .borrow()
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        return vm
+            .classes
+            .get(&lower)
+            .map(|c| c.get_method(b"__tostring").is_some())
+            .unwrap_or(false);
     }
     false
 }
 
 /// Z_PARAM_STR (weak mode; the VM already reports null deprecations).
-fn zpp_str(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v: &Value) -> Result<PhpString, VmError> {
+fn zpp_str(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    v: &Value,
+) -> Result<PhpString, VmError> {
     let v = v.deref();
     match &v {
         Value::String(s) => Ok(s.clone()),
@@ -1315,7 +1355,13 @@ fn zpp_str(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v: &Value) -> Resu
 }
 
 /// Z_PARAM_ARRAY_HT
-fn zpp_array(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v: &Value) -> Result<Rc<RefCell<PhpArray>>, VmError> {
+fn zpp_array(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    v: &Value,
+) -> Result<Rc<RefCell<PhpArray>>, VmError> {
     let v = v.deref();
     match &v {
         Value::Array(a) => Ok(a.clone()),
@@ -1339,7 +1385,13 @@ enum AlgoArg {
 }
 
 /// Z_PARAM_STR_OR_LONG_OR_NULL (weak mode)
-fn zpp_str_or_long_or_null(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v: &Value) -> Result<AlgoArg, VmError> {
+fn zpp_str_or_long_or_null(
+    vm: &mut Vm,
+    fname: &str,
+    idx: usize,
+    pname: &str,
+    v: &Value,
+) -> Result<AlgoArg, VmError> {
     let v = v.deref();
     match &v {
         Value::Null | Value::Undef => Ok(AlgoArg::Null),
@@ -1347,7 +1399,11 @@ fn zpp_str_or_long_or_null(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v:
         Value::Long(n) => Ok(AlgoArg::Long(*n)),
         Value::True => Ok(AlgoArg::Long(1)),
         Value::False => Ok(AlgoArg::Long(0)),
-        Value::Double(d) if d.is_finite() && *d >= -9.223_372_036_854_776e18 && *d < 9.223_372_036_854_776e18 => {
+        Value::Double(d)
+            if d.is_finite()
+                && *d >= -9.223_372_036_854_776e18
+                && *d < 9.223_372_036_854_776e18 =>
+        {
             if d.fract() != 0.0 {
                 vm.emit_deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",
@@ -1357,7 +1413,9 @@ fn zpp_str_or_long_or_null(vm: &mut Vm, fname: &str, idx: usize, pname: &str, v:
             Ok(AlgoArg::Long(*d as i64))
         }
         Value::Double(_) => Ok(AlgoArg::Str(v.to_php_string())),
-        Value::Object(_) if has_tostring(vm, &v) => Ok(AlgoArg::Str(vm.value_to_string_checked(&v)?)),
+        Value::Object(_) if has_tostring(vm, &v) => {
+            Ok(AlgoArg::Str(vm.value_to_string_checked(&v)?))
+        }
         _ => {
             let msg = format!(
                 "{}(): Argument #{} (${}) must be of type string|int|null, {} given",
@@ -1406,7 +1464,11 @@ enum PasswordAlgo {
 
 /// The registered password algorithms (php_password_algos); argon2 is not built.
 fn password_algo_find(ident: &[u8]) -> Option<PasswordAlgo> {
-    if ident == b"2y" { Some(PasswordAlgo::Bcrypt) } else { None }
+    if ident == b"2y" {
+        Some(PasswordAlgo::Bcrypt)
+    } else {
+        None
+    }
 }
 
 fn password_algo_find_arg(arg: &AlgoArg) -> Option<PasswordAlgo> {
@@ -1431,7 +1493,9 @@ fn password_algo_extract_ident(hash: &[u8]) -> Option<Vec<u8>> {
 
 fn password_algo_valid(algo: PasswordAlgo, hash: &[u8]) -> bool {
     match algo {
-        PasswordAlgo::Bcrypt => hash.len() == 60 && hash[0] == b'$' && hash[1] == b'2' && hash[2] == b'y',
+        PasswordAlgo::Bcrypt => {
+            hash.len() == 60 && hash[0] == b'$' && hash[1] == b'2' && hash[2] == b'y'
+        }
     }
 }
 
@@ -1479,7 +1543,10 @@ fn option_long(vm: &mut Vm, options: Option<&Rc<RefCell<PhpArray>>>, key: &[u8])
         Value::Object(_) => {
             // zval_get_long on an object: warning + 1
             let cls = Vm::value_type_name(&v);
-            vm.emit_warning(&format!("Object of class {} could not be converted to int", cls));
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to int",
+                cls
+            ));
             1
         }
         _ => v.to_long(),
@@ -1518,7 +1585,11 @@ fn os_random(buf: &mut [u8]) -> bool {
     let mut filled = 0usize;
     while filled < buf.len() {
         let r = unsafe {
-            libc::getrandom(buf[filled..].as_mut_ptr() as *mut libc::c_void, buf.len() - filled, 0)
+            libc::getrandom(
+                buf[filled..].as_mut_ptr() as *mut libc::c_void,
+                buf.len() - filled,
+                0,
+            )
         };
         if r < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
@@ -1541,8 +1612,16 @@ fn base64_encode(input: &[u8]) -> Vec<u8> {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[(n >> 18) as usize & 63]);
         out.push(T[(n >> 12) as usize & 63]);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] } else { b'=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] } else { b'=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63]
+        } else {
+            b'='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63]
+        } else {
+            b'='
+        });
     }
     out
 }
@@ -1568,16 +1647,27 @@ fn password_make_salt(vm: &mut Vm, length: usize) -> Result<Vec<u8>, VmError> {
     Ok(ret)
 }
 
-fn bcrypt_hash(vm: &mut Vm, password: &[u8], options: Option<&Rc<RefCell<PhpArray>>>) -> Result<Option<Vec<u8>>, VmError> {
+fn bcrypt_hash(
+    vm: &mut Vm,
+    password: &[u8],
+    options: Option<&Rc<RefCell<PhpArray>>>,
+) -> Result<Option<Vec<u8>>, VmError> {
     if password.contains(&0) {
-        return Err(throw(vm, b"ValueError", "Bcrypt password must not contain null character"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "Bcrypt password must not contain null character",
+        ));
     }
     let cost = option_long(vm, options, b"cost").unwrap_or(PHP_PASSWORD_BCRYPT_COST);
     if !(4..=31).contains(&cost) {
         let msg = format!("Invalid bcrypt cost parameter specified: {}", cost);
         return Err(throw(vm, b"ValueError", &msg));
     }
-    if options.map(|o| o.borrow().get_str(b"salt").is_some()).unwrap_or(false) {
+    if options
+        .map(|o| o.borrow().get_str(b"salt").is_some())
+        .unwrap_or(false)
+    {
         vm.emit_warning(
             "password_hash(): The \"salt\" option has been ignored, since providing a custom salt is no longer supported",
         );
@@ -1615,7 +1705,11 @@ fn password_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     match digest {
         Some(d) => Ok(Value::String(PhpString::from_vec(d))),
-        None => Err(throw(vm, b"Error", "Password hashing failed for unknown reason")),
+        None => Err(throw(
+            vm,
+            b"Error",
+            "Password hashing failed for unknown reason",
+        )),
     }
 }
 
@@ -1647,18 +1741,30 @@ fn password_get_info_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let algo = ident.as_deref().and_then(password_algo_find);
     match algo {
         Some(a) if password_algo_valid(a, hash) => {
-            ret.set(key(b"algo"), Value::String(PhpString::from_vec(ident.unwrap_or_default())));
+            ret.set(
+                key(b"algo"),
+                Value::String(PhpString::from_vec(ident.unwrap_or_default())),
+            );
             match a {
                 PasswordAlgo::Bcrypt => {
-                    ret.set(key(b"algoName"), Value::String(PhpString::from_bytes(b"bcrypt")));
-                    options.set(key(b"cost"), Value::Long(bcrypt_scan_cost(hash, PHP_PASSWORD_BCRYPT_COST)));
+                    ret.set(
+                        key(b"algoName"),
+                        Value::String(PhpString::from_bytes(b"bcrypt")),
+                    );
+                    options.set(
+                        key(b"cost"),
+                        Value::Long(bcrypt_scan_cost(hash, PHP_PASSWORD_BCRYPT_COST)),
+                    );
                 }
             }
             ret.set(key(b"options"), new_array(options));
         }
         _ => {
             ret.set(key(b"algo"), Value::Null);
-            ret.set(key(b"algoName"), Value::String(PhpString::from_bytes(b"unknown")));
+            ret.set(
+                key(b"algoName"),
+                Value::String(PhpString::from_bytes(b"unknown")),
+            );
             ret.set(key(b"options"), new_array(options));
         }
     }
@@ -1684,7 +1790,8 @@ fn password_needs_rehash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let needs = match new_algo {
         PasswordAlgo::Bcrypt => {
             let old_cost = bcrypt_scan_cost(hash.as_bytes(), PHP_PASSWORD_BCRYPT_COST);
-            let new_cost = option_long(vm, options.as_ref(), b"cost").unwrap_or(PHP_PASSWORD_BCRYPT_COST);
+            let new_cost =
+                option_long(vm, options.as_ref(), b"cost").unwrap_or(PHP_PASSWORD_BCRYPT_COST);
             old_cost != new_cost
         }
     };
@@ -1719,7 +1826,11 @@ mod tests {
             ("./xZjzHv5vzVE", "password"),
             ("zZDDIZ0NOlPzw", "password"),
         ] {
-            assert_eq!(crypt_extended(pw.as_bytes(), &with_nul(hash.as_bytes())).map(|v| String::from_utf8(v).unwrap()), Some(hash.to_string()));
+            assert_eq!(
+                crypt_extended(pw.as_bytes(), &with_nul(hash.as_bytes()))
+                    .map(|v| String::from_utf8(v).unwrap()),
+                Some(hash.to_string())
+            );
         }
     }
 
@@ -1743,14 +1854,19 @@ mod tests {
 
     #[test]
     fn md5_and_sha() {
-        assert_eq!(c("rasmuslerdorf", b"$1$rasmusle$").as_deref(), Some("$1$rasmusle$rISCgZzpwk3UhDidwXvin0"));
+        assert_eq!(
+            c("rasmuslerdorf", b"$1$rasmusle$").as_deref(),
+            Some("$1$rasmusle$rISCgZzpwk3UhDidwXvin0")
+        );
         assert_eq!(
             c("Hello world!", b"$5$saltstring").as_deref(),
             Some("$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5")
         );
         assert_eq!(
             c("Hello world!", b"$6$saltstring").as_deref(),
-            Some("$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1")
+            Some(
+                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
+            )
         );
     }
 }

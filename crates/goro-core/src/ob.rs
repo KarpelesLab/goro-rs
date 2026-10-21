@@ -82,7 +82,11 @@ struct ObCtx {
 
 impl ObCtx {
     fn new(op: i64) -> Self {
-        ObCtx { op, input: Vec::new(), out: None }
+        ObCtx {
+            op,
+            input: Vec::new(),
+            out: None,
+        }
     }
     fn reset(&mut self) {
         self.input.clear();
@@ -196,7 +200,10 @@ impl Vm {
         if op != 0 && !self.ob_stack.is_empty() && self.ob_running.is_some() {
             let origin = self.ob_origin();
             self.ob_deactivate();
-            let msg = format!("{}(): Cannot use output buffering in output buffering display handlers", origin);
+            let msg = format!(
+                "{}(): Cannot use output buffering in output buffering display handlers",
+                origin
+            );
             let line = self.current_line;
             let err = self.emit_fatal_at(&msg, line);
             if self.ob_pending_fatal.is_none() {
@@ -259,7 +266,10 @@ impl Vm {
         match kind {
             ObKind::User(cb) => {
                 let data = self.ob_stack[idx].clone();
-                let args = [Value::String(PhpString::from_vec(data)), Value::Long(ctx.op)];
+                let args = [
+                    Value::String(PhpString::from_vec(data)),
+                    Value::Long(ctx.op),
+                ];
                 let r = self.call_callback(&cb, &args);
                 match r {
                     Ok(retval) if self.current_exception.is_none() => {
@@ -267,7 +277,8 @@ impl Vm {
                             if self.ob_handlers[i].flags & OBH_PRODUCED_OUTPUT != 0 {
                                 self.ob_handlers[i].flags |= OBH_DISABLED;
                                 self.ob_handlers[i].flags &= !OBH_PRODUCED_OUTPUT;
-                                let name = String::from_utf8_lossy(&self.ob_handlers[i].name).to_string();
+                                let name =
+                                    String::from_utf8_lossy(&self.ob_handlers[i].name).to_string();
                                 let origin = self.ob_origin();
                                 self.emit_deprecated(&format!(
                                     "{}(): Producing output from user output handler {} is deprecated",
@@ -331,7 +342,11 @@ impl Vm {
             }
             ObKind::Default => {
                 let data = self.ob_stack[idx].clone();
-                status = if data.is_empty() { ObStatus::NoData } else { ObStatus::Success };
+                status = if data.is_empty() {
+                    ObStatus::NoData
+                } else {
+                    ObStatus::Success
+                };
                 ctx.out = Some(data);
             }
             ObKind::Devnull => {
@@ -375,7 +390,11 @@ impl Vm {
             return;
         }
         let mut ctx = ObCtx::new(op);
-        let cnt = if self.ob_deactivated { 0 } else { self.ob_stack.len() };
+        let cnt = if self.ob_deactivated {
+            0
+        } else {
+            self.ob_stack.len()
+        };
         if cnt > 0 {
             ctx.input = data.to_vec();
             if cnt > 1 {
@@ -452,8 +471,17 @@ impl Vm {
     }
 
     /// Build a handler structure (php_output_handler_init).
-    pub fn ob_make_handler(name: Vec<u8>, kind: ObKind, chunk_size: usize, flags: i64) -> ObHandler {
-        let type_flag = if matches!(kind, ObKind::User(_)) { OBH_USER } else { OBH_INTERNAL };
+    pub fn ob_make_handler(
+        name: Vec<u8>,
+        kind: ObKind,
+        chunk_size: usize,
+        flags: i64,
+    ) -> ObHandler {
+        let type_flag = if matches!(kind, ObKind::User(_)) {
+            OBH_USER
+        } else {
+            OBH_INTERNAL
+        };
         ObHandler {
             id: 0,
             name,
@@ -520,21 +548,41 @@ impl Vm {
         self.ob_sync();
         if self.ob_deactivated || self.ob_stack.is_empty() {
             if flags & OB_POP_SILENT == 0 {
-                let what = if flags & OB_POP_DISCARD != 0 { "discard" } else { "send" };
+                let what = if flags & OB_POP_DISCARD != 0 {
+                    "discard"
+                } else {
+                    "send"
+                };
                 let origin = self.ob_origin();
                 let line = self.current_line;
-                self.emit_notice_at(&format!("{}(): Failed to {} buffer. No buffer to {}", origin, what, what), line);
+                self.emit_notice_at(
+                    &format!(
+                        "{}(): Failed to {} buffer. No buffer to {}",
+                        origin, what, what
+                    ),
+                    line,
+                );
             }
             return false;
         }
         let top = self.ob_stack.len() - 1;
         if flags & OB_POP_FORCE == 0 && self.ob_handlers[top].flags & OBH_REMOVABLE == 0 {
             if flags & OB_POP_SILENT == 0 {
-                let what = if flags & OB_POP_DISCARD != 0 { "discard" } else { "send" };
+                let what = if flags & OB_POP_DISCARD != 0 {
+                    "discard"
+                } else {
+                    "send"
+                };
                 let name = String::from_utf8_lossy(&self.ob_handlers[top].name).to_string();
                 let origin = self.ob_origin();
                 let line = self.current_line;
-                self.emit_notice_at(&format!("{}(): Failed to {} buffer of {} ({})", origin, what, name, top), line);
+                self.emit_notice_at(
+                    &format!(
+                        "{}(): Failed to {} buffer of {} ({})",
+                        origin, what, name, top
+                    ),
+                    line,
+                );
             }
             return false;
         }
@@ -618,7 +666,10 @@ impl Vm {
     }
 
     /// Status array data for one level: (name, type, flags, level, chunk, size, used).
-    pub fn ob_status_entry(&mut self, level: usize) -> Option<(Vec<u8>, i64, i64, i64, i64, i64, i64)> {
+    pub fn ob_status_entry(
+        &mut self,
+        level: usize,
+    ) -> Option<(Vec<u8>, i64, i64, i64, i64, i64, i64)> {
         self.ob_sync();
         let h = self.ob_handlers.get(level)?;
         let used = self.ob_stack.get(level).map(|b| b.len()).unwrap_or(0);
@@ -645,7 +696,10 @@ impl Vm {
 
     pub fn ob_active_name(&mut self) -> Vec<u8> {
         self.ob_sync();
-        self.ob_handlers.last().map(|h| h.name.clone()).unwrap_or_default()
+        self.ob_handlers
+            .last()
+            .map(|h| h.name.clone())
+            .unwrap_or_default()
     }
 
     /// Whether a handler with this name is currently on the stack.

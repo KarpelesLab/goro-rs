@@ -336,14 +336,18 @@ impl Compiler {
                 let valid = tv.mask & crate::vm::variance::T_OBJECT != 0
                     || tv.elems.iter().any(|e| match e {
                         crate::vm::variance::TElem::Name(n) => {
-                            n.eq_ignore_ascii_case(b"Traversable") || n.eq_ignore_ascii_case(b"Iterator") || n.eq_ignore_ascii_case(b"Generator")
+                            n.eq_ignore_ascii_case(b"Traversable")
+                                || n.eq_ignore_ascii_case(b"Iterator")
+                                || n.eq_ignore_ascii_case(b"Generator")
                         }
                         _ => false,
                     });
                 if !valid {
                     return Err(CompileError {
-                        message: format!("Generator return type must be a supertype of Generator, {} given",
-                            crate::vm::variance::type_to_string(&tv, None)),
+                        message: format!(
+                            "Generator return type must be a supertype of Generator, {} given",
+                            crate::vm::variance::type_to_string(&tv, None)
+                        ),
                         line: self.op_array.decl_line,
                     });
                 }
@@ -363,10 +367,16 @@ impl Compiler {
                 let is_prefix = label_path.len() <= goto_path.len()
                     && goto_path[..label_path.len()] == label_path[..];
                 if !is_prefix {
-                    return Err(CompileError { message: "jump into a finally block is disallowed".into(), line: *line });
+                    return Err(CompileError {
+                        message: "jump into a finally block is disallowed".into(),
+                        line: *line,
+                    });
                 }
                 if goto_path.len() > label_path.len() {
-                    return Err(CompileError { message: "jump out of a finally block is disallowed".into(), line: *line });
+                    return Err(CompileError {
+                        message: "jump out of a finally block is disallowed".into(),
+                        line: *line,
+                    });
                 }
             }
         }
@@ -416,7 +426,9 @@ impl Compiler {
     fn compile_property_name(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         if let ExprKind::Identifier(name) = &expr.kind {
             // Bare identifier in property context is always a string literal
-            let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+            let idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(name.clone())));
             Ok(OperandType::Const(idx))
         } else {
             self.compile_expr(expr)
@@ -448,7 +460,13 @@ impl Compiler {
     /// (lowered by the parser to `parent::__property_{get,set}_<prop>()`),
     /// matching zend_compile_parent_property_hook_call(). Returns Ok(false)
     /// when the call is valid (or not a parent hook call).
-    fn check_parent_hook_call(&self, class: &Expr, method: &[u8], is_fcc: bool, line: u32) -> Result<bool, CompileError> {
+    fn check_parent_hook_call(
+        &self,
+        class: &Expr,
+        method: &[u8],
+        is_fcc: bool,
+        line: u32,
+    ) -> Result<bool, CompileError> {
         let (kind, prop) = if let Some(p) = method.strip_prefix(b"__property_get_".as_slice()) {
             ("get", p)
         } else if let Some(p) = method.strip_prefix(b"__property_set_".as_slice()) {
@@ -468,24 +486,32 @@ impl Compiler {
         }
         let prop_s = String::from_utf8_lossy(prop);
         let n = &self.op_array.name;
-        let active = if n.len() > 6 && n[0] == b'$' && (n.ends_with(b"::get") || n.ends_with(b"::set")) {
-            Some((&n[1..n.len() - 5], &n[n.len() - 3..]))
-        } else {
-            None
-        };
+        let active =
+            if n.len() > 6 && n[0] == b'$' && (n.ends_with(b"::get") || n.ends_with(b"::set")) {
+                Some((&n[1..n.len() - 5], &n[n.len() - 3..]))
+            } else {
+                None
+            };
         let Some((active_prop, active_kind)) = active else {
-            return err(format!("Must not use parent::${}::{}() outside a property hook", prop_s, kind));
+            return err(format!(
+                "Must not use parent::${}::{}() outside a property hook",
+                prop_s, kind
+            ));
         };
         if active_prop != prop {
             return err(format!(
                 "Must not use parent::${}::{}() in a different property (${})",
-                prop_s, kind, String::from_utf8_lossy(active_prop)
+                prop_s,
+                kind,
+                String::from_utf8_lossy(active_prop)
             ));
         }
         if active_kind != kind.as_bytes() {
             return err(format!(
                 "Must not use parent::${}::{}() in a different property hook ({})",
-                prop_s, kind, String::from_utf8_lossy(active_kind)
+                prop_s,
+                kind,
+                String::from_utf8_lossy(active_kind)
             ));
         }
         Ok(false)
@@ -498,15 +524,9 @@ impl Compiler {
                 // In class constant context (not a method), __METHOD__ and __FUNCTION__ are ""
                 Value::String(PhpString::empty())
             }
-            b"__class__" => {
-                Value::String(PhpString::from_vec(class_name.to_vec()))
-            }
-            b"__line__" => {
-                Value::Long(line as i64)
-            }
-            b"__file__" => {
-                Value::String(PhpString::from_vec(self.source_file.clone()))
-            }
+            b"__class__" => Value::String(PhpString::from_vec(class_name.to_vec())),
+            b"__line__" => Value::Long(line as i64),
+            b"__file__" => Value::String(PhpString::from_vec(self.source_file.clone())),
             b"__dir__" => {
                 let path = String::from_utf8_lossy(&self.source_file);
                 let dir = if let Some(pos) = path.rfind('/') {
@@ -516,12 +536,8 @@ impl Compiler {
                 };
                 Value::String(PhpString::from_string(dir.to_string()))
             }
-            b"__namespace__" => {
-                Value::String(PhpString::from_vec(self.current_namespace.clone()))
-            }
-            b"__trait__" => {
-                Value::String(PhpString::empty())
-            }
+            b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
+            b"__trait__" => Value::String(PhpString::empty()),
             b"true" => Value::True,
             b"false" => Value::False,
             b"null" => Value::Null,
@@ -600,7 +616,11 @@ impl Compiler {
     /// "property", "class constant", "constant".
     fn validate_internal_attr(name: &[u8], target: &str) -> Option<String> {
         // Strip leading backslash for fully-qualified names
-        let bare: &[u8] = if name.first() == Some(&b'\\') { &name[1..] } else { name };
+        let bare: &[u8] = if name.first() == Some(&b'\\') {
+            &name[1..]
+        } else {
+            name
+        };
         // "Attribute" is only allowed on classes.
         if bare.eq_ignore_ascii_case(b"Attribute") && target != "class" {
             return Some(format!(
@@ -623,15 +643,17 @@ impl Compiler {
             ));
         }
         // "NoDiscard" is allowed on function and method
-        if bare.eq_ignore_ascii_case(b"NoDiscard")
-            && target != "function" && target != "method" {
+        if bare.eq_ignore_ascii_case(b"NoDiscard") && target != "function" && target != "method" {
             return Some(format!(
                 "Attribute \"NoDiscard\" cannot target {} (allowed targets: function, method)",
                 target
             ));
         }
         // "ReturnTypeWillChange" is only allowed on methods.
-        if bare.eq_ignore_ascii_case(b"ReturnTypeWillChange") && !target.is_empty() && target != "method" {
+        if bare.eq_ignore_ascii_case(b"ReturnTypeWillChange")
+            && !target.is_empty()
+            && target != "method"
+        {
             return Some(format!(
                 "Attribute \"ReturnTypeWillChange\" cannot target {} (allowed targets: method)",
                 target
@@ -645,7 +667,10 @@ impl Compiler {
         None
     }
 
-    fn compile_attributes(&mut self, attrs: &[goro_parser::ast::Attribute]) -> Vec<crate::object::RuntimeAttribute> {
+    fn compile_attributes(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+    ) -> Vec<crate::object::RuntimeAttribute> {
         self.compile_attributes_target(attrs, "")
     }
 
@@ -653,7 +678,11 @@ impl Compiler {
     /// attributes against the placement target. If validation fails the
     /// error is queued on the compiler so the executor can raise a fatal
     /// before running the surrounding code.
-    fn compile_attributes_target(&mut self, attrs: &[goro_parser::ast::Attribute], target: &str) -> Vec<crate::object::RuntimeAttribute> {
+    fn compile_attributes_target(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+        target: &str,
+    ) -> Vec<crate::object::RuntimeAttribute> {
         // If #[DelayedTargetValidation] is present, skip compile-time target
         // validation for built-in attributes (PHP 8.5).
         let has_delayed = attrs.iter().any(|a| {
@@ -667,90 +696,142 @@ impl Compiler {
         // are NOT repeatable. The `#[\DelayedTargetValidation]` bypass does NOT apply
         // to repetition errors (per repetition_errors.phpt).
         let internal_non_repeatable: &[&[u8]] = &[
-            b"Attribute", b"AllowDynamicProperties", b"SensitiveParameter",
-            b"NoDiscard", b"Override", b"Deprecated", b"ReturnTypeWillChange",
+            b"Attribute",
+            b"AllowDynamicProperties",
+            b"SensitiveParameter",
+            b"NoDiscard",
+            b"Override",
+            b"Deprecated",
+            b"ReturnTypeWillChange",
             b"DelayedTargetValidation",
         ];
         for builtin in internal_non_repeatable {
-            let occurrences: Vec<_> = attrs.iter().filter(|a| {
-                let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
-                // Strip leading backslash
-                let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
-                bare.eq_ignore_ascii_case(builtin)
-            }).collect();
+            let occurrences: Vec<_> = attrs
+                .iter()
+                .filter(|a| {
+                    let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
+                    // Strip leading backslash
+                    let bare: &[u8] = if last.first() == Some(&b'\\') {
+                        &last[1..]
+                    } else {
+                        last
+                    };
+                    bare.eq_ignore_ascii_case(builtin)
+                })
+                .collect();
             if occurrences.len() > 1 {
                 let display = std::str::from_utf8(builtin).unwrap_or("");
-                self.deferred_fatal_errors.push(format!(
-                    "Attribute \"{}\" must not be repeated", display
-                ));
+                self.deferred_fatal_errors
+                    .push(format!("Attribute \"{}\" must not be repeated", display));
             }
         }
-        attrs.iter().map(|attr| {
-            let name = if attr.name.len() == 1 {
-                self.resolve_class_name(&attr.name[0])
-            } else {
-                let mut f = Vec::new();
-                for (i, p) in attr.name.iter().enumerate() {
-                    if i > 0 { f.push(b'\\'); }
-                    f.extend_from_slice(p);
-                }
-                self.resolve_class_name(&f)
-            };
-            if !effective_target.is_empty() {
-                if let Some(msg) = Self::validate_internal_attr(&name, effective_target) {
-                    self.deferred_fatal_errors.push(msg);
-                }
-            }
-            // Attribute argument lists cannot use unpacking (...) per PHP.
-            for arg in &attr.args {
-                if arg.unpack {
-                    self.deferred_fatal_errors.push("Cannot use unpacking in attribute argument list".to_string());
-                    break;
-                }
-            }
-            // Attribute argument expressions must be constant expressions.
-            for arg in &attr.args {
-                if !Self::is_const_attr_expr(&arg.value) {
-                    self.deferred_fatal_errors.push(
-                        "Constant expression contains invalid operations".to_string(),
-                    );
-                    break;
-                }
-            }
-            let mut ac = Compiler::new();
-            ac.current_namespace = self.current_namespace.clone();
-            ac.use_map = self.use_map.clone();
-            ac.use_function_map = self.use_function_map.clone();
-            ac.use_const_map = self.use_const_map.clone();
-            ac.source_file = self.source_file.clone();
-            ac.op_array.strict_types = self.op_array.strict_types;
-            if let Some(cls) = &self.current_class {
-                ac.current_class = Some(cls.clone());
-                ac.op_array.scope_class = Some(cls.iter().map(|b| b.to_ascii_lowercase()).collect());
-            }
-            if let Some(p) = &self.current_parent_class { ac.current_parent_class = Some(p.clone()); }
-            let arr_tmp = ac.op_array.alloc_temp();
-            ac.op_array.emit(Op { opcode: OpCode::ArrayNew, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(arr_tmp), line: 0 });
-            for arg in &attr.args {
-                if let Ok(val) = ac.compile_expr(&arg.value) {
-                    if let Some(an) = &arg.name {
-                        let kl = ac.op_array.add_literal(Value::String(PhpString::from_vec(an.clone())));
-                        ac.op_array.emit(Op { opcode: OpCode::ArraySet, op1: OperandType::Tmp(arr_tmp), op2: val, result: OperandType::Const(kl), line: 0 });
-                    } else {
-                        ac.op_array.emit(Op { opcode: OpCode::ArrayAppend, op1: OperandType::Tmp(arr_tmp), op2: val, result: OperandType::Unused, line: 0 });
+        attrs
+            .iter()
+            .map(|attr| {
+                let name = if attr.name.len() == 1 {
+                    self.resolve_class_name(&attr.name[0])
+                } else {
+                    let mut f = Vec::new();
+                    for (i, p) in attr.name.iter().enumerate() {
+                        if i > 0 {
+                            f.push(b'\\');
+                        }
+                        f.extend_from_slice(p);
+                    }
+                    self.resolve_class_name(&f)
+                };
+                if !effective_target.is_empty() {
+                    if let Some(msg) = Self::validate_internal_attr(&name, effective_target) {
+                        self.deferred_fatal_errors.push(msg);
                     }
                 }
-            }
-            ac.op_array.emit(Op { opcode: OpCode::Return, op1: OperandType::Tmp(arr_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: 0 });
-            // Reflection's rendering of each argument (ReflectionAttribute::__toString).
-            ac.op_array.param_default_repr = attr.args.iter().map(|a| {
-                self.default_value_repr(&a.value).map(|r| match &a.name {
-                    Some(n) => format!("{} = {}", String::from_utf8_lossy(n), r),
-                    None => r,
-                })
-            }).collect();
-            crate::object::RuntimeAttribute { name, args_op_array: ac.op_array }
-        }).collect()
+                // Attribute argument lists cannot use unpacking (...) per PHP.
+                for arg in &attr.args {
+                    if arg.unpack {
+                        self.deferred_fatal_errors
+                            .push("Cannot use unpacking in attribute argument list".to_string());
+                        break;
+                    }
+                }
+                // Attribute argument expressions must be constant expressions.
+                for arg in &attr.args {
+                    if !Self::is_const_attr_expr(&arg.value) {
+                        self.deferred_fatal_errors
+                            .push("Constant expression contains invalid operations".to_string());
+                        break;
+                    }
+                }
+                let mut ac = Compiler::new();
+                ac.current_namespace = self.current_namespace.clone();
+                ac.use_map = self.use_map.clone();
+                ac.use_function_map = self.use_function_map.clone();
+                ac.use_const_map = self.use_const_map.clone();
+                ac.source_file = self.source_file.clone();
+                ac.op_array.strict_types = self.op_array.strict_types;
+                if let Some(cls) = &self.current_class {
+                    ac.current_class = Some(cls.clone());
+                    ac.op_array.scope_class =
+                        Some(cls.iter().map(|b| b.to_ascii_lowercase()).collect());
+                }
+                if let Some(p) = &self.current_parent_class {
+                    ac.current_parent_class = Some(p.clone());
+                }
+                let arr_tmp = ac.op_array.alloc_temp();
+                ac.op_array.emit(Op {
+                    opcode: OpCode::ArrayNew,
+                    op1: OperandType::Unused,
+                    op2: OperandType::Unused,
+                    result: OperandType::Tmp(arr_tmp),
+                    line: 0,
+                });
+                for arg in &attr.args {
+                    if let Ok(val) = ac.compile_expr(&arg.value) {
+                        if let Some(an) = &arg.name {
+                            let kl = ac
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(an.clone())));
+                            ac.op_array.emit(Op {
+                                opcode: OpCode::ArraySet,
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: val,
+                                result: OperandType::Const(kl),
+                                line: 0,
+                            });
+                        } else {
+                            ac.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: val,
+                                result: OperandType::Unused,
+                                line: 0,
+                            });
+                        }
+                    }
+                }
+                ac.op_array.emit(Op {
+                    opcode: OpCode::Return,
+                    op1: OperandType::Tmp(arr_tmp),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: 0,
+                });
+                // Reflection's rendering of each argument (ReflectionAttribute::__toString).
+                ac.op_array.param_default_repr = attr
+                    .args
+                    .iter()
+                    .map(|a| {
+                        self.default_value_repr(&a.value).map(|r| match &a.name {
+                            Some(n) => format!("{} = {}", String::from_utf8_lossy(n), r),
+                            None => r,
+                        })
+                    })
+                    .collect();
+                crate::object::RuntimeAttribute {
+                    name,
+                    args_op_array: ac.op_array,
+                }
+            })
+            .collect()
     }
 
     fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
@@ -782,7 +863,8 @@ impl Compiler {
             // Qualified name (contains backslash but doesn't start with one)
             // Check if the first part matches a use alias
             let first_part = &name[..pos];
-            let first_part_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let first_part_lower: Vec<u8> =
+                first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
             if let Some(resolved) = self.use_map.get(&first_part_lower) {
                 let mut result = resolved.clone();
                 result.extend_from_slice(&name[pos..]);
@@ -818,7 +900,8 @@ impl Compiler {
         if let Some(pos) = name.iter().position(|&b| b == b'\\') {
             // Qualified name
             let first_part = &name[..pos];
-            let first_part_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let first_part_lower: Vec<u8> =
+                first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
             if let Some(resolved) = self.use_function_map.get(&first_part_lower) {
                 let mut result = resolved.clone();
                 result.extend_from_slice(&name[pos..]);
@@ -908,7 +991,10 @@ impl Compiler {
                 let mut is_byref = Self::is_builtin_byref_param(func_name, i);
                 // array_multisort() takes its arguments by "prefer-ref": variables
                 // are passed by reference, other expressions (sort flags) by value.
-                if func_name.map(|n| n.eq_ignore_ascii_case(b"array_multisort")).unwrap_or(false) {
+                if func_name
+                    .map(|n| n.eq_ignore_ascii_case(b"array_multisort"))
+                    .unwrap_or(false)
+                {
                     is_byref = Self::is_writable_lvalue(&arg.value);
                 }
                 // Builtins taking `array &$array`: goro passes arrays by shared
@@ -916,22 +1002,52 @@ impl Compiler {
                 if !is_byref && !Self::is_writable_lvalue(&arg.value) {
                     if let Some(fname) = func_name {
                         let lower = fname.to_ascii_lowercase();
-                        let array_ref = i == 0 && matches!(lower.as_slice(),
-                            b"next" | b"prev" | b"reset" | b"end" | b"array_shift" | b"array_pop"
-                            | b"array_unshift" | b"array_push" | b"array_splice" | b"sort" | b"rsort"
-                            | b"usort" | b"uasort" | b"uksort" | b"asort" | b"arsort" | b"ksort"
-                            | b"krsort" | b"natsort" | b"natcasesort" | b"shuffle" | b"array_walk"
-                            | b"array_walk_recursive");
+                        let array_ref = i == 0
+                            && matches!(
+                                lower.as_slice(),
+                                b"next"
+                                    | b"prev"
+                                    | b"reset"
+                                    | b"end"
+                                    | b"array_shift"
+                                    | b"array_pop"
+                                    | b"array_unshift"
+                                    | b"array_push"
+                                    | b"array_splice"
+                                    | b"sort"
+                                    | b"rsort"
+                                    | b"usort"
+                                    | b"uasort"
+                                    | b"uksort"
+                                    | b"asort"
+                                    | b"arsort"
+                                    | b"ksort"
+                                    | b"krsort"
+                                    | b"natsort"
+                                    | b"natcasesort"
+                                    | b"shuffle"
+                                    | b"array_walk"
+                                    | b"array_walk_recursive"
+                            );
                         if array_ref {
-                            let is_call = matches!(&arg.value.kind,
-                                ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. });
+                            let is_call = matches!(
+                                &arg.value.kind,
+                                ExprKind::FunctionCall { .. }
+                                    | ExprKind::MethodCall { .. }
+                                    | ExprKind::StaticMethodCall { .. }
+                            );
                             let (opcode, msg) = if is_call {
-                                (OpCode::EmitNotice, b"Only variables should be passed by reference".to_vec())
+                                (
+                                    OpCode::EmitNotice,
+                                    b"Only variables should be passed by reference".to_vec(),
+                                )
                             } else {
                                 let disp = String::from_utf8_lossy(fname).to_string();
                                 (OpCode::ThrowErrorMsg, format!("{}(): Argument #1 ($array) could not be passed by reference", disp).into_bytes())
                             };
-                            let msg_idx = self.op_array.add_literal(Value::String(crate::string::PhpString::from_vec(msg)));
+                            let msg_idx = self.op_array.add_literal(Value::String(
+                                crate::string::PhpString::from_vec(msg),
+                            ));
                             self.op_array.emit(Op {
                                 opcode,
                                 op1: OperandType::Const(msg_idx),
@@ -947,7 +1063,9 @@ impl Compiler {
                 if is_byref && !Self::is_writable_lvalue(&arg.value) {
                     // Emit a NoticeAt opcode with the warning message
                     let msg_idx = self.op_array.add_literal(Value::String(
-                        crate::string::PhpString::from_bytes(b"Only variables should be passed by reference")
+                        crate::string::PhpString::from_bytes(
+                            b"Only variables should be passed by reference",
+                        ),
                     ));
                     self.op_array.emit(Op {
                         opcode: OpCode::EmitNotice,
@@ -965,26 +1083,47 @@ impl Compiler {
                 // Unknown callee at compile time: an array element or property
                 // argument may need to be passed by reference. Decide at runtime.
                 let dim_or_prop = matches!(&arg.value.kind, ExprKind::ArrayAccess { .. })
-                    || matches!(&arg.value.kind, ExprKind::PropertyAccess { nullsafe: false, .. });
+                    || matches!(
+                        &arg.value.kind,
+                        ExprKind::PropertyAccess {
+                            nullsafe: false,
+                            ..
+                        }
+                    );
                 let is_append = {
                     let mut e = &arg.value;
                     let mut found = false;
                     while let ExprKind::ArrayAccess { array, index } = &e.kind {
-                        if index.is_none() { found = true; }
+                        if index.is_none() {
+                            found = true;
+                        }
                         e = array;
                     }
                     found
                 };
                 // Callee declared earlier in this file: its by-ref-ness is known.
-                let known_byval = func_name.and_then(|n| {
-                    let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let lower = lower.strip_prefix(b"\\").map(|x| x.to_vec()).unwrap_or(lower);
-                    self.op_array.child_functions.iter()
-                        .find(|f| f.name.eq_ignore_ascii_case(&lower))
-                        .map(|f| !f.by_ref_params.get(i).copied().unwrap_or(false) && f.variadic_param.is_none())
-                }).unwrap_or(false);
+                let known_byval = func_name
+                    .and_then(|n| {
+                        let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let lower = lower
+                            .strip_prefix(b"\\")
+                            .map(|x| x.to_vec())
+                            .unwrap_or(lower);
+                        self.op_array
+                            .child_functions
+                            .iter()
+                            .find(|f| f.name.eq_ignore_ascii_case(&lower))
+                            .map(|f| {
+                                !f.by_ref_params.get(i).copied().unwrap_or(false)
+                                    && f.variadic_param.is_none()
+                            })
+                    })
+                    .unwrap_or(false);
                 if is_append && known_byval {
-                    return Err(CompileError { message: "Cannot use [] for reading".into(), line });
+                    return Err(CompileError {
+                        message: "Cannot use [] for reading".into(),
+                        line,
+                    });
                 }
                 if !is_byref && dim_or_prop && !known_byval {
                     let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
@@ -1029,7 +1168,10 @@ impl Compiler {
                             | ExprKind::DynamicStaticPropertyAccess { .. }
                     );
                     if temp_base {
-                        self.compile_throw_error(b"Cannot use temporary expression in write context", line)?;
+                        self.compile_throw_error(
+                            b"Cannot use temporary expression in write context",
+                            line,
+                        )?;
                         let end = self.op_array.current_offset();
                         self.op_array.patch_jump(jmp_end, end);
                         continue;
@@ -1051,9 +1193,9 @@ impl Compiler {
                             });
                             t
                         }
-                        ExprKind::PropertyAccess { object, property, .. } => {
-                            self.compile_property_ref(object, property, line)?
-                        }
+                        ExprKind::PropertyAccess {
+                            object, property, ..
+                        } => self.compile_property_ref(object, property, line)?,
                         _ => unreachable!(),
                     };
                     self.op_array.emit(Op {
@@ -1092,7 +1234,11 @@ impl Compiler {
                 };
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
                 self.op_array.emit(Op {
-                    opcode: if is_byref { OpCode::SendRef } else { OpCode::SendVal },
+                    opcode: if is_byref {
+                        OpCode::SendRef
+                    } else {
+                        OpCode::SendVal
+                    },
                     op1: val,
                     op2: OperandType::Const(pos_idx),
                     result: OperandType::Unused,
@@ -1122,12 +1268,12 @@ impl Compiler {
     /// Check if an expression contains a nullsafe property/method access (?->)
     fn expr_contains_nullsafe(expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::PropertyAccess { nullsafe, object, .. } => {
-                *nullsafe || Self::expr_contains_nullsafe(object)
-            }
-            ExprKind::MethodCall { nullsafe, object, .. } => {
-                *nullsafe || Self::expr_contains_nullsafe(object)
-            }
+            ExprKind::PropertyAccess {
+                nullsafe, object, ..
+            } => *nullsafe || Self::expr_contains_nullsafe(object),
+            ExprKind::MethodCall {
+                nullsafe, object, ..
+            } => *nullsafe || Self::expr_contains_nullsafe(object),
             _ => false,
         }
     }
@@ -1147,9 +1293,12 @@ impl Compiler {
     fn build_anon_class_name_map(&mut self, stmts: &[Statement]) {
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::ClassDecl { name, extends, implements, .. }
-                    if name.starts_with(b"__anonymous_class_") =>
-                {
+                StmtKind::ClassDecl {
+                    name,
+                    extends,
+                    implements,
+                    ..
+                } if name.starts_with(b"__anonymous_class_") => {
                     let counter_part = &name[b"__anonymous_class_".len()..];
                     let counter: u32 = std::str::from_utf8(counter_part)
                         .ok()
@@ -1182,7 +1331,9 @@ impl Compiler {
                     if let Some(parts) = name {
                         let mut ns = Vec::new();
                         for (i, part) in parts.iter().enumerate() {
-                            if i > 0 { ns.push(b'\\'); }
+                            if i > 0 {
+                                ns.push(b'\\');
+                            }
                             ns.extend_from_slice(part);
                         }
                         self.current_namespace = ns;
@@ -1202,12 +1353,18 @@ impl Compiler {
                     for item in use_items {
                         if item.kind == UseKind::Normal {
                             let empty_vec: Vec<u8> = Vec::new();
-                            let alias_lower = item.alias.as_ref()
+                            let alias_lower = item
+                                .alias
+                                .as_ref()
                                 .unwrap_or_else(|| item.name.last().unwrap_or(&empty_vec))
-                                .iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect::<Vec<u8>>();
                             let mut qualified = Vec::new();
                             for (i, part) in item.name.iter().enumerate() {
-                                if i > 0 { qualified.push(b'\\'); }
+                                if i > 0 {
+                                    qualified.push(b'\\');
+                                }
                                 qualified.extend_from_slice(part);
                             }
                             self.use_map.insert(alias_lower, qualified);
@@ -1221,7 +1378,10 @@ impl Compiler {
 
     /// Compile a complete program
     /// Compile a program, returning the op_array and compiled classes
-    pub fn compile(mut self, program: &Program) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
+    pub fn compile(
+        mut self,
+        program: &Program,
+    ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         self.is_top_level = true;
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
@@ -1256,10 +1416,18 @@ impl Compiler {
             fn is_declare_directive(stmt: &Statement) -> Option<bool> {
                 // Some(has_strict_types) for a real declare(); None for anything else
                 if let StmtKind::Declare { directives, .. } = &stmt.kind {
-                    if !directives.is_empty() && directives.iter().all(|(n, _)| {
-                        n.eq_ignore_ascii_case(b"strict_types") || n.eq_ignore_ascii_case(b"ticks") || n.eq_ignore_ascii_case(b"encoding")
-                    }) {
-                        return Some(directives.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"strict_types")));
+                    if !directives.is_empty()
+                        && directives.iter().all(|(n, _)| {
+                            n.eq_ignore_ascii_case(b"strict_types")
+                                || n.eq_ignore_ascii_case(b"ticks")
+                                || n.eq_ignore_ascii_case(b"encoding")
+                        })
+                    {
+                        return Some(
+                            directives
+                                .iter()
+                                .any(|(n, _)| n.eq_ignore_ascii_case(b"strict_types")),
+                        );
                     }
                 }
                 None
@@ -1268,12 +1436,20 @@ impl Compiler {
                 for st in stmts {
                     match &st.kind {
                         StmtKind::NamespaceDecl { body: Some(b), .. } => {
-                            if let Some(l) = b.iter().find(|x| is_declare_directive(x) == Some(true)).map(|x| x.span.line) {
+                            if let Some(l) = b
+                                .iter()
+                                .find(|x| is_declare_directive(x) == Some(true))
+                                .map(|x| x.span.line)
+                            {
                                 return Some(l);
                             }
                         }
                         StmtKind::Declare { body: Some(b), .. } => {
-                            if let Some(l) = b.iter().find(|x| is_declare_directive(x) == Some(true)).map(|x| x.span.line) {
+                            if let Some(l) = b
+                                .iter()
+                                .find(|x| is_declare_directive(x) == Some(true))
+                                .map(|x| x.span.line)
+                            {
                                 return Some(l);
                             }
                         }
@@ -1309,7 +1485,9 @@ impl Compiler {
             }
             if let Some(line) = nested_strict(&program.statements) {
                 return Err(CompileError {
-                    message: "strict_types declaration must be the very first statement in the script".into(),
+                    message:
+                        "strict_types declaration must be the very first statement in the script"
+                            .into(),
                     line,
                 });
             }
@@ -1349,7 +1527,9 @@ impl Compiler {
                     if let Some(parts) = name {
                         let mut ns = Vec::new();
                         for (i, part) in parts.iter().enumerate() {
-                            if i > 0 { ns.push(b'\\'); }
+                            if i > 0 {
+                                ns.push(b'\\');
+                            }
                             ns.extend_from_slice(part);
                         }
                         self.current_namespace = ns;
@@ -1367,7 +1547,9 @@ impl Compiler {
                                 StmtKind::FunctionDecl { .. } => {
                                     // Already compiled in first pass
                                 }
-                                StmtKind::ClassDecl { name, .. } if !name.starts_with(b"__anonymous_class_") => {
+                                StmtKind::ClassDecl { name, .. }
+                                    if !name.starts_with(b"__anonymous_class_") =>
+                                {
                                     // Hoisted classes already compiled in first pass; compile
                                     // non-early-bindable ones here, in source order.
                                     let qn_lower: Vec<u8> = self
@@ -1415,7 +1597,10 @@ impl Compiler {
         // If any deferred fatal errors were collected (e.g. internal attribute
         // target violations), surface the first one as a compile error.
         if let Some(msg) = self.deferred_fatal_errors.into_iter().next() {
-            return Err(CompileError { message: msg, line: 0 });
+            return Err(CompileError {
+                message: msg,
+                line: 0,
+            });
         }
         Ok((self.op_array, self.compiled_classes, self.warnings))
     }
@@ -1430,7 +1615,9 @@ impl Compiler {
                     if let Some(parts) = name {
                         let mut ns = Vec::new();
                         for (i, part) in parts.iter().enumerate() {
-                            if i > 0 { ns.push(b'\\'); }
+                            if i > 0 {
+                                ns.push(b'\\');
+                            }
                             ns.extend_from_slice(part);
                         }
                         self.current_namespace = ns;
@@ -1457,7 +1644,8 @@ impl Compiler {
                 StmtKind::FunctionDecl { name, .. } => {
                     let qn = self.prefix_with_namespace(name);
                     let qn_lower: Vec<u8> = qn.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some((prev_name, prev_line)) = self.hoisted_function_names.get(&qn_lower) {
+                    if let Some((prev_name, prev_line)) = self.hoisted_function_names.get(&qn_lower)
+                    {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot redeclare function {}() (previously declared in {}:{})",
@@ -1468,12 +1656,18 @@ impl Compiler {
                             line: stmt.span.line,
                         });
                     }
-                    self.hoisted_function_names.insert(qn_lower, (qn, stmt.span.line));
+                    self.hoisted_function_names
+                        .insert(qn_lower, (qn, stmt.span.line));
                     self.compile_stmt(stmt)?;
                 }
-                StmtKind::ClassDecl { name, modifiers, extends, implements, body, .. }
-                    if !name.starts_with(b"__anonymous_class_") =>
-                {
+                StmtKind::ClassDecl {
+                    name,
+                    modifiers,
+                    extends,
+                    implements,
+                    body,
+                    ..
+                } if !name.starts_with(b"__anonymous_class_") => {
                     // Only early-bind (hoist) declarations PHP would early-bind. Others are
                     // left for the second pass to emit at their source position.
                     if self.class_is_early_bindable(modifiers, extends, implements, body) {
@@ -1486,7 +1680,8 @@ impl Compiler {
                         let r = self.compile_stmt(stmt);
                         self.in_hoisting_pass = false;
                         r?;
-                        self.hoisted_class_idx.insert(qn_lower.clone(), self.compiled_classes.len() as i64 - 1);
+                        self.hoisted_class_idx
+                            .insert(qn_lower.clone(), self.compiled_classes.len() as i64 - 1);
                         self.hoisted_class_names.insert(qn_lower);
                     }
                 }
@@ -1502,8 +1697,14 @@ impl Compiler {
     /// early binding.
     fn emit_late_hoisted_decl(&mut self, qn_lower: &[u8], line: u32) {
         if let Some(&idx) = self.hoisted_class_idx.get(qn_lower) {
-            let name = self.compiled_classes.get(idx as usize).map(|c| c.name.clone()).unwrap_or_default();
-            let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name)));
+            let name = self
+                .compiled_classes
+                .get(idx as usize)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            let name_idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(name)));
             let idx_literal = self.op_array.add_literal(Value::Long(idx));
             let flag = self.op_array.add_literal(Value::Long(2));
             self.op_array.emit(Op {
@@ -1539,7 +1740,10 @@ impl Compiler {
         if !implements.is_empty() {
             return false;
         }
-        if body.iter().any(|m| matches!(m, ClassMember::TraitUse { .. })) {
+        if body
+            .iter()
+            .any(|m| matches!(m, ClassMember::TraitUse { .. }))
+        {
             return false;
         }
         if let Some(parent) = extends {
@@ -1588,10 +1792,11 @@ impl Compiler {
 
             StmtKind::Expression(expr) => {
                 // Set flag when expression result is discarded (for #[\NoDiscard] checking)
-                let is_call = matches!(expr.kind,
-                    ExprKind::FunctionCall { .. } |
-                    ExprKind::MethodCall { .. } |
-                    ExprKind::StaticMethodCall { .. }
+                let is_call = matches!(
+                    expr.kind,
+                    ExprKind::FunctionCall { .. }
+                        | ExprKind::MethodCall { .. }
+                        | ExprKind::StaticMethodCall { .. }
                 );
                 if is_call {
                     self.is_discarding_result = true;
@@ -1614,7 +1819,11 @@ impl Compiler {
 
             StmtKind::Return(value) => {
                 // Check for return in never-returning function
-                let callable_kind = if self.current_class.is_some() { "method" } else { "function" };
+                let callable_kind = if self.current_class.is_some() {
+                    "method"
+                } else {
+                    "function"
+                };
                 if self.has_never_return {
                     return Err(CompileError {
                         message: format!("A never-returning {} must not return", callable_kind),
@@ -1629,7 +1838,10 @@ impl Compiler {
                             // Check if the return value is `null` to provide a better hint
                             let is_null_return = matches!(ret_expr.kind, ExprKind::Null);
                             let msg = if is_null_return {
-                                format!("A void {} must not return a value (did you mean \"return;\" instead of \"return null;\"?)", callable_kind)
+                                format!(
+                                    "A void {} must not return a value (did you mean \"return;\" instead of \"return null;\"?)",
+                                    callable_kind
+                                )
                             } else {
                                 format!("A void {} must not return a value", callable_kind)
                             };
@@ -1661,7 +1873,8 @@ impl Compiler {
                                 });
                             } else {
                                 return Err(CompileError {
-                                    message: "A function with return type must return a value".to_string(),
+                                    message: "A function with return type must return a value"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
@@ -1679,11 +1892,18 @@ impl Compiler {
                 // "Only variable references should be returned by reference".
                 if self.op_array.returns_by_ref && !self.op_array.is_generator {
                     let is_var_or_call = match value {
-                        Some(e) => matches!(e.kind,
-                            ExprKind::Variable(_) | ExprKind::DynamicVariable(_) | ExprKind::ArrayAccess { .. }
-                            | ExprKind::PropertyAccess { .. } | ExprKind::StaticPropertyAccess { .. }
-                            | ExprKind::DynamicStaticPropertyAccess { .. }
-                            | ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }),
+                        Some(e) => matches!(
+                            e.kind,
+                            ExprKind::Variable(_)
+                                | ExprKind::DynamicVariable(_)
+                                | ExprKind::ArrayAccess { .. }
+                                | ExprKind::PropertyAccess { .. }
+                                | ExprKind::StaticPropertyAccess { .. }
+                                | ExprKind::DynamicStaticPropertyAccess { .. }
+                                | ExprKind::FunctionCall { .. }
+                                | ExprKind::MethodCall { .. }
+                                | ExprKind::StaticMethodCall { .. }
+                        ),
                         None => true,
                     };
                     // The return type is verified first: a literal failing it throws
@@ -1693,8 +1913,11 @@ impl Compiler {
                         _ => false,
                     };
                     if !is_var_or_call && !fails_return_type {
-                        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
-                            b"Only variable references should be returned by reference")));
+                        let msg_idx =
+                            self.op_array
+                                .add_literal(Value::String(PhpString::from_bytes(
+                                    b"Only variable references should be returned by reference",
+                                )));
                         self.op_array.emit(Op {
                             opcode: OpCode::EmitNotice,
                             op1: OperandType::Const(msg_idx),
@@ -1998,7 +2221,11 @@ impl Compiler {
                 // Create iterator temp
                 let iter_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: if *by_ref { OpCode::ForeachInitRef } else { OpCode::ForeachInit },
+                    opcode: if *by_ref {
+                        OpCode::ForeachInitRef
+                    } else {
+                        OpCode::ForeachInit
+                    },
                     op1: arr,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(iter_tmp),
@@ -2020,7 +2247,7 @@ impl Compiler {
                 let val_tmp = self.op_array.alloc_temp();
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
-                    
+
                     self.op_array.emit(Op {
                         opcode: OpCode::ForeachNextRef,
                         op1: OperandType::Tmp(iter_tmp),
@@ -2065,9 +2292,7 @@ impl Compiler {
                     // foreach ($arr as list($a, $b)) or foreach ($arr as [$a, $b])
                     let elems: Option<Vec<ArrayElement>> = match &value.kind {
                         ExprKind::Array(elems) => Some(elems.clone()),
-                        ExprKind::FunctionCall { name, args }
-                            if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
-                        {
+                        ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
                             Some(
                                 args.iter()
                                     .map(|a| ArrayElement {
@@ -2209,11 +2434,14 @@ impl Compiler {
                     } else {
                         if default_index.is_some() {
                             // Report error at the duplicate default clause
-                            let err_line = case.body.first()
+                            let err_line = case
+                                .body
+                                .first()
                                 .map(|s| s.span.line.saturating_sub(1))
                                 .unwrap_or(stmt.span.line);
                             return Err(CompileError {
-                                message: "Switch statements may only contain one default clause".into(),
+                                message: "Switch statements may only contain one default clause"
+                                    .into(),
                                 line: err_line,
                             });
                         }
@@ -2270,7 +2498,8 @@ impl Compiler {
                 let (level, is_non_integer) = Self::extract_break_continue_level(level_expr);
                 if is_non_integer {
                     return Err(CompileError {
-                        message: "'break' operator with non-integer operand is no longer supported".into(),
+                        message: "'break' operator with non-integer operand is no longer supported"
+                            .into(),
                         line: stmt.span.line,
                     });
                 }
@@ -2302,8 +2531,11 @@ impl Compiler {
                 }
                 // Check if we're inside a try-with-finally block that the
                 // jump leaves (the target loop started outside of it)
-                let leaves_try_finally = self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
-                if let Some(&finally_target) = self.finally_targets.last().filter(|_| leaves_try_finally) {
+                let leaves_try_finally =
+                    self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
+                if let Some(&finally_target) =
+                    self.finally_targets.last().filter(|_| leaves_try_finally)
+                {
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
@@ -2360,7 +2592,9 @@ impl Compiler {
                 let (level, is_non_integer) = Self::extract_break_continue_level(level_expr);
                 if is_non_integer {
                     return Err(CompileError {
-                        message: "'continue' operator with non-integer operand is no longer supported".into(),
+                        message:
+                            "'continue' operator with non-integer operand is no longer supported"
+                                .into(),
                         line: stmt.span.line,
                     });
                 }
@@ -2392,8 +2626,11 @@ impl Compiler {
                 }
                 // Check if we're inside a try-with-finally block that the
                 // jump leaves (the target loop started outside of it)
-                let leaves_try_finally = self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
-                if let Some(&finally_target) = self.finally_targets.last().filter(|_| leaves_try_finally) {
+                let leaves_try_finally =
+                    self.finally_targets.len() > self.loop_stack[target_index].try_finally_depth;
+                if let Some(&finally_target) =
+                    self.finally_targets.last().filter(|_| leaves_try_finally)
+                {
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
@@ -2444,7 +2681,15 @@ impl Compiler {
             }
 
             StmtKind::FunctionDecl {
-                name, params, body, return_type, attributes: func_attributes, end_line: func_end_line, doc_comment: func_doc_comment, returns_by_ref: func_returns_by_ref, ..
+                name,
+                params,
+                body,
+                return_type,
+                attributes: func_attributes,
+                end_line: func_end_line,
+                doc_comment: func_doc_comment,
+                returns_by_ref: func_returns_by_ref,
+                ..
             } => {
                 if name.eq_ignore_ascii_case(b"assert") {
                     return Err(CompileError {
@@ -2456,7 +2701,8 @@ impl Compiler {
                 for param in params {
                     if param.visibility.is_some() || param.readonly || param.is_final {
                         return Err(CompileError {
-                            message: "Cannot declare promoted property outside a constructor".to_string(),
+                            message: "Cannot declare promoted property outside a constructor"
+                                .to_string(),
                             line: stmt.span.line,
                         });
                     }
@@ -2465,7 +2711,11 @@ impl Compiler {
                 {
                     let has_nodiscard = func_attributes.iter().any(|a| {
                         let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
-                        let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
+                        let bare: &[u8] = if last.first() == Some(&b'\\') {
+                            &last[1..]
+                        } else {
+                            last
+                        };
                         bare.eq_ignore_ascii_case(b"NoDiscard")
                     });
                     if has_nodiscard {
@@ -2505,10 +2755,15 @@ impl Compiler {
                 func_compiler.op_array.is_generator = is_generator;
                 func_compiler.op_array.returns_by_ref = *func_returns_by_ref;
                 func_compiler.op_array.decl_line = stmt.span.line;
-                func_compiler.op_array.end_line = if *func_end_line > 0 { *func_end_line } else { stmt.span.line };
+                func_compiler.op_array.end_line = if *func_end_line > 0 {
+                    *func_end_line
+                } else {
+                    stmt.span.line
+                };
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
-                func_compiler.op_array.attributes = self.compile_attributes_target(func_attributes, "function");
+                func_compiler.op_array.attributes =
+                    self.compile_attributes_target(func_attributes, "function");
                 // Carry the source filename so ReflectionFunction::getFileName()
                 // can report where the function was declared, not where it was
                 // first looked up.
@@ -2528,16 +2783,23 @@ impl Compiler {
                         }
                     }
                     // Validate type hint for redundancy and standalone constraints
-                    if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                    if let Some(err) = validate_type_hint(hint, self.current_class.as_deref())
+                        .or_else(|| self.type_redundancy_error(hint))
+                    {
                         return Err(CompileError {
                             message: err,
                             line: stmt.span.line,
                         });
                     }
-                    func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                    func_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(
+                        hint,
+                        &self.current_namespace,
+                        &self.use_map,
+                    ));
                     // Check for 'never' return type
                     if let TypeHint::Simple(name) = hint {
-                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let name_lower: Vec<u8> =
+                            name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if name_lower == b"never" {
                             func_compiler.has_never_return = true;
                         }
@@ -2557,7 +2819,9 @@ impl Compiler {
                             }
                         }
                         // Validate type hint for redundancy and standalone constraints
-                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                        if let Some(err) = validate_type_hint(hint, self.current_class.as_deref())
+                            .or_else(|| self.type_redundancy_error(hint))
+                        {
                             return Err(CompileError {
                                 message: err,
                                 line: stmt.span.line,
@@ -2566,7 +2830,11 @@ impl Compiler {
                         let simple_hint = match hint {
                             TypeHint::Simple(n) => Some(n),
                             TypeHint::Nullable(inner) => {
-                                if let TypeHint::Simple(n) = inner.as_ref() { Some(n) } else { None }
+                                if let TypeHint::Simple(n) = inner.as_ref() {
+                                    Some(n)
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         };
@@ -2586,7 +2854,8 @@ impl Compiler {
                             }
                             if lower == b"static" {
                                 return Err(CompileError {
-                                    message: "Cannot use \"static\" as a parameter type".to_string(),
+                                    message: "Cannot use \"static\" as a parameter type"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
@@ -2606,7 +2875,10 @@ impl Compiler {
                         }
                         if !seen_params.insert(&param.name) {
                             return Err(CompileError {
-                                message: format!("Redefinition of parameter ${}", String::from_utf8_lossy(&param.name)),
+                                message: format!(
+                                    "Redefinition of parameter ${}",
+                                    String::from_utf8_lossy(&param.name)
+                                ),
                                 line: func_compiler.op_array.decl_line,
                             });
                         }
@@ -2628,11 +2900,15 @@ impl Compiler {
                     (last_req + 1) as u32
                 };
                 // Compile parameter attributes
-                func_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
+                func_compiler.op_array.param_attributes = params
+                    .iter()
+                    .map(|p| self.compile_attributes_target(&p.attributes, "parameter"))
+                    .collect();
                 // Record which parameters are by-reference
                 func_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
                 // Record which parameters have default values
-                func_compiler.op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
+                func_compiler.op_array.param_has_default =
+                    params.iter().map(|p| p.default.is_some()).collect();
                 for param in params {
                     let cv = func_compiler.op_array.get_or_create_cv(&param.name);
                     if param.variadic {
@@ -2641,10 +2917,16 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
-                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        let mut pt = type_hint_to_param_type_with_ns(
+                            hint,
+                            &self.current_namespace,
+                            &self.use_map,
+                        );
                         let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
-                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                            if matches!(default_expr.kind, ExprKind::Null)
+                                && !is_type_nullable_or_mixed(&pt)
+                            {
                                 pt = ParamType::Nullable(Box::new(pt));
                                 is_implicitly_nullable = true;
                             }
@@ -2662,18 +2944,30 @@ impl Compiler {
                     func_compiler.op_array.param_types[cv as usize] = type_info;
 
                     if let Some(default_expr) = &param.default {
-                        func_compiler.op_array.set_param_default_repr(cv, self.default_value_repr(default_expr));
+                        func_compiler
+                            .op_array
+                            .set_param_default_repr(cv, self.default_value_repr(default_expr));
                         // Emit: if param is Undef, set to default
                         let default_val = func_compiler.compile_expr(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
                             let pcv = func_compiler.op_array.get_or_create_cv(&param.name) as usize;
-                            if let Some(Some(pti)) = func_compiler.op_array.param_types.get(pcv).cloned() {
+                            if let Some(Some(pti)) =
+                                func_compiler.op_array.param_types.get(pcv).cloned()
+                            {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
                                         return Err(CompileError {
-                                            message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
+                                            message: format!(
+                                                "Cannot use {} as default value for parameter ${} of type {}",
+                                                tn,
                                                 String::from_utf8_lossy(&param.name),
-                                                crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
+                                                crate::vm::variance::type_to_string(
+                                                    &crate::vm::variance::TypeView::from_param_type(
+                                                        &pti.param_type
+                                                    ),
+                                                    None
+                                                )
+                                            ),
                                             line: default_expr.span.line,
                                         });
                                     }
@@ -2754,13 +3048,16 @@ impl Compiler {
                 Ok(())
             }
 
-            StmtKind::Declare { directives, body, attributes } => {
+            StmtKind::Declare {
+                directives,
+                body,
+                attributes,
+            } => {
                 // If attributes are present and there's more than one directive,
                 // this is `#[Attr] const A=1, B=2;` which is a fatal error.
                 if !attributes.is_empty() && directives.len() > 1 {
-                    self.deferred_fatal_errors.push(
-                        "Cannot apply attributes to multiple constants at once".to_string(),
-                    );
+                    self.deferred_fatal_errors
+                        .push("Cannot apply attributes to multiple constants at once".to_string());
                 }
 
                 // Handle const declarations (parsed as Declare directives)
@@ -2777,10 +3074,15 @@ impl Compiler {
                     }
                     // declare(ticks = N): value must be a literal
                     if name_lower == b"ticks" {
-                        if !matches!(&value.kind,
-                            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::String(_)
-                            | ExprKind::True | ExprKind::False | ExprKind::Null)
-                        {
+                        if !matches!(
+                            &value.kind,
+                            ExprKind::Int(_)
+                                | ExprKind::Float(_)
+                                | ExprKind::String(_)
+                                | ExprKind::True
+                                | ExprKind::False
+                                | ExprKind::Null
+                        ) {
                             return Err(CompileError {
                                 message: "declare(ticks) value must be a literal".into(),
                                 line: stmt.span.line,
@@ -2834,7 +3136,7 @@ impl Compiler {
                             if elem.unpack {
                                 match Self::eval_const_expr(&elem.value) {
                                     Some(Value::Array(_)) => {} // OK: literal array spread
-                                    Some(_) => {}               // Non-array constant; will fail at runtime
+                                    Some(_) => {} // Non-array constant; will fail at runtime
                                     None => {
                                         // Cannot evaluate at compile time: non-constant expression
                                         has_invalid_spread = true;
@@ -2845,9 +3147,14 @@ impl Compiler {
                         }
                         if has_invalid_spread {
                             // Emit: throw new Error("Only arrays can be unpacked in constant expression")
-                            let err_msg_bytes = b"Only arrays can be unpacked in constant expression";
-                            let err_class_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"Error")));
-                            let err_msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(err_msg_bytes)));
+                            let err_msg_bytes =
+                                b"Only arrays can be unpacked in constant expression";
+                            let err_class_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_bytes(b"Error")));
+                            let err_msg_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_bytes(err_msg_bytes)));
                             let err_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
                                 opcode: OpCode::NewObject,
@@ -2856,7 +3163,9 @@ impl Compiler {
                                 result: OperandType::Tmp(err_tmp),
                                 line: value.span.line,
                             });
-                            let ctor_name_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"__construct")));
+                            let ctor_name_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_bytes(b"__construct")));
                             self.op_array.emit(Op {
                                 opcode: OpCode::InitMethodCall,
                                 op1: OperandType::Tmp(err_tmp),
@@ -2897,7 +3206,9 @@ impl Compiler {
                     if !attributes.is_empty() {
                         let compiled_attrs = self.compile_attributes_target(attributes, "constant");
                         let idx = self.op_array.const_attribute_table.len() as i64;
-                        self.op_array.const_attribute_table.push((fqn.clone(), compiled_attrs));
+                        self.op_array
+                            .const_attribute_table
+                            .push((fqn.clone(), compiled_attrs));
                         let idx_lit = self.op_array.add_literal(Value::Long(idx));
                         self.op_array.emit(Op {
                             opcode: OpCode::RegisterConstAttrs,
@@ -2907,8 +3218,12 @@ impl Compiler {
                             line: stmt.span.line,
                         });
                     }
-                    let name_idx = self.op_array.add_literal(Value::String(PhpString::from_vec(fqn)));
-                    let define_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"define")));
+                    let name_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(fqn)));
+                    let define_idx = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_bytes(b"define")));
                     let arg_count_idx = self.op_array.add_literal(Value::Long(2));
                     self.op_array.emit(Op {
                         opcode: OpCode::InitFCall,
@@ -3331,8 +3646,10 @@ impl Compiler {
                         if self.op_array.ops[i].opcode == OpCode::Jmp {
                             if let OperandType::JmpTarget(0) = self.op_array.ops[i].op1 {
                                 // Check if preceded by SaveReturn or SaveJump
-                                if i > 0 && (self.op_array.ops[i - 1].opcode == OpCode::SaveReturn
-                                    || self.op_array.ops[i - 1].opcode == OpCode::SaveJump) {
+                                if i > 0
+                                    && (self.op_array.ops[i - 1].opcode == OpCode::SaveReturn
+                                        || self.op_array.ops[i - 1].opcode == OpCode::SaveJump)
+                                {
                                     self.op_array.ops[i].op1 =
                                         OperandType::JmpTarget(finally_start);
                                 }
@@ -3433,18 +3750,24 @@ impl Compiler {
                 }
                 let qualified_name = if is_anonymous {
                     // Look up from pre-built map (built before hoisting pass)
-                    self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| {
-                        // Fallback: generate on the fly if map doesn't have it
-                        let counter_part = &name[b"__anonymous_class_".len()..];
-                        let counter: u32 = std::str::from_utf8(counter_part).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut anon_name = b"class@anonymous\x00".to_vec();
-                        anon_name.extend_from_slice(&self.source_file);
-                        anon_name.push(b':');
-                        anon_name.extend_from_slice(stmt.span.line.to_string().as_bytes());
-                        anon_name.push(b'$');
-                        anon_name.extend_from_slice(format!("{:x}", counter).as_bytes());
-                        anon_name
-                    })
+                    self.anon_class_name_map
+                        .get(name.as_slice())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            // Fallback: generate on the fly if map doesn't have it
+                            let counter_part = &name[b"__anonymous_class_".len()..];
+                            let counter: u32 = std::str::from_utf8(counter_part)
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            let mut anon_name = b"class@anonymous\x00".to_vec();
+                            anon_name.extend_from_slice(&self.source_file);
+                            anon_name.push(b':');
+                            anon_name.extend_from_slice(stmt.span.line.to_string().as_bytes());
+                            anon_name.push(b'$');
+                            anon_name.extend_from_slice(format!("{:x}", counter).as_bytes());
+                            anon_name
+                        })
                 } else {
                     // Prefix class name with namespace
                     self.prefix_with_namespace(name)
@@ -3464,15 +3787,21 @@ impl Compiler {
                     // Single-underscore name was deprecated in 8.4.
                     if name == b"_" {
                         push_pending_compile_deprecated(
-                            format!("Using \"_\" as {} {} name is deprecated since 8.4",
-                                article, kind),
+                            format!(
+                                "Using \"_\" as {} {} name is deprecated since 8.4",
+                                article, kind
+                            ),
                             stmt.span.line,
                         );
                     }
                     if is_reserved_class_name(&name_lower) {
                         return Err(CompileError {
-                            message: format!("Cannot use \"{}\" as {} {} name as it is reserved",
-                                String::from_utf8_lossy(name), article, kind),
+                            message: format!(
+                                "Cannot use \"{}\" as {} {} name as it is reserved",
+                                String::from_utf8_lossy(name),
+                                article,
+                                kind
+                            ),
                             line: stmt.span.line,
                         });
                     }
@@ -3484,51 +3813,94 @@ impl Compiler {
                     let mut seen_consts: Vec<Vec<u8>> = Vec::new();
                     for member in body.iter() {
                         match member {
-                            ClassMember::ClassConstant { name: cn, value, visibility, .. } => {
+                            ClassMember::ClassConstant {
+                                name: cn,
+                                value,
+                                visibility,
+                                ..
+                            } => {
                                 let line = value.span.line;
-                                if modifiers.is_interface && !matches!(visibility, Visibility::Public) {
+                                if modifiers.is_interface
+                                    && !matches!(visibility, Visibility::Public)
+                                {
                                     return Err(CompileError {
-                                        message: format!("Access type for interface constant {}::{} must be public",
-                                            cname, String::from_utf8_lossy(cn)),
+                                        message: format!(
+                                            "Access type for interface constant {}::{} must be public",
+                                            cname,
+                                            String::from_utf8_lossy(cn)
+                                        ),
                                         line,
                                     });
                                 }
-                                if matches!(value.kind, ExprKind::InterpolatedString(_) | ExprKind::Variable(_)) {
+                                if matches!(
+                                    value.kind,
+                                    ExprKind::InterpolatedString(_) | ExprKind::Variable(_)
+                                ) {
                                     return Err(CompileError {
-                                        message: "Constant expression contains invalid operations".into(),
+                                        message: "Constant expression contains invalid operations"
+                                            .into(),
                                         line,
                                     });
                                 }
                                 if seen_consts.iter().any(|c| c == cn) {
                                     return Err(CompileError {
-                                        message: format!("Cannot redefine class constant {}::{}",
-                                            cname, String::from_utf8_lossy(cn)),
+                                        message: format!(
+                                            "Cannot redefine class constant {}::{}",
+                                            cname,
+                                            String::from_utf8_lossy(cn)
+                                        ),
                                         line,
                                     });
                                 }
                                 seen_consts.push(cn.clone());
                             }
-                            ClassMember::Property { get_hook, set_hook, is_abstract, default, get_hook_abstract, set_hook_abstract, .. }
-                                if modifiers.is_interface && get_hook.is_none() && set_hook.is_none() && !*is_abstract
-                                    && !*get_hook_abstract && !*set_hook_abstract =>
+                            ClassMember::Property {
+                                get_hook,
+                                set_hook,
+                                is_abstract,
+                                default,
+                                get_hook_abstract,
+                                set_hook_abstract,
+                                ..
+                            } if modifiers.is_interface
+                                && get_hook.is_none()
+                                && set_hook.is_none()
+                                && !*is_abstract
+                                && !*get_hook_abstract
+                                && !*set_hook_abstract =>
                             {
                                 return Err(CompileError {
                                     message: "Interfaces may only include hooked properties".into(),
-                                    line: default.as_ref().map(|d| d.span.line).unwrap_or(stmt.span.line),
+                                    line: default
+                                        .as_ref()
+                                        .map(|d| d.span.line)
+                                        .unwrap_or(stmt.span.line),
                                 });
                             }
-                            ClassMember::Method { name: mn, body: mbody, visibility, line, .. } if modifiers.is_interface => {
+                            ClassMember::Method {
+                                name: mn,
+                                body: mbody,
+                                visibility,
+                                line,
+                                ..
+                            } if modifiers.is_interface => {
                                 if !matches!(visibility, Visibility::Public) {
                                     return Err(CompileError {
-                                        message: format!("Access type for interface method {}::{}() must be public",
-                                            cname, String::from_utf8_lossy(mn)),
+                                        message: format!(
+                                            "Access type for interface method {}::{}() must be public",
+                                            cname,
+                                            String::from_utf8_lossy(mn)
+                                        ),
                                         line: *line,
                                     });
                                 }
                                 if mbody.is_some() {
                                     return Err(CompileError {
-                                        message: format!("Interface function {}::{}() cannot contain body",
-                                            cname, String::from_utf8_lossy(mn)),
+                                        message: format!(
+                                            "Interface function {}::{}() cannot contain body",
+                                            cname,
+                                            String::from_utf8_lossy(mn)
+                                        ),
                                         line: *line,
                                     });
                                 }
@@ -3539,7 +3911,11 @@ impl Compiler {
                 }
                 let mut class = ClassEntry::new(qualified_name.clone());
                 class.start_line = stmt.span.line;
-                class.end_line = if *class_end_line > 0 { *class_end_line } else { stmt.span.line };
+                class.end_line = if *class_end_line > 0 {
+                    *class_end_line
+                } else {
+                    stmt.span.line
+                };
                 if let Some(dc) = class_doc_comment.as_ref() {
                     class.doc_comment = Some(String::from_utf8_lossy(dc).into_owned());
                 }
@@ -3547,10 +3923,17 @@ impl Compiler {
                 if let Some(p) = extends.as_ref() {
                     let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if p_lower == b"self" || p_lower == b"parent" || p_lower == b"static" {
-                        let kind_name = if modifiers.is_interface { "interface" } else { "class" };
+                        let kind_name = if modifiers.is_interface {
+                            "interface"
+                        } else {
+                            "class"
+                        };
                         return Err(CompileError {
-                            message: format!("Cannot use \"{}\" as {} name, as it is reserved",
-                                String::from_utf8_lossy(p), kind_name),
+                            message: format!(
+                                "Cannot use \"{}\" as {} name, as it is reserved",
+                                String::from_utf8_lossy(p),
+                                kind_name
+                            ),
                             line: stmt.span.line,
                         });
                     }
@@ -3558,11 +3941,17 @@ impl Compiler {
                 class.parent = extends.as_ref().map(|p| self.resolve_class_name(p));
                 // Resolve interface names - also check for reserved names
                 for iface in implements.iter() {
-                    let iface_lower: Vec<u8> = iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if iface_lower == b"self" || iface_lower == b"parent" || iface_lower == b"static" {
+                    let iface_lower: Vec<u8> =
+                        iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    if iface_lower == b"self"
+                        || iface_lower == b"parent"
+                        || iface_lower == b"static"
+                    {
                         return Err(CompileError {
-                            message: format!("Cannot use \"{}\" as interface name, as it is reserved",
-                                String::from_utf8_lossy(iface)),
+                            message: format!(
+                                "Cannot use \"{}\" as interface name, as it is reserved",
+                                String::from_utf8_lossy(iface)
+                            ),
                             line: stmt.span.line,
                         });
                     }
@@ -3572,20 +3961,34 @@ impl Compiler {
                     let mut seen: Vec<Vec<u8>> = Vec::new();
                     for iface in implements.iter() {
                         let resolved = self.resolve_class_name(iface);
-                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let lower: Vec<u8> =
+                            resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if seen.contains(&lower) {
-                            let kind = if modifiers.is_enum { "Enum" } else if modifiers.is_interface { "Interface" } else { "Class" };
+                            let kind = if modifiers.is_enum {
+                                "Enum"
+                            } else if modifiers.is_interface {
+                                "Interface"
+                            } else {
+                                "Class"
+                            };
                             let iface_display = String::from_utf8_lossy(iface);
                             return Err(CompileError {
-                                message: format!("{} {} cannot implement previously implemented interface {}",
-                                    kind, String::from_utf8_lossy(name), iface_display),
+                                message: format!(
+                                    "{} {} cannot implement previously implemented interface {}",
+                                    kind,
+                                    String::from_utf8_lossy(name),
+                                    iface_display
+                                ),
                                 line: stmt.span.line,
                             });
                         }
                         seen.push(lower);
                     }
                 }
-                class.interfaces = implements.iter().map(|i| self.resolve_class_name(i)).collect();
+                class.interfaces = implements
+                    .iter()
+                    .map(|i| self.resolve_class_name(i))
+                    .collect();
                 class.is_abstract = modifiers.is_abstract;
                 class.is_final = modifiers.is_final;
                 class.is_readonly = modifiers.is_readonly;
@@ -3614,8 +4017,10 @@ impl Compiler {
                 if let Some(bt) = &enum_backing_type {
                     if !bt.eq_ignore_ascii_case(b"int") && !bt.eq_ignore_ascii_case(b"string") {
                         return Err(CompileError {
-                            message: format!("Enum backing type must be int or string, {} given",
-                                String::from_utf8_lossy(bt)),
+                            message: format!(
+                                "Enum backing type must be int or string, {} given",
+                                String::from_utf8_lossy(bt)
+                            ),
                             line: stmt.span.line,
                         });
                     }
@@ -3646,14 +4051,22 @@ impl Compiler {
                             // Enums cannot include properties
                             if modifiers.is_enum {
                                 return Err(CompileError {
-                                    message: format!("Enum {} cannot include properties",
-                                        String::from_utf8_lossy(name)),
+                                    message: format!(
+                                        "Enum {} cannot include properties",
+                                        String::from_utf8_lossy(name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
                             // Validate type hint for redundancy and standalone constraints
                             if let Some(hint) = type_hint {
-                                if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                                if let Some(err) = validate_type_hint_full(
+                                    hint,
+                                    Some(&qualified_name),
+                                    class.parent.as_deref(),
+                                )
+                                .or_else(|| self.type_redundancy_error(hint))
+                                {
                                     return Err(CompileError {
                                         message: err,
                                         line: stmt.span.line,
@@ -3672,8 +4085,11 @@ impl Compiler {
                                 };
                                 if check_callable(hint) {
                                     return Err(CompileError {
-                                        message: format!("Property {}::${} cannot have type callable",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Property {}::${} cannot have type callable",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
@@ -3686,8 +4102,11 @@ impl Compiler {
                                 };
                                 if check_void(hint) {
                                     return Err(CompileError {
-                                        message: format!("Property {}::${} cannot have type void",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Property {}::${} cannot have type void",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
@@ -3700,8 +4119,11 @@ impl Compiler {
                                 };
                                 if check_never(hint) {
                                     return Err(CompileError {
-                                        message: format!("Property {}::${} cannot have type never",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Property {}::${} cannot have type never",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
@@ -3712,21 +4134,33 @@ impl Compiler {
                                 // Readonly properties must have a type declaration
                                 if type_hint.is_none() {
                                     return Err(CompileError {
-                                        message: format!("Readonly property {}::${} must have type", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Readonly property {}::${} must have type",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
                                 // Readonly properties cannot be static
                                 if *is_static {
                                     return Err(CompileError {
-                                        message: format!("Static property {}::${} cannot be readonly", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Static property {}::${} cannot be readonly",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
                                 // Readonly properties cannot have a default value
                                 if default.is_some() {
                                     return Err(CompileError {
-                                        message: format!("Readonly property {}::${} cannot have default value", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Readonly property {}::${} cannot have default value",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
@@ -3743,11 +4177,22 @@ impl Compiler {
                                 if matches!(expr.kind, ExprKind::Null) {
                                     // Check if the type includes null
                                     if let TypeHint::Intersection(_) = hint {
-                                        let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
-                                        let tstr = crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pt), None);
+                                        let pt = type_hint_to_param_type_with_ns(
+                                            hint,
+                                            &self.current_namespace,
+                                            &self.use_map,
+                                        );
+                                        let tstr = crate::vm::variance::type_to_string(
+                                            &crate::vm::variance::TypeView::from_param_type(&pt),
+                                            None,
+                                        );
                                         return Err(CompileError {
-                                            message: format!("Cannot use null as default value for property {}::${} of type {}",
-                                                String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(prop_name), tstr),
+                                            message: format!(
+                                                "Cannot use null as default value for property {}::${} of type {}",
+                                                String::from_utf8_lossy(&qualified_name),
+                                                String::from_utf8_lossy(prop_name),
+                                                tstr
+                                            ),
                                             line: stmt.span.line,
                                         });
                                     }
@@ -3768,40 +4213,61 @@ impl Compiler {
                                     if !type_allows_null {
                                         // Format the type name for the error message
                                         let type_name = match hint {
-                                            TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                            TypeHint::Union(types) => {
-                                                types.iter().map(|t| match t {
-                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                                    _ => "?".to_string(),
-                                                }).collect::<Vec<_>>().join("|")
+                                            TypeHint::Simple(n) => {
+                                                String::from_utf8_lossy(n).to_string()
                                             }
-                                            TypeHint::Intersection(types) => {
-                                                types.iter().map(|t| match t {
-                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                                    _ => "?".to_string(),
-                                                }).collect::<Vec<_>>().join("&")
-                                            }
-                                            TypeHint::Nullable(inner) => {
-                                                format!("?{}", match inner.as_ref() {
-                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
+                                            TypeHint::Union(types) => types
+                                                .iter()
+                                                .map(|t| match t {
+                                                    TypeHint::Simple(n) => {
+                                                        String::from_utf8_lossy(n).to_string()
+                                                    }
                                                     _ => "?".to_string(),
                                                 })
+                                                .collect::<Vec<_>>()
+                                                .join("|"),
+                                            TypeHint::Intersection(types) => types
+                                                .iter()
+                                                .map(|t| match t {
+                                                    TypeHint::Simple(n) => {
+                                                        String::from_utf8_lossy(n).to_string()
+                                                    }
+                                                    _ => "?".to_string(),
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("&"),
+                                            TypeHint::Nullable(inner) => {
+                                                format!(
+                                                    "?{}",
+                                                    match inner.as_ref() {
+                                                        TypeHint::Simple(n) =>
+                                                            String::from_utf8_lossy(n).to_string(),
+                                                        _ => "?".to_string(),
+                                                    }
+                                                )
                                             }
                                         };
                                         let nullable_type_name = match hint {
                                             TypeHint::Union(types) => {
-                                                let mut parts: Vec<String> = types.iter().map(|t| match t {
-                                                    TypeHint::Simple(n) => String::from_utf8_lossy(n).to_string(),
-                                                    _ => "?".to_string(),
-                                                }).collect();
+                                                let mut parts: Vec<String> = types
+                                                    .iter()
+                                                    .map(|t| match t {
+                                                        TypeHint::Simple(n) => {
+                                                            String::from_utf8_lossy(n).to_string()
+                                                        }
+                                                        _ => "?".to_string(),
+                                                    })
+                                                    .collect();
                                                 parts.push("null".to_string());
                                                 parts.join("|")
                                             }
                                             _ => format!("?{}", type_name),
                                         };
                                         return Err(CompileError {
-                                            message: format!("Default value for property of type {} may not be null. Use the nullable type {} to allow null default value",
-                                                type_name, nullable_type_name),
+                                            message: format!(
+                                                "Default value for property of type {} may not be null. Use the nullable type {} to allow null default value",
+                                                type_name, nullable_type_name
+                                            ),
                                             line: stmt.span.line,
                                         });
                                     }
@@ -3810,13 +4276,25 @@ impl Compiler {
                             // zend_is_valid_default_value for literal defaults of typed properties
                             let mut widened_default: Option<Value> = None;
                             if let (Some(hint), Some(expr)) = (type_hint, default) {
-                                let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                let pt = type_hint_to_param_type_with_ns(
+                                    hint,
+                                    &self.current_namespace,
+                                    &self.use_map,
+                                );
                                 match Self::check_literal_default(&pt, expr) {
                                     Err((_, vn)) => {
-                                        let tstr = crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pt), None);
+                                        let tstr = crate::vm::variance::type_to_string(
+                                            &crate::vm::variance::TypeView::from_param_type(&pt),
+                                            None,
+                                        );
                                         return Err(CompileError {
-                                            message: format!("Cannot use {} as default value for property {}::${} of type {}",
-                                                vn, String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(prop_name), tstr),
+                                            message: format!(
+                                                "Cannot use {} as default value for property {}::${} of type {}",
+                                                vn,
+                                                String::from_utf8_lossy(&qualified_name),
+                                                String::from_utf8_lossy(prop_name),
+                                                tstr
+                                            ),
                                             line: stmt.span.line,
                                         });
                                     }
@@ -3840,32 +4318,65 @@ impl Compiler {
                                         let mut all_const = true;
                                         for elem in elements {
                                             let val = Self::eval_const_expr(&elem.value)
-                                                .or_else(|| Self::eval_class_const_expr(&elem.value, &class, &qualified_name, extends.as_deref(), self))
+                                                .or_else(|| {
+                                                    Self::eval_class_const_expr(
+                                                        &elem.value,
+                                                        &class,
+                                                        &qualified_name,
+                                                        extends.as_deref(),
+                                                        self,
+                                                    )
+                                                })
                                                 .or_else(|| {
                                                     // Create deferred marker for ClassConstAccess
-                                                    if let ExprKind::ClassConstAccess { class: class_expr, constant } = &elem.value.kind {
+                                                    if let ExprKind::ClassConstAccess {
+                                                        class: class_expr,
+                                                        constant,
+                                                    } = &elem.value.kind
+                                                    {
                                                         let cname = match &class_expr.kind {
                                                             ExprKind::Identifier(n) => {
-                                                                let resolved = self.resolve_class_name(n);
-                                                                if resolved.eq_ignore_ascii_case(b"self") { qualified_name.clone() }
-                                                                else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
-                                                                } else { resolved }
+                                                                let resolved =
+                                                                    self.resolve_class_name(n);
+                                                                if resolved
+                                                                    .eq_ignore_ascii_case(b"self")
+                                                                {
+                                                                    qualified_name.clone()
+                                                                } else if resolved
+                                                                    .eq_ignore_ascii_case(b"parent")
+                                                                {
+                                                                    extends
+                                                                        .as_ref()
+                                                                        .map(|p| {
+                                                                            self.resolve_class_name(
+                                                                                p,
+                                                                            )
+                                                                        })
+                                                                        .unwrap_or(resolved)
+                                                                } else {
+                                                                    resolved
+                                                                }
                                                             }
                                                             _ => qualified_name.clone(),
                                                         };
                                                         if elem.unpack {
-                                                            let mut marker = b"__deferred_spread__::".to_vec();
+                                                            let mut marker =
+                                                                b"__deferred_spread__::".to_vec();
                                                             marker.extend_from_slice(&cname);
                                                             marker.extend_from_slice(b"::");
                                                             marker.extend_from_slice(constant);
-                                                            Some(Value::String(PhpString::from_vec(marker)))
+                                                            Some(Value::String(
+                                                                PhpString::from_vec(marker),
+                                                            ))
                                                         } else {
-                                                            let mut marker = b"__deferred_const__::".to_vec();
+                                                            let mut marker =
+                                                                b"__deferred_const__::".to_vec();
                                                             marker.extend_from_slice(&cname);
                                                             marker.extend_from_slice(b"::");
                                                             marker.extend_from_slice(constant);
-                                                            Some(Value::String(PhpString::from_vec(marker)))
+                                                            Some(Value::String(
+                                                                PhpString::from_vec(marker),
+                                                            ))
                                                         }
                                                     } else {
                                                         None
@@ -3883,17 +4394,29 @@ impl Compiler {
                                                                 }
                                                             }
                                                         }
-                                                        Value::String(ref s) if s.as_bytes().starts_with(b"__deferred_spread__::") => {
+                                                        Value::String(ref s)
+                                                            if s.as_bytes().starts_with(
+                                                                b"__deferred_spread__::",
+                                                            ) =>
+                                                        {
                                                             // Already a spread marker, store as-is
                                                             arr.push(v);
                                                         }
                                                         _ => {
                                                             // Already has a deferred_const marker - convert to spread
                                                             if let Value::String(ref s) = v {
-                                                                if s.as_bytes().starts_with(b"__deferred_const__::") {
-                                                                    let mut spread_marker = b"__deferred_spread__::".to_vec();
+                                                                if s.as_bytes().starts_with(
+                                                                    b"__deferred_const__::",
+                                                                ) {
+                                                                    let mut spread_marker =
+                                                                        b"__deferred_spread__::"
+                                                                            .to_vec();
                                                                     spread_marker.extend_from_slice(&s.as_bytes()[b"__deferred_const__::".len()..]);
-                                                                    arr.push(Value::String(PhpString::from_vec(spread_marker)));
+                                                                    arr.push(Value::String(
+                                                                        PhpString::from_vec(
+                                                                            spread_marker,
+                                                                        ),
+                                                                    ));
                                                                 } else {
                                                                     all_const = false;
                                                                     break;
@@ -3905,11 +4428,19 @@ impl Compiler {
                                                         }
                                                     }
                                                 } else if let Some(key_expr) = &elem.key {
-                                                    if let Some(k) = Self::eval_const_expr(key_expr) {
+                                                    if let Some(k) = Self::eval_const_expr(key_expr)
+                                                    {
                                                         let key = match k {
-                                                            Value::Long(n) => crate::array::ArrayKey::Int(n),
-                                                            Value::String(s) => crate::array::ArrayKey::String(s),
-                                                            _ => { all_const = false; break; }
+                                                            Value::Long(n) => {
+                                                                crate::array::ArrayKey::Int(n)
+                                                            }
+                                                            Value::String(s) => {
+                                                                crate::array::ArrayKey::String(s)
+                                                            }
+                                                            _ => {
+                                                                all_const = false;
+                                                                break;
+                                                            }
                                                         };
                                                         arr.set(key, v);
                                                     } else {
@@ -3925,18 +4456,22 @@ impl Compiler {
                                             }
                                         }
                                         if all_const {
-                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                                                arr,
+                                            )))
                                         } else {
                                             Value::Null
                                         }
                                     }
-                                    ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
-                                        match Self::eval_const_expr(operand) {
-                                            Some(Value::Long(n)) => Value::Long(-n),
-                                            Some(Value::Double(f)) => Value::Double(-f),
-                                            _ => Value::Null,
-                                        }
-                                    }
+                                    ExprKind::UnaryOp {
+                                        op: UnaryOp::Negate,
+                                        operand,
+                                        ..
+                                    } => match Self::eval_const_expr(operand) {
+                                        Some(Value::Long(n)) => Value::Long(-n),
+                                        Some(Value::Double(f)) => Value::Double(-f),
+                                        _ => Value::Null,
+                                    },
                                     ExprKind::ClassConstAccess { class, constant } => {
                                         // Handle self::CONST, ClassName::CONST in property defaults
                                         let class_name = match &class.kind {
@@ -3945,7 +4480,10 @@ impl Compiler {
                                                 if resolved.eq_ignore_ascii_case(b"self") {
                                                     qualified_name.clone()
                                                 } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                    extends
+                                                        .as_ref()
+                                                        .map(|p| self.resolve_class_name(p))
+                                                        .unwrap_or(resolved)
                                                 } else {
                                                     resolved
                                                 }
@@ -3959,12 +4497,26 @@ impl Compiler {
                                         marker.extend_from_slice(constant);
                                         Value::String(PhpString::from_vec(marker))
                                     }
-                                    ExprKind::BinaryOp { op, left, right, .. } => {
+                                    ExprKind::BinaryOp {
+                                        op, left, right, ..
+                                    } => {
                                         let l = Self::eval_const_expr(left).or_else(|| {
-                                            Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
+                                            Self::eval_class_const_expr(
+                                                left,
+                                                &class,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                                self,
+                                            )
                                         });
                                         let r = Self::eval_const_expr(right).or_else(|| {
-                                            Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
+                                            Self::eval_class_const_expr(
+                                                right,
+                                                &class,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                                self,
+                                            )
                                         });
                                         // Helper: resolve an operand, producing a deferred marker for ClassConstAccess if needed
                                         let resolve_or_defer_prop = |operand: &Expr, resolved: Option<Value>| -> Option<Value> {
@@ -4024,23 +4576,46 @@ impl Compiler {
                                                     BinaryOp::Sub => lv.sub(&rv),
                                                     BinaryOp::Mul => lv.mul(&rv),
                                                     BinaryOp::Concat => {
-                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
-                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                        let mut result =
+                                                            lv.to_php_string().as_bytes().to_vec();
+                                                        result.extend_from_slice(
+                                                            rv.to_php_string().as_bytes(),
+                                                        );
                                                         Value::String(PhpString::from_vec(result))
                                                     }
-                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                                                    BinaryOp::BitwiseXor => Value::Long(lv.to_long() ^ rv.to_long()),
+                                                    BinaryOp::BitwiseOr => {
+                                                        Value::Long(lv.to_long() | rv.to_long())
+                                                    }
+                                                    BinaryOp::BitwiseAnd => {
+                                                        Value::Long(lv.to_long() & rv.to_long())
+                                                    }
+                                                    BinaryOp::BitwiseXor => {
+                                                        Value::Long(lv.to_long() ^ rv.to_long())
+                                                    }
                                                     BinaryOp::ShiftLeft => {
                                                         let n = rv.to_long();
-                                                        Value::Long(if (0..64).contains(&n) { lv.to_long().wrapping_shl(n as u32) } else { 0 })
+                                                        Value::Long(if (0..64).contains(&n) {
+                                                            lv.to_long().wrapping_shl(n as u32)
+                                                        } else {
+                                                            0
+                                                        })
                                                     }
                                                     BinaryOp::ShiftRight => {
                                                         let (a, n) = (lv.to_long(), rv.to_long());
-                                                        Value::Long(if (0..64).contains(&n) { a >> n } else if a < 0 { -1 } else { 0 })
+                                                        Value::Long(if (0..64).contains(&n) {
+                                                            a >> n
+                                                        } else if a < 0 {
+                                                            -1
+                                                        } else {
+                                                            0
+                                                        })
                                                     }
-                                                    BinaryOp::Div => lv.div(&rv).unwrap_or(Value::Null),
-                                                    BinaryOp::Mod => lv.modulo(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Div => {
+                                                        lv.div(&rv).unwrap_or(Value::Null)
+                                                    }
+                                                    BinaryOp::Mod => {
+                                                        lv.modulo(&rv).unwrap_or(Value::Null)
+                                                    }
                                                     BinaryOp::Pow => lv.pow(&rv),
                                                     _ => Value::Null,
                                                 }
@@ -4050,13 +4625,28 @@ impl Compiler {
                                         }
                                     }
                                     ExprKind::Identifier(cname) => {
-                                        let lower: Vec<u8> = cname.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        let v = self.resolve_class_const_magic(&lower, &qualified_name, expr.span.line);
-                                        if matches!(v, Value::Null) && lower != b"null" && !*is_static {
+                                        let lower: Vec<u8> =
+                                            cname.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                        let v = self.resolve_class_const_magic(
+                                            &lower,
+                                            &qualified_name,
+                                            expr.span.line,
+                                        );
+                                        if matches!(v, Value::Null)
+                                            && lower != b"null"
+                                            && !*is_static
+                                        {
                                             // User constant: resolved when the object is created.
-                                            let mut marker = b"__deferred_global_const__::".to_vec();
-                                            let bare = if cname.first() == Some(&b'\\') { &cname[1..] } else { &cname[..] };
-                                            if !self.current_namespace.is_empty() && cname.first() != Some(&b'\\') {
+                                            let mut marker =
+                                                b"__deferred_global_const__::".to_vec();
+                                            let bare = if cname.first() == Some(&b'\\') {
+                                                &cname[1..]
+                                            } else {
+                                                &cname[..]
+                                            };
+                                            if !self.current_namespace.is_empty()
+                                                && cname.first() != Some(&b'\\')
+                                            {
                                                 marker.extend_from_slice(&self.current_namespace);
                                                 marker.push(b'\\');
                                             }
@@ -4075,40 +4665,63 @@ impl Compiler {
                                     } => {
                                         // Closure in property default
                                         let global_id = next_closure_id();
-                                        let closure_name = format!("__closure_{}", global_id).into_bytes();
+                                        let closure_name =
+                                            format!("__closure_{}", global_id).into_bytes();
                                         let is_generator = stmts_contain_yield(closure_body);
                                         // Compute display_name with no method context (property default).
                                         let display_name = {
                                             let mut s = b"{closure:".to_vec();
                                             s.extend_from_slice(&self.source_file);
-                                            s.extend_from_slice(format!(":{}}}", expr.span.line).as_bytes());
+                                            s.extend_from_slice(
+                                                format!(":{}}}", expr.span.line).as_bytes(),
+                                            );
                                             s
                                         };
                                         let mut closure_compiler = Compiler::new();
                                         closure_compiler.op_array.name = closure_name.clone();
                                         closure_compiler.op_array.display_name = display_name;
-                                        closure_compiler.op_array.filename = self.source_file.clone();
+                                        closure_compiler.op_array.filename =
+                                            self.source_file.clone();
                                         closure_compiler.op_array.is_generator = is_generator;
-                                        closure_compiler.op_array.is_static_closure = *closure_is_static;
+                                        closure_compiler.op_array.is_static_closure =
+                                            *closure_is_static;
                                         closure_compiler.op_array.decl_line = expr.span.line;
-                                        closure_compiler.op_array.strict_types = self.op_array.strict_types;
-                                        closure_compiler.op_array.attributes = self.compile_attributes(closure_attrs);
+                                        closure_compiler.op_array.strict_types =
+                                            self.op_array.strict_types;
+                                        closure_compiler.op_array.attributes =
+                                            self.compile_attributes(closure_attrs);
                                         closure_compiler.source_file = self.source_file.clone();
-                                        closure_compiler.current_class = Some(qualified_name.clone());
-                                        closure_compiler.current_parent_class = self.current_parent_class.clone();
-                                        closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                        closure_compiler.op_array.param_count = closure_params.len() as u32;
+                                        closure_compiler.current_class =
+                                            Some(qualified_name.clone());
+                                        closure_compiler.current_parent_class =
+                                            self.current_parent_class.clone();
+                                        closure_compiler.op_array.scope_class = Some(
+                                            qualified_name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect(),
+                                        );
+                                        closure_compiler.op_array.param_count =
+                                            closure_params.len() as u32;
                                         closure_compiler.op_array.required_param_count = {
                                             let mut last_req: i64 = -1;
                                             for (i, p) in closure_params.iter().enumerate() {
-                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                                if !p.variadic && p.default.is_none() {
+                                                    last_req = i as i64;
+                                                }
                                             }
                                             (last_req + 1) as u32
                                         };
-                                        closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
-                                        closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
+                                        closure_compiler.op_array.by_ref_params =
+                                            closure_params.iter().map(|p| p.by_ref).collect();
+                                        closure_compiler.op_array.param_has_default =
+                                            closure_params
+                                                .iter()
+                                                .map(|p| p.default.is_some())
+                                                .collect();
                                         for p in closure_params {
-                                            let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
+                                            let cv =
+                                                closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
                                                 closure_compiler.op_array.variadic_param = Some(cv);
                                             }
@@ -4117,7 +4730,8 @@ impl Compiler {
                                             closure_compiler.compile_stmt(s)?;
                                         }
                                         closure_compiler.check_pending_gotos()?;
-                                        let null_idx = closure_compiler.op_array.add_literal(Value::Null);
+                                        let null_idx =
+                                            closure_compiler.op_array.add_literal(Value::Null);
                                         closure_compiler.op_array.emit(crate::opcode::Op {
                                             opcode: OpCode::Return,
                                             op1: OperandType::Const(null_idx),
@@ -4133,13 +4747,19 @@ impl Compiler {
                                     ExprKind::FirstClassCallable(target) => {
                                         // FCC in property default
                                         let global_id = next_closure_id();
-                                        let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
+                                        let closure_name =
+                                            format!("__closure_fcc_{}", global_id).into_bytes();
                                         let mut cc = Compiler::new();
                                         cc.op_array.name = closure_name.clone();
                                         cc.op_array.strict_types = self.op_array.strict_types;
                                         cc.current_class = Some(qualified_name.clone());
                                         cc.current_parent_class = self.current_parent_class.clone();
-                                        cc.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        cc.op_array.scope_class = Some(
+                                            qualified_name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect(),
+                                        );
                                         cc.source_file = self.source_file.clone();
                                         let args_cv = cc.op_array.get_or_create_cv(b"args");
                                         cc.op_array.param_count = 1;
@@ -4148,37 +4768,103 @@ impl Compiler {
                                         match target {
                                             CallableTarget::Function(name_expr) => {
                                                 if let ExprKind::Identifier(n) = &name_expr.kind {
-                                                    let resolved_name = self.resolve_function_name(n);
-                                                    cc.op_array.fcc_target_name = Some(resolved_name.clone());
-                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
-                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    let resolved_name =
+                                                        self.resolve_function_name(n);
+                                                    cc.op_array.fcc_target_name =
+                                                        Some(resolved_name.clone());
+                                                    let name_idx =
+                                                        cc.op_array.add_literal(Value::String(
+                                                            PhpString::from_vec(resolved_name),
+                                                        ));
+                                                    let arg_count_idx =
+                                                        cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::InitFCall,
+                                                        op1: OperandType::Const(name_idx),
+                                                        op2: OperandType::Const(arg_count_idx),
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::SendUnpack,
+                                                        op1: OperandType::Cv(args_cv),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
                                                     let result_tmp = cc.op_array.alloc_temp();
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::DoFCall,
+                                                        op1: OperandType::Unused,
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Tmp(result_tmp),
+                                                        line: expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::Return,
+                                                        op1: OperandType::Tmp(result_tmp),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
                                                 }
                                             }
-                                            CallableTarget::StaticMethod { class: class_expr, method } => {
+                                            CallableTarget::StaticMethod {
+                                                class: class_expr,
+                                                method,
+                                            } => {
                                                 if let ExprKind::Identifier(cn) = &class_expr.kind {
                                                     let class_n = self.resolve_class_name(cn);
-                                                    let resolved = if class_n.eq_ignore_ascii_case(b"self") {
-                                                        qualified_name.clone()
-                                                    } else if class_n.eq_ignore_ascii_case(b"parent") {
-                                                        self.current_parent_class.clone().unwrap_or(class_n.clone())
-                                                    } else {
-                                                        class_n
-                                                    };
+                                                    let resolved =
+                                                        if class_n.eq_ignore_ascii_case(b"self") {
+                                                            qualified_name.clone()
+                                                        } else if class_n
+                                                            .eq_ignore_ascii_case(b"parent")
+                                                        {
+                                                            self.current_parent_class
+                                                                .clone()
+                                                                .unwrap_or(class_n.clone())
+                                                        } else {
+                                                            class_n
+                                                        };
                                                     let mut func_name = resolved;
                                                     func_name.extend_from_slice(b"::");
                                                     func_name.extend_from_slice(method);
-                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
-                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    let name_idx =
+                                                        cc.op_array.add_literal(Value::String(
+                                                            PhpString::from_vec(func_name),
+                                                        ));
+                                                    let arg_count_idx =
+                                                        cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::InitFCall,
+                                                        op1: OperandType::Const(name_idx),
+                                                        op2: OperandType::Const(arg_count_idx),
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::SendUnpack,
+                                                        op1: OperandType::Cv(args_cv),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
                                                     let result_tmp = cc.op_array.alloc_temp();
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::DoFCall,
+                                                        op1: OperandType::Unused,
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Tmp(result_tmp),
+                                                        line: expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::Return,
+                                                        op1: OperandType::Tmp(result_tmp),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: expr.span.line,
+                                                    });
                                                 }
                                             }
                                             _ => {}
@@ -4211,19 +4897,20 @@ impl Compiler {
                                     .insert(prop_name.clone(), default_val.clone());
                             }
                             // Asymmetric visibility validation
-                            let obj_set_vis = set_visibility.map(|sv| {
-                                match sv {
-                                    Visibility::Public => ObjVisibility::Public,
-                                    Visibility::Protected => ObjVisibility::Protected,
-                                    Visibility::Private => ObjVisibility::Private,
-                                }
+                            let obj_set_vis = set_visibility.map(|sv| match sv {
+                                Visibility::Public => ObjVisibility::Public,
+                                Visibility::Protected => ObjVisibility::Protected,
+                                Visibility::Private => ObjVisibility::Private,
                             });
                             if obj_set_vis.is_some() {
                                 // Asymmetric visibility requires a type
                                 if type_hint.is_none() {
                                     return Err(CompileError {
-                                        message: format!("Property with asymmetric visibility {}::${} must have type",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                        message: format!(
+                                            "Property with asymmetric visibility {}::${} must have type",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
@@ -4236,31 +4923,47 @@ impl Compiler {
                                 if let Some(ref sv) = obj_set_vis {
                                     if vis_level(sv) < vis_level(&vis) {
                                         return Err(CompileError {
-                                            message: format!("Visibility of property {}::${} must not be weaker than set visibility",
-                                                String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                            message: format!(
+                                                "Visibility of property {}::${} must not be weaker than set visibility",
+                                                String::from_utf8_lossy(name),
+                                                String::from_utf8_lossy(prop_name)
+                                            ),
                                             line: stmt.span.line,
                                         });
                                     }
                                 }
                             }
-                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let declaring_class_lower: Vec<u8> = qualified_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
                             let prop_type = type_hint.as_ref().map(|hint| {
-                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
+                                type_hint_to_param_type_with_ns(
+                                    hint,
+                                    &self.current_namespace,
+                                    &self.use_map,
+                                )
                             });
                             // Check for duplicate property names
                             if class.properties.iter().any(|p| p.name == *prop_name) {
                                 return Err(CompileError {
-                                    message: format!("Cannot redeclare {}::${}",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)),
+                                    message: format!(
+                                        "Cannot redeclare {}::${}",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(prop_name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
                             // Determine if property is virtual (hooks don't access backing store)
-                            let hooks_would_be_virtual = if get_hook.is_some() || set_hook.is_some() {
-                                let get_uses_backing = get_hook.as_ref()
+                            let hooks_would_be_virtual = if get_hook.is_some() || set_hook.is_some()
+                            {
+                                let get_uses_backing = get_hook
+                                    .as_ref()
                                     .map(|body| stmts_reference_backing_store(body, prop_name))
                                     .unwrap_or(false);
-                                let set_uses_backing = set_hook.as_ref()
+                                let set_uses_backing = set_hook
+                                    .as_ref()
                                     .map(|(_, body)| stmts_reference_backing_store(body, prop_name))
                                     .unwrap_or(false);
                                 !get_uses_backing && !set_uses_backing
@@ -4275,14 +4978,19 @@ impl Compiler {
                             // Abstract+final is not allowed
                             if *prop_is_abstract && *prop_is_final {
                                 return Err(CompileError {
-                                    message: "Cannot use the final modifier on an abstract property".to_string(),
+                                    message:
+                                        "Cannot use the final modifier on an abstract property"
+                                            .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
                             // Final+private is not allowed
-                            if *prop_is_final && matches!(visibility, goro_parser::ast::Visibility::Private) {
+                            if *prop_is_final
+                                && matches!(visibility, goro_parser::ast::Visibility::Private)
+                            {
                                 return Err(CompileError {
-                                    message: "Property cannot be both final and private".to_string(),
+                                    message: "Property cannot be both final and private"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
@@ -4291,41 +4999,69 @@ impl Compiler {
                             // `private $prop { final get; }` is both, but the expected error is
                             // "cannot be both final and private".
                             if (*get_hook_final || *set_hook_final)
-                                && matches!(visibility, goro_parser::ast::Visibility::Private) {
+                                && matches!(visibility, goro_parser::ast::Visibility::Private)
+                            {
                                 return Err(CompileError {
-                                    message: "Property hook cannot be both final and private".to_string(),
+                                    message: "Property hook cannot be both final and private"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
-                            if (*get_hook_final && *get_hook_abstract) || (*set_hook_final && *set_hook_abstract) {
+                            if (*get_hook_final && *get_hook_abstract)
+                                || (*set_hook_final && *set_hook_abstract)
+                            {
                                 return Err(CompileError {
-                                    message: "Property hook cannot be both abstract and final".to_string(),
+                                    message: "Property hook cannot be both abstract and final"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
-                            if *prop_is_abstract && matches!(visibility, goro_parser::ast::Visibility::Private) {
+                            if *prop_is_abstract
+                                && matches!(visibility, goro_parser::ast::Visibility::Private)
+                            {
                                 return Err(CompileError {
-                                    message: "Property hook cannot be both abstract and private".to_string(),
+                                    message: "Property hook cannot be both abstract and private"
+                                        .to_string(),
                                     line: stmt.span.line,
                                 });
                             }
                             // Abstract property in non-abstract, non-interface, non-trait class
                             // Only the hooks declared with `;` (no body) are actually abstract;
                             // `get { }` / `set { }` with an empty body are concrete.
-                            if *prop_is_abstract && !modifiers.is_abstract && !modifiers.is_interface && !modifiers.is_trait {
+                            if *prop_is_abstract
+                                && !modifiers.is_abstract
+                                && !modifiers.is_interface
+                                && !modifiers.is_trait
+                            {
                                 let has_g = *get_hook_abstract;
                                 let has_s = *set_hook_abstract;
                                 let count = (has_g as usize) + (has_s as usize);
                                 if count > 0 {
-                                    let (plural, is_plural) = if count == 1 { ("method", false) } else { ("methods", true) };
+                                    let (plural, is_plural) = if count == 1 {
+                                        ("method", false)
+                                    } else {
+                                        ("methods", true)
+                                    };
                                     let mut parts: Vec<String> = Vec::new();
                                     if has_g {
-                                        parts.push(format!("{}::${}::get", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                        parts.push(format!(
+                                            "{}::${}::get",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ));
                                     }
                                     if has_s {
-                                        parts.push(format!("{}::${}::set", String::from_utf8_lossy(name), String::from_utf8_lossy(prop_name)));
+                                        parts.push(format!(
+                                            "{}::${}::set",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(prop_name)
+                                        ));
                                     }
-                                    let remaining_word = if is_plural { "remaining methods" } else { "remaining method" };
+                                    let remaining_word = if is_plural {
+                                        "remaining methods"
+                                    } else {
+                                        "remaining method"
+                                    };
                                     return Err(CompileError {
                                         message: format!(
                                             "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
@@ -4354,15 +5090,20 @@ impl Compiler {
                                 is_abstract: *prop_is_abstract,
                                 is_final: *prop_is_final,
                                 attributes: self.compile_attributes_target(attributes, "property"),
-                                doc_comment: prop_doc_comment.as_ref()
+                                doc_comment: prop_doc_comment
+                                    .as_ref()
                                     .map(|d| String::from_utf8_lossy(d).into_owned()),
                             });
 
                             // Compile property get hook as a method: __property_get_$propname
                             if let Some(hook_body) = get_hook {
-                                let hook_method_name = format!("__property_get_{}", String::from_utf8_lossy(prop_name));
+                                let hook_method_name = format!(
+                                    "__property_get_{}",
+                                    String::from_utf8_lossy(prop_name)
+                                );
                                 // Display name for __METHOD__: $prop::get
-                                let hook_display_name = format!("${}::get", String::from_utf8_lossy(prop_name));
+                                let hook_display_name =
+                                    format!("${}::get", String::from_utf8_lossy(prop_name));
                                 let mut hook_compiler = Compiler::new();
                                 hook_compiler.current_namespace = self.current_namespace.clone();
                                 hook_compiler.use_map = self.use_map.clone();
@@ -4373,12 +5114,19 @@ impl Compiler {
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 // The get hook's return type is the property type.
                                 hook_compiler.op_array.return_type = prop_type.clone();
-                                hook_compiler.op_array.is_generator = stmts_contain_yield(hook_body);
+                                hook_compiler.op_array.is_generator =
+                                    stmts_contain_yield(hook_body);
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
-                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                hook_compiler.op_array.scope_class = Some(
+                                    qualified_name
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect(),
+                                );
+                                hook_compiler.anon_class_name_map =
+                                    self.anon_class_name_map.clone();
 
                                 // $this is CV 0
                                 hook_compiler.op_array.get_or_create_cv(b"this");
@@ -4400,7 +5148,10 @@ impl Compiler {
                                     line: 0,
                                 });
 
-                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                let lower_hook_name: Vec<u8> = hook_method_name
+                                    .bytes()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -4419,9 +5170,13 @@ impl Compiler {
                             }
                             // Compile property set hook as a method: __property_set_$propname
                             if let Some((param_name, hook_body)) = set_hook {
-                                let hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(prop_name));
+                                let hook_method_name = format!(
+                                    "__property_set_{}",
+                                    String::from_utf8_lossy(prop_name)
+                                );
                                 // Display name for __METHOD__: $prop::set
-                                let hook_display_name = format!("${}::set", String::from_utf8_lossy(prop_name));
+                                let hook_display_name =
+                                    format!("${}::set", String::from_utf8_lossy(prop_name));
                                 let mut hook_compiler = Compiler::new();
                                 hook_compiler.current_namespace = self.current_namespace.clone();
                                 hook_compiler.use_map = self.use_map.clone();
@@ -4433,8 +5188,14 @@ impl Compiler {
                                 hook_compiler.source_file = self.source_file.clone();
                                 hook_compiler.current_class = Some(qualified_name.clone());
                                 hook_compiler.current_parent_class = class.parent.clone();
-                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                hook_compiler.op_array.scope_class = Some(
+                                    qualified_name
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect(),
+                                );
+                                hook_compiler.anon_class_name_map =
+                                    self.anon_class_name_map.clone();
 
                                 // $this is CV 0
                                 hook_compiler.op_array.get_or_create_cv(b"this");
@@ -4443,12 +5204,19 @@ impl Compiler {
                                 // Explicit `set(Type $value)` parameter type (used by
                                 // inheritance/variance checks).
                                 if let Some(th) = set_hook_type {
-                                    let pt = type_hint_to_param_type_with_ns(th, &self.current_namespace, &self.use_map);
-                                    hook_compiler.op_array.param_types = vec![None, Some(ParamTypeInfo {
-                                        param_name: param_name.clone(),
-                                        param_type: pt,
-                                        implicitly_nullable: false,
-                                    })];
+                                    let pt = type_hint_to_param_type_with_ns(
+                                        th,
+                                        &self.current_namespace,
+                                        &self.use_map,
+                                    );
+                                    hook_compiler.op_array.param_types = vec![
+                                        None,
+                                        Some(ParamTypeInfo {
+                                            param_name: param_name.clone(),
+                                            param_type: pt,
+                                            implicitly_nullable: false,
+                                        }),
+                                    ];
                                 }
                                 hook_compiler.op_array.param_count = 2; // $this + $value
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
@@ -4468,7 +5236,10 @@ impl Compiler {
                                     line: 0,
                                 });
 
-                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                                let lower_hook_name: Vec<u8> = hook_method_name
+                                    .bytes()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -4505,7 +5276,8 @@ impl Compiler {
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
                                 return Err(CompileError {
-                                    message: "Cannot use the final modifier on an abstract method".to_string(),
+                                    message: "Cannot use the final modifier on an abstract method"
+                                        .to_string(),
                                     line: *method_line,
                                 });
                             }
@@ -4513,24 +5285,36 @@ impl Compiler {
                             {
                                 let has_nodiscard = method_attributes.iter().any(|a| {
                                     let last = a.name.last().map(|s| s.as_slice()).unwrap_or(&[]);
-                                    let bare: &[u8] = if last.first() == Some(&b'\\') { &last[1..] } else { last };
+                                    let bare: &[u8] = if last.first() == Some(&b'\\') {
+                                        &last[1..]
+                                    } else {
+                                        last
+                                    };
                                     bare.eq_ignore_ascii_case(b"NoDiscard")
                                 });
                                 if has_nodiscard {
-                                    let mn_lower_v: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let mn_lower_v: Vec<u8> = method_name
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect();
                                     let class_display = String::from_utf8_lossy(name).to_string();
-                                    let method_display = String::from_utf8_lossy(method_name).to_string();
+                                    let method_display =
+                                        String::from_utf8_lossy(method_name).to_string();
                                     if mn_lower_v == b"__construct" {
                                         return Err(CompileError {
-                                            message: format!("Method {}::{} cannot be #[\\NoDiscard]",
-                                                class_display, method_display),
+                                            message: format!(
+                                                "Method {}::{} cannot be #[\\NoDiscard]",
+                                                class_display, method_display
+                                            ),
                                             line: *method_line,
                                         });
                                     }
                                     if mn_lower_v == b"__clone" {
                                         return Err(CompileError {
-                                            message: format!("Method {}::{} cannot be #[\\NoDiscard]",
-                                                class_display, method_display),
+                                            message: format!(
+                                                "Method {}::{} cannot be #[\\NoDiscard]",
+                                                class_display, method_display
+                                            ),
                                             line: *method_line,
                                         });
                                     }
@@ -4556,49 +5340,78 @@ impl Compiler {
                             // Check: interface methods must not be final
                             if modifiers.is_interface && *method_is_final {
                                 return Err(CompileError {
-                                    message: format!("Interface method {}::{}() must not be final",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    message: format!(
+                                        "Interface method {}::{}() must not be final",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(method_name)
+                                    ),
                                     line: *method_line,
                                 });
                             }
                             // Check: interface methods must not be abstract (they are implicitly abstract)
                             if modifiers.is_interface && *is_abstract {
                                 return Err(CompileError {
-                                    message: format!("Interface method {}::{}() must not be abstract",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    message: format!(
+                                        "Interface method {}::{}() must not be abstract",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(method_name)
+                                    ),
                                     line: *method_line,
                                 });
                             }
                             // Check: abstract method cannot be private (except in traits, since PHP 8.0)
-                            if *is_abstract && matches!(visibility, goro_parser::ast::Visibility::Private) && !modifiers.is_trait {
+                            if *is_abstract
+                                && matches!(visibility, goro_parser::ast::Visibility::Private)
+                                && !modifiers.is_trait
+                            {
                                 return Err(CompileError {
-                                    message: format!("Abstract function {}::{}() cannot be declared private",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    message: format!(
+                                        "Abstract function {}::{}() cannot be declared private",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(method_name)
+                                    ),
                                     line: *method_line,
                                 });
                             }
                             // Enums cannot have abstract methods
                             if modifiers.is_enum && *is_abstract {
                                 return Err(CompileError {
-                                    message: format!("Enum method {}::{}() must not be abstract",
-                                        String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                    message: format!(
+                                        "Enum method {}::{}() must not be abstract",
+                                        String::from_utf8_lossy(name),
+                                        String::from_utf8_lossy(method_name)
+                                    ),
                                     line: *method_line,
                                 });
                             }
                             // Enums cannot include certain magic methods
                             if modifiers.is_enum {
-                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let forbidden_magic = matches!(mn_lower.as_slice(),
-                                    b"__get" | b"__set" | b"__destruct" | b"__clone"
-                                    | b"__sleep" | b"__wakeup" | b"__set_state"
-                                    | b"__unserialize" | b"__serialize"
-                                    | b"__isset" | b"__unset" | b"__debuginfo"
-                                    | b"__construct" | b"__tostring"
+                                let mn_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let forbidden_magic = matches!(
+                                    mn_lower.as_slice(),
+                                    b"__get"
+                                        | b"__set"
+                                        | b"__destruct"
+                                        | b"__clone"
+                                        | b"__sleep"
+                                        | b"__wakeup"
+                                        | b"__set_state"
+                                        | b"__unserialize"
+                                        | b"__serialize"
+                                        | b"__isset"
+                                        | b"__unset"
+                                        | b"__debuginfo"
+                                        | b"__construct"
+                                        | b"__tostring"
                                 );
                                 if forbidden_magic {
                                     return Err(CompileError {
-                                        message: format!("Enum {} cannot include magic method {}",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        message: format!(
+                                            "Enum {} cannot include magic method {}",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(method_name)
+                                        ),
                                         line: *method_line,
                                     });
                                 }
@@ -4610,19 +5423,27 @@ impl Compiler {
                                 };
                                 if is_reserved_enum_method {
                                     return Err(CompileError {
-                                        message: format!("Cannot redeclare {}::{}()",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        message: format!(
+                                            "Cannot redeclare {}::{}()",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(method_name)
+                                        ),
                                         line: *method_line,
                                     });
                                 }
                             }
                             // Enforce: __construct and __destruct cannot declare return types
                             {
-                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mn_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if method_return_type.is_some() {
                                     if mn_lower == b"__construct" || mn_lower == b"__destruct" {
                                         return Err(CompileError {
-                                            message: format!("Method {}::{}() cannot declare a return type", String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                            message: format!(
+                                                "Method {}::{}() cannot declare a return type",
+                                                String::from_utf8_lossy(name),
+                                                String::from_utf8_lossy(method_name)
+                                            ),
                                             line: *method_line,
                                         });
                                     }
@@ -4630,20 +5451,33 @@ impl Compiler {
                                     if let Some(rt) = method_return_type {
                                         let class_display = String::from_utf8_lossy(name);
                                         // Helper: check if a type hint matches a simple type name
-                                        let is_simple_type = |hint: &TypeHint, expected: &[u8]| -> bool {
-                                            match hint {
-                                                TypeHint::Simple(n) => n.eq_ignore_ascii_case(expected),
-                                                _ => false,
-                                            }
-                                        };
+                                        let is_simple_type =
+                                            |hint: &TypeHint, expected: &[u8]| -> bool {
+                                                match hint {
+                                                    TypeHint::Simple(n) => {
+                                                        n.eq_ignore_ascii_case(expected)
+                                                    }
+                                                    _ => false,
+                                                }
+                                            };
                                         // Helper: check if type is ?array (nullable array)
                                         let is_nullable_array = |hint: &TypeHint| -> bool {
                                             match hint {
-                                                TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"array"),
-                                                TypeHint::Nullable(inner) => matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")),
+                                                TypeHint::Simple(n) => {
+                                                    n.eq_ignore_ascii_case(b"array")
+                                                }
+                                                TypeHint::Nullable(inner) => {
+                                                    matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
+                                                }
                                                 TypeHint::Union(types) => {
                                                     // array|null or null|array
-                                                    types.len() == 2 && types.iter().any(|t| is_simple_type(t, b"array")) && types.iter().any(|t| is_simple_type(t, b"null"))
+                                                    types.len() == 2
+                                                        && types
+                                                            .iter()
+                                                            .any(|t| is_simple_type(t, b"array"))
+                                                        && types
+                                                            .iter()
+                                                            .any(|t| is_simple_type(t, b"null"))
                                                 }
                                                 _ => false,
                                             }
@@ -4652,9 +5486,13 @@ impl Compiler {
                                         // a subset of the expected one (never is always allowed).
                                         let _ = (&is_simple_type, &is_nullable_array);
                                         {
-                                            use crate::vm::variance::{TypeView, T_ARRAY, T_BOOL, T_NEVER, T_NULL, T_OBJECT, T_STATIC, T_STRING, T_VOID};
+                                            use crate::vm::variance::{
+                                                T_ARRAY, T_BOOL, T_NEVER, T_NULL, T_OBJECT,
+                                                T_STATIC, T_STRING, T_VOID, TypeView,
+                                            };
                                             let expected: Option<u32> = match mn_lower.as_slice() {
-                                                b"__clone" | b"__set" | b"__unset" | b"__unserialize" | b"__wakeup" => Some(T_VOID),
+                                                b"__clone" | b"__set" | b"__unset"
+                                                | b"__unserialize" | b"__wakeup" => Some(T_VOID),
                                                 b"__isset" => Some(T_BOOL),
                                                 b"__tostring" => Some(T_STRING),
                                                 b"__debuginfo" => Some(T_ARRAY | T_NULL),
@@ -4663,7 +5501,11 @@ impl Compiler {
                                                 _ => None,
                                             };
                                             if let Some(exp) = expected {
-                                                let pt = type_hint_to_param_type_with_ns(rt, &self.current_namespace, &self.use_map);
+                                                let pt = type_hint_to_param_type_with_ns(
+                                                    rt,
+                                                    &self.current_namespace,
+                                                    &self.use_map,
+                                                );
                                                 let tv = TypeView::from_param_type(&pt);
                                                 if tv.mask & T_NEVER == 0 {
                                                     let mut is_complex = !tv.elems.is_empty();
@@ -4672,12 +5514,24 @@ impl Compiler {
                                                         extra &= !T_STATIC;
                                                         is_complex = true;
                                                     }
-                                                    if extra != 0 || (is_complex && exp != T_OBJECT) {
-                                                        let exp_tv = TypeView { mask: exp, elems: Vec::new(), is_intersection: false };
+                                                    if extra != 0 || (is_complex && exp != T_OBJECT)
+                                                    {
+                                                        let exp_tv = TypeView {
+                                                            mask: exp,
+                                                            elems: Vec::new(),
+                                                            is_intersection: false,
+                                                        };
                                                         return Err(CompileError {
-                                                            message: format!("{}::{}(): Return type must be {} when declared",
-                                                                class_display, String::from_utf8_lossy(method_name),
-                                                                crate::vm::variance::type_to_string(&exp_tv, None)),
+                                                            message: format!(
+                                                                "{}::{}(): Return type must be {} when declared",
+                                                                class_display,
+                                                                String::from_utf8_lossy(
+                                                                    method_name
+                                                                ),
+                                                                crate::vm::variance::type_to_string(
+                                                                    &exp_tv, None
+                                                                )
+                                                            ),
                                                             line: *method_line,
                                                         });
                                                     }
@@ -4689,36 +5543,148 @@ impl Compiler {
                             }
                             // Validate magic method argument counts, static modifiers, visibility, by-ref params, and param types
                             {
-                                let mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mn_lower: Vec<u8> =
+                                    method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let class_display = String::from_utf8_lossy(name).to_string();
-                                let method_display = String::from_utf8_lossy(method_name).to_string();
+                                let method_display =
+                                    String::from_utf8_lossy(method_name).to_string();
 
                                 // 1) Argument count / signature checks first (PHP checks these before static)
-                                if matches!(mn_lower.as_slice(), b"__clone" | b"__destruct" | b"__tostring" | b"__serialize" | b"__sleep" | b"__wakeup") && !params.is_empty() {
-                                    return Err(CompileError { message: format!("Method {}::{}() cannot take arguments", class_display, method_display), line: *method_line });
+                                if matches!(
+                                    mn_lower.as_slice(),
+                                    b"__clone"
+                                        | b"__destruct"
+                                        | b"__tostring"
+                                        | b"__serialize"
+                                        | b"__sleep"
+                                        | b"__wakeup"
+                                ) && !params.is_empty()
+                                {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::{}() cannot take arguments",
+                                            class_display, method_display
+                                        ),
+                                        line: *method_line,
+                                    });
                                 }
-                                if mn_lower == b"__isset" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__isset() must take exactly 1 argument", class_display), line: *method_line }); }
-                                if mn_lower == b"__unset" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__unset() must take exactly 1 argument", class_display), line: *method_line }); }
-                                if mn_lower == b"__get" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__get() must take exactly 1 argument", class_display), line: *method_line }); }
-                                if mn_lower == b"__set" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__set() must take exactly 2 arguments", class_display), line: *method_line }); }
-                                if mn_lower == b"__call" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__call() must take exactly 2 arguments", class_display), line: *method_line }); }
-                                if mn_lower == b"__callstatic" && params.len() != 2 { return Err(CompileError { message: format!("Method {}::__callStatic() must take exactly 2 arguments", class_display), line: *method_line }); }
-                                if mn_lower == b"__unserialize" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__unserialize() must take exactly 1 argument", class_display), line: *method_line }); }
-                                if mn_lower == b"__set_state" && params.len() != 1 { return Err(CompileError { message: format!("Method {}::__set_state() must take exactly 1 argument", class_display), line: *method_line }); }
+                                if mn_lower == b"__isset" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__isset() must take exactly 1 argument",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__unset" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__unset() must take exactly 1 argument",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__get" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__get() must take exactly 1 argument",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__set" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__set() must take exactly 2 arguments",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__call" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__call() must take exactly 2 arguments",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__callstatic" && params.len() != 2 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__callStatic() must take exactly 2 arguments",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__unserialize" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__unserialize() must take exactly 1 argument",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
+                                if mn_lower == b"__set_state" && params.len() != 1 {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__set_state() must take exactly 1 argument",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
+                                }
 
                                 // 2) By-reference parameter checks
-                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic") {
+                                if matches!(
+                                    mn_lower.as_slice(),
+                                    b"__get"
+                                        | b"__set"
+                                        | b"__isset"
+                                        | b"__unset"
+                                        | b"__call"
+                                        | b"__callstatic"
+                                ) {
                                     if params.iter().any(|p| p.by_ref) {
-                                        return Err(CompileError { message: format!("Method {}::{}() cannot take arguments by reference", class_display, method_display), line: *method_line });
+                                        return Err(CompileError {
+                                            message: format!(
+                                                "Method {}::{}() cannot take arguments by reference",
+                                                class_display, method_display
+                                            ),
+                                            line: *method_line,
+                                        });
                                     }
                                 }
 
                                 // 3) Parameter type validation
-                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic") {
+                                if matches!(
+                                    mn_lower.as_slice(),
+                                    b"__get"
+                                        | b"__set"
+                                        | b"__isset"
+                                        | b"__unset"
+                                        | b"__call"
+                                        | b"__callstatic"
+                                ) {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"string")) {
-                                                return Err(CompileError { message: format!("{}::{}(): Parameter #1 (${}) must be of type string when declared", class_display, method_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"string"))
+                                            {
+                                                return Err(CompileError {
+                                                    message: format!(
+                                                        "{}::{}(): Parameter #1 (${}) must be of type string when declared",
+                                                        class_display,
+                                                        method_display,
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
+                                                    line: *method_line,
+                                                });
                                             }
                                         }
                                     }
@@ -4726,8 +5692,17 @@ impl Compiler {
                                 if matches!(mn_lower.as_slice(), b"__call" | b"__callstatic") {
                                     if let Some(param) = params.get(1) {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
-                                                return Err(CompileError { message: format!("{}::{}(): Parameter #2 (${}) must be of type array when declared", class_display, method_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
+                                            {
+                                                return Err(CompileError {
+                                                    message: format!(
+                                                        "{}::{}(): Parameter #2 (${}) must be of type array when declared",
+                                                        class_display,
+                                                        method_display,
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
+                                                    line: *method_line,
+                                                });
                                             }
                                         }
                                     }
@@ -4735,8 +5710,16 @@ impl Compiler {
                                 if mn_lower == b"__unserialize" {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
-                                                return Err(CompileError { message: format!("{}::__unserialize(): Parameter #1 (${}) must be of type array when declared", class_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
+                                            {
+                                                return Err(CompileError {
+                                                    message: format!(
+                                                        "{}::__unserialize(): Parameter #1 (${}) must be of type array when declared",
+                                                        class_display,
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
+                                                    line: *method_line,
+                                                });
                                             }
                                         }
                                     }
@@ -4744,28 +5727,81 @@ impl Compiler {
                                 if mn_lower == b"__set_state" {
                                     if let Some(param) = params.first() {
                                         if let Some(ref th) = param.type_hint {
-                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array")) {
-                                                return Err(CompileError { message: format!("{}::__set_state(): Parameter #1 (${}) must be of type array when declared", class_display, String::from_utf8_lossy(&param.name)), line: *method_line });
+                                            if !matches!(th, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"array"))
+                                            {
+                                                return Err(CompileError {
+                                                    message: format!(
+                                                        "{}::__set_state(): Parameter #1 (${}) must be of type array when declared",
+                                                        class_display,
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
+                                                    line: *method_line,
+                                                });
                                             }
                                         }
                                     }
                                 }
 
                                 // 4) Cannot be static checks (after argument checks)
-                                if matches!(mn_lower.as_slice(), b"__construct" | b"__destruct" | b"__clone" | b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__tostring" | b"__debuginfo") {
+                                if matches!(
+                                    mn_lower.as_slice(),
+                                    b"__construct"
+                                        | b"__destruct"
+                                        | b"__clone"
+                                        | b"__get"
+                                        | b"__set"
+                                        | b"__isset"
+                                        | b"__unset"
+                                        | b"__call"
+                                        | b"__tostring"
+                                        | b"__debuginfo"
+                                ) {
                                     if *is_static {
-                                        return Err(CompileError { message: format!("Method {}::{}() cannot be static", class_display, method_display), line: *method_line });
+                                        return Err(CompileError {
+                                            message: format!(
+                                                "Method {}::{}() cannot be static",
+                                                class_display, method_display
+                                            ),
+                                            line: *method_line,
+                                        });
                                     }
                                 }
                                 if mn_lower == b"__callstatic" && !*is_static {
-                                    return Err(CompileError { message: format!("Method {}::__callstatic() must be static", class_display), line: *method_line });
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__callstatic() must be static",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
                                 }
                                 if mn_lower == b"__set_state" && !*is_static {
-                                    return Err(CompileError { message: format!("Method {}::__set_state() must be static", class_display), line: *method_line });
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Method {}::__set_state() must be static",
+                                            class_display
+                                        ),
+                                        line: *method_line,
+                                    });
                                 }
 
                                 // 5) Visibility warnings (must be public)
-                                if matches!(mn_lower.as_slice(), b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic" | b"__tostring" | b"__debuginfo" | b"__serialize" | b"__unserialize" | b"__sleep" | b"__wakeup" | b"__set_state") {
+                                if matches!(
+                                    mn_lower.as_slice(),
+                                    b"__get"
+                                        | b"__set"
+                                        | b"__isset"
+                                        | b"__unset"
+                                        | b"__call"
+                                        | b"__callstatic"
+                                        | b"__tostring"
+                                        | b"__debuginfo"
+                                        | b"__serialize"
+                                        | b"__unserialize"
+                                        | b"__sleep"
+                                        | b"__wakeup"
+                                        | b"__set_state"
+                                ) {
                                     if *visibility != Visibility::Public {
                                         self.warnings.push((format!("The magic method {}::{}() must have public visibility", class_display, method_display), *method_line));
                                     }
@@ -4778,7 +5814,12 @@ impl Compiler {
                                 // Check for promoted properties in non-constructors
                                 if mn_lower != b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
+                                        if param.visibility.is_some()
+                                            || param.readonly
+                                            || param.is_final
+                                            || param.get_hook.is_some()
+                                            || param.set_hook.is_some()
+                                        {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
                                                 line: stmt.span.line,
@@ -4789,7 +5830,12 @@ impl Compiler {
                                 // Check for promoted properties in abstract constructors
                                 if mn_lower == b"__construct" && *is_abstract {
                                     for param in params {
-                                        if param.visibility.is_some() || param.readonly || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
+                                        if param.visibility.is_some()
+                                            || param.readonly
+                                            || param.is_final
+                                            || param.get_hook.is_some()
+                                            || param.set_hook.is_some()
+                                        {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
                                                 line: stmt.span.line,
@@ -4799,8 +5845,17 @@ impl Compiler {
                                 }
                                 if mn_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.set_visibility.is_some() || param.is_final || param.get_hook.is_some() || param.set_hook.is_some() {
-                                            let prop_vis = match param.visibility.as_ref().unwrap_or(&Visibility::Public) {
+                                        if param.visibility.is_some()
+                                            || param.set_visibility.is_some()
+                                            || param.is_final
+                                            || param.get_hook.is_some()
+                                            || param.set_hook.is_some()
+                                        {
+                                            let prop_vis = match param
+                                                .visibility
+                                                .as_ref()
+                                                .unwrap_or(&Visibility::Public)
+                                            {
                                                 Visibility::Public => {
                                                     crate::object::Visibility::Public
                                                 }
@@ -4811,19 +5866,23 @@ impl Compiler {
                                                     crate::object::Visibility::Private
                                                 }
                                             };
-                                            let obj_set_vis_cpp = param.set_visibility.as_ref().map(|sv| {
-                                                match sv {
+                                            let obj_set_vis_cpp =
+                                                param.set_visibility.as_ref().map(|sv| match sv {
                                                     Visibility::Public => ObjVisibility::Public,
-                                                    Visibility::Protected => ObjVisibility::Protected,
+                                                    Visibility::Protected => {
+                                                        ObjVisibility::Protected
+                                                    }
                                                     Visibility::Private => ObjVisibility::Private,
-                                                }
-                                            });
+                                                });
                                             // Validate asymmetric visibility in CPP
                                             if obj_set_vis_cpp.is_some() {
                                                 if param.type_hint.is_none() {
                                                     return Err(CompileError {
-                                                        message: format!("Property with asymmetric visibility {}::${} must have type",
-                                                            String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                        message: format!(
+                                                            "Property with asymmetric visibility {}::${} must have type",
+                                                            String::from_utf8_lossy(name),
+                                                            String::from_utf8_lossy(&param.name)
+                                                        ),
                                                         line: *method_line,
                                                     });
                                                 }
@@ -4835,43 +5894,70 @@ impl Compiler {
                                                 if let Some(ref sv) = obj_set_vis_cpp {
                                                     if vis_level(sv) < vis_level(&prop_vis) {
                                                         return Err(CompileError {
-                                                            message: format!("Visibility of property {}::${} must not be weaker than set visibility",
-                                                                String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                            message: format!(
+                                                                "Visibility of property {}::${} must not be weaker than set visibility",
+                                                                String::from_utf8_lossy(name),
+                                                                String::from_utf8_lossy(
+                                                                    &param.name
+                                                                )
+                                                            ),
                                                             line: *method_line,
                                                         });
                                                     }
                                                 }
                                             }
                                             // Readonly promoted properties must have a type
-                                            if (param.readonly || modifiers.is_readonly) && param.type_hint.is_none() {
+                                            if (param.readonly || modifiers.is_readonly)
+                                                && param.type_hint.is_none()
+                                            {
                                                 return Err(CompileError {
-                                                    message: format!("Readonly property {}::${} must have type",
-                                                        String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                    message: format!(
+                                                        "Readonly property {}::${} must have type",
+                                                        String::from_utf8_lossy(name),
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
                                                     line: *method_line,
                                                 });
                                             }
                                             // Hooked promoted properties cannot be readonly (PHP-8.4 rule)
                                             if (param.readonly || modifiers.is_readonly)
-                                                && (param.get_hook.is_some() || param.set_hook.is_some())
+                                                && (param.get_hook.is_some()
+                                                    || param.set_hook.is_some())
                                             {
                                                 return Err(CompileError {
-                                                    message: "Hooked properties cannot be readonly".to_string(),
+                                                    message: "Hooked properties cannot be readonly"
+                                                        .to_string(),
                                                     line: *method_line,
                                                 });
                                             }
-                                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            let promoted_prop_type = param.type_hint.as_ref().map(|hint| {
-                                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
-                                            });
+                                            let declaring_class_lower: Vec<u8> = qualified_name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            let promoted_prop_type =
+                                                param.type_hint.as_ref().map(|hint| {
+                                                    type_hint_to_param_type_with_ns(
+                                                        hint,
+                                                        &self.current_namespace,
+                                                        &self.use_map,
+                                                    )
+                                                });
                                             // Check for duplicate property from promotion
-                                            if class.properties.iter().any(|p| p.name == param.name) {
+                                            if class.properties.iter().any(|p| p.name == param.name)
+                                            {
                                                 return Err(CompileError {
-                                                    message: format!("Cannot redeclare {}::${}",
-                                                        String::from_utf8_lossy(name), String::from_utf8_lossy(&param.name)),
+                                                    message: format!(
+                                                        "Cannot redeclare {}::${}",
+                                                        String::from_utf8_lossy(name),
+                                                        String::from_utf8_lossy(&param.name)
+                                                    ),
                                                     line: *method_line,
                                                 });
                                             }
-                                            let pa = self.compile_attributes_target(&param.attributes, "parameter");
+                                            let pa = self.compile_attributes_target(
+                                                &param.attributes,
+                                                "parameter",
+                                            );
                                             // Promoted typed properties start as Undef (constructor sets the value)
                                             // Promoted untyped properties get Null as default
                                             let promoted_default = if promoted_prop_type.is_some() {
@@ -4882,17 +5968,32 @@ impl Compiler {
                                             let prom_has_get_hook = param.get_hook.is_some();
                                             let prom_has_set_hook = param.set_hook.is_some();
                                             // Determine if promoted property with hooks is virtual
-                                            let prom_is_virtual = if prom_has_get_hook || prom_has_set_hook {
-                                                let get_uses_backing = param.get_hook.as_ref()
-                                                    .map(|body| stmts_reference_backing_store(body, &param.name))
-                                                    .unwrap_or(false);
-                                                let set_uses_backing = param.set_hook.as_ref()
-                                                    .map(|(_, body)| stmts_reference_backing_store(body, &param.name))
-                                                    .unwrap_or(false);
-                                                !get_uses_backing && !set_uses_backing
-                                            } else {
-                                                false
-                                            };
+                                            let prom_is_virtual =
+                                                if prom_has_get_hook || prom_has_set_hook {
+                                                    let get_uses_backing = param
+                                                        .get_hook
+                                                        .as_ref()
+                                                        .map(|body| {
+                                                            stmts_reference_backing_store(
+                                                                body,
+                                                                &param.name,
+                                                            )
+                                                        })
+                                                        .unwrap_or(false);
+                                                    let set_uses_backing = param
+                                                        .set_hook
+                                                        .as_ref()
+                                                        .map(|(_, body)| {
+                                                            stmts_reference_backing_store(
+                                                                body,
+                                                                &param.name,
+                                                            )
+                                                        })
+                                                        .unwrap_or(false);
+                                                    !get_uses_backing && !set_uses_backing
+                                                } else {
+                                                    false
+                                                };
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
                                                 default: promoted_default,
@@ -4900,7 +6001,8 @@ impl Compiler {
                                                 visibility: prop_vis,
                                                 set_visibility: obj_set_vis_cpp,
                                                 declaring_class: declaring_class_lower.clone(),
-                                                is_readonly: param.readonly || modifiers.is_readonly,
+                                                is_readonly: param.readonly
+                                                    || modifiers.is_readonly,
                                                 property_type: promoted_prop_type.clone(),
                                                 has_get_hook: prom_has_get_hook,
                                                 has_set_hook: prom_has_set_hook,
@@ -4908,27 +6010,49 @@ impl Compiler {
                                                 is_abstract: false,
                                                 is_final: param.is_final,
                                                 attributes: pa,
-                                                doc_comment: param.doc_comment.as_ref()
-                                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                                doc_comment: param.doc_comment.as_ref().map(|d| {
+                                                    String::from_utf8_lossy(d).into_owned()
+                                                }),
                                             });
                                             // Compile promoted property get hook
                                             if let Some(hook_body) = &param.get_hook {
-                                                let hook_method_name = format!("__property_get_{}", String::from_utf8_lossy(&param.name));
-                                                let hook_display_name = format!("${}::get", String::from_utf8_lossy(&param.name));
+                                                let hook_method_name = format!(
+                                                    "__property_get_{}",
+                                                    String::from_utf8_lossy(&param.name)
+                                                );
+                                                let hook_display_name = format!(
+                                                    "${}::get",
+                                                    String::from_utf8_lossy(&param.name)
+                                                );
                                                 let mut hook_compiler = Compiler::new();
-                                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                                hook_compiler.current_namespace =
+                                                    self.current_namespace.clone();
                                                 hook_compiler.use_map = self.use_map.clone();
-                                                hook_compiler.use_function_map = self.use_function_map.clone();
-                                                hook_compiler.use_const_map = self.use_const_map.clone();
-                                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                                hook_compiler.use_function_map =
+                                                    self.use_function_map.clone();
+                                                hook_compiler.use_const_map =
+                                                    self.use_const_map.clone();
+                                                hook_compiler.op_array.name =
+                                                    hook_display_name.into_bytes();
                                                 hook_compiler.op_array.decl_line = *method_line;
-                                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
-                                                hook_compiler.op_array.return_type = promoted_prop_type.clone();
-                                                hook_compiler.source_file = self.source_file.clone();
-                                                hook_compiler.current_class = Some(qualified_name.clone());
-                                                hook_compiler.current_parent_class = class.parent.clone();
-                                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                                hook_compiler.op_array.strict_types =
+                                                    self.op_array.strict_types;
+                                                hook_compiler.op_array.return_type =
+                                                    promoted_prop_type.clone();
+                                                hook_compiler.source_file =
+                                                    self.source_file.clone();
+                                                hook_compiler.current_class =
+                                                    Some(qualified_name.clone());
+                                                hook_compiler.current_parent_class =
+                                                    class.parent.clone();
+                                                hook_compiler.op_array.scope_class = Some(
+                                                    qualified_name
+                                                        .iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect(),
+                                                );
+                                                hook_compiler.anon_class_name_map =
+                                                    self.anon_class_name_map.clone();
                                                 hook_compiler.op_array.get_or_create_cv(b"this");
                                                 hook_compiler.op_array.param_count = 1;
                                                 hook_compiler.op_array.required_param_count = 0;
@@ -4936,7 +6060,8 @@ impl Compiler {
                                                     hook_compiler.compile_stmt(s)?;
                                                 }
                                                 hook_compiler.check_pending_gotos()?;
-                                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                                let null_idx =
+                                                    hook_compiler.op_array.add_literal(Value::Null);
                                                 hook_compiler.op_array.emit(Op {
                                                     opcode: OpCode::Return,
                                                     op1: OperandType::Const(null_idx),
@@ -4944,46 +6069,78 @@ impl Compiler {
                                                     result: OperandType::Unused,
                                                     line: 0,
                                                 });
-                                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                                                class.methods.insert(lower_hook_name, MethodDef {
-                                                    name: hook_method_name.into_bytes(),
-                                                    op_array: hook_compiler.op_array,
-                                                    param_count: 0,
-                                                    is_static: false,
-                                                    is_abstract: false,
-                                                    is_final: param.get_hook_final,
-                                                    visibility: ObjVisibility::Public,
-                                                    declaring_class: declaring_class_lower.clone(),
-                                                    doc_comment: None,
-                                                    attributes: Vec::new(),
-                                                });
+                                                let lower_hook_name: Vec<u8> = hook_method_name
+                                                    .bytes()
+                                                    .map(|b| b.to_ascii_lowercase())
+                                                    .collect();
+                                                class.methods.insert(
+                                                    lower_hook_name,
+                                                    MethodDef {
+                                                        name: hook_method_name.into_bytes(),
+                                                        op_array: hook_compiler.op_array,
+                                                        param_count: 0,
+                                                        is_static: false,
+                                                        is_abstract: false,
+                                                        is_final: param.get_hook_final,
+                                                        visibility: ObjVisibility::Public,
+                                                        declaring_class: declaring_class_lower
+                                                            .clone(),
+                                                        doc_comment: None,
+                                                        attributes: Vec::new(),
+                                                    },
+                                                );
                                             }
                                             // Compile promoted property set hook
-                                            if let Some((set_param_name, hook_body)) = &param.set_hook {
-                                                let hook_method_name = format!("__property_set_{}", String::from_utf8_lossy(&param.name));
-                                                let hook_display_name = format!("${}::set", String::from_utf8_lossy(&param.name));
+                                            if let Some((set_param_name, hook_body)) =
+                                                &param.set_hook
+                                            {
+                                                let hook_method_name = format!(
+                                                    "__property_set_{}",
+                                                    String::from_utf8_lossy(&param.name)
+                                                );
+                                                let hook_display_name = format!(
+                                                    "${}::set",
+                                                    String::from_utf8_lossy(&param.name)
+                                                );
                                                 let mut hook_compiler = Compiler::new();
-                                                hook_compiler.current_namespace = self.current_namespace.clone();
+                                                hook_compiler.current_namespace =
+                                                    self.current_namespace.clone();
                                                 hook_compiler.use_map = self.use_map.clone();
-                                                hook_compiler.use_function_map = self.use_function_map.clone();
-                                                hook_compiler.use_const_map = self.use_const_map.clone();
-                                                hook_compiler.op_array.name = hook_display_name.into_bytes();
+                                                hook_compiler.use_function_map =
+                                                    self.use_function_map.clone();
+                                                hook_compiler.use_const_map =
+                                                    self.use_const_map.clone();
+                                                hook_compiler.op_array.name =
+                                                    hook_display_name.into_bytes();
                                                 hook_compiler.op_array.decl_line = *method_line;
-                                                hook_compiler.op_array.strict_types = self.op_array.strict_types;
-                                                hook_compiler.source_file = self.source_file.clone();
-                                                hook_compiler.current_class = Some(qualified_name.clone());
-                                                hook_compiler.current_parent_class = class.parent.clone();
-                                                hook_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                                hook_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                                hook_compiler.op_array.strict_types =
+                                                    self.op_array.strict_types;
+                                                hook_compiler.source_file =
+                                                    self.source_file.clone();
+                                                hook_compiler.current_class =
+                                                    Some(qualified_name.clone());
+                                                hook_compiler.current_parent_class =
+                                                    class.parent.clone();
+                                                hook_compiler.op_array.scope_class = Some(
+                                                    qualified_name
+                                                        .iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect(),
+                                                );
+                                                hook_compiler.anon_class_name_map =
+                                                    self.anon_class_name_map.clone();
                                                 hook_compiler.op_array.get_or_create_cv(b"this");
-                                                hook_compiler.op_array.get_or_create_cv(set_param_name);
+                                                hook_compiler
+                                                    .op_array
+                                                    .get_or_create_cv(set_param_name);
                                                 hook_compiler.op_array.param_count = 2;
                                                 hook_compiler.op_array.required_param_count = 1;
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
                                                 }
                                                 hook_compiler.check_pending_gotos()?;
-                                                let null_idx = hook_compiler.op_array.add_literal(Value::Null);
+                                                let null_idx =
+                                                    hook_compiler.op_array.add_literal(Value::Null);
                                                 hook_compiler.op_array.emit(Op {
                                                     opcode: OpCode::Return,
                                                     op1: OperandType::Const(null_idx),
@@ -4991,19 +6148,26 @@ impl Compiler {
                                                     result: OperandType::Unused,
                                                     line: 0,
                                                 });
-                                                let lower_hook_name: Vec<u8> = hook_method_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                                                class.methods.insert(lower_hook_name, MethodDef {
-                                                    name: hook_method_name.into_bytes(),
-                                                    op_array: hook_compiler.op_array,
-                                                    param_count: 1,
-                                                    is_static: false,
-                                                    is_abstract: false,
-                                                    is_final: param.set_hook_final,
-                                                    visibility: ObjVisibility::Public,
-                                                    declaring_class: declaring_class_lower.clone(),
-                                                    doc_comment: None,
-                                                    attributes: Vec::new(),
-                                                });
+                                                let lower_hook_name: Vec<u8> = hook_method_name
+                                                    .bytes()
+                                                    .map(|b| b.to_ascii_lowercase())
+                                                    .collect();
+                                                class.methods.insert(
+                                                    lower_hook_name,
+                                                    MethodDef {
+                                                        name: hook_method_name.into_bytes(),
+                                                        op_array: hook_compiler.op_array,
+                                                        param_count: 1,
+                                                        is_static: false,
+                                                        is_abstract: false,
+                                                        is_final: param.set_hook_final,
+                                                        visibility: ObjVisibility::Public,
+                                                        declaring_class: declaring_class_lower
+                                                            .clone(),
+                                                        doc_comment: None,
+                                                        attributes: Vec::new(),
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -5023,7 +6187,13 @@ impl Compiler {
                                         }
                                     }
                                     // Validate type hint
-                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                                    if let Some(err) = validate_type_hint_full(
+                                        hint,
+                                        Some(&qualified_name),
+                                        class.parent.as_deref(),
+                                    )
+                                    .or_else(|| self.type_redundancy_error(hint))
+                                    {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
@@ -5034,14 +6204,22 @@ impl Compiler {
                                 for param in params.iter() {
                                     if let Some(hint) = &param.type_hint {
                                         if class.parent.is_none() && !modifiers.is_trait {
-                                            if let Some(err) = check_parent_type_without_parent(hint) {
+                                            if let Some(err) =
+                                                check_parent_type_without_parent(hint)
+                                            {
                                                 return Err(CompileError {
                                                     message: err,
                                                     line: *method_line,
                                                 });
                                             }
                                         }
-                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                                        if let Some(err) = validate_type_hint_full(
+                                            hint,
+                                            Some(&qualified_name),
+                                            class.parent.as_deref(),
+                                        )
+                                        .or_else(|| self.type_redundancy_error(hint))
+                                        {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -5050,7 +6228,9 @@ impl Compiler {
                                         // "static" cannot be used as a parameter type (only as return type)
                                         if check_static_param_type(hint) {
                                             return Err(CompileError {
-                                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                                message:
+                                                    "Cannot use \"static\" as a parameter type"
+                                                        .to_string(),
                                                 line: *method_line,
                                             });
                                         }
@@ -5073,7 +6253,11 @@ impl Compiler {
                                 method_compiler.is_in_class_method = true;
                                 method_compiler.op_array.decl_line = *method_line;
                                 method_compiler.op_array.returns_by_ref = *method_returns_by_ref;
-                                method_compiler.op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
+                                method_compiler.op_array.end_line = if *method_end_line > 0 {
+                                    *method_end_line
+                                } else {
+                                    *method_line
+                                };
                                 method_compiler.op_array.doc_comment = method_doc_comment.clone();
                                 method_compiler.op_array.filename = self.source_file.clone();
                                 method_compiler.op_array.strict_types = self.op_array.strict_types;
@@ -5089,17 +6273,28 @@ impl Compiler {
                                         }
                                     }
                                     // Validate return type hint
-                                    if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                                    if let Some(err) = validate_type_hint_full(
+                                        hint,
+                                        Some(&qualified_name),
+                                        class.parent.as_deref(),
+                                    )
+                                    .or_else(|| self.type_redundancy_error(hint))
+                                    {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
                                         });
                                     }
                                     method_compiler.op_array.return_type =
-                                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                                        Some(type_hint_to_param_type_with_ns(
+                                            hint,
+                                            &self.current_namespace,
+                                            &self.use_map,
+                                        ));
                                     // Check for 'never' return type
                                     if let TypeHint::Simple(name) = hint {
-                                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let name_lower: Vec<u8> =
+                                            name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                         if name_lower == b"never" {
                                             method_compiler.has_never_return = true;
                                         }
@@ -5108,8 +6303,14 @@ impl Compiler {
                                 method_compiler.current_class = Some(qualified_name.clone());
                                 method_compiler.current_parent_class = class.parent.clone();
                                 method_compiler.op_array.returns_by_ref = *method_returns_by_ref;
-                                method_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                                method_compiler.anon_class_name_map = self.anon_class_name_map.clone();
+                                method_compiler.op_array.scope_class = Some(
+                                    qualified_name
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect(),
+                                );
+                                method_compiler.anon_class_name_map =
+                                    self.anon_class_name_map.clone();
 
                                 // First CV is always $this (for non-static methods)
                                 if !is_static {
@@ -5118,19 +6319,23 @@ impl Compiler {
 
                                 // Set up parameter CVs with default values
                                 // Set param_count and required_param_count for the method
-                                method_compiler.op_array.param_count = params.len() as u32
-                                    + if *is_static { 0 } else { 1 }; // +1 for $this
+                                method_compiler.op_array.param_count =
+                                    params.len() as u32 + if *is_static { 0 } else { 1 }; // +1 for $this
                                 method_compiler.op_array.required_param_count = {
                                     let mut last_req: i64 = -1;
                                     for (i, p) in params.iter().enumerate() {
-                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                        if !p.variadic && p.default.is_none() {
+                                            last_req = i as i64;
+                                        }
                                     }
                                     (last_req + 1) as u32
                                 };
                                 // Record by-ref params (offset by 1 for non-static methods due to $this)
                                 if *is_static {
-                                    method_compiler.op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
-                                    method_compiler.op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
+                                    method_compiler.op_array.by_ref_params =
+                                        params.iter().map(|p| p.by_ref).collect();
+                                    method_compiler.op_array.param_has_default =
+                                        params.iter().map(|p| p.default.is_some()).collect();
                                 } else {
                                     let mut by_ref = vec![false]; // $this is not by-ref
                                     by_ref.extend(params.iter().map(|p| p.by_ref));
@@ -5140,7 +6345,12 @@ impl Compiler {
                                     method_compiler.op_array.param_has_default = has_default;
                                 }
                                 // Compile parameter attributes
-                                method_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
+                                method_compiler.op_array.param_attributes = params
+                                    .iter()
+                                    .map(|p| {
+                                        self.compile_attributes_target(&p.attributes, "parameter")
+                                    })
+                                    .collect();
 
                                 for param in params {
                                     // Check for $this as parameter name
@@ -5154,14 +6364,22 @@ impl Compiler {
                                     if let Some(hint) = &param.type_hint {
                                         // Check for parent type in a class/interface with no parent (not traits)
                                         if class.parent.is_none() && !modifiers.is_trait {
-                                            if let Some(err) = check_parent_type_without_parent(hint) {
+                                            if let Some(err) =
+                                                check_parent_type_without_parent(hint)
+                                            {
                                                 return Err(CompileError {
                                                     message: err,
                                                     line: *method_line,
                                                 });
                                             }
                                         }
-                                        if let Some(err) = validate_type_hint_full(hint, Some(&qualified_name), class.parent.as_deref()).or_else(|| self.type_redundancy_error(hint)) {
+                                        if let Some(err) = validate_type_hint_full(
+                                            hint,
+                                            Some(&qualified_name),
+                                            class.parent.as_deref(),
+                                        )
+                                        .or_else(|| self.type_redundancy_error(hint))
+                                        {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -5170,7 +6388,9 @@ impl Compiler {
                                         // "static" cannot be used as a parameter type (only as return type)
                                         if check_static_param_type(hint) {
                                             return Err(CompileError {
-                                                message: "Cannot use \"static\" as a parameter type".to_string(),
+                                                message:
+                                                    "Cannot use \"static\" as a parameter type"
+                                                        .to_string(),
                                                 line: *method_line,
                                             });
                                         }
@@ -5188,34 +6408,49 @@ impl Compiler {
                                     if param.visibility.is_some() {
                                         if let Some(hint) = &param.type_hint {
                                             if let Some(default_expr) = &param.default {
-                                                let pt_tmp = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
-                                                if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt_tmp) {
+                                                let pt_tmp = type_hint_to_param_type_with_ns(
+                                                    hint,
+                                                    &self.current_namespace,
+                                                    &self.use_map,
+                                                );
+                                                if matches!(default_expr.kind, ExprKind::Null)
+                                                    && !is_type_nullable_or_mixed(&pt_tmp)
+                                                {
                                                     return Err(CompileError {
-                                                        message: format!("Cannot use null as default value for parameter ${} of type {}", String::from_utf8_lossy(&param.name), type_hint_display(hint)),
+                                                        message: format!(
+                                                            "Cannot use null as default value for parameter ${} of type {}",
+                                                            String::from_utf8_lossy(&param.name),
+                                                            type_hint_display(hint)
+                                                        ),
                                                         line: default_expr.span.line,
                                                     });
                                                 }
                                             }
                                         }
                                     }
-                                    let type_info =
-                                        param.type_hint.as_ref().map(|hint| {
-                                            let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
-                                            let mut is_implicitly_nullable = false;
-                                            if param.visibility.is_none() {
-                                                if let Some(default_expr) = &param.default {
-                                                    if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
-                                                        pt = ParamType::Nullable(Box::new(pt));
-                                                        is_implicitly_nullable = true;
-                                                    }
+                                    let type_info = param.type_hint.as_ref().map(|hint| {
+                                        let mut pt = type_hint_to_param_type_with_ns(
+                                            hint,
+                                            &self.current_namespace,
+                                            &self.use_map,
+                                        );
+                                        let mut is_implicitly_nullable = false;
+                                        if param.visibility.is_none() {
+                                            if let Some(default_expr) = &param.default {
+                                                if matches!(default_expr.kind, ExprKind::Null)
+                                                    && !is_type_nullable_or_mixed(&pt)
+                                                {
+                                                    pt = ParamType::Nullable(Box::new(pt));
+                                                    is_implicitly_nullable = true;
                                                 }
                                             }
-                                            ParamTypeInfo {
-                                                param_type: pt,
-                                                param_name: param.name.clone(),
-                                                implicitly_nullable: is_implicitly_nullable,
-                                            }
-                                        });
+                                        }
+                                        ParamTypeInfo {
+                                            param_type: pt,
+                                            param_name: param.name.clone(),
+                                            implicitly_nullable: is_implicitly_nullable,
+                                        }
+                                    });
                                     while method_compiler.op_array.param_types.len() <= cv as usize
                                     {
                                         method_compiler.op_array.param_types.push(None);
@@ -5223,14 +6458,34 @@ impl Compiler {
                                     method_compiler.op_array.param_types[cv as usize] = type_info;
 
                                     if let Some(default_expr) = &param.default {
-                                        let default_repr = self.default_value_repr_scoped(default_expr, if modifiers.is_trait { None } else { Some(&qualified_name) });
-                                        method_compiler.op_array.set_param_default_repr(cv, default_repr);
+                                        let default_repr = self.default_value_repr_scoped(
+                                            default_expr,
+                                            if modifiers.is_trait {
+                                                None
+                                            } else {
+                                                Some(&qualified_name)
+                                            },
+                                        );
+                                        method_compiler
+                                            .op_array
+                                            .set_param_default_repr(cv, default_repr);
                                         let default_val =
                                             method_compiler.compile_expr(default_expr)?;
                                         if !matches!(default_expr.kind, ExprKind::Null) {
-                                            let pcv = method_compiler.op_array.get_or_create_cv(&param.name) as usize;
-                                            if let Some(Some(pti)) = method_compiler.op_array.param_types.get(pcv).cloned() {
-                                                match Self::check_literal_default(&pti.param_type, default_expr) {
+                                            let pcv = method_compiler
+                                                .op_array
+                                                .get_or_create_cv(&param.name)
+                                                as usize;
+                                            if let Some(Some(pti)) = method_compiler
+                                                .op_array
+                                                .param_types
+                                                .get(pcv)
+                                                .cloned()
+                                            {
+                                                match Self::check_literal_default(
+                                                    &pti.param_type,
+                                                    default_expr,
+                                                ) {
                                                     Err((tn, _)) => {
                                                         return Err(CompileError {
                                                             message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
@@ -5240,8 +6495,10 @@ impl Compiler {
                                                         });
                                                     }
                                                     Ok(Some(widened)) => {
-                                                        if let OperandType::Const(li) = default_val {
-                                                            method_compiler.op_array.literals[li as usize] = widened;
+                                                        if let OperandType::Const(li) = default_val
+                                                        {
+                                                            method_compiler.op_array.literals
+                                                                [li as usize] = widened;
                                                         }
                                                     }
                                                     Ok(None) => {}
@@ -5283,7 +6540,10 @@ impl Compiler {
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if method_name_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some() || param.get_hook.is_some() || param.set_hook.is_some() {
+                                        if param.visibility.is_some()
+                                            || param.get_hook.is_some()
+                                            || param.set_hook.is_some()
+                                        {
                                             // Promoted param: assign to $this->name
                                             let this_cv = 0u32; // $this is always CV 0
                                             let param_cv = method_compiler
@@ -5334,14 +6594,24 @@ impl Compiler {
                                 // Check for duplicate method names
                                 if class.methods.contains_key(&lower_name) {
                                     return Err(CompileError {
-                                        message: format!("Cannot redeclare {}::{}()",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        message: format!(
+                                            "Cannot redeclare {}::{}()",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(method_name)
+                                        ),
                                         line: *method_line,
                                     });
                                 }
-                                let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = qualified_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 let mut concrete_op_array = method_compiler.op_array;
-                                concrete_op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
+                                concrete_op_array.end_line = if *method_end_line > 0 {
+                                    *method_end_line
+                                } else {
+                                    *method_line
+                                };
                                 class.methods.insert(
                                     lower_name,
                                     MethodDef {
@@ -5353,17 +6623,25 @@ impl Compiler {
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
-                                        doc_comment: method_doc_comment.as_ref()
+                                        doc_comment: method_doc_comment
+                                            .as_ref()
                                             .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                        attributes: self.compile_attributes_target(method_attributes, "method"),
+                                        attributes: self
+                                            .compile_attributes_target(method_attributes, "method"),
                                     },
                                 );
                             } else {
                                 // Non-abstract method without body in a concrete class
-                                if !*is_abstract && !modifiers.is_abstract && !modifiers.is_interface {
+                                if !*is_abstract
+                                    && !modifiers.is_abstract
+                                    && !modifiers.is_interface
+                                {
                                     return Err(CompileError {
-                                        message: format!("Non-abstract method {}::{}() must contain body",
-                                            String::from_utf8_lossy(name), String::from_utf8_lossy(method_name)),
+                                        message: format!(
+                                            "Non-abstract method {}::{}() must contain body",
+                                            String::from_utf8_lossy(name),
+                                            String::from_utf8_lossy(method_name)
+                                        ),
                                         line: *method_line,
                                     });
                                 }
@@ -5376,11 +6654,18 @@ impl Compiler {
                                 let param_count = params.len();
                                 let lower_name: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let declaring_class_lower: Vec<u8> = qualified_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 let mut abstract_op_array = OpArray::new();
                                 abstract_op_array.decl_line = *method_line;
                                 abstract_op_array.returns_by_ref = *method_returns_by_ref;
-                                abstract_op_array.end_line = if *method_end_line > 0 { *method_end_line } else { *method_line };
+                                abstract_op_array.end_line = if *method_end_line > 0 {
+                                    *method_end_line
+                                } else {
+                                    *method_line
+                                };
                                 abstract_op_array.filename = self.source_file.clone();
                                 abstract_op_array.name = method_name.clone();
                                 abstract_op_array.scope_class = Some(declaring_class_lower.clone());
@@ -5389,18 +6674,22 @@ impl Compiler {
                                 if !is_static {
                                     abstract_op_array.get_or_create_cv(b"this");
                                 }
-                                abstract_op_array.param_count = params.len() as u32
-                                    + if *is_static { 0 } else { 1 };
+                                abstract_op_array.param_count =
+                                    params.len() as u32 + if *is_static { 0 } else { 1 };
                                 abstract_op_array.required_param_count = {
                                     let mut last_req: i64 = -1;
                                     for (i, p) in params.iter().enumerate() {
-                                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                        if !p.variadic && p.default.is_none() {
+                                            last_req = i as i64;
+                                        }
                                     }
                                     (last_req + 1) as u32
                                 };
                                 if *is_static {
-                                    abstract_op_array.by_ref_params = params.iter().map(|p| p.by_ref).collect();
-                                    abstract_op_array.param_has_default = params.iter().map(|p| p.default.is_some()).collect();
+                                    abstract_op_array.by_ref_params =
+                                        params.iter().map(|p| p.by_ref).collect();
+                                    abstract_op_array.param_has_default =
+                                        params.iter().map(|p| p.default.is_some()).collect();
                                 } else {
                                     let mut by_ref = vec![false];
                                     by_ref.extend(params.iter().map(|p| p.by_ref));
@@ -5409,17 +6698,28 @@ impl Compiler {
                                     has_default.extend(params.iter().map(|p| p.default.is_some()));
                                     abstract_op_array.param_has_default = has_default;
                                 }
-                                abstract_op_array.param_attributes = params.iter().map(|p| self.compile_attributes_target(&p.attributes, "parameter")).collect();
+                                abstract_op_array.param_attributes = params
+                                    .iter()
+                                    .map(|p| {
+                                        self.compile_attributes_target(&p.attributes, "parameter")
+                                    })
+                                    .collect();
                                 for param in params {
                                     let cv = abstract_op_array.get_or_create_cv(&param.name);
                                     if param.variadic {
                                         abstract_op_array.variadic_param = Some(cv);
                                     }
                                     let type_info = param.type_hint.as_ref().map(|hint| {
-                                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                        let mut pt = type_hint_to_param_type_with_ns(
+                                            hint,
+                                            &self.current_namespace,
+                                            &self.use_map,
+                                        );
                                         let mut is_implicitly_nullable = false;
                                         if let Some(default_expr) = &param.default {
-                                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                                            if matches!(default_expr.kind, ExprKind::Null)
+                                                && !is_type_nullable_or_mixed(&pt)
+                                            {
                                                 pt = ParamType::Nullable(Box::new(pt));
                                                 is_implicitly_nullable = true;
                                             }
@@ -5452,7 +6752,8 @@ impl Compiler {
                                         if let Some(default_expr) = &param.default {
                                             let cv = dc.op_array.get_or_create_cv(&param.name);
                                             if let Ok(default_val) = dc.compile_expr(default_expr) {
-                                                let undef_idx = dc.op_array.add_literal(Value::Undef);
+                                                let undef_idx =
+                                                    dc.op_array.add_literal(Value::Undef);
                                                 let check_tmp = dc.op_array.alloc_temp();
                                                 dc.op_array.emit(Op {
                                                     opcode: OpCode::Identical,
@@ -5485,7 +6786,11 @@ impl Compiler {
                                 // Set return type
                                 if let Some(hint) = method_return_type {
                                     abstract_op_array.return_type =
-                                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                                        Some(type_hint_to_param_type_with_ns(
+                                            hint,
+                                            &self.current_namespace,
+                                            &self.use_map,
+                                        ));
                                 }
                                 class.methods.insert(
                                     lower_name,
@@ -5498,9 +6803,11 @@ impl Compiler {
                                         is_final: *method_is_final,
                                         visibility: vis,
                                         declaring_class: declaring_class_lower,
-                                        doc_comment: method_doc_comment.as_ref()
+                                        doc_comment: method_doc_comment
+                                            .as_ref()
                                             .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                        attributes: self.compile_attributes_target(method_attributes, "method"),
+                                        attributes: self
+                                            .compile_attributes_target(method_attributes, "method"),
                                     },
                                 );
                             }
@@ -5519,9 +6826,18 @@ impl Compiler {
                             } else {
                                 // Handle class constant references like self::B, ClassName::CONST
                                 match &const_expr.kind {
-                                    ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                                    ExprKind::ClassConstAccess {
+                                        class: class_expr,
+                                        constant,
+                                    } => {
                                         // First try to resolve from the same class's already-compiled constants
-                                        if let Some(val) = Self::eval_class_const_expr(const_expr, &class, &qualified_name, extends.as_deref(), self) {
+                                        if let Some(val) = Self::eval_class_const_expr(
+                                            const_expr,
+                                            &class,
+                                            &qualified_name,
+                                            extends.as_deref(),
+                                            self,
+                                        ) {
                                             val
                                         } else {
                                             // Store as a deferred constant reference marker
@@ -5531,8 +6847,13 @@ impl Compiler {
                                                     let resolved = self.resolve_class_name(name);
                                                     if resolved.eq_ignore_ascii_case(b"self") {
                                                         qualified_name.clone()
-                                                    } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                        extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                    } else if resolved
+                                                        .eq_ignore_ascii_case(b"parent")
+                                                    {
+                                                        extends
+                                                            .as_ref()
+                                                            .map(|p| self.resolve_class_name(p))
+                                                            .unwrap_or(resolved)
                                                     } else {
                                                         resolved
                                                     }
@@ -5551,36 +6872,58 @@ impl Compiler {
                                         // Recursive helper handles nested binops, ConstantAccess,
                                         // ClassConstAccess, and produces a __deferred_binop__ marker
                                         // when any subexpression must be resolved at runtime.
-                                        self.eval_or_defer_in_class_const(const_expr, &class, &qualified_name, extends.as_deref())
-                                            .unwrap_or(Value::Null)
+                                        self.eval_or_defer_in_class_const(
+                                            const_expr,
+                                            &class,
+                                            &qualified_name,
+                                            extends.as_deref(),
+                                        )
+                                        .unwrap_or(Value::Null)
                                     }
                                     ExprKind::ConstantAccess(parts) => {
                                         // Handle magic constants and known constants in class constant context
-                                        let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
-                                        let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        let magic_val = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line);
+                                        let name_lower: Vec<u8> =
+                                            parts.iter().flat_map(|p| p.iter()).copied().collect();
+                                        let name_lower_lc: Vec<u8> = name_lower
+                                            .iter()
+                                            .map(|c| c.to_ascii_lowercase())
+                                            .collect();
+                                        let magic_val = self.resolve_class_const_magic(
+                                            &name_lower_lc,
+                                            &qualified_name,
+                                            const_expr.span.line,
+                                        );
                                         if !matches!(magic_val, Value::Null) {
                                             magic_val
                                         } else {
                                             // Build the full constant name from parts
                                             let mut full_name = Vec::new();
                                             for (i, part) in parts.iter().enumerate() {
-                                                if i > 0 { full_name.push(b'\\'); }
+                                                if i > 0 {
+                                                    full_name.push(b'\\');
+                                                }
                                                 full_name.extend_from_slice(part);
                                             }
-                                            let mut marker = b"__deferred_global_const__::".to_vec();
+                                            let mut marker =
+                                                b"__deferred_global_const__::".to_vec();
                                             marker.extend_from_slice(&full_name);
                                             Value::String(PhpString::from_vec(marker))
                                         }
                                     }
                                     ExprKind::Identifier(name) => {
-                                        let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                        let magic_val = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, const_expr.span.line);
+                                        let name_lower_lc: Vec<u8> =
+                                            name.iter().map(|c| c.to_ascii_lowercase()).collect();
+                                        let magic_val = self.resolve_class_const_magic(
+                                            &name_lower_lc,
+                                            &qualified_name,
+                                            const_expr.span.line,
+                                        );
                                         if !matches!(magic_val, Value::Null) {
                                             magic_val
                                         } else {
                                             // Unknown identifier - create a deferred global constant lookup marker
-                                            let resolved_name = if self.current_namespace.is_empty() {
+                                            let resolved_name = if self.current_namespace.is_empty()
+                                            {
                                                 name.clone()
                                             } else {
                                                 let mut fqn = self.current_namespace.clone();
@@ -5588,7 +6931,8 @@ impl Compiler {
                                                 fqn.extend_from_slice(name);
                                                 fqn
                                             };
-                                            let mut marker = b"__deferred_global_const__::".to_vec();
+                                            let mut marker =
+                                                b"__deferred_global_const__::".to_vec();
                                             marker.extend_from_slice(&resolved_name);
                                             Value::String(PhpString::from_vec(marker))
                                         }
@@ -5600,46 +6944,99 @@ impl Compiler {
                                         for elem in elements {
                                             // Try to evaluate each element, with class context fallback
                                             let val = Self::eval_const_expr(&elem.value)
-                                                .or_else(|| Self::eval_class_const_expr(&elem.value, &class, &qualified_name, extends.as_deref(), self))
+                                                .or_else(|| {
+                                                    Self::eval_class_const_expr(
+                                                        &elem.value,
+                                                        &class,
+                                                        &qualified_name,
+                                                        extends.as_deref(),
+                                                        self,
+                                                    )
+                                                })
                                                 .or_else(|| {
                                                     // Handle magic constants like __CLASS__ in array context
                                                     match &elem.value.kind {
                                                         ExprKind::ConstantAccess(parts) => {
-                                                            let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
-                                                            let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                                            let v = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, elem.value.span.line);
-                                                            if matches!(v, Value::Null) { None } else { Some(v) }
+                                                            let name_lower: Vec<u8> = parts
+                                                                .iter()
+                                                                .flat_map(|p| p.iter())
+                                                                .copied()
+                                                                .collect();
+                                                            let name_lower_lc: Vec<u8> = name_lower
+                                                                .iter()
+                                                                .map(|c| c.to_ascii_lowercase())
+                                                                .collect();
+                                                            let v = self.resolve_class_const_magic(
+                                                                &name_lower_lc,
+                                                                &qualified_name,
+                                                                elem.value.span.line,
+                                                            );
+                                                            if matches!(v, Value::Null) {
+                                                                None
+                                                            } else {
+                                                                Some(v)
+                                                            }
                                                         }
                                                         ExprKind::Identifier(n) => {
-                                                            let name_lower_lc: Vec<u8> = n.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                                            let v = self.resolve_class_const_magic(&name_lower_lc, &qualified_name, elem.value.span.line);
-                                                            if matches!(v, Value::Null) { None } else { Some(v) }
+                                                            let name_lower_lc: Vec<u8> = n
+                                                                .iter()
+                                                                .map(|c| c.to_ascii_lowercase())
+                                                                .collect();
+                                                            let v = self.resolve_class_const_magic(
+                                                                &name_lower_lc,
+                                                                &qualified_name,
+                                                                elem.value.span.line,
+                                                            );
+                                                            if matches!(v, Value::Null) {
+                                                                None
+                                                            } else {
+                                                                Some(v)
+                                                            }
                                                         }
                                                         _ => None,
                                                     }
                                                 })
                                                 .or_else(|| {
                                                     // Create deferred marker for class const references
-                                                    if let ExprKind::ClassConstAccess { class: class_expr, constant } = &elem.value.kind {
+                                                    if let ExprKind::ClassConstAccess {
+                                                        class: class_expr,
+                                                        constant,
+                                                    } = &elem.value.kind
+                                                    {
                                                         let cname = match &class_expr.kind {
                                                             ExprKind::Identifier(n) => {
-                                                                let resolved = self.resolve_class_name(n);
-                                                                if resolved.eq_ignore_ascii_case(b"self") {
+                                                                let resolved =
+                                                                    self.resolve_class_name(n);
+                                                                if resolved
+                                                                    .eq_ignore_ascii_case(b"self")
+                                                                {
                                                                     qualified_name.clone()
-                                                                } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                                    extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                                } else if resolved
+                                                                    .eq_ignore_ascii_case(b"parent")
+                                                                {
+                                                                    extends
+                                                                        .as_ref()
+                                                                        .map(|p| {
+                                                                            self.resolve_class_name(
+                                                                                p,
+                                                                            )
+                                                                        })
+                                                                        .unwrap_or(resolved)
                                                                 } else {
                                                                     resolved
                                                                 }
                                                             }
                                                             _ => qualified_name.clone(),
                                                         };
-                                                        let mut marker = b"__deferred_const__::".to_vec();
+                                                        let mut marker =
+                                                            b"__deferred_const__::".to_vec();
                                                         marker.extend_from_slice(&cname);
                                                         marker.push(b':');
                                                         marker.push(b':');
                                                         marker.extend_from_slice(constant);
-                                                        Some(Value::String(PhpString::from_vec(marker)))
+                                                        Some(Value::String(PhpString::from_vec(
+                                                            marker,
+                                                        )))
                                                     } else {
                                                         None
                                                     }
@@ -5655,13 +7052,24 @@ impl Compiler {
                                                                 arr.set(k.clone(), sv.clone());
                                                             }
                                                         }
-                                                        Value::String(ref s) if s.as_bytes().starts_with(b"__deferred_const__::") => {
+                                                        Value::String(ref s)
+                                                            if s.as_bytes().starts_with(
+                                                                b"__deferred_const__::",
+                                                            ) =>
+                                                        {
                                                             // Deferred spread: store with special marker
-                                                            let mut spread_marker = b"__deferred_spread__::".to_vec();
-                                                            spread_marker.extend_from_slice(&s.as_bytes()[b"__deferred_const__::".len()..]);
+                                                            let mut spread_marker =
+                                                                b"__deferred_spread__::".to_vec();
+                                                            spread_marker.extend_from_slice(
+                                                                &s.as_bytes()
+                                                                    [b"__deferred_const__::"
+                                                                        .len()..],
+                                                            );
                                                             // Store as a special element that will be resolved/expanded at runtime
                                                             // Use a sentinel key to mark it (runtime will need to expand these)
-                                                            arr.push(Value::String(PhpString::from_vec(spread_marker)));
+                                                            arr.push(Value::String(
+                                                                PhpString::from_vec(spread_marker),
+                                                            ));
                                                         }
                                                         _ => {
                                                             // Non-array spread in constant expression
@@ -5671,12 +7079,27 @@ impl Compiler {
                                                     }
                                                 } else if let Some(key_expr) = &elem.key {
                                                     let k = Self::eval_const_expr(key_expr)
-                                                        .or_else(|| Self::eval_class_const_expr(key_expr, &class, &qualified_name, extends.as_deref(), self));
+                                                        .or_else(|| {
+                                                            Self::eval_class_const_expr(
+                                                                key_expr,
+                                                                &class,
+                                                                &qualified_name,
+                                                                extends.as_deref(),
+                                                                self,
+                                                            )
+                                                        });
                                                     if let Some(k) = k {
                                                         let key = match k {
-                                                            Value::Long(n) => crate::array::ArrayKey::Int(n),
-                                                            Value::String(s) => crate::array::ArrayKey::String(s),
-                                                            _ => { ok = false; break; }
+                                                            Value::Long(n) => {
+                                                                crate::array::ArrayKey::Int(n)
+                                                            }
+                                                            Value::String(s) => {
+                                                                crate::array::ArrayKey::String(s)
+                                                            }
+                                                            _ => {
+                                                                ok = false;
+                                                                break;
+                                                            }
                                                         };
                                                         arr.set(key, v);
                                                     } else {
@@ -5692,14 +7115,27 @@ impl Compiler {
                                             }
                                         }
                                         if ok {
-                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+                                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                                                arr,
+                                            )))
                                         } else {
                                             Value::Null
                                         }
                                     }
-                                    ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
-                                        let inner = Self::eval_const_expr(operand)
-                                            .or_else(|| Self::eval_class_const_expr(operand, &class, &qualified_name, extends.as_deref(), self));
+                                    ExprKind::UnaryOp {
+                                        op: UnaryOp::Negate,
+                                        operand,
+                                        ..
+                                    } => {
+                                        let inner = Self::eval_const_expr(operand).or_else(|| {
+                                            Self::eval_class_const_expr(
+                                                operand,
+                                                &class,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                                self,
+                                            )
+                                        });
                                         match inner {
                                             Some(Value::Long(n)) => Value::Long(-n),
                                             Some(Value::Double(f)) => Value::Double(-f),
@@ -5716,41 +7152,64 @@ impl Compiler {
                                     } => {
                                         // Compile closure for const expression
                                         let global_id = next_closure_id();
-                                        let closure_name = format!("__closure_{}", global_id).into_bytes();
+                                        let closure_name =
+                                            format!("__closure_{}", global_id).into_bytes();
                                         let is_generator = stmts_contain_yield(closure_body);
                                         // Const-expression closures have no surrounding method context.
                                         let display_name = {
                                             let mut s = b"{closure:".to_vec();
                                             s.extend_from_slice(&self.source_file);
-                                            s.extend_from_slice(format!(":{}}}", const_expr.span.line).as_bytes());
+                                            s.extend_from_slice(
+                                                format!(":{}}}", const_expr.span.line).as_bytes(),
+                                            );
                                             s
                                         };
                                         let mut closure_compiler = Compiler::new();
                                         closure_compiler.op_array.name = closure_name.clone();
                                         closure_compiler.op_array.display_name = display_name;
-                                        closure_compiler.op_array.filename = self.source_file.clone();
+                                        closure_compiler.op_array.filename =
+                                            self.source_file.clone();
                                         closure_compiler.op_array.is_generator = is_generator;
-                                        closure_compiler.op_array.is_static_closure = *closure_is_static;
+                                        closure_compiler.op_array.is_static_closure =
+                                            *closure_is_static;
                                         closure_compiler.op_array.decl_line = const_expr.span.line;
-                                        closure_compiler.op_array.strict_types = self.op_array.strict_types;
-                                        closure_compiler.op_array.attributes = self.compile_attributes(closure_attrs);
+                                        closure_compiler.op_array.strict_types =
+                                            self.op_array.strict_types;
+                                        closure_compiler.op_array.attributes =
+                                            self.compile_attributes(closure_attrs);
                                         closure_compiler.source_file = self.source_file.clone();
-                                        closure_compiler.current_class = Some(qualified_name.clone());
-                                        closure_compiler.current_parent_class = self.current_parent_class.clone();
-                                        closure_compiler.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        closure_compiler.current_class =
+                                            Some(qualified_name.clone());
+                                        closure_compiler.current_parent_class =
+                                            self.current_parent_class.clone();
+                                        closure_compiler.op_array.scope_class = Some(
+                                            qualified_name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect(),
+                                        );
                                         // Compile params and body
-                                        closure_compiler.op_array.param_count = closure_params.len() as u32;
+                                        closure_compiler.op_array.param_count =
+                                            closure_params.len() as u32;
                                         closure_compiler.op_array.required_param_count = {
                                             let mut last_req: i64 = -1;
                                             for (i, p) in closure_params.iter().enumerate() {
-                                                if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                                                if !p.variadic && p.default.is_none() {
+                                                    last_req = i as i64;
+                                                }
                                             }
                                             (last_req + 1) as u32
                                         };
-                                        closure_compiler.op_array.by_ref_params = closure_params.iter().map(|p| p.by_ref).collect();
-                                        closure_compiler.op_array.param_has_default = closure_params.iter().map(|p| p.default.is_some()).collect();
+                                        closure_compiler.op_array.by_ref_params =
+                                            closure_params.iter().map(|p| p.by_ref).collect();
+                                        closure_compiler.op_array.param_has_default =
+                                            closure_params
+                                                .iter()
+                                                .map(|p| p.default.is_some())
+                                                .collect();
                                         for p in closure_params {
-                                            let cv = closure_compiler.op_array.get_or_create_cv(&p.name);
+                                            let cv =
+                                                closure_compiler.op_array.get_or_create_cv(&p.name);
                                             if p.variadic {
                                                 closure_compiler.op_array.variadic_param = Some(cv);
                                             }
@@ -5760,7 +7219,8 @@ impl Compiler {
                                         }
                                         closure_compiler.check_pending_gotos()?;
                                         // Add implicit return null
-                                        let null_idx = closure_compiler.op_array.add_literal(Value::Null);
+                                        let null_idx =
+                                            closure_compiler.op_array.add_literal(Value::Null);
                                         closure_compiler.op_array.emit(crate::opcode::Op {
                                             opcode: OpCode::Return,
                                             op1: OperandType::Const(null_idx),
@@ -5778,13 +7238,19 @@ impl Compiler {
                                     ExprKind::FirstClassCallable(target) => {
                                         // FCC in const expression: compile and store as deferred
                                         let global_id = next_closure_id();
-                                        let closure_name = format!("__closure_fcc_{}", global_id).into_bytes();
+                                        let closure_name =
+                                            format!("__closure_fcc_{}", global_id).into_bytes();
                                         let mut cc = Compiler::new();
                                         cc.op_array.name = closure_name.clone();
                                         cc.op_array.strict_types = self.op_array.strict_types;
                                         cc.current_class = Some(qualified_name.clone());
                                         cc.current_parent_class = self.current_parent_class.clone();
-                                        cc.op_array.scope_class = Some(qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                        cc.op_array.scope_class = Some(
+                                            qualified_name
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect(),
+                                        );
                                         cc.source_file = self.source_file.clone();
                                         // Set up variadic ...$args parameter
                                         let args_cv = cc.op_array.get_or_create_cv(b"args");
@@ -5795,36 +7261,102 @@ impl Compiler {
                                         match target {
                                             CallableTarget::Function(name_expr) => {
                                                 if let ExprKind::Identifier(n) = &name_expr.kind {
-                                                    let resolved_name = self.resolve_function_name(n);
-                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
-                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: const_expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    let resolved_name =
+                                                        self.resolve_function_name(n);
+                                                    let name_idx =
+                                                        cc.op_array.add_literal(Value::String(
+                                                            PhpString::from_vec(resolved_name),
+                                                        ));
+                                                    let arg_count_idx =
+                                                        cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::InitFCall,
+                                                        op1: OperandType::Const(name_idx),
+                                                        op2: OperandType::Const(arg_count_idx),
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::SendUnpack,
+                                                        op1: OperandType::Cv(args_cv),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
                                                     let result_tmp = cc.op_array.alloc_temp();
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: const_expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::DoFCall,
+                                                        op1: OperandType::Unused,
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Tmp(result_tmp),
+                                                        line: const_expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::Return,
+                                                        op1: OperandType::Tmp(result_tmp),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
                                                 }
                                             }
-                                            CallableTarget::StaticMethod { class: class_expr, method } => {
+                                            CallableTarget::StaticMethod {
+                                                class: class_expr,
+                                                method,
+                                            } => {
                                                 if let ExprKind::Identifier(cn) = &class_expr.kind {
                                                     let class_name = self.resolve_class_name(cn);
-                                                    let resolved = if class_name.eq_ignore_ascii_case(b"self") {
+                                                    let resolved = if class_name
+                                                        .eq_ignore_ascii_case(b"self")
+                                                    {
                                                         qualified_name.clone()
-                                                    } else if class_name.eq_ignore_ascii_case(b"parent") {
-                                                        self.current_parent_class.clone().unwrap_or(class_name.clone())
+                                                    } else if class_name
+                                                        .eq_ignore_ascii_case(b"parent")
+                                                    {
+                                                        self.current_parent_class
+                                                            .clone()
+                                                            .unwrap_or(class_name.clone())
                                                     } else {
                                                         class_name
                                                     };
                                                     let mut func_name = resolved;
                                                     func_name.extend_from_slice(b"::");
                                                     func_name.extend_from_slice(method);
-                                                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
-                                                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::InitFCall, op1: OperandType::Const(name_idx), op2: OperandType::Const(arg_count_idx), result: OperandType::Unused, line: const_expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::SendUnpack, op1: OperandType::Cv(args_cv), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    let name_idx =
+                                                        cc.op_array.add_literal(Value::String(
+                                                            PhpString::from_vec(func_name),
+                                                        ));
+                                                    let arg_count_idx =
+                                                        cc.op_array.add_literal(Value::Long(0));
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::InitFCall,
+                                                        op1: OperandType::Const(name_idx),
+                                                        op2: OperandType::Const(arg_count_idx),
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::SendUnpack,
+                                                        op1: OperandType::Cv(args_cv),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
                                                     let result_tmp = cc.op_array.alloc_temp();
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::DoFCall, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Tmp(result_tmp), line: const_expr.span.line });
-                                                    cc.op_array.emit(crate::opcode::Op { opcode: OpCode::Return, op1: OperandType::Tmp(result_tmp), op2: OperandType::Unused, result: OperandType::Unused, line: const_expr.span.line });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::DoFCall,
+                                                        op1: OperandType::Unused,
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Tmp(result_tmp),
+                                                        line: const_expr.span.line,
+                                                    });
+                                                    cc.op_array.emit(crate::opcode::Op {
+                                                        opcode: OpCode::Return,
+                                                        op1: OperandType::Tmp(result_tmp),
+                                                        op2: OperandType::Unused,
+                                                        result: OperandType::Unused,
+                                                        line: const_expr.span.line,
+                                                    });
                                                 }
                                             }
                                             _ => {}
@@ -5834,7 +7366,10 @@ impl Compiler {
                                         marker.extend_from_slice(&closure_name);
                                         Value::String(PhpString::from_vec(marker))
                                     }
-                                    ExprKind::New { class: new_class, args: _new_args } => {
+                                    ExprKind::New {
+                                        class: new_class,
+                                        args: _new_args,
+                                    } => {
                                         // new Foo() in const expression - store as deferred
                                         if let ExprKind::Identifier(cn) = &new_class.kind {
                                             let resolved = self.resolve_class_name(cn);
@@ -5850,22 +7385,39 @@ impl Compiler {
                             };
                             let mut val = val;
                             if let Some(hint) = const_type_hint.as_ref() {
-                                use crate::vm::variance::{TypeView, T_ANY, T_CALLABLE, T_NEVER, T_VOID};
-                                let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                                use crate::vm::variance::{
+                                    T_ANY, T_CALLABLE, T_NEVER, T_VOID, TypeView,
+                                };
+                                let pt = type_hint_to_param_type_with_ns(
+                                    hint,
+                                    &self.current_namespace,
+                                    &self.use_map,
+                                );
                                 let tv = TypeView::from_param_type(&pt);
                                 let tstr = crate::vm::variance::type_to_string(&tv, None);
-                                if tv.mask != T_ANY && tv.mask & (T_CALLABLE | T_VOID | T_NEVER) != 0 {
+                                if tv.mask != T_ANY
+                                    && tv.mask & (T_CALLABLE | T_VOID | T_NEVER) != 0
+                                {
                                     return Err(CompileError {
-                                        message: format!("Class constant {}::{} cannot have type {}",
-                                            String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(const_name), tstr),
+                                        message: format!(
+                                            "Class constant {}::{} cannot have type {}",
+                                            String::from_utf8_lossy(&qualified_name),
+                                            String::from_utf8_lossy(const_name),
+                                            tstr
+                                        ),
                                         line: stmt.span.line,
                                     });
                                 }
                                 match Self::check_literal_default(&pt, const_expr) {
                                     Err((tn, _)) => {
                                         return Err(CompileError {
-                                            message: format!("Cannot use {} as value for class constant {}::{} of type {}",
-                                                tn, String::from_utf8_lossy(&qualified_name), String::from_utf8_lossy(const_name), tstr),
+                                            message: format!(
+                                                "Cannot use {} as value for class constant {}::{} of type {}",
+                                                tn,
+                                                String::from_utf8_lossy(&qualified_name),
+                                                String::from_utf8_lossy(const_name),
+                                                tstr
+                                            ),
                                             line: stmt.span.line,
                                         });
                                     }
@@ -5876,41 +7428,71 @@ impl Compiler {
                             class.constants.insert(const_name.clone(), val);
                             // Store constant metadata (visibility, final)
                             let const_vis = match const_visibility {
-                                goro_parser::ast::Visibility::Public => crate::object::Visibility::Public,
-                                goro_parser::ast::Visibility::Protected => crate::object::Visibility::Protected,
-                                goro_parser::ast::Visibility::Private => crate::object::Visibility::Private,
+                                goro_parser::ast::Visibility::Public => {
+                                    crate::object::Visibility::Public
+                                }
+                                goro_parser::ast::Visibility::Protected => {
+                                    crate::object::Visibility::Protected
+                                }
+                                goro_parser::ast::Visibility::Private => {
+                                    crate::object::Visibility::Private
+                                }
                             };
-                            let declaring_class_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let declaring_class_lower: Vec<u8> = qualified_name
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
                             let const_attrs = self.compile_attributes(const_attributes);
                             let declared_type = const_type_hint.as_ref().map(|hint| {
-                                type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map)
+                                type_hint_to_param_type_with_ns(
+                                    hint,
+                                    &self.current_namespace,
+                                    &self.use_map,
+                                )
                             });
                             // Collect class constant references in the value expression so
                             // accessing this constant can re-emit #[\Deprecated] banners for
                             // any deprecated constants it depends on.
                             let mut refs = Vec::new();
-                            Self::collect_class_const_refs(const_expr, &qualified_name, extends.as_deref(), self, &mut refs);
-                            class.constants_meta.insert(const_name.clone(), crate::object::ConstantMeta {
-                                visibility: const_vis,
-                                is_final: *const_is_final,
-                                declaring_class: declaring_class_lower,
-                                attributes: const_attrs,
-                                declared_type,
-                                doc_comment: const_doc_comment.as_ref()
-                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                referenced_constants: refs,
-                            });
+                            Self::collect_class_const_refs(
+                                const_expr,
+                                &qualified_name,
+                                extends.as_deref(),
+                                self,
+                                &mut refs,
+                            );
+                            class.constants_meta.insert(
+                                const_name.clone(),
+                                crate::object::ConstantMeta {
+                                    visibility: const_vis,
+                                    is_final: *const_is_final,
+                                    declaring_class: declaring_class_lower,
+                                    attributes: const_attrs,
+                                    declared_type,
+                                    doc_comment: const_doc_comment
+                                        .as_ref()
+                                        .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                    referenced_constants: refs,
+                                },
+                            );
                             // Private constants cannot be final
                             if *const_is_final && const_vis == crate::object::Visibility::Private {
                                 return Err(CompileError {
-                                    message: format!("Private constant {}::{} cannot be final as it is not visible to other classes",
+                                    message: format!(
+                                        "Private constant {}::{} cannot be final as it is not visible to other classes",
                                         String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(const_name)),
+                                        String::from_utf8_lossy(const_name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
                         }
-                        ClassMember::EnumCase { name: case_name, value, attributes: case_attributes, doc_comment: case_doc_comment } => {
+                        ClassMember::EnumCase {
+                            name: case_name,
+                            value,
+                            attributes: case_attributes,
+                            doc_comment: case_doc_comment,
+                        } => {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {
                                 return Err(CompileError {
@@ -5921,15 +7503,21 @@ impl Compiler {
                             // Backed enum cases must have values, unit enum cases must not
                             if enum_backing_type.is_some() && value.is_none() {
                                 return Err(CompileError {
-                                    message: format!("Case {} of backed enum {} must have a value",
-                                        String::from_utf8_lossy(case_name), String::from_utf8_lossy(name)),
+                                    message: format!(
+                                        "Case {} of backed enum {} must have a value",
+                                        String::from_utf8_lossy(case_name),
+                                        String::from_utf8_lossy(name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
                             if enum_backing_type.is_none() && value.is_some() {
                                 return Err(CompileError {
-                                    message: format!("Case {} of non-backed enum {} must not have a value",
-                                        String::from_utf8_lossy(case_name), String::from_utf8_lossy(name)),
+                                    message: format!(
+                                        "Case {} of non-backed enum {} must not have a value",
+                                        String::from_utf8_lossy(case_name),
+                                        String::from_utf8_lossy(name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
@@ -5940,9 +7528,18 @@ impl Compiler {
                                 } else {
                                     // Handle class constant references and magic constants like class constant defaults
                                     match &val_expr.kind {
-                                        ExprKind::ClassConstAccess { class: class_expr, constant } => {
+                                        ExprKind::ClassConstAccess {
+                                            class: class_expr,
+                                            constant,
+                                        } => {
                                             // Try to resolve from same class or other classes
-                                            if let Some(val) = Self::eval_class_const_expr(val_expr, &class, &qualified_name, extends.as_deref(), self) {
+                                            if let Some(val) = Self::eval_class_const_expr(
+                                                val_expr,
+                                                &class,
+                                                &qualified_name,
+                                                extends.as_deref(),
+                                                self,
+                                            ) {
                                                 val
                                             } else {
                                                 let class_name = match &class_expr.kind {
@@ -5950,8 +7547,13 @@ impl Compiler {
                                                         let resolved = self.resolve_class_name(cn);
                                                         if resolved.eq_ignore_ascii_case(b"self") {
                                                             qualified_name.clone()
-                                                        } else if resolved.eq_ignore_ascii_case(b"parent") {
-                                                            extends.as_ref().map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                                                        } else if resolved
+                                                            .eq_ignore_ascii_case(b"parent")
+                                                        {
+                                                            extends
+                                                                .as_ref()
+                                                                .map(|p| self.resolve_class_name(p))
+                                                                .unwrap_or(resolved)
                                                         } else {
                                                             resolved
                                                         }
@@ -5967,20 +7569,52 @@ impl Compiler {
                                             }
                                         }
                                         ExprKind::ConstantAccess(parts) => {
-                                            let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
-                                            let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                            self.resolve_class_const_magic(&name_lower_lc, &qualified_name, val_expr.span.line)
+                                            let name_lower: Vec<u8> = parts
+                                                .iter()
+                                                .flat_map(|p| p.iter())
+                                                .copied()
+                                                .collect();
+                                            let name_lower_lc: Vec<u8> = name_lower
+                                                .iter()
+                                                .map(|c| c.to_ascii_lowercase())
+                                                .collect();
+                                            self.resolve_class_const_magic(
+                                                &name_lower_lc,
+                                                &qualified_name,
+                                                val_expr.span.line,
+                                            )
                                         }
                                         ExprKind::Identifier(ident_name) => {
-                                            let name_lower_lc: Vec<u8> = ident_name.iter().map(|c| c.to_ascii_lowercase()).collect();
-                                            self.resolve_class_const_magic(&name_lower_lc, &qualified_name, val_expr.span.line)
+                                            let name_lower_lc: Vec<u8> = ident_name
+                                                .iter()
+                                                .map(|c| c.to_ascii_lowercase())
+                                                .collect();
+                                            self.resolve_class_const_magic(
+                                                &name_lower_lc,
+                                                &qualified_name,
+                                                val_expr.span.line,
+                                            )
                                         }
-                                        ExprKind::BinaryOp { op, left, right, .. } => {
+                                        ExprKind::BinaryOp {
+                                            op, left, right, ..
+                                        } => {
                                             let l = Self::eval_const_expr(left).or_else(|| {
-                                                Self::eval_class_const_expr(left, &class, &qualified_name, extends.as_deref(), self)
+                                                Self::eval_class_const_expr(
+                                                    left,
+                                                    &class,
+                                                    &qualified_name,
+                                                    extends.as_deref(),
+                                                    self,
+                                                )
                                             });
                                             let r = Self::eval_const_expr(right).or_else(|| {
-                                                Self::eval_class_const_expr(right, &class, &qualified_name, extends.as_deref(), self)
+                                                Self::eval_class_const_expr(
+                                                    right,
+                                                    &class,
+                                                    &qualified_name,
+                                                    extends.as_deref(),
+                                                    self,
+                                                )
                                             });
                                             if let (Some(lv), Some(rv)) = (l, r) {
                                                 match op {
@@ -5988,23 +7622,46 @@ impl Compiler {
                                                     BinaryOp::Sub => lv.sub(&rv),
                                                     BinaryOp::Mul => lv.mul(&rv),
                                                     BinaryOp::Concat => {
-                                                        let mut result = lv.to_php_string().as_bytes().to_vec();
-                                                        result.extend_from_slice(rv.to_php_string().as_bytes());
+                                                        let mut result =
+                                                            lv.to_php_string().as_bytes().to_vec();
+                                                        result.extend_from_slice(
+                                                            rv.to_php_string().as_bytes(),
+                                                        );
                                                         Value::String(PhpString::from_vec(result))
                                                     }
-                                                    BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                                                    BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                                                    BinaryOp::BitwiseXor => Value::Long(lv.to_long() ^ rv.to_long()),
+                                                    BinaryOp::BitwiseOr => {
+                                                        Value::Long(lv.to_long() | rv.to_long())
+                                                    }
+                                                    BinaryOp::BitwiseAnd => {
+                                                        Value::Long(lv.to_long() & rv.to_long())
+                                                    }
+                                                    BinaryOp::BitwiseXor => {
+                                                        Value::Long(lv.to_long() ^ rv.to_long())
+                                                    }
                                                     BinaryOp::ShiftLeft => {
                                                         let n = rv.to_long();
-                                                        Value::Long(if (0..64).contains(&n) { lv.to_long().wrapping_shl(n as u32) } else { 0 })
+                                                        Value::Long(if (0..64).contains(&n) {
+                                                            lv.to_long().wrapping_shl(n as u32)
+                                                        } else {
+                                                            0
+                                                        })
                                                     }
                                                     BinaryOp::ShiftRight => {
                                                         let (a, n) = (lv.to_long(), rv.to_long());
-                                                        Value::Long(if (0..64).contains(&n) { a >> n } else if a < 0 { -1 } else { 0 })
+                                                        Value::Long(if (0..64).contains(&n) {
+                                                            a >> n
+                                                        } else if a < 0 {
+                                                            -1
+                                                        } else {
+                                                            0
+                                                        })
                                                     }
-                                                    BinaryOp::Div => lv.div(&rv).unwrap_or(Value::Null),
-                                                    BinaryOp::Mod => lv.modulo(&rv).unwrap_or(Value::Null),
+                                                    BinaryOp::Div => {
+                                                        lv.div(&rv).unwrap_or(Value::Null)
+                                                    }
+                                                    BinaryOp::Mod => {
+                                                        lv.modulo(&rv).unwrap_or(Value::Null)
+                                                    }
                                                     BinaryOp::Pow => lv.pow(&rv),
                                                     _ => Value::Null,
                                                 }
@@ -6022,45 +7679,67 @@ impl Compiler {
                             // enum's backing table is first built (zend_enum_build_backed_enum_table).
                             // Validate backing type matches
                             if let Some(bt) = &enum_backing_type {
-                                if bt.eq_ignore_ascii_case(b"int") && !matches!(backing_value, Value::Long(_) | Value::Null) {
+                                if bt.eq_ignore_ascii_case(b"int")
+                                    && !matches!(backing_value, Value::Long(_) | Value::Null)
+                                {
                                     // Type mismatch: string value for int-backed enum
                                     // (Null means unit enum case, which is already handled above)
                                 }
-                                if bt.eq_ignore_ascii_case(b"string") && !matches!(backing_value, Value::String(_) | Value::Null) {
+                                if bt.eq_ignore_ascii_case(b"string")
+                                    && !matches!(backing_value, Value::String(_) | Value::Null)
+                                {
                                     // Type mismatch: int value for string-backed enum
                                 }
                             }
                             // Store in enum_cases list for runtime enum object creation
-                            class.enum_cases.push((case_name.clone(), backing_value.clone()));
+                            class
+                                .enum_cases
+                                .push((case_name.clone(), backing_value.clone()));
                             // Store a special marker constant "__enum_case__::CaseName"
                             // The VM will detect this and create/return enum case objects
                             let marker = Value::String(crate::string::PhpString::from_vec(
-                                [b"__enum_case__::" as &[u8], case_name.as_slice()].concat()
+                                [b"__enum_case__::" as &[u8], case_name.as_slice()].concat(),
                             ));
                             class.constants.insert(case_name.clone(), marker);
                             // Insert metadata so getDocComment() works on enum cases via
                             // ReflectionClassConstant / ReflectionEnumUnitCase / BackedCase.
                             let declaring_class_lower_ec: Vec<u8> = qualified_name
-                                .iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let case_attrs_compiled = self.compile_attributes_target(case_attributes, "constant");
-                            class.constants_meta.insert(case_name.clone(), crate::object::ConstantMeta {
-                                visibility: crate::object::Visibility::Public,
-                                is_final: false,
-                                declaring_class: declaring_class_lower_ec,
-                                attributes: case_attrs_compiled,
-                                declared_type: None,
-                                doc_comment: case_doc_comment.as_ref()
-                                    .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                referenced_constants: Vec::new(),
-                            });
+                                .iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect();
+                            let case_attrs_compiled =
+                                self.compile_attributes_target(case_attributes, "constant");
+                            class.constants_meta.insert(
+                                case_name.clone(),
+                                crate::object::ConstantMeta {
+                                    visibility: crate::object::Visibility::Public,
+                                    is_final: false,
+                                    declaring_class: declaring_class_lower_ec,
+                                    attributes: case_attrs_compiled,
+                                    declared_type: None,
+                                    doc_comment: case_doc_comment
+                                        .as_ref()
+                                        .map(|d| String::from_utf8_lossy(d).into_owned()),
+                                    referenced_constants: Vec::new(),
+                                },
+                            );
                         }
-                        ClassMember::TraitUse { traits, adaptations } => {
+                        ClassMember::TraitUse {
+                            traits,
+                            adaptations,
+                        } => {
                             // Interfaces cannot use traits
                             if modifiers.is_interface {
-                                let trait_list: Vec<String> = traits.iter().map(|t| String::from_utf8_lossy(t).to_string()).collect();
+                                let trait_list: Vec<String> = traits
+                                    .iter()
+                                    .map(|t| String::from_utf8_lossy(t).to_string())
+                                    .collect();
                                 return Err(CompileError {
-                                    message: format!("Cannot use traits inside of interfaces. {} is used in {}",
-                                        trait_list.first().unwrap_or(&String::new()), String::from_utf8_lossy(name)),
+                                    message: format!(
+                                        "Cannot use traits inside of interfaces. {} is used in {}",
+                                        trait_list.first().unwrap_or(&String::new()),
+                                        String::from_utf8_lossy(name)
+                                    ),
                                     line: stmt.span.line,
                                 });
                             }
@@ -6077,13 +7756,23 @@ impl Compiler {
                                     } => {
                                         class.trait_adaptations.push(
                                             crate::object::TraitAdaptation::Alias {
-                                                trait_name: trait_name.as_ref().map(|n| self.resolve_class_name(n)),
+                                                trait_name: trait_name
+                                                    .as_ref()
+                                                    .map(|n| self.resolve_class_name(n)),
                                                 method: method.clone(),
                                                 new_name: new_name.clone(),
-                                                new_visibility: new_visibility.as_ref().map(|v| match v {
-                                                    goro_parser::ast::Visibility::Public => crate::object::Visibility::Public,
-                                                    goro_parser::ast::Visibility::Protected => crate::object::Visibility::Protected,
-                                                    goro_parser::ast::Visibility::Private => crate::object::Visibility::Private,
+                                                new_visibility: new_visibility.as_ref().map(|v| {
+                                                    match v {
+                                                        goro_parser::ast::Visibility::Public => {
+                                                            crate::object::Visibility::Public
+                                                        }
+                                                        goro_parser::ast::Visibility::Protected => {
+                                                            crate::object::Visibility::Protected
+                                                        }
+                                                        goro_parser::ast::Visibility::Private => {
+                                                            crate::object::Visibility::Private
+                                                        }
+                                                    }
                                                 }),
                                             },
                                         );
@@ -6097,7 +7786,10 @@ impl Compiler {
                                             crate::object::TraitAdaptation::Precedence {
                                                 trait_name: self.resolve_class_name(trait_name),
                                                 method: method.clone(),
-                                                instead_of: instead_of.iter().map(|n| self.resolve_class_name(n)).collect(),
+                                                instead_of: instead_of
+                                                    .iter()
+                                                    .map(|n| self.resolve_class_name(n))
+                                                    .collect(),
                                             },
                                         );
                                     }
@@ -6195,19 +7887,26 @@ impl Compiler {
                         // Last part of the name
                         item.name.last().cloned().unwrap_or_default()
                     };
-                    let alias_lower: Vec<u8> = alias.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let alias_lower: Vec<u8> =
+                        alias.iter().map(|b| b.to_ascii_lowercase()).collect();
                     // Check for reserved names in use declarations (only for class imports)
-                    if matches!(item.kind, UseKind::Normal) && is_reserved_class_name(&alias_lower) {
+                    if matches!(item.kind, UseKind::Normal) && is_reserved_class_name(&alias_lower)
+                    {
                         return Err(CompileError {
-                            message: format!("Cannot use {} as {} because '{}' is a special class name",
+                            message: format!(
+                                "Cannot use {} as {} because '{}' is a special class name",
                                 String::from_utf8_lossy(&fqn),
                                 String::from_utf8_lossy(&alias),
-                                String::from_utf8_lossy(&alias)),
+                                String::from_utf8_lossy(&alias)
+                            ),
                             line: stmt.span.line,
                         });
                     }
                     if self.in_main_pass {
-                        if item.alias.is_none() && item.name.len() == 1 && self.current_namespace.is_empty() {
+                        if item.alias.is_none()
+                            && item.name.len() == 1
+                            && self.current_namespace.is_empty()
+                        {
                             self.warnings.push((
                                 format!(
                                     "The use statement with non-compound name '{}' has no effect",
@@ -6221,7 +7920,8 @@ impl Compiler {
                             UseKind::Function => " function",
                             UseKind::Constant => " const",
                         };
-                        let fqn_lower: Vec<u8> = fqn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let fqn_lower: Vec<u8> =
+                            fqn.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let already_imported = match item.kind {
                             UseKind::Normal => self.use_map.contains_key(&alias_lower),
                             UseKind::Function => self.use_function_map.contains_key(&alias_lower),
@@ -6232,7 +7932,11 @@ impl Compiler {
                             let check: Vec<u8> = if self.current_namespace.is_empty() {
                                 alias_lower.clone()
                             } else {
-                                let mut c: Vec<u8> = self.current_namespace.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                let mut c: Vec<u8> = self
+                                    .current_namespace
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
                                 c.push(b'\\');
                                 c.extend_from_slice(&alias_lower);
                                 c
@@ -6279,7 +7983,8 @@ impl Compiler {
                 }
                 let offset = self.op_array.current_offset();
                 self.label_offsets.insert(name.clone(), offset);
-                self.label_finally_paths.insert(name.clone(), self.finally_path.clone());
+                self.label_finally_paths
+                    .insert(name.clone(), self.finally_path.clone());
                 // Patch any pending gotos that reference this label
                 if let Some(gotos) = self.pending_gotos.remove(name) {
                     for (goto_offset, _line) in gotos {
@@ -6289,7 +7994,11 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Goto(name) => {
-                self.goto_finally_paths.push((name.clone(), self.finally_path.clone(), stmt.span.line));
+                self.goto_finally_paths.push((
+                    name.clone(),
+                    self.finally_path.clone(),
+                    stmt.span.line,
+                ));
                 if let Some(&target) = self.label_offsets.get(name) {
                     // Label already seen - emit jump
                     self.op_array.emit(Op {
@@ -6323,17 +8032,45 @@ impl Compiler {
     /// Compile the object part of `isset($a->b->c)`: each intermediate
     /// non-nullsafe property fetch is guarded by PropertyIsset (so magic
     /// __isset runs before __get); failed checks jump to `patches`.
-    fn compile_isset_prop_chain(&mut self, expr: &Expr, line: u32, patches: &mut Vec<u32>) -> CompileResult<OperandType> {
-        if let ExprKind::PropertyAccess { object, property, nullsafe: false } = &expr.kind {
+    fn compile_isset_prop_chain(
+        &mut self,
+        expr: &Expr,
+        line: u32,
+        patches: &mut Vec<u32>,
+    ) -> CompileResult<OperandType> {
+        if let ExprKind::PropertyAccess {
+            object,
+            property,
+            nullsafe: false,
+        } = &expr.kind
+        {
             if matches!(&property.kind, ExprKind::Identifier(_)) {
                 let base = self.compile_isset_prop_chain(object, line, patches)?;
                 let prop_op = self.compile_property_name(property)?;
                 let isset_tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op { opcode: OpCode::PropertyIsset, op1: base, op2: prop_op, result: OperandType::Tmp(isset_tmp), line });
-                let jmp = self.op_array.emit(Op { opcode: OpCode::JmpZ, op1: OperandType::Tmp(isset_tmp), op2: OperandType::JmpTarget(0), result: OperandType::Unused, line });
+                self.op_array.emit(Op {
+                    opcode: OpCode::PropertyIsset,
+                    op1: base,
+                    op2: prop_op,
+                    result: OperandType::Tmp(isset_tmp),
+                    line,
+                });
+                let jmp = self.op_array.emit(Op {
+                    opcode: OpCode::JmpZ,
+                    op1: OperandType::Tmp(isset_tmp),
+                    op2: OperandType::JmpTarget(0),
+                    result: OperandType::Unused,
+                    line,
+                });
                 patches.push(jmp);
                 let get_tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op { opcode: OpCode::PropertyGet, op1: base, op2: prop_op, result: OperandType::Tmp(get_tmp), line });
+                self.op_array.emit(Op {
+                    opcode: OpCode::PropertyGet,
+                    op1: base,
+                    op2: prop_op,
+                    result: OperandType::Tmp(get_tmp),
+                    line,
+                });
                 return Ok(OperandType::Tmp(get_tmp));
             }
         }
@@ -6341,28 +8078,53 @@ impl Compiler {
     }
 
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
-        elems.iter().any(|e| e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub)))
+        elems.iter().any(|e| {
+            e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub))
+        })
     }
 
     /// Destructuring that contains `&` elements: each element is bound
     /// directly against `src[key]` (which must be a writable place).
-    fn compile_list_destructure_ref(&mut self, elems: &[ArrayElement], src: &Expr, line: u32) -> CompileResult<()> {
-        if elems.is_empty() || elems.iter().all(|e| matches!(&e.value.kind, ExprKind::Null)) {
-            return Err(CompileError { message: "Cannot use empty list".into(), line });
+    fn compile_list_destructure_ref(
+        &mut self,
+        elems: &[ArrayElement],
+        src: &Expr,
+        line: u32,
+    ) -> CompileResult<()> {
+        if elems.is_empty()
+            || elems
+                .iter()
+                .all(|e| matches!(&e.value.kind, ExprKind::Null))
+        {
+            return Err(CompileError {
+                message: "Cannot use empty list".into(),
+                line,
+            });
         }
         let has_keyed = elems.iter().any(|e| e.key.is_some());
-        let has_unkeyed = elems.iter().any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
+        let has_unkeyed = elems
+            .iter()
+            .any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
         if has_keyed && has_unkeyed {
-            return Err(CompileError { message: "Cannot mix keyed and unkeyed array entries in assignments".into(), line });
+            return Err(CompileError {
+                message: "Cannot mix keyed and unkeyed array entries in assignments".into(),
+                line,
+            });
         }
         for (i, elem) in elems.iter().enumerate() {
             if matches!(&elem.value.kind, ExprKind::Null) {
                 continue;
             }
             let span = elem.value.span;
-            let key = elem.key.clone().unwrap_or(Expr { kind: ExprKind::Int(i as i64), span });
+            let key = elem.key.clone().unwrap_or(Expr {
+                kind: ExprKind::Int(i as i64),
+                span,
+            });
             let sub = Expr {
-                kind: ExprKind::ArrayAccess { array: Box::new(src.clone()), index: Some(Box::new(key)) },
+                kind: ExprKind::ArrayAccess {
+                    array: Box::new(src.clone()),
+                    index: Some(Box::new(key)),
+                },
                 span,
             };
             let e = match &elem.value.kind {
@@ -6371,10 +8133,19 @@ impl Compiler {
                     continue;
                 }
                 _ if elem.by_ref => Expr {
-                    kind: ExprKind::AssignRef { target: Box::new(elem.value.clone()), value: Box::new(sub) },
+                    kind: ExprKind::AssignRef {
+                        target: Box::new(elem.value.clone()),
+                        value: Box::new(sub),
+                    },
                     span,
                 },
-                _ => Expr { kind: ExprKind::Assign { target: Box::new(elem.value.clone()), value: Box::new(sub) }, span },
+                _ => Expr {
+                    kind: ExprKind::Assign {
+                        target: Box::new(elem.value.clone()),
+                        value: Box::new(sub),
+                    },
+                    span,
+                },
             };
             let t0 = self.op_array.temp_count;
             self.compile_expr(&e)?;
@@ -6400,7 +8171,9 @@ impl Compiler {
         }
 
         // Check for empty list (all elements are empty/null placeholders)
-        let all_empty = elems.iter().all(|e| matches!(&e.value.kind, ExprKind::Null));
+        let all_empty = elems
+            .iter()
+            .all(|e| matches!(&e.value.kind, ExprKind::Null));
         if elems.is_empty() || all_empty {
             return Err(CompileError {
                 message: "Cannot use empty list".into(),
@@ -6410,7 +8183,9 @@ impl Compiler {
 
         // Check for mixed keyed and unkeyed elements
         let has_keyed = elems.iter().any(|e| e.key.is_some());
-        let has_unkeyed = elems.iter().any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
+        let has_unkeyed = elems
+            .iter()
+            .any(|e| e.key.is_none() && !matches!(&e.value.kind, ExprKind::Null));
         if has_keyed && has_unkeyed {
             return Err(CompileError {
                 message: "Cannot mix keyed and unkeyed array entries in assignments".into(),
@@ -6459,17 +8234,13 @@ impl Compiler {
                 // Check for nested destructuring
                 let nested_elems = match &elem.value.kind {
                     ExprKind::Array(elems) => Some(elems.clone()),
-                    ExprKind::FunctionCall { name, args }
-                        if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
-                    {
+                    ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
                         Some(
                             args.iter()
                                 .map(|a| ArrayElement {
-                                    key: a.name.as_ref().map(|n| {
-                                        Expr {
-                                            kind: ExprKind::String(n.clone()),
-                                            span: a.value.span,
-                                        }
+                                    key: a.name.as_ref().map(|n| Expr {
+                                        kind: ExprKind::String(n.clone()),
+                                        span: a.value.span,
                                     }),
                                     value: a.value.clone(),
                                     unpack: false,
@@ -6526,14 +8297,16 @@ impl Compiler {
                                 });
                             }
                         }
-                        ExprKind::PropertyAccess { object, property, .. } => {
+                        ExprKind::PropertyAccess {
+                            object, property, ..
+                        } => {
                             // $obj->prop = value
                             let obj_op = self.compile_expr(object)?;
                             let prop_op = match &property.kind {
                                 ExprKind::Identifier(name) => {
-                                    let name_idx = self.op_array.add_literal(
-                                        Value::String(PhpString::from_vec(name.clone()))
-                                    );
+                                    let name_idx = self.op_array.add_literal(Value::String(
+                                        PhpString::from_vec(name.clone()),
+                                    ));
                                     OperandType::Const(name_idx)
                                 }
                                 _ => self.compile_expr(property)?,
@@ -6563,17 +8336,18 @@ impl Compiler {
                                 }
                                 _ => {
                                     return Err(CompileError {
-                                        message: "Cannot use dynamic class in list destructuring".into(),
+                                        message: "Cannot use dynamic class in list destructuring"
+                                            .into(),
                                         line,
                                     });
                                 }
                             };
-                            let class_idx = self.op_array.add_literal(
-                                Value::String(PhpString::from_vec(class_name))
-                            );
-                            let prop_idx = self.op_array.add_literal(
-                                Value::String(PhpString::from_vec(property.clone()))
-                            );
+                            let class_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(class_name)));
+                            let prop_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(property.clone())));
                             self.op_array.emit(Op {
                                 opcode: OpCode::StaticPropSet,
                                 op1: OperandType::Const(class_idx),
@@ -6599,14 +8373,15 @@ impl Compiler {
                                 }
                                 _ => {
                                     return Err(CompileError {
-                                        message: "Cannot use dynamic class in list destructuring".into(),
+                                        message: "Cannot use dynamic class in list destructuring"
+                                            .into(),
                                         line,
                                     });
                                 }
                             };
-                            let class_idx = self.op_array.add_literal(
-                                Value::String(PhpString::from_vec(class_name))
-                            );
+                            let class_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(class_name)));
                             let prop_op = self.compile_expr(property)?;
                             self.op_array.emit(Op {
                                 opcode: OpCode::StaticPropSet,
@@ -6694,9 +8469,11 @@ impl Compiler {
         if is_var {
             return;
         }
-        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
-            b"Only variable references should be returned by reference",
-        )));
+        let msg_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_bytes(
+                b"Only variable references should be returned by reference",
+            )));
         self.op_array.emit(Op {
             opcode: OpCode::EmitNotice,
             op1: OperandType::Const(msg_idx),
@@ -6711,13 +8488,17 @@ impl Compiler {
     fn emit_assign_ref_call_notice(&mut self, value: &Expr, line: u32) {
         if !matches!(
             value.kind,
-            ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }
+            ExprKind::FunctionCall { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::StaticMethodCall { .. }
         ) {
             return;
         }
-        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
-            b"Only variables should be assigned by reference",
-        )));
+        let msg_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_bytes(
+                b"Only variables should be assigned by reference",
+            )));
         let cond_idx = self.op_array.add_literal(Value::Long(1));
         self.op_array.emit(Op {
             opcode: OpCode::EmitNotice,
@@ -6730,7 +8511,12 @@ impl Compiler {
 
     /// Emit PropertyGetRef for `$obj->prop` in a reference context and return
     /// the tmp holding the Reference.
-    fn compile_property_ref(&mut self, object: &Expr, property: &Expr, line: u32) -> CompileResult<u32> {
+    fn compile_property_ref(
+        &mut self,
+        object: &Expr,
+        property: &Expr,
+        line: u32,
+    ) -> CompileResult<u32> {
         let obj = self.compile_expr(object)?;
         let name = self.compile_property_name(property)?;
         let ref_tmp = self.op_array.alloc_temp();
@@ -6747,7 +8533,12 @@ impl Compiler {
     /// Compile the container of a dimension write. A property container
     /// (`$obj->p[...] = v`) is fetched for writing (FETCH_OBJ_W semantics).
     fn compile_dim_write_base(&mut self, array: &Expr) -> CompileResult<OperandType> {
-        if let ExprKind::PropertyAccess { object, property, nullsafe: false } = &array.kind {
+        if let ExprKind::PropertyAccess {
+            object,
+            property,
+            nullsafe: false,
+        } = &array.kind
+        {
             let obj = self.compile_expr(object)?;
             let name = self.compile_property_name(property)?;
             let tmp = self.op_array.alloc_temp();
@@ -6760,7 +8551,11 @@ impl Compiler {
             });
             return Ok(OperandType::Tmp(tmp));
         }
-        if let ExprKind::ArrayAccess { array: inner, index } = &array.kind {
+        if let ExprKind::ArrayAccess {
+            array: inner,
+            index,
+        } = &array.kind
+        {
             // Nested dimension write: fetch the intermediate element for writing.
             let container = self.compile_dim_write_base(inner)?;
             let key = match index {
@@ -6788,10 +8583,16 @@ impl Compiler {
             kind: ExprKind::ThrowExpr(Box::new(Expr {
                 span,
                 kind: ExprKind::New {
-                    class: Box::new(Expr { span, kind: ExprKind::Identifier(b"\\Error".to_vec()) }),
+                    class: Box::new(Expr {
+                        span,
+                        kind: ExprKind::Identifier(b"\\Error".to_vec()),
+                    }),
                     args: vec![Argument {
                         name: None,
-                        value: Expr { span, kind: ExprKind::String(msg.to_vec()) },
+                        value: Expr {
+                            span,
+                            kind: ExprKind::String(msg.to_vec()),
+                        },
                         unpack: false,
                     }],
                 },
@@ -6816,7 +8617,9 @@ impl Compiler {
                 } else {
                     resolved
                 };
-                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                let idx = self
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                 if is_self && self.is_in_trait {
                     self.op_array.class_const_literals.push(idx);
                 }
@@ -6824,7 +8627,10 @@ impl Compiler {
             }
             _ => {
                 if is_illegal_class_literal(class) {
-                    return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                    return Err(CompileError {
+                        message: "Illegal class name".into(),
+                        line: class.span.line,
+                    });
                 }
                 self.compile_expr(class)
             }
@@ -6867,7 +8673,10 @@ impl Compiler {
 
             ExprKind::Assign { target, value } => {
                 // Check for nullsafe in write context
-                if matches!(&target.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                if matches!(
+                    &target.kind,
+                    ExprKind::PropertyAccess { nullsafe: true, .. }
+                ) {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
                         line: target.span.line,
@@ -6893,16 +8702,22 @@ impl Compiler {
                 if let ExprKind::Array(elems) = &target.kind {
                     if Self::list_has_ref(elems) {
                         match &value.kind {
-                            ExprKind::Variable(_) | ExprKind::ArrayAccess { .. } | ExprKind::PropertyAccess { .. }
-                            | ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicVariable(_) => {
+                            ExprKind::Variable(_)
+                            | ExprKind::ArrayAccess { .. }
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicVariable(_) => {
                                 self.compile_list_destructure_ref(elems, value, expr.span.line)?;
                                 return self.compile_expr(value);
                             }
-                            ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }
+                            ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
                             | ExprKind::DynamicStaticMethodCall { .. } => {}
                             _ => {
                                 return Err(CompileError {
-                                    message: "Cannot assign reference to non referenceable value".into(),
+                                    message: "Cannot assign reference to non referenceable value"
+                                        .into(),
                                     line: expr.span.line,
                                 });
                             }
@@ -7013,7 +8828,9 @@ impl Compiler {
                                 } else {
                                     resolved
                                 };
-                                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                                let idx = self
+                                    .op_array
+                                    .add_literal(Value::String(PhpString::from_vec(class_name)));
                                 OperandType::Const(idx)
                             }
                             _ => self.compile_expr(class)?,
@@ -7044,9 +8861,7 @@ impl Compiler {
                         // Also supports keyed: ["a" => $x, "b" => $y] = $arr
                         let elems: Vec<_> = match &target.kind {
                             ExprKind::Array(elems) => elems.clone(),
-                            ExprKind::FunctionCall { name, args }
-                                if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
-                            {
+                            ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) => {
                                 args.iter()
                                     .map(|a| ArrayElement {
                                         key: None,
@@ -7058,8 +8873,12 @@ impl Compiler {
                             }
                             _ => {
                                 let msg = match &target.kind {
-                                    ExprKind::FunctionCall { .. } => "Can't use function return value in write context",
-                                    ExprKind::MethodCall { .. } => "Can't use method return value in write context",
+                                    ExprKind::FunctionCall { .. } => {
+                                        "Can't use function return value in write context"
+                                    }
+                                    ExprKind::MethodCall { .. } => {
+                                        "Can't use method return value in write context"
+                                    }
                                     _ => "Can't use function return value in write context",
                                 };
                                 return Err(CompileError {
@@ -7092,7 +8911,10 @@ impl Compiler {
 
             ExprKind::CompoundAssign { op, target, value } => {
                 // Check for nullsafe in write context
-                if matches!(&target.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                if matches!(
+                    &target.kind,
+                    ExprKind::PropertyAccess { nullsafe: true, .. }
+                ) {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
                         line: target.span.line,
@@ -7508,9 +9330,17 @@ impl Compiler {
                 }
 
                 // Handle increment/decrement on property access: $obj->prop++ etc.
-                if matches!(op, UnaryOp::PostIncrement | UnaryOp::PostDecrement | UnaryOp::PreIncrement | UnaryOp::PreDecrement)
-                {
-                    if matches!(&operand.kind, ExprKind::PropertyAccess { nullsafe: true, .. }) {
+                if matches!(
+                    op,
+                    UnaryOp::PostIncrement
+                        | UnaryOp::PostDecrement
+                        | UnaryOp::PreIncrement
+                        | UnaryOp::PreDecrement
+                ) {
+                    if matches!(
+                        &operand.kind,
+                        ExprKind::PropertyAccess { nullsafe: true, .. }
+                    ) {
                         return Err(CompileError {
                             message: "Can't use nullsafe operator in write context".into(),
                             line: operand.span.line,
@@ -7518,14 +9348,19 @@ impl Compiler {
                     }
                     // zend_ensure_writable_variable()
                     let call_msg = match &operand.kind {
-                        ExprKind::FunctionCall { .. } => Some("Can't use function return value in write context"),
+                        ExprKind::FunctionCall { .. } => {
+                            Some("Can't use function return value in write context")
+                        }
                         ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. } => {
                             Some("Can't use method return value in write context")
                         }
                         _ => None,
                     };
                     if let Some(msg) = call_msg {
-                        return Err(CompileError { message: msg.into(), line: operand.span.line });
+                        return Err(CompileError {
+                            message: msg.into(),
+                            line: operand.span.line,
+                        });
                     }
 
                     // Increment/decrement on array element: $arr[$key]++ / --$arr[$key]
@@ -7575,18 +9410,25 @@ impl Compiler {
                         });
                         // Pre returns new value (old_tmp); Post returns old (new_tmp).
                         return match op {
-                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => {
+                                Ok(OperandType::Tmp(new_tmp))
+                            }
                             _ => Ok(OperandType::Tmp(old_tmp)),
                         };
                     }
 
-                    if let ExprKind::PropertyAccess { object, property, .. } = &operand.kind {
+                    if let ExprKind::PropertyAccess {
+                        object, property, ..
+                    } = &operand.kind
+                    {
                         let obj_op = self.compile_expr(object)?;
                         // Property name: a literal identifier, or an expression
                         // evaluated once ($obj->$name++, $obj->{'a'}++).
                         let name_op = match &property.kind {
                             ExprKind::Identifier(name) if !name.is_empty() => {
-                                let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(name.clone())));
+                                let idx = self
+                                    .op_array
+                                    .add_literal(Value::String(PhpString::from_vec(name.clone())));
                                 OperandType::Const(idx)
                             }
                             _ => {
@@ -7615,7 +9457,9 @@ impl Compiler {
                             // Increment/decrement
                             let new_tmp = self.op_array.alloc_temp();
                             let inc_opcode = match op {
-                                UnaryOp::PostIncrement | UnaryOp::PreIncrement => OpCode::PostIncrement,
+                                UnaryOp::PostIncrement | UnaryOp::PreIncrement => {
+                                    OpCode::PostIncrement
+                                }
                                 _ => OpCode::PostDecrement,
                             };
                             self.op_array.emit(Op {
@@ -7635,7 +9479,9 @@ impl Compiler {
                             });
                             // For post-inc/dec, return old value (new_tmp); for pre, return new value (old_tmp)
                             return match op {
-                                UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                                UnaryOp::PostIncrement | UnaryOp::PostDecrement => {
+                                    Ok(OperandType::Tmp(new_tmp))
+                                }
                                 _ => Ok(OperandType::Tmp(old_tmp)),
                             };
                         }
@@ -7678,13 +9524,16 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         return match op {
-                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => {
+                                Ok(OperandType::Tmp(new_tmp))
+                            }
                             _ => Ok(OperandType::Tmp(old_tmp)),
                         };
                     }
 
                     // Increment/decrement on a dynamic static property: self::$$x++
-                    if let ExprKind::DynamicStaticPropertyAccess { class, property } = &operand.kind {
+                    if let ExprKind::DynamicStaticPropertyAccess { class, property } = &operand.kind
+                    {
                         let class_operand = self.compile_static_class_operand(class)?;
                         let prop_op = self.compile_expr(property)?;
                         let old_tmp = self.op_array.alloc_temp();
@@ -7715,7 +9564,9 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         return match op {
-                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => Ok(OperandType::Tmp(new_tmp)),
+                            UnaryOp::PostIncrement | UnaryOp::PostDecrement => {
+                                Ok(OperandType::Tmp(new_tmp))
+                            }
                             _ => Ok(OperandType::Tmp(old_tmp)),
                         };
                     }
@@ -7799,7 +9650,10 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if func_lower == b"compact" && !args.is_empty() && args.iter().all(|a| a.name.is_none() && !a.unpack) {
+                    if func_lower == b"compact"
+                        && !args.is_empty()
+                        && args.iter().all(|a| a.name.is_none() && !a.unpack)
+                    {
                         // Make sure literal variable names have CV slots.
                         fn collect_names(e: &Expr, out: &mut Vec<Vec<u8>>) {
                             match &e.kind {
@@ -7856,7 +9710,10 @@ impl Compiler {
                 if let ExprKind::Identifier(n) = &name.kind {
                     let func_lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
                     // `\assert(...)` is the same compile-time special case.
-                    let func_lower: Vec<u8> = func_lower.strip_prefix(b"\\").map(|r| r.to_vec()).unwrap_or(func_lower);
+                    let func_lower: Vec<u8> = func_lower
+                        .strip_prefix(b"\\")
+                        .map(|r| r.to_vec())
+                        .unwrap_or(func_lower);
                     if func_lower == b"assert"
                         && args.len() == 1
                         && args[0].name.is_none()
@@ -7865,7 +9722,9 @@ impl Compiler {
                         let expr_str = expr_to_source_string(&args[0].value);
                         let assert_str = format!("assert({})", expr_str);
                         // Emit: InitFCall("assert", 2)
-                        let assert_name_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(b"assert")));
+                        let assert_name_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_bytes(b"assert")));
                         let arg_count_idx = self.op_array.add_literal(Value::Long(2));
                         self.op_array.emit(Op {
                             opcode: OpCode::InitFCall,
@@ -7885,7 +9744,11 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         // SendVal(assert_str, 1)
-                        let str_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(assert_str.as_bytes())));
+                        let str_idx =
+                            self.op_array
+                                .add_literal(Value::String(PhpString::from_bytes(
+                                    assert_str.as_bytes(),
+                                )));
                         let pos1 = self.op_array.add_literal(Value::Long(1));
                         self.op_array.emit(Op {
                             opcode: OpCode::SendVal,
@@ -8242,20 +10105,39 @@ impl Compiler {
                 // $a->b->c ?? d: property fetches in the chain go through
                 // __isset before __get (FETCH_OBJ_IS semantics).
                 let mut isset_patches: Vec<u32> = Vec::new();
-                let left_val = if matches!(&left.kind, ExprKind::PropertyAccess { nullsafe: false, property, .. } if matches!(property.kind, ExprKind::Identifier(_))) {
+                let left_val = if matches!(&left.kind, ExprKind::PropertyAccess { nullsafe: false, property, .. } if matches!(property.kind, ExprKind::Identifier(_)))
+                {
                     self.compile_isset_prop_chain(left, expr.span.line, &mut isset_patches)?
                 } else {
                     self.compile_expr(left)?
                 };
                 let mut isset_fail_jmp: Option<u32> = None;
                 if !isset_patches.is_empty() {
-                    let over = self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                    let over = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
                     let fail_label = self.op_array.current_offset();
                     for p in &isset_patches {
                         self.op_array.ops[*p as usize].op2 = OperandType::JmpTarget(fail_label);
                     }
-                    self.op_array.emit(Op { opcode: OpCode::ErrorRestore, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
-                    isset_fail_jmp = Some(self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line }));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    isset_fail_jmp = Some(self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    }));
                     let after = self.op_array.current_offset();
                     self.op_array.patch_jump(over, after);
                 }
@@ -8358,7 +10240,10 @@ impl Compiler {
                                 };
                                 if let Some(tname) = type_name {
                                     return Err(CompileError {
-                                        message: format!("Only arrays and Traversables can be unpacked, {} given", tname),
+                                        message: format!(
+                                            "Only arrays and Traversables can be unpacked, {} given",
+                                            tname
+                                        ),
                                         line: expr.span.line,
                                     });
                                 }
@@ -8737,7 +10622,9 @@ impl Compiler {
                         // Actually, let's just handle it in the trait patching code
                         return Ok(OperandType::Const(idx));
                     }
-                    b"__namespace__" => Value::String(PhpString::from_vec(self.current_namespace.clone())),
+                    b"__namespace__" => {
+                        Value::String(PhpString::from_vec(self.current_namespace.clone()))
+                    }
                     b"__trait__" => Value::String(PhpString::empty()),
                     // PHP constants
                     b"php_eol" => Value::String(PhpString::from_bytes(b"\n")),
@@ -8775,9 +10662,11 @@ impl Compiler {
                             b"/"
                         }))
                     }
-                    b"path_separator" => {
-                        Value::String(PhpString::from_bytes(if cfg!(windows) { b";" } else { b":" }))
-                    }
+                    b"path_separator" => Value::String(PhpString::from_bytes(if cfg!(windows) {
+                        b";"
+                    } else {
+                        b":"
+                    })),
                     b"str_pad_right" => Value::Long(1),
                     b"str_pad_left" => Value::Long(0),
                     b"str_pad_both" => Value::Long(2),
@@ -8849,7 +10738,8 @@ impl Compiler {
                             // Qualified name: check use aliases for first part
                             let first_sep = name.iter().position(|&b| b == b'\\').unwrap();
                             let first_part = &name[..first_sep];
-                            let first_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let first_lower: Vec<u8> =
+                                first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if let Some(resolved) = self.use_map.get(&first_lower) {
                                 let mut result = resolved.clone();
                                 result.extend_from_slice(&name[first_sep..]);
@@ -8893,12 +10783,17 @@ impl Compiler {
                             is_self_new = true;
                             self.current_class.clone().unwrap_or(name.clone())
                         } else if name.eq_ignore_ascii_case(b"parent") {
-                            self.current_parent_class.clone().unwrap_or_else(|| b"parent".to_vec())
+                            self.current_parent_class
+                                .clone()
+                                .unwrap_or_else(|| b"parent".to_vec())
                         } else if name.eq_ignore_ascii_case(b"static") {
                             b"static".to_vec()
                         } else if name.starts_with(b"__anonymous_class_") {
                             // Anonymous class: look up the NUL-byte PHP name from the map
-                            self.anon_class_name_map.get(name.as_slice()).cloned().unwrap_or_else(|| name.clone())
+                            self.anon_class_name_map
+                                .get(name.as_slice())
+                                .cloned()
+                                .unwrap_or_else(|| name.clone())
                         } else {
                             // Resolve through namespace (handles "static" correctly since
                             // resolve_class_name passes it through unchanged)
@@ -9058,10 +10953,14 @@ impl Compiler {
                 // isset() returns true if all vars are set and not null
                 // Validate: isset() can only take variables, properties, array accesses
                 for check_expr in exprs {
-                    let is_valid = matches!(check_expr.kind,
-                        ExprKind::Variable(_) | ExprKind::DynamicVariable(_) |
-                        ExprKind::PropertyAccess { .. } | ExprKind::StaticPropertyAccess { .. } |
-                        ExprKind::ArrayAccess { .. } | ExprKind::NullCoalesce { .. }
+                    let is_valid = matches!(
+                        check_expr.kind,
+                        ExprKind::Variable(_)
+                            | ExprKind::DynamicVariable(_)
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::ArrayAccess { .. }
+                            | ExprKind::NullCoalesce { .. }
                     );
                     if !is_valid {
                         return Err(CompileError {
@@ -9081,15 +10980,16 @@ impl Compiler {
                 });
                 if exprs.len() == 1 {
                     // Check if expression is a property access -> use PropertyIsset
-                    let is_prop_access = matches!(
-                        exprs[0].kind,
-                        ExprKind::PropertyAccess { .. }
-                    );
+                    let is_prop_access = matches!(exprs[0].kind, ExprKind::PropertyAccess { .. });
                     if is_prop_access {
-                        if let ExprKind::PropertyAccess { object, property, .. } = &exprs[0].kind {
+                        if let ExprKind::PropertyAccess {
+                            object, property, ..
+                        } = &exprs[0].kind
+                        {
                             // For isset($aa[0]->foo), the inner object might be an ArrayAccess
                             // We need to check offsetExists first before calling offsetGet
-                            let obj_operand = if matches!(object.kind, ExprKind::ArrayAccess { .. }) {
+                            let obj_operand = if matches!(object.kind, ExprKind::ArrayAccess { .. })
+                            {
                                 // Compile with isset-aware ArrayAccess handling
                                 let mut chain: Vec<&Expr> = Vec::new();
                                 let mut base_expr: &Expr = object;
@@ -9176,9 +11076,11 @@ impl Compiler {
                                 });
                                 let end_target = self.op_array.ops.len() as u32;
                                 for jmp_pos in jmp_patches {
-                                    self.op_array.ops[jmp_pos].op2 = OperandType::JmpTarget(false_target);
+                                    self.op_array.ops[jmp_pos].op2 =
+                                        OperandType::JmpTarget(false_target);
                                 }
-                                self.op_array.ops[jmp_end_pos].op1 = OperandType::JmpTarget(end_target);
+                                self.op_array.ops[jmp_end_pos].op1 =
+                                    OperandType::JmpTarget(end_target);
 
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ErrorRestore,
@@ -9190,23 +11092,52 @@ impl Compiler {
                                 return Ok(OperandType::Tmp(result_tmp));
                             } else {
                                 let mut patches = Vec::new();
-                                let op = self.compile_isset_prop_chain(object, expr.span.line, &mut patches)?;
+                                let op = self.compile_isset_prop_chain(
+                                    object,
+                                    expr.span.line,
+                                    &mut patches,
+                                )?;
                                 if !patches.is_empty() {
                                     // isset($a->b->c): intermediate fetches go through
                                     // __isset before __get (FETCH_OBJ_IS semantics).
                                     let prop_operand = self.compile_property_name(property)?;
                                     let tmp = self.op_array.alloc_temp();
-                                    self.op_array.emit(Op { opcode: OpCode::PropertyIsset, op1: op, op2: prop_operand, result: OperandType::Tmp(tmp), line: expr.span.line });
-                                    let jmp_end = self.op_array.emit(Op { opcode: OpCode::Jmp, op1: OperandType::JmpTarget(0), op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::PropertyIsset,
+                                        op1: op,
+                                        op2: prop_operand,
+                                        result: OperandType::Tmp(tmp),
+                                        line: expr.span.line,
+                                    });
+                                    let jmp_end = self.op_array.emit(Op {
+                                        opcode: OpCode::Jmp,
+                                        op1: OperandType::JmpTarget(0),
+                                        op2: OperandType::Unused,
+                                        result: OperandType::Unused,
+                                        line: expr.span.line,
+                                    });
                                     let false_target = self.op_array.current_offset();
                                     let false_lit = self.op_array.add_literal(Value::False);
-                                    self.op_array.emit(Op { opcode: OpCode::Assign, op1: OperandType::Tmp(tmp), op2: OperandType::Const(false_lit), result: OperandType::Unused, line: expr.span.line });
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::Assign,
+                                        op1: OperandType::Tmp(tmp),
+                                        op2: OperandType::Const(false_lit),
+                                        result: OperandType::Unused,
+                                        line: expr.span.line,
+                                    });
                                     let end_target = self.op_array.current_offset();
                                     for p in patches {
-                                        self.op_array.ops[p as usize].op2 = OperandType::JmpTarget(false_target);
+                                        self.op_array.ops[p as usize].op2 =
+                                            OperandType::JmpTarget(false_target);
                                     }
                                     self.op_array.patch_jump(jmp_end, end_target);
-                                    self.op_array.emit(Op { opcode: OpCode::ErrorRestore, op1: OperandType::Unused, op2: OperandType::Unused, result: OperandType::Unused, line: expr.span.line });
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ErrorRestore,
+                                        op1: OperandType::Unused,
+                                        op2: OperandType::Unused,
+                                        result: OperandType::Unused,
+                                        line: expr.span.line,
+                                    });
                                     return Ok(OperandType::Tmp(tmp));
                                 }
                                 op
@@ -9257,7 +11188,10 @@ impl Compiler {
                         // PropertyGet (which honors __get) and proceed with the array chain.
                         let result_tmp = self.op_array.alloc_temp();
                         let mut jmp_patches: Vec<usize> = Vec::new();
-                        let base_op = if let ExprKind::PropertyAccess { object, property, .. } = &base_expr.kind {
+                        let base_op = if let ExprKind::PropertyAccess {
+                            object, property, ..
+                        } = &base_expr.kind
+                        {
                             let obj_op = self.compile_expr(object)?;
                             let prop_op = self.compile_property_name(property)?;
                             let isset_tmp = self.op_array.alloc_temp();
@@ -9406,7 +11340,9 @@ impl Compiler {
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    if let ExprKind::DynamicStaticPropertyAccess { class, property } = &exprs[0].kind {
+                    if let ExprKind::DynamicStaticPropertyAccess { class, property } =
+                        &exprs[0].kind
+                    {
                         let class_operand = self.compile_static_class_operand(class)?;
                         let prop_op = self.compile_expr(property)?;
                         let tmp = self.op_array.alloc_temp();
@@ -9680,15 +11616,22 @@ impl Compiler {
                 closure_compiler.op_array.is_static_closure = *is_static;
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.returns_by_ref = *closure_returns_by_ref;
-                closure_compiler.op_array.end_line = if *closure_end_line > 0 { *closure_end_line } else { expr.span.line };
+                closure_compiler.op_array.end_line = if *closure_end_line > 0 {
+                    *closure_end_line
+                } else {
+                    expr.span.line
+                };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
                 closure_compiler.op_array.doc_comment = closure_doc_comment.clone();
                 // Propagate the closure's declared return type so ReflectionFunction
                 // observes it via `hasReturnType`/`getReturnType`.
                 if let Some(hint) = closure_return_type {
-                    closure_compiler.op_array.return_type =
-                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                    closure_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(
+                        hint,
+                        &self.current_namespace,
+                        &self.use_map,
+                    ));
                 }
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
@@ -9696,8 +11639,12 @@ impl Compiler {
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
-                closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
-                    .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                closure_compiler.op_array.scope_class =
+                    self.op_array.scope_class.clone().or_else(|| {
+                        self.current_class
+                            .as_ref()
+                            .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect())
+                    });
 
                 // If inside a class method and not static, automatically capture $this
                 let has_this = !is_static
@@ -9722,23 +11669,41 @@ impl Compiler {
                 // Count required params and set param_count
                 closure_compiler.op_array.param_count = params.len() as u32
                     + use_vars.len() as u32
-                    + if !*is_static && self.current_class.is_some() { 1 } else { 0 };
+                    + if !*is_static && self.current_class.is_some() {
+                        1
+                    } else {
+                        0
+                    };
                 closure_compiler.op_array.required_param_count = {
                     let mut last_req: i64 = -1;
                     for (i, p) in params.iter().enumerate() {
-                        if !p.variadic && p.default.is_none() { last_req = i as i64; }
+                        if !p.variadic && p.default.is_none() {
+                            last_req = i as i64;
+                        }
                     }
                     (last_req + 1) as u32
                 };
                 // Compile parameter attributes
-                closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                closure_compiler.op_array.param_attributes = params
+                    .iter()
+                    .map(|p| self.compile_attributes(&p.attributes))
+                    .collect();
                 // Record by-ref params for closures (with offset for $this and use vars)
                 {
                     let mut by_ref = Vec::new();
                     let mut has_default = Vec::new();
-                    if has_this { by_ref.push(false); has_default.push(false); } // $this
-                    for uv in use_vars { by_ref.push(uv.by_ref); has_default.push(false); } // use vars
-                    for p in params.iter() { by_ref.push(p.by_ref); has_default.push(p.default.is_some()); } // params
+                    if has_this {
+                        by_ref.push(false);
+                        has_default.push(false);
+                    } // $this
+                    for uv in use_vars {
+                        by_ref.push(uv.by_ref);
+                        has_default.push(false);
+                    } // use vars
+                    for p in params.iter() {
+                        by_ref.push(p.by_ref);
+                        has_default.push(p.default.is_some());
+                    } // params
                     closure_compiler.op_array.by_ref_params = by_ref;
                     closure_compiler.op_array.param_has_default = has_default;
                 }
@@ -9766,10 +11731,16 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
-                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        let mut pt = type_hint_to_param_type_with_ns(
+                            hint,
+                            &self.current_namespace,
+                            &self.use_map,
+                        );
                         let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
-                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                            if matches!(default_expr.kind, ExprKind::Null)
+                                && !is_type_nullable_or_mixed(&pt)
+                            {
                                 pt = ParamType::Nullable(Box::new(pt));
                                 is_implicitly_nullable = true;
                             }
@@ -9787,23 +11758,37 @@ impl Compiler {
 
                     // Compile default value
                     if let Some(default_expr) = &param.default {
-                        closure_compiler.op_array.set_param_default_repr(cv, self.default_value_repr(default_expr));
+                        closure_compiler
+                            .op_array
+                            .set_param_default_repr(cv, self.default_value_repr(default_expr));
                         let default_val = closure_compiler.compile_expr(default_expr)?;
                         if !matches!(default_expr.kind, ExprKind::Null) {
-                            let pcv = closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
-                            if let Some(Some(pti)) = closure_compiler.op_array.param_types.get(pcv).cloned() {
+                            let pcv =
+                                closure_compiler.op_array.get_or_create_cv(&param.name) as usize;
+                            if let Some(Some(pti)) =
+                                closure_compiler.op_array.param_types.get(pcv).cloned()
+                            {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
                                         return Err(CompileError {
-                                            message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
+                                            message: format!(
+                                                "Cannot use {} as default value for parameter ${} of type {}",
+                                                tn,
                                                 String::from_utf8_lossy(&param.name),
-                                                crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
+                                                crate::vm::variance::type_to_string(
+                                                    &crate::vm::variance::TypeView::from_param_type(
+                                                        &pti.param_type
+                                                    ),
+                                                    None
+                                                )
+                                            ),
                                             line: default_expr.span.line,
                                         });
                                     }
                                     Ok(Some(widened)) => {
                                         if let OperandType::Const(li) = default_val {
-                                            closure_compiler.op_array.literals[li as usize] = widened;
+                                            closure_compiler.op_array.literals[li as usize] =
+                                                widened;
                                         }
                                     }
                                     Ok(None) => {}
@@ -9947,7 +11932,16 @@ impl Compiler {
                 }
             }
 
-            ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, returns_by_ref: arrow_returns_by_ref, .. } => {
+            ExprKind::ArrowFunction {
+                params,
+                body,
+                attributes,
+                end_line: arrow_end_line,
+                doc_comment: arrow_doc_comment,
+                return_type: arrow_return_type,
+                returns_by_ref: arrow_returns_by_ref,
+                ..
+            } => {
                 check_duplicate_params(params, expr.span.line)?;
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
@@ -9975,23 +11969,37 @@ impl Compiler {
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.op_array.decl_line = expr.span.line;
                 closure_compiler.op_array.returns_by_ref = *arrow_returns_by_ref;
-                closure_compiler.op_array.end_line = if *arrow_end_line > 0 { *arrow_end_line } else { expr.span.line };
+                closure_compiler.op_array.end_line = if *arrow_end_line > 0 {
+                    *arrow_end_line
+                } else {
+                    expr.span.line
+                };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
                 closure_compiler.op_array.attributes = self.compile_attributes(attributes);
                 closure_compiler.op_array.doc_comment = arrow_doc_comment.clone();
-                closure_compiler.op_array.param_attributes = params.iter().map(|p| self.compile_attributes(&p.attributes)).collect();
+                closure_compiler.op_array.param_attributes = params
+                    .iter()
+                    .map(|p| self.compile_attributes(&p.attributes))
+                    .collect();
                 // Propagate arrow function's declared return type.
                 if let Some(hint) = arrow_return_type {
-                    closure_compiler.op_array.return_type =
-                        Some(type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map));
+                    closure_compiler.op_array.return_type = Some(type_hint_to_param_type_with_ns(
+                        hint,
+                        &self.current_namespace,
+                        &self.use_map,
+                    ));
                 }
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
-                closure_compiler.op_array.scope_class = self.op_array.scope_class.clone()
-                    .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                closure_compiler.op_array.scope_class =
+                    self.op_array.scope_class.clone().or_else(|| {
+                        self.current_class
+                            .as_ref()
+                            .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect())
+                    });
 
                 // Validate parameter types
                 for param in params.iter() {
@@ -10015,10 +12023,16 @@ impl Compiler {
 
                     // Store parameter type info
                     let type_info = param.type_hint.as_ref().map(|hint| {
-                        let mut pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                        let mut pt = type_hint_to_param_type_with_ns(
+                            hint,
+                            &self.current_namespace,
+                            &self.use_map,
+                        );
                         let mut is_implicitly_nullable = false;
                         if let Some(default_expr) = &param.default {
-                            if matches!(default_expr.kind, ExprKind::Null) && !is_type_nullable_or_mixed(&pt) {
+                            if matches!(default_expr.kind, ExprKind::Null)
+                                && !is_type_nullable_or_mixed(&pt)
+                            {
                                 pt = ParamType::Nullable(Box::new(pt));
                                 is_implicitly_nullable = true;
                             }
@@ -10129,8 +12143,7 @@ impl Compiler {
                                 // time here.
                                 emit_notice = true;
                             }
-                            ExprKind::MethodCall { .. }
-                            | ExprKind::StaticMethodCall { .. } => {
+                            ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. } => {
                                 // Methods can return by-reference; defer at compile
                                 // time. The runtime detects and emits.
                             }
@@ -10140,9 +12153,9 @@ impl Compiler {
                         }
                         if emit_notice {
                             let msg_str = "Only variable references should be yielded by reference";
-                            let msg_idx = self
-                                .op_array
-                                .add_literal(Value::String(crate::string::PhpString::from_bytes(msg_str.as_bytes())));
+                            let msg_idx = self.op_array.add_literal(Value::String(
+                                crate::string::PhpString::from_bytes(msg_str.as_bytes()),
+                            ));
                             self.op_array.emit(Op {
                                 opcode: OpCode::EmitNotice,
                                 op1: OperandType::Const(msg_idx),
@@ -10257,7 +12270,10 @@ impl Compiler {
                     }
                     _ => {
                         if is_illegal_class_literal(class) {
-                            return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                            return Err(CompileError {
+                                message: "Illegal class name".into(),
+                                line: class.span.line,
+                            });
                         }
                         // $expr::class - emit GetClassName opcode
                         if constant == b"class" {
@@ -10576,8 +12592,18 @@ impl Compiler {
                 method,
                 args,
             } => {
-                if matches!(method.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null) {
-                    return Err(CompileError { message: "Method name must be a string".into(), line: expr.span.line });
+                if matches!(
+                    method.kind,
+                    ExprKind::Int(_)
+                        | ExprKind::Float(_)
+                        | ExprKind::True
+                        | ExprKind::False
+                        | ExprKind::Null
+                ) {
+                    return Err(CompileError {
+                        message: "Method name must be a string".into(),
+                        line: expr.span.line,
+                    });
                 }
                 // Dynamic static method call: Foo::$method()
                 let class_operand = match &class.kind {
@@ -10590,7 +12616,9 @@ impl Compiler {
                         } else {
                             resolved
                         };
-                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(resolved)));
+                        let idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(resolved)));
                         OperandType::Const(idx)
                     }
                     _ => self.compile_expr(class)?,
@@ -10621,7 +12649,10 @@ impl Compiler {
 
             ExprKind::StaticPropertyAccess { class, property } => {
                 if is_illegal_class_literal(class) {
-                    return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                    return Err(CompileError {
+                        message: "Illegal class name".into(),
+                        line: class.span.line,
+                    });
                 }
                 // Check if the class expression is in a nullsafe chain
                 let chain_nullsafe = expr_is_in_nullsafe_chain(class);
@@ -10640,7 +12671,9 @@ impl Compiler {
                         } else {
                             resolved
                         };
-                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(class_name)));
                         // Track self:: references for trait patching (like __CLASS__)
                         if is_self && self.is_in_trait {
                             self.op_array.class_const_literals.push(idx);
@@ -10729,7 +12762,9 @@ impl Compiler {
                         } else {
                             resolved
                         };
-                        let idx = self.op_array.add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(class_name)));
                         if is_self && self.is_in_trait {
                             self.op_array.class_const_literals.push(idx);
                         }
@@ -10757,7 +12792,8 @@ impl Compiler {
             } => {
                 // Check if this is in a nullsafe chain (e.g., $obj?->foo->bar
                 // where ->bar should also short-circuit)
-                let effective_nullsafe = *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
+                let effective_nullsafe =
+                    *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
                 let prop_operand = match &property.kind {
                     ExprKind::Identifier(name) => {
@@ -10841,10 +12877,21 @@ impl Compiler {
             } => {
                 // Check if this is in a nullsafe chain (e.g., $obj?->foo()->bar()
                 // where ->bar() should also short-circuit)
-                if matches!(method.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null) {
-                    return Err(CompileError { message: "Method name must be a string".into(), line: expr.span.line });
+                if matches!(
+                    method.kind,
+                    ExprKind::Int(_)
+                        | ExprKind::Float(_)
+                        | ExprKind::True
+                        | ExprKind::False
+                        | ExprKind::Null
+                ) {
+                    return Err(CompileError {
+                        message: "Method name must be a string".into(),
+                        line: expr.span.line,
+                    });
                 }
-                let effective_nullsafe = *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
+                let effective_nullsafe =
+                    *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
 
@@ -10871,18 +12918,19 @@ impl Compiler {
                     None
                 };
 
-                let (method_operand, method_name_for_ref): (OperandType, Option<Vec<u8>>) = match &method.kind {
-                    ExprKind::Identifier(name) => {
-                        let name_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
-                        (OperandType::Const(name_idx), Some(name.clone()))
-                    }
-                    _ => {
-                        // Dynamic method name (e.g., $this->$method())
-                        (self.compile_expr(method)?, None)
-                    }
-                };
+                let (method_operand, method_name_for_ref): (OperandType, Option<Vec<u8>>) =
+                    match &method.kind {
+                        ExprKind::Identifier(name) => {
+                            let name_idx = self
+                                .op_array
+                                .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                            (OperandType::Const(name_idx), Some(name.clone()))
+                        }
+                        _ => {
+                            // Dynamic method name (e.g., $this->$method())
+                            (self.compile_expr(method)?, None)
+                        }
+                    };
 
                 self.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
@@ -10986,7 +13034,13 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(target_cv))
                     }
-                    (ExprKind::Variable(target_name), ExprKind::ArrayAccess { array: value_arr, index: value_idx }) => {
+                    (
+                        ExprKind::Variable(target_name),
+                        ExprKind::ArrayAccess {
+                            array: value_arr,
+                            index: value_idx,
+                        },
+                    ) => {
                         // $var = &$arr[key] — get/create reference in array, assign to variable
                         let src_arr = self.compile_expr(value_arr)?;
                         let ref_tmp = self.op_array.alloc_temp();
@@ -11017,9 +13071,17 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(target_cv))
                     }
-                    (ExprKind::Variable(target_name), ExprKind::PropertyAccess { object, property, nullsafe: false }) => {
+                    (
+                        ExprKind::Variable(target_name),
+                        ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        },
+                    ) => {
                         // $var = &$obj->prop — bind the variable to the property slot
-                        let ref_tmp = self.compile_property_ref(object, property, expr.span.line)?;
+                        let ref_tmp =
+                            self.compile_property_ref(object, property, expr.span.line)?;
                         let target_cv = self.op_array.get_or_create_cv(target_name);
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
@@ -11030,9 +13092,20 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(target_cv))
                     }
-                    (ExprKind::ArrayAccess { array, index: Some(index) }, ExprKind::PropertyAccess { object, property, nullsafe: false }) => {
+                    (
+                        ExprKind::ArrayAccess {
+                            array,
+                            index: Some(index),
+                        },
+                        ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        },
+                    ) => {
                         // $arr[k] = &$obj->prop
-                        let ref_tmp = self.compile_property_ref(object, property, expr.span.line)?;
+                        let ref_tmp =
+                            self.compile_property_ref(object, property, expr.span.line)?;
                         let arr = self.compile_expr(array)?;
                         let idx = self.compile_expr(index)?;
                         self.op_array.emit(Op {
@@ -11044,7 +13117,14 @@ impl Compiler {
                         });
                         Ok(arr)
                     }
-                    (ExprKind::PropertyAccess { object, property, nullsafe: false }, _) => {
+                    (
+                        ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        },
+                        _,
+                    ) => {
                         // $obj->prop = &<expr>
                         let value_op = match &value.kind {
                             ExprKind::Variable(value_name) => {
@@ -11058,7 +13138,10 @@ impl Compiler {
                                 });
                                 OperandType::Cv(value_cv)
                             }
-                            ExprKind::ArrayAccess { array: value_arr, index: Some(value_idx) } => {
+                            ExprKind::ArrayAccess {
+                                array: value_arr,
+                                index: Some(value_idx),
+                            } => {
                                 let src_arr = self.compile_expr(value_arr)?;
                                 let src_idx = self.compile_expr(value_idx)?;
                                 let ref_tmp = self.op_array.alloc_temp();
@@ -11071,9 +13154,15 @@ impl Compiler {
                                 });
                                 OperandType::Tmp(ref_tmp)
                             }
-                            ExprKind::PropertyAccess { object: vo, property: vp, nullsafe: false } => {
-                                OperandType::Tmp(self.compile_property_ref(vo, vp, expr.span.line)?)
-                            }
+                            ExprKind::PropertyAccess {
+                                object: vo,
+                                property: vp,
+                                nullsafe: false,
+                            } => OperandType::Tmp(self.compile_property_ref(
+                                vo,
+                                vp,
+                                expr.span.line,
+                            )?),
                             _ => {
                                 let v = self.compile_expr(value)?;
                                 self.emit_assign_ref_call_notice(value, expr.span.line);
@@ -11137,8 +13226,16 @@ impl Compiler {
                         }
                         Ok(arr)
                     }
-                    (ExprKind::ArrayAccess { array: target_arr, index: target_idx },
-                     ExprKind::ArrayAccess { array: value_arr, index: value_idx }) => {
+                    (
+                        ExprKind::ArrayAccess {
+                            array: target_arr,
+                            index: target_idx,
+                        },
+                        ExprKind::ArrayAccess {
+                            array: value_arr,
+                            index: value_idx,
+                        },
+                    ) => {
                         // $arr1[k1] = &$arr2[k2] — get/create reference in source, store in target
                         let src_arr = self.compile_expr(value_arr)?;
                         let ref_tmp = self.op_array.alloc_temp();
@@ -11229,12 +13326,12 @@ impl Compiler {
                             }
                         };
                         let val = self.compile_expr(value)?;
-                        let class_idx = self.op_array.add_literal(
-                            Value::String(PhpString::from_vec(class_name))
-                        );
-                        let prop_idx = self.op_array.add_literal(
-                            Value::String(PhpString::from_vec(property.clone()))
-                        );
+                        let class_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(class_name)));
+                        let prop_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(property.clone())));
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropSet,
                             op1: OperandType::Const(class_idx),
@@ -11268,9 +13365,9 @@ impl Compiler {
                         };
                         let val = self.compile_expr(value)?;
                         let prop_op = self.compile_expr(property)?;
-                        let class_idx = self.op_array.add_literal(
-                            Value::String(PhpString::from_vec(class_name))
-                        );
+                        let class_idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(class_name)));
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropSet,
                             op1: OperandType::Const(class_idx),
@@ -11297,7 +13394,10 @@ impl Compiler {
             ExprKind::ConstantAccess(parts) if parts.len() == 1 => {
                 // Parenthesized constant name (`(NAME)(...)`): same lookup
                 // (with namespace resolution) as a bare identifier.
-                let e = Expr { kind: ExprKind::Identifier(parts[0].clone()), span: expr.span };
+                let e = Expr {
+                    kind: ExprKind::Identifier(parts[0].clone()),
+                    span: expr.span,
+                };
                 self.compile_expr(&e)
             }
 
@@ -11305,7 +13405,9 @@ impl Compiler {
                 // Qualified constant - build fully-qualified name and emit ConstLookup
                 let mut full_name = Vec::new();
                 for (i, part) in parts.iter().enumerate() {
-                    if i > 0 { full_name.push(b'\\'); }
+                    if i > 0 {
+                        full_name.push(b'\\');
+                    }
                     full_name.extend_from_slice(part);
                 }
                 // Check if it's a known compile-time constant first
@@ -11369,8 +13471,11 @@ impl Compiler {
         cc.op_array.filename = self.source_file.clone();
         cc.current_class = self.current_class.clone();
         cc.current_parent_class = self.current_parent_class.clone();
-        cc.op_array.scope_class = self.op_array.scope_class.clone()
-            .or_else(|| self.current_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect()));
+        cc.op_array.scope_class = self.op_array.scope_class.clone().or_else(|| {
+            self.current_class
+                .as_ref()
+                .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect())
+        });
         cc.anon_class_name_map = self.anon_class_name_map.clone();
 
         // Determine what needs to be captured.
@@ -11379,7 +13484,9 @@ impl Compiler {
         // - Method call: capture the object
         // - Static method: no capture needed (resolved at compile time)
         let needs_capture = match target {
-            CallableTarget::Function(name_expr) => !matches!(name_expr.kind, ExprKind::Identifier(_)),
+            CallableTarget::Function(name_expr) => {
+                !matches!(name_expr.kind, ExprKind::Identifier(_))
+            }
             CallableTarget::Method { .. } => true,
             CallableTarget::StaticMethod { .. } => false,
         };
@@ -11402,7 +13509,9 @@ impl Compiler {
                     // Static function name - resolve at compile time
                     let resolved_name = self.resolve_function_name(n);
                     cc.op_array.fcc_target_name = Some(resolved_name.clone());
-                    let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(resolved_name)));
+                    let name_idx = cc
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(resolved_name)));
                     OperandType::Const(name_idx)
                 } else {
                     // Dynamic callable - use captured value from cv0
@@ -11448,7 +13557,9 @@ impl Compiler {
                 };
                 // For method FCCs, we don't know the class name at compile time
                 // since it depends on the object type at runtime
-                let method_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(method_name)));
+                let method_idx = cc
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(method_name)));
                 cc.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
                     op1: OperandType::Cv(obj_cv),
@@ -11494,7 +13605,9 @@ impl Compiler {
                 } else if class_name.eq_ignore_ascii_case(b"static") {
                     b"static".to_vec()
                 } else if class_name.eq_ignore_ascii_case(b"parent") {
-                    self.current_parent_class.clone().unwrap_or(class_name.clone())
+                    self.current_parent_class
+                        .clone()
+                        .unwrap_or(class_name.clone())
                 } else {
                     class_name.clone()
                 };
@@ -11502,7 +13615,9 @@ impl Compiler {
                 func_name.extend_from_slice(b"::");
                 func_name.extend_from_slice(method);
                 cc.op_array.fcc_target_name = Some(func_name.clone());
-                let name_idx = cc.op_array.add_literal(Value::String(PhpString::from_vec(func_name)));
+                let name_idx = cc
+                    .op_array
+                    .add_literal(Value::String(PhpString::from_vec(func_name)));
                 let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
                 cc.op_array.emit(Op {
                     opcode: OpCode::InitFCall,
@@ -11609,8 +13724,7 @@ impl Compiler {
                 }
                 Ok(false)
             }
-            ExprKind::FunctionCall { name, args }
-                if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
+            ExprKind::FunctionCall { name, args } if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")) =>
             {
                 for arg in args {
                     if self.check_foreach_this_assign(&arg.value, _line)? {
@@ -11631,23 +13745,44 @@ impl Compiler {
     fn is_const_attr_expr(expr: &Expr) -> bool {
         use goro_parser::ast::ExprKind as E;
         match &expr.kind {
-            E::Int(_) | E::Float(_) | E::String(_) | E::True | E::False | E::Null
-            | E::ConstantAccess(_) | E::Identifier(_) | E::ClassConstAccess { .. } => true,
+            E::Int(_)
+            | E::Float(_)
+            | E::String(_)
+            | E::True
+            | E::False
+            | E::Null
+            | E::ConstantAccess(_)
+            | E::Identifier(_)
+            | E::ClassConstAccess { .. } => true,
             E::InterpolatedString(_) => false, // variables inside
-            E::BinaryOp { left, right, .. } => Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right),
+            E::BinaryOp { left, right, .. } => {
+                Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right)
+            }
             E::UnaryOp { operand, op, .. } => {
                 use goro_parser::ast::UnaryOp as U;
-                if matches!(op, U::PreIncrement | U::PreDecrement | U::PostIncrement | U::PostDecrement) {
+                if matches!(
+                    op,
+                    U::PreIncrement | U::PreDecrement | U::PostIncrement | U::PostDecrement
+                ) {
                     return false;
                 }
                 Self::is_const_attr_expr(operand)
             }
-            E::Ternary { condition, if_true, if_false } => {
+            E::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
                 Self::is_const_attr_expr(condition)
-                    && if_true.as_ref().map(|e| Self::is_const_attr_expr(e)).unwrap_or(true)
+                    && if_true
+                        .as_ref()
+                        .map(|e| Self::is_const_attr_expr(e))
+                        .unwrap_or(true)
                     && Self::is_const_attr_expr(if_false)
             }
-            E::NullCoalesce { left, right } => Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right),
+            E::NullCoalesce { left, right } => {
+                Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right)
+            }
             E::Array(elements) => elements.iter().all(|e| {
                 e.key.as_ref().map(Self::is_const_attr_expr).unwrap_or(true)
                     && Self::is_const_attr_expr(&e.value)
@@ -11657,18 +13792,40 @@ impl Compiler {
                 args.iter().all(|a| Self::is_const_attr_expr(&a.value))
             }
             // These are non-const:
-            E::Variable(_) | E::DynamicVariable(_)
-            | E::Assign { .. } | E::CompoundAssign { .. } | E::AssignRef { .. }
-            | E::PropertyAccess { .. } | E::DynamicStaticPropertyAccess { .. }
+            E::Variable(_)
+            | E::DynamicVariable(_)
+            | E::Assign { .. }
+            | E::CompoundAssign { .. }
+            | E::AssignRef { .. }
+            | E::PropertyAccess { .. }
+            | E::DynamicStaticPropertyAccess { .. }
             | E::StaticPropertyAccess { .. }
-            | E::MethodCall { .. } | E::StaticMethodCall { .. } | E::DynamicStaticMethodCall { .. }
-            | E::ArrayAccess { .. } | E::FunctionCall { .. }
-            | E::Match { .. } | E::Closure { .. } | E::ArrowFunction { .. }
-            | E::Instanceof { .. } | E::Cast(_, _) | E::Print(_) | E::Exit(_)
-            | E::Empty(_) | E::Isset(_) | E::Eval(_) | E::Include { .. }
-            | E::Yield(_, _) | E::YieldFrom(_) | E::Clone(_) | E::CloneWith { .. }
-            | E::Spread(_) | E::Pipe { .. } | E::DynamicClassConstAccess { .. }
-            | E::ThrowExpr(_) | E::Suppress(_) | E::FirstClassCallable(_) => false,
+            | E::MethodCall { .. }
+            | E::StaticMethodCall { .. }
+            | E::DynamicStaticMethodCall { .. }
+            | E::ArrayAccess { .. }
+            | E::FunctionCall { .. }
+            | E::Match { .. }
+            | E::Closure { .. }
+            | E::ArrowFunction { .. }
+            | E::Instanceof { .. }
+            | E::Cast(_, _)
+            | E::Print(_)
+            | E::Exit(_)
+            | E::Empty(_)
+            | E::Isset(_)
+            | E::Eval(_)
+            | E::Include { .. }
+            | E::Yield(_, _)
+            | E::YieldFrom(_)
+            | E::Clone(_)
+            | E::CloneWith { .. }
+            | E::Spread(_)
+            | E::Pipe { .. }
+            | E::DynamicClassConstAccess { .. }
+            | E::ThrowExpr(_)
+            | E::Suppress(_)
+            | E::FirstClassCallable(_) => false,
         }
     }
 
@@ -11681,14 +13838,22 @@ impl Compiler {
                 TypeHint::Intersection(parts) => {
                     for p in parts {
                         if let TypeHint::Simple(n) = p {
-                            if in_trait && (n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent")) {
-                                return Some(format!("Type {} cannot be part of an intersection type", String::from_utf8_lossy(n)));
+                            if in_trait
+                                && (n.eq_ignore_ascii_case(b"self")
+                                    || n.eq_ignore_ascii_case(b"parent"))
+                            {
+                                return Some(format!(
+                                    "Type {} cannot be part of an intersection type",
+                                    String::from_utf8_lossy(n)
+                                ));
                             }
                         }
                     }
                     None
                 }
-                TypeHint::Union(parts) => parts.iter().find_map(|p| relative_in_intersection(p, in_trait)),
+                TypeHint::Union(parts) => parts
+                    .iter()
+                    .find_map(|p| relative_in_intersection(p, in_trait)),
                 TypeHint::Nullable(inner) => relative_in_intersection(inner, in_trait),
                 _ => None,
             }
@@ -11698,15 +13863,47 @@ impl Compiler {
         }
         let pt = type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
         fn names(parts: &[ParamType]) -> Vec<Vec<u8>> {
-            parts.iter().filter_map(|p| if let ParamType::Simple(n) = p { Some(n.clone()) } else { None }).collect()
+            parts
+                .iter()
+                .filter_map(|p| {
+                    if let ParamType::Simple(n) = p {
+                        Some(n.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
         fn is_builtin(n: &[u8]) -> bool {
-            matches!(n, b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-                | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
-                | b"void" | b"false" | b"true" | b"never" | b"static" | b"self" | b"parent")
+            matches!(
+                n,
+                b"int"
+                    | b"integer"
+                    | b"float"
+                    | b"double"
+                    | b"string"
+                    | b"bool"
+                    | b"boolean"
+                    | b"array"
+                    | b"object"
+                    | b"callable"
+                    | b"iterable"
+                    | b"mixed"
+                    | b"null"
+                    | b"void"
+                    | b"false"
+                    | b"true"
+                    | b"never"
+                    | b"static"
+                    | b"self"
+                    | b"parent"
+            )
         }
         fn join(ns: &[Vec<u8>]) -> String {
-            ns.iter().map(|n| String::from_utf8_lossy(n).to_string()).collect::<Vec<_>>().join("&")
+            ns.iter()
+                .map(|n| String::from_utf8_lossy(n).to_string())
+                .collect::<Vec<_>>()
+                .join("&")
         }
         fn contains_ci(list: &[Vec<u8>], n: &[u8]) -> bool {
             list.iter().any(|x| x.eq_ignore_ascii_case(n))
@@ -11716,13 +13913,19 @@ impl Compiler {
                 let ns = names(parts);
                 for i in 1..ns.len() {
                     if contains_ci(&ns[..i], &ns[i]) {
-                        return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(&ns[i])));
+                        return Some(format!(
+                            "Duplicate type {} is redundant",
+                            String::from_utf8_lossy(&ns[i])
+                        ));
                     }
                 }
                 None
             }
             ParamType::Union(parts) => {
-                enum M { C(Vec<u8>), I(Vec<Vec<u8>>) }
+                enum M {
+                    C(Vec<u8>),
+                    I(Vec<Vec<u8>>),
+                }
                 let mut list: Vec<M> = Vec::new();
                 for p in parts {
                     match p {
@@ -11730,27 +13933,51 @@ impl Compiler {
                             let new = names(ip);
                             for i in 1..new.len() {
                                 if contains_ci(&new[..i], &new[i]) {
-                                    return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(&new[i])));
+                                    return Some(format!(
+                                        "Duplicate type {} is redundant",
+                                        String::from_utf8_lossy(&new[i])
+                                    ));
                                 }
                             }
                             for prev in &list {
                                 match prev {
                                     M::I(old) => {
-                                        let (smaller, larger) = if old.len() < new.len() { (old, &new) } else { (&new, old) };
-                                        let sum = smaller.iter().filter(|n| contains_ci(larger, n)).count();
+                                        let (smaller, larger) = if old.len() < new.len() {
+                                            (old, &new)
+                                        } else {
+                                            (&new, old)
+                                        };
+                                        let sum = smaller
+                                            .iter()
+                                            .filter(|n| contains_ci(larger, n))
+                                            .count();
                                         if sum == smaller.len() {
                                             // left = new, right = old (zend_are_intersection_types_redundant(single, prev))
                                             let flipped = old.len() < new.len();
-                                            let (sm_s, lg_s) = if flipped { (join(old), join(&new)) } else { (join(&new), join(old)) };
+                                            let (sm_s, lg_s) = if flipped {
+                                                (join(old), join(&new))
+                                            } else {
+                                                (join(&new), join(old))
+                                            };
                                             if smaller.len() == larger.len() {
-                                                return Some(format!("Type {} is redundant with type {}", sm_s, lg_s));
+                                                return Some(format!(
+                                                    "Type {} is redundant with type {}",
+                                                    sm_s, lg_s
+                                                ));
                                             }
-                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", lg_s, sm_s));
+                                            return Some(format!(
+                                                "Type {} is redundant as it is more restrictive than type {}",
+                                                lg_s, sm_s
+                                            ));
                                         }
                                     }
                                     M::C(c) => {
                                         if contains_ci(&new, c) {
-                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", join(&new), String::from_utf8_lossy(c)));
+                                            return Some(format!(
+                                                "Type {} is redundant as it is more restrictive than type {}",
+                                                join(&new),
+                                                String::from_utf8_lossy(c)
+                                            ));
                                         }
                                     }
                                 }
@@ -11762,12 +13989,19 @@ impl Compiler {
                                 match prev {
                                     M::I(old) => {
                                         if contains_ci(old, n) {
-                                            return Some(format!("Type {} is redundant as it is more restrictive than type {}", join(old), String::from_utf8_lossy(n)));
+                                            return Some(format!(
+                                                "Type {} is redundant as it is more restrictive than type {}",
+                                                join(old),
+                                                String::from_utf8_lossy(n)
+                                            ));
                                         }
                                     }
                                     M::C(c) => {
                                         if c.eq_ignore_ascii_case(n) {
-                                            return Some(format!("Duplicate type {} is redundant", String::from_utf8_lossy(n)));
+                                            return Some(format!(
+                                                "Duplicate type {} is redundant",
+                                                String::from_utf8_lossy(n)
+                                            ));
                                         }
                                     }
                                 }
@@ -11786,8 +14020,13 @@ impl Compiler {
     /// zend_is_valid_default_value for a compile-time literal default value.
     /// Ok(None): valid or not a literal; Ok(Some(v)): valid once widened to
     /// float (use `v`); Err((type name, value name)) when invalid.
-    fn check_literal_default(pt: &ParamType, e: &Expr) -> Result<Option<Value>, (&'static str, &'static str)> {
-        use crate::vm::variance::{TypeView, T_ANY, T_ARRAY, T_DOUBLE, T_FALSE, T_LONG, T_NULL, T_STRING, T_TRUE};
+    fn check_literal_default(
+        pt: &ParamType,
+        e: &Expr,
+    ) -> Result<Option<Value>, (&'static str, &'static str)> {
+        use crate::vm::variance::{
+            T_ANY, T_ARRAY, T_DOUBLE, T_FALSE, T_LONG, T_NULL, T_STRING, T_TRUE, TypeView,
+        };
         let v = match Self::eval_const_expr(e) {
             Some(v) => v,
             None => return Ok(None),
@@ -11855,42 +14094,84 @@ impl Compiler {
                 }
                 Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
             }
-            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
-                match Self::eval_const_expr(operand)? {
-                    Value::Long(n) => Some(Value::Long(-n)),
-                    Value::Double(f) => Some(Value::Double(-f)),
-                    _ => None,
-                }
-            }
-            ExprKind::UnaryOp { op: UnaryOp::BitwiseNot, operand, .. } => {
-                match Self::eval_const_expr(operand)? {
-                    Value::Long(n) => Some(Value::Long(!n)),
-                    _ => None,
-                }
-            }
-            ExprKind::BinaryOp { left, op, right, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::Negate,
+                operand,
+                ..
+            } => match Self::eval_const_expr(operand)? {
+                Value::Long(n) => Some(Value::Long(-n)),
+                Value::Double(f) => Some(Value::Double(-f)),
+                _ => None,
+            },
+            ExprKind::UnaryOp {
+                op: UnaryOp::BitwiseNot,
+                operand,
+                ..
+            } => match Self::eval_const_expr(operand)? {
+                Value::Long(n) => Some(Value::Long(!n)),
+                _ => None,
+            },
+            ExprKind::BinaryOp {
+                left, op, right, ..
+            } => {
                 let l = Self::eval_const_expr(left)?;
                 let r = Self::eval_const_expr(right)?;
                 match (l, op, r) {
-                    (Value::Long(a), BinaryOp::ShiftLeft, Value::Long(b)) => Some(Value::Long(a << b)),
-                    (Value::Long(a), BinaryOp::ShiftRight, Value::Long(b)) => Some(Value::Long(a >> b)),
-                    (Value::Long(a), BinaryOp::BitwiseAnd, Value::Long(b)) => Some(Value::Long(a & b)),
-                    (Value::Long(a), BinaryOp::BitwiseOr, Value::Long(b)) => Some(Value::Long(a | b)),
-                    (Value::Long(a), BinaryOp::BitwiseXor, Value::Long(b)) => Some(Value::Long(a ^ b)),
-                    (Value::Long(a), BinaryOp::Add, Value::Long(b)) => Some(Value::Long(a.wrapping_add(b))),
-                    (Value::Long(a), BinaryOp::Sub, Value::Long(b)) => Some(Value::Long(a.wrapping_sub(b))),
-                    (Value::Long(a), BinaryOp::Mul, Value::Long(b)) => Some(Value::Long(a.wrapping_mul(b))),
-                    (Value::Long(a), BinaryOp::Div, Value::Long(b)) if b != 0 => {
-                        if a % b == 0 { Some(Value::Long(a / b)) } else { Some(Value::Double(a as f64 / b as f64)) }
+                    (Value::Long(a), BinaryOp::ShiftLeft, Value::Long(b)) => {
+                        Some(Value::Long(a << b))
                     }
-                    (Value::Long(a), BinaryOp::Mod, Value::Long(b)) if b != 0 => Some(Value::Long(a % b)),
-                    (Value::Long(a), BinaryOp::Pow, Value::Long(b)) if b >= 0 => Some(Value::Long(a.wrapping_pow(b as u32))),
-                    (Value::Double(a), BinaryOp::Add, Value::Double(b)) => Some(Value::Double(a + b)),
-                    (Value::Double(a), BinaryOp::Sub, Value::Double(b)) => Some(Value::Double(a - b)),
-                    (Value::Double(a), BinaryOp::Mul, Value::Double(b)) => Some(Value::Double(a * b)),
-                    (Value::Double(a), BinaryOp::Div, Value::Double(b)) if b != 0.0 => Some(Value::Double(a / b)),
-                    (Value::Long(a), BinaryOp::Add, Value::Double(b)) => Some(Value::Double(a as f64 + b)),
-                    (Value::Double(a), BinaryOp::Add, Value::Long(b)) => Some(Value::Double(a + b as f64)),
+                    (Value::Long(a), BinaryOp::ShiftRight, Value::Long(b)) => {
+                        Some(Value::Long(a >> b))
+                    }
+                    (Value::Long(a), BinaryOp::BitwiseAnd, Value::Long(b)) => {
+                        Some(Value::Long(a & b))
+                    }
+                    (Value::Long(a), BinaryOp::BitwiseOr, Value::Long(b)) => {
+                        Some(Value::Long(a | b))
+                    }
+                    (Value::Long(a), BinaryOp::BitwiseXor, Value::Long(b)) => {
+                        Some(Value::Long(a ^ b))
+                    }
+                    (Value::Long(a), BinaryOp::Add, Value::Long(b)) => {
+                        Some(Value::Long(a.wrapping_add(b)))
+                    }
+                    (Value::Long(a), BinaryOp::Sub, Value::Long(b)) => {
+                        Some(Value::Long(a.wrapping_sub(b)))
+                    }
+                    (Value::Long(a), BinaryOp::Mul, Value::Long(b)) => {
+                        Some(Value::Long(a.wrapping_mul(b)))
+                    }
+                    (Value::Long(a), BinaryOp::Div, Value::Long(b)) if b != 0 => {
+                        if a % b == 0 {
+                            Some(Value::Long(a / b))
+                        } else {
+                            Some(Value::Double(a as f64 / b as f64))
+                        }
+                    }
+                    (Value::Long(a), BinaryOp::Mod, Value::Long(b)) if b != 0 => {
+                        Some(Value::Long(a % b))
+                    }
+                    (Value::Long(a), BinaryOp::Pow, Value::Long(b)) if b >= 0 => {
+                        Some(Value::Long(a.wrapping_pow(b as u32)))
+                    }
+                    (Value::Double(a), BinaryOp::Add, Value::Double(b)) => {
+                        Some(Value::Double(a + b))
+                    }
+                    (Value::Double(a), BinaryOp::Sub, Value::Double(b)) => {
+                        Some(Value::Double(a - b))
+                    }
+                    (Value::Double(a), BinaryOp::Mul, Value::Double(b)) => {
+                        Some(Value::Double(a * b))
+                    }
+                    (Value::Double(a), BinaryOp::Div, Value::Double(b)) if b != 0.0 => {
+                        Some(Value::Double(a / b))
+                    }
+                    (Value::Long(a), BinaryOp::Add, Value::Double(b)) => {
+                        Some(Value::Double(a as f64 + b))
+                    }
+                    (Value::Double(a), BinaryOp::Add, Value::Long(b)) => {
+                        Some(Value::Double(a + b as f64))
+                    }
                     (Value::String(a), BinaryOp::Concat, Value::String(b)) => {
                         let mut result = a.as_bytes().to_vec();
                         result.extend_from_slice(b.as_bytes());
@@ -11904,39 +14185,91 @@ impl Compiler {
                     }
                     // Boolean/logical operators - always return bool
                     (l, BinaryOp::BooleanAnd, r) | (l, BinaryOp::LogicalAnd, r) => {
-                        Some(if l.is_truthy() && r.is_truthy() { Value::True } else { Value::False })
+                        Some(if l.is_truthy() && r.is_truthy() {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
                     }
                     (l, BinaryOp::BooleanOr, r) | (l, BinaryOp::LogicalOr, r) => {
-                        Some(if l.is_truthy() || r.is_truthy() { Value::True } else { Value::False })
+                        Some(if l.is_truthy() || r.is_truthy() {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
                     }
-                    (l, BinaryOp::LogicalXor, r) => {
-                        Some(if l.is_truthy() ^ r.is_truthy() { Value::True } else { Value::False })
-                    }
+                    (l, BinaryOp::LogicalXor, r) => Some(if l.is_truthy() ^ r.is_truthy() {
+                        Value::True
+                    } else {
+                        Value::False
+                    }),
                     // Comparison operators
-                    (Value::Long(a), BinaryOp::Less, Value::Long(b)) => Some(if a < b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::Greater, Value::Long(b)) => Some(if a > b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::LessEqual, Value::Long(b)) => Some(if a <= b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::GreaterEqual, Value::Long(b)) => Some(if a >= b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::Equal, Value::Long(b)) => Some(if a == b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::Identical, Value::Long(b)) => Some(if a == b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::NotEqual, Value::Long(b)) => Some(if a != b { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::NotIdentical, Value::Long(b)) => Some(if a != b { Value::True } else { Value::False }),
-                    // Equal/NotEqual with string comparison (loose)
-                    (Value::String(a), BinaryOp::Equal, Value::String(b)) => Some(if a.as_bytes() == b.as_bytes() { Value::True } else { Value::False }),
-                    (Value::String(a), BinaryOp::NotEqual, Value::String(b)) => Some(if a.as_bytes() != b.as_bytes() { Value::True } else { Value::False }),
-                    (Value::Long(a), BinaryOp::Equal, Value::String(b)) | (Value::String(b), BinaryOp::Equal, Value::Long(a)) => {
-                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
-                        Some(if s.parse::<i64>().ok() == Some(a) { Value::True } else { Value::False })
+                    (Value::Long(a), BinaryOp::Less, Value::Long(b)) => {
+                        Some(if a < b { Value::True } else { Value::False })
                     }
-                    (Value::Long(a), BinaryOp::NotEqual, Value::String(b)) | (Value::String(b), BinaryOp::NotEqual, Value::Long(a)) => {
+                    (Value::Long(a), BinaryOp::Greater, Value::Long(b)) => {
+                        Some(if a > b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::LessEqual, Value::Long(b)) => {
+                        Some(if a <= b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::GreaterEqual, Value::Long(b)) => {
+                        Some(if a >= b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::Equal, Value::Long(b)) => {
+                        Some(if a == b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::Identical, Value::Long(b)) => {
+                        Some(if a == b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::NotEqual, Value::Long(b)) => {
+                        Some(if a != b { Value::True } else { Value::False })
+                    }
+                    (Value::Long(a), BinaryOp::NotIdentical, Value::Long(b)) => {
+                        Some(if a != b { Value::True } else { Value::False })
+                    }
+                    // Equal/NotEqual with string comparison (loose)
+                    (Value::String(a), BinaryOp::Equal, Value::String(b)) => {
+                        Some(if a.as_bytes() == b.as_bytes() {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
+                    }
+                    (Value::String(a), BinaryOp::NotEqual, Value::String(b)) => {
+                        Some(if a.as_bytes() != b.as_bytes() {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
+                    }
+                    (Value::Long(a), BinaryOp::Equal, Value::String(b))
+                    | (Value::String(b), BinaryOp::Equal, Value::Long(a)) => {
                         let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
-                        Some(if s.parse::<i64>().ok() != Some(a) { Value::True } else { Value::False })
+                        Some(if s.parse::<i64>().ok() == Some(a) {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
+                    }
+                    (Value::Long(a), BinaryOp::NotEqual, Value::String(b))
+                    | (Value::String(b), BinaryOp::NotEqual, Value::Long(a)) => {
+                        let s = std::str::from_utf8(b.as_bytes()).unwrap_or("");
+                        Some(if s.parse::<i64>().ok() != Some(a) {
+                            Value::True
+                        } else {
+                            Value::False
+                        })
                     }
                     _ => None,
                 }
             }
             // Ternary operator
-            ExprKind::Ternary { condition, if_true, if_false } => {
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
                 let cond = Self::eval_const_expr(condition)?;
                 if cond.is_truthy() {
                     if let Some(true_expr) = if_true {
@@ -11950,14 +14283,24 @@ impl Compiler {
                 }
             }
             // UnaryOp::BooleanNot (!)
-            ExprKind::UnaryOp { op: UnaryOp::BooleanNot, operand, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::BooleanNot,
+                operand,
+                ..
+            } => {
                 let val = Self::eval_const_expr(operand)?;
-                Some(if val.is_truthy() { Value::False } else { Value::True })
+                Some(if val.is_truthy() {
+                    Value::False
+                } else {
+                    Value::True
+                })
             }
             // UnaryOp::Plus (+)
-            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => {
-                Self::eval_const_expr(operand)
-            }
+            ExprKind::UnaryOp {
+                op: UnaryOp::Plus,
+                operand,
+                ..
+            } => Self::eval_const_expr(operand),
             // Handle Identifier constants (TRUE, FALSE, NULL, PHP_INT_MAX, etc.)
             ExprKind::Identifier(name) => {
                 let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -11997,7 +14340,9 @@ impl Compiler {
                     b"php_config_file_path" => Some(Value::String(PhpString::from_bytes(b"/etc"))),
                     b"php_config_file_scan_dir" => Some(Value::String(PhpString::from_bytes(b""))),
                     b"php_extension_dir" => Some(Value::String(PhpString::from_bytes(b"."))),
-                    b"directory_separator" | b"dirsep" => Some(Value::String(PhpString::from_bytes(b"/"))),
+                    b"directory_separator" | b"dirsep" => {
+                        Some(Value::String(PhpString::from_bytes(b"/")))
+                    }
                     b"path_separator" => Some(Value::String(PhpString::from_bytes(b":"))),
                     b"stdin" | b"stdout" | b"stderr" => None, // resources can't be const
                     b"nan" => Some(Value::Double(f64::NAN)),
@@ -12032,18 +14377,22 @@ impl Compiler {
                     CastType::Int => Some(Value::Long(val.to_long())),
                     CastType::Float => Some(Value::Double(val.to_double())),
                     CastType::String => Some(Value::String(val.to_php_string())),
-                    CastType::Bool => Some(if val.is_truthy() { Value::True } else { Value::False }),
-                    CastType::Array => {
-                        match val {
-                            Value::Array(_) => Some(val),
-                            Value::Null => Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(crate::array::PhpArray::new())))),
-                            other => {
-                                let mut arr = crate::array::PhpArray::new();
-                                arr.push(other);
-                                Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
-                            }
+                    CastType::Bool => Some(if val.is_truthy() {
+                        Value::True
+                    } else {
+                        Value::False
+                    }),
+                    CastType::Array => match val {
+                        Value::Array(_) => Some(val),
+                        Value::Null => Some(Value::Array(std::rc::Rc::new(
+                            std::cell::RefCell::new(crate::array::PhpArray::new()),
+                        ))),
+                        other => {
+                            let mut arr = crate::array::PhpArray::new();
+                            arr.push(other);
+                            Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
                         }
-                    }
+                    },
                     _ => None,
                 }
             }
@@ -12072,17 +14421,29 @@ impl Compiler {
 
     /// Try to resolve an expression as a class constant reference.
     /// This handles `self::CONST`, `ClassName::CONST` etc. during class compilation.
-    fn eval_class_const_expr(expr: &Expr, class: &ClassEntry, qualified_name: &[u8], extends: Option<&[u8]>, compiler: &Compiler) -> Option<Value> {
+    fn eval_class_const_expr(
+        expr: &Expr,
+        class: &ClassEntry,
+        qualified_name: &[u8],
+        extends: Option<&[u8]>,
+        compiler: &Compiler,
+    ) -> Option<Value> {
         match &expr.kind {
-            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+            ExprKind::ClassConstAccess {
+                class: class_expr,
+                constant,
+            } => {
                 let target_class = match &class_expr.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = compiler.resolve_class_name(name);
-                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let lower: Vec<u8> =
+                            resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if lower == b"self" || lower == b"static" {
                             qualified_name.to_vec()
                         } else if lower == b"parent" {
-                            extends.map(|p| compiler.resolve_class_name(p)).unwrap_or(resolved)
+                            extends
+                                .map(|p| compiler.resolve_class_name(p))
+                                .unwrap_or(resolved)
                         } else {
                             resolved
                         }
@@ -12096,8 +14457,14 @@ impl Compiler {
                 }
 
                 // Check if this references the same class
-                let target_lower: Vec<u8> = target_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let self_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let target_lower: Vec<u8> = target_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let self_lower: Vec<u8> = qualified_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if target_lower == self_lower {
                     // Look up the constant in the class being compiled
                     if let Some(val) = class.constants.get(constant) {
@@ -12112,17 +14479,23 @@ impl Compiler {
                 }
                 None
             }
-            ExprKind::DynamicClassConstAccess { class: class_expr, constant: const_expr } => {
+            ExprKind::DynamicClassConstAccess {
+                class: class_expr,
+                constant: const_expr,
+            } => {
                 // Dynamic class constant access in constant expression context: self::{'BAR'}
                 // Only evaluatable if the class is self/static and the key is a string literal
                 let target_class = match &class_expr.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = compiler.resolve_class_name(name);
-                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let lower: Vec<u8> =
+                            resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if lower == b"self" || lower == b"static" {
                             qualified_name.to_vec()
                         } else if lower == b"parent" {
-                            extends.map(|p| compiler.resolve_class_name(p)).unwrap_or(resolved)
+                            extends
+                                .map(|p| compiler.resolve_class_name(p))
+                                .unwrap_or(resolved)
                         } else {
                             resolved
                         }
@@ -12130,15 +14503,28 @@ impl Compiler {
                     _ => return None,
                 };
                 // Evaluate the constant name expression
-                let const_name_val = Self::eval_const_expr(const_expr)
-                    .or_else(|| Self::eval_class_const_expr(const_expr, class, qualified_name, extends, compiler))?;
+                let const_name_val = Self::eval_const_expr(const_expr).or_else(|| {
+                    Self::eval_class_const_expr(
+                        const_expr,
+                        class,
+                        qualified_name,
+                        extends,
+                        compiler,
+                    )
+                })?;
                 let const_name_str = match const_name_val {
                     Value::String(s) => s.as_bytes().to_vec(),
                     _ => return None,
                 };
                 // Check if this references the same class
-                let target_lower: Vec<u8> = target_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let self_lower: Vec<u8> = qualified_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let target_lower: Vec<u8> = target_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let self_lower: Vec<u8> = qualified_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if target_lower == self_lower {
                     if let Some(val) = class.constants.get(&const_name_str) {
                         if let Value::String(s) = val {
@@ -12181,7 +14567,10 @@ impl Compiler {
             return Some(v);
         }
         match &expr.kind {
-            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+            ExprKind::ClassConstAccess {
+                class: class_expr,
+                constant,
+            } => {
                 // Unresolved: emit a deferred marker.
                 let class_name = match &class_expr.kind {
                     ExprKind::Identifier(name) => {
@@ -12189,7 +14578,9 @@ impl Compiler {
                         if resolved.eq_ignore_ascii_case(b"self") {
                             qualified_name.to_vec()
                         } else if resolved.eq_ignore_ascii_case(b"parent") {
-                            extends.map(|p| self.resolve_class_name(p)).unwrap_or(resolved)
+                            extends
+                                .map(|p| self.resolve_class_name(p))
+                                .unwrap_or(resolved)
                         } else {
                             resolved
                         }
@@ -12206,14 +14597,18 @@ impl Compiler {
             ExprKind::ConstantAccess(parts) => {
                 // Try magic constants first.
                 let name_lower: Vec<u8> = parts.iter().flat_map(|p| p.iter()).copied().collect();
-                let name_lower_lc: Vec<u8> = name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let magic_val = self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
+                let name_lower_lc: Vec<u8> =
+                    name_lower.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let magic_val =
+                    self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
                 if !matches!(magic_val, Value::Null) {
                     return Some(magic_val);
                 }
                 let mut full_name = Vec::new();
                 for (i, part) in parts.iter().enumerate() {
-                    if i > 0 { full_name.push(b'\\'); }
+                    if i > 0 {
+                        full_name.push(b'\\');
+                    }
                     full_name.extend_from_slice(part);
                 }
                 let mut marker = b"__deferred_global_const__::".to_vec();
@@ -12222,7 +14617,8 @@ impl Compiler {
             }
             ExprKind::Identifier(name) => {
                 let name_lower_lc: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let magic_val = self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
+                let magic_val =
+                    self.resolve_class_const_magic(&name_lower_lc, qualified_name, expr.span.line);
                 if !matches!(magic_val, Value::Null) {
                     return Some(magic_val);
                 }
@@ -12238,13 +14634,18 @@ impl Compiler {
                 marker.extend_from_slice(&resolved_name);
                 Some(Value::String(crate::string::PhpString::from_vec(marker)))
             }
-            ExprKind::BinaryOp { op, left, right, .. } => {
+            ExprKind::BinaryOp {
+                op, left, right, ..
+            } => {
                 let lv = self.eval_or_defer_in_class_const(left, class, qualified_name, extends)?;
-                let rv = self.eval_or_defer_in_class_const(right, class, qualified_name, extends)?;
-                let is_deferred = |v: &Value| matches!(v, Value::String(s)
+                let rv =
+                    self.eval_or_defer_in_class_const(right, class, qualified_name, extends)?;
+                let is_deferred = |v: &Value| {
+                    matches!(v, Value::String(s)
                     if s.as_bytes().starts_with(b"__deferred_const__::")
                     || s.as_bytes().starts_with(b"__deferred_global_const__::")
-                    || s.as_bytes().starts_with(b"__deferred_binop__::"));
+                    || s.as_bytes().starts_with(b"__deferred_binop__::"))
+                };
                 if is_deferred(&lv) || is_deferred(&rv) {
                     let op_code: u8 = match op {
                         BinaryOp::Concat => 1,
@@ -12303,14 +14704,18 @@ impl Compiler {
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) {
         match &expr.kind {
-            ExprKind::ClassConstAccess { class: class_expr, constant } => {
+            ExprKind::ClassConstAccess {
+                class: class_expr,
+                constant,
+            } => {
                 if constant == b"class" {
                     return;
                 }
                 let class_resolved: Option<Vec<u8>> = match &class_expr.kind {
                     ExprKind::Identifier(name) => {
                         let resolved = compiler.resolve_class_name(name);
-                        let lower: Vec<u8> = resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let lower: Vec<u8> =
+                            resolved.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if lower == b"self" || lower == b"static" {
                             Some(qualified_name.to_vec())
                         } else if lower == b"parent" {
@@ -12333,7 +14738,11 @@ impl Compiler {
             ExprKind::UnaryOp { operand, .. } => {
                 Self::collect_class_const_refs(operand, qualified_name, extends, compiler, out);
             }
-            ExprKind::Ternary { condition, if_true, if_false } => {
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
                 Self::collect_class_const_refs(condition, qualified_name, extends, compiler, out);
                 if let Some(t) = if_true {
                     Self::collect_class_const_refs(t, qualified_name, extends, compiler, out);
@@ -12349,7 +14758,13 @@ impl Compiler {
                     if let Some(k) = &elem.key {
                         Self::collect_class_const_refs(k, qualified_name, extends, compiler, out);
                     }
-                    Self::collect_class_const_refs(&elem.value, qualified_name, extends, compiler, out);
+                    Self::collect_class_const_refs(
+                        &elem.value,
+                        qualified_name,
+                        extends,
+                        compiler,
+                        out,
+                    );
                 }
             }
             ExprKind::Cast(_, inner) => {
@@ -12381,7 +14796,11 @@ fn compound_binary_opcode(op: &BinaryOp) -> OpCode {
 }
 
 /// Convert an AST TypeHint into a runtime ParamType with namespace resolution.
-fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &HashMap<Vec<u8>, Vec<u8>>) -> ParamType {
+fn type_hint_to_param_type_with_ns(
+    hint: &TypeHint,
+    namespace: &[u8],
+    use_map: &HashMap<Vec<u8>, Vec<u8>>,
+) -> ParamType {
     match hint {
         TypeHint::Simple(name) => {
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -12401,7 +14820,8 @@ fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &
                     // Check use map
                     if let Some(pos) = name.iter().position(|&b| b == b'\\') {
                         let first_part = &name[..pos];
-                        let first_lower: Vec<u8> = first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let first_lower: Vec<u8> =
+                            first_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if let Some(resolved) = use_map.get(&first_lower) {
                             let mut result = resolved.clone();
                             result.extend_from_slice(&name[pos..]);
@@ -12418,7 +14838,8 @@ fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &
                         }
                     } else {
                         // Unqualified: check use map
-                        let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let name_lower: Vec<u8> =
+                            name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         if let Some(resolved) = use_map.get(&name_lower) {
                             return ParamType::Simple(resolved.clone());
                         }
@@ -12435,13 +14856,21 @@ fn type_hint_to_param_type_with_ns(hint: &TypeHint, namespace: &[u8], use_map: &
                 }
             }
         }
-        TypeHint::Nullable(inner) => ParamType::Nullable(Box::new(type_hint_to_param_type_with_ns(inner, namespace, use_map))),
-        TypeHint::Union(types) => {
-            ParamType::Union(types.iter().map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map)).collect())
-        }
-        TypeHint::Intersection(types) => {
-            ParamType::Intersection(types.iter().map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map)).collect())
-        }
+        TypeHint::Nullable(inner) => ParamType::Nullable(Box::new(
+            type_hint_to_param_type_with_ns(inner, namespace, use_map),
+        )),
+        TypeHint::Union(types) => ParamType::Union(
+            types
+                .iter()
+                .map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map))
+                .collect(),
+        ),
+        TypeHint::Intersection(types) => ParamType::Intersection(
+            types
+                .iter()
+                .map(|t| type_hint_to_param_type_with_ns(t, namespace, use_map))
+                .collect(),
+        ),
     }
 }
 
@@ -12453,12 +14882,12 @@ fn is_type_nullable_or_mixed(pt: &ParamType) -> bool {
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
             lower == b"mixed" || lower == b"null"
         }
-        ParamType::Union(types) => {
-            types.iter().any(|t| matches!(t, ParamType::Simple(n) if {
+        ParamType::Union(types) => types.iter().any(|t| {
+            matches!(t, ParamType::Simple(n) if {
                 let lower: Vec<u8> = n.iter().map(|b| b.to_ascii_lowercase()).collect();
                 lower == b"null" || lower == b"mixed"
-            }))
-        }
+            })
+        }),
         ParamType::Intersection(_) => false,
     }
 }
@@ -12468,8 +14897,16 @@ fn type_hint_display(hint: &TypeHint) -> String {
     match hint {
         TypeHint::Simple(name) => String::from_utf8_lossy(name).to_string(),
         TypeHint::Nullable(inner) => format!("?{}", type_hint_display(inner)),
-        TypeHint::Union(types) => types.iter().map(type_hint_display).collect::<Vec<_>>().join("|"),
-        TypeHint::Intersection(types) => types.iter().map(type_hint_display).collect::<Vec<_>>().join("&"),
+        TypeHint::Union(types) => types
+            .iter()
+            .map(type_hint_display)
+            .collect::<Vec<_>>()
+            .join("|"),
+        TypeHint::Intersection(types) => types
+            .iter()
+            .map(type_hint_display)
+            .collect::<Vec<_>>()
+            .join("&"),
     }
 }
 
@@ -12478,9 +14915,26 @@ pub fn is_reserved_class_name(name: &[u8]) -> bool {
     let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
     matches!(
         lower.as_slice(),
-        b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-        | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
-        | b"void" | b"self" | b"parent" | b"static" | b"false" | b"true" | b"never"
+        b"int"
+            | b"integer"
+            | b"float"
+            | b"double"
+            | b"string"
+            | b"bool"
+            | b"boolean"
+            | b"array"
+            | b"object"
+            | b"callable"
+            | b"iterable"
+            | b"mixed"
+            | b"null"
+            | b"void"
+            | b"self"
+            | b"parent"
+            | b"static"
+            | b"false"
+            | b"true"
+            | b"never"
     )
 }
 
@@ -12492,7 +14946,11 @@ fn validate_type_hint(hint: &TypeHint, class_name: Option<&[u8]>) -> Option<Stri
     validate_type_hint_full(hint, class_name, None)
 }
 
-fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_class_name: Option<&[u8]>) -> Option<String> {
+fn validate_type_hint_full(
+    hint: &TypeHint,
+    class_name: Option<&[u8]>,
+    parent_class_name: Option<&[u8]>,
+) -> Option<String> {
     match hint {
         TypeHint::Nullable(inner) => {
             // ?null is invalid
@@ -12503,7 +14961,10 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                 }
                 // ?mixed is invalid - "mixed already includes null"
                 if lower == b"mixed" {
-                    return Some("Type mixed cannot be marked as nullable since mixed already includes null".to_string());
+                    return Some(
+                        "Type mixed cannot be marked as nullable since mixed already includes null"
+                            .to_string(),
+                    );
                 }
                 // ?void is invalid
                 if lower == b"void" {
@@ -12536,12 +14997,8 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
 
                         // Resolve self/parent to actual class name for duplicate checking
                         let resolved = match lower.as_slice() {
-                            b"self" => {
-                                class_name.map(|cn| cn.to_vec())
-                            }
-                            b"parent" => {
-                                parent_class_name.map(|pn| pn.to_vec())
-                            }
+                            b"self" => class_name.map(|cn| cn.to_vec()),
+                            b"parent" => parent_class_name.map(|pn| pn.to_vec()),
                             _ => None,
                         };
 
@@ -12562,10 +15019,25 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                         // The display name for error messages: resolved class name or canonical built-in
                         let display_name: String = if let Some(ref r) = resolved {
                             String::from_utf8_lossy(r).to_string()
-                        } else if matches!(lower.as_slice(),
-                            b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-                            | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
-                            | b"void" | b"false" | b"true" | b"never"
+                        } else if matches!(
+                            lower.as_slice(),
+                            b"int"
+                                | b"integer"
+                                | b"float"
+                                | b"double"
+                                | b"string"
+                                | b"bool"
+                                | b"boolean"
+                                | b"array"
+                                | b"object"
+                                | b"callable"
+                                | b"iterable"
+                                | b"mixed"
+                                | b"null"
+                                | b"void"
+                                | b"false"
+                                | b"true"
+                                | b"never"
                         ) {
                             // For built-in types, display the canonical (lowercase) form
                             String::from_utf8_lossy(&canonical).to_string()
@@ -12589,7 +15061,9 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                                     return Some("Duplicate type array is redundant".to_string());
                                 }
                                 if seen_types.iter().any(|s| s == b"traversable") {
-                                    return Some("Duplicate type Traversable is redundant".to_string());
+                                    return Some(
+                                        "Duplicate type Traversable is redundant".to_string(),
+                                    );
                                 }
                                 // Add both expanded types
                                 seen_types.push(b"traversable".to_vec());
@@ -12605,10 +15079,25 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                         }
 
                         // Check for class type (non-builtin) for object redundancy
-                        if !matches!(lower.as_slice(),
-                            b"int" | b"integer" | b"float" | b"double" | b"string" | b"bool" | b"boolean"
-                            | b"array" | b"object" | b"callable" | b"iterable" | b"mixed" | b"null"
-                            | b"void" | b"false" | b"true" | b"never"
+                        if !matches!(
+                            lower.as_slice(),
+                            b"int"
+                                | b"integer"
+                                | b"float"
+                                | b"double"
+                                | b"string"
+                                | b"bool"
+                                | b"boolean"
+                                | b"array"
+                                | b"object"
+                                | b"callable"
+                                | b"iterable"
+                                | b"mixed"
+                                | b"null"
+                                | b"void"
+                                | b"false"
+                                | b"true"
+                                | b"never"
                         ) {
                             has_class_type = true;
                             class_type_names.push(display_name.clone().into_bytes());
@@ -12617,7 +15106,10 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                         // Check for duplicate types (skip iterable which was handled above)
                         if lower != b"iterable" {
                             if seen_types.iter().any(|s| s == &canonical) {
-                                return Some(format!("Duplicate type {} is redundant", display_name));
+                                return Some(format!(
+                                    "Duplicate type {} is redundant",
+                                    display_name
+                                ));
                             }
                             seen_types.push(canonical);
                         }
@@ -12653,7 +15145,9 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
             }
             // true + false should be bool
             if has_true && has_false {
-                return Some("Type contains both true and false, bool must be used instead".to_string());
+                return Some(
+                    "Type contains both true and false, bool must be used instead".to_string(),
+                );
             }
             // object + class type is redundant
             if has_object && has_class_type {
@@ -12663,14 +15157,21 @@ fn validate_type_hint_full(hint: &TypeHint, class_name: Option<&[u8]>, parent_cl
                 for e in tv.elems.iter_mut() {
                     if let crate::vm::variance::TElem::Name(n) = e {
                         if n.eq_ignore_ascii_case(b"self") {
-                            if let Some(cn) = class_name { *n = cn.to_vec(); }
+                            if let Some(cn) = class_name {
+                                *n = cn.to_vec();
+                            }
                         } else if n.eq_ignore_ascii_case(b"parent") {
-                            if let Some(pn) = parent_class_name { *n = pn.to_vec(); }
+                            if let Some(pn) = parent_class_name {
+                                *n = pn.to_vec();
+                            }
                         }
                     }
                 }
                 let full_type = crate::vm::variance::type_to_string(&tv, None);
-                return Some(format!("Type {} contains both object and a class type, which is redundant", full_type));
+                return Some(format!(
+                    "Type {} contains both object and a class type, which is redundant",
+                    full_type
+                ));
             }
 
             None
@@ -12695,8 +15196,12 @@ fn check_relative_type_outside_class(hint: &TypeHint) -> Option<String> {
             let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
             match lower.as_slice() {
                 b"self" => Some("Cannot use \"self\" when no class scope is active".to_string()),
-                b"parent" => Some("Cannot use \"parent\" when no class scope is active".to_string()),
-                b"static" => Some("Cannot use \"static\" when no class scope is active".to_string()),
+                b"parent" => {
+                    Some("Cannot use \"parent\" when no class scope is active".to_string())
+                }
+                b"static" => {
+                    Some("Cannot use \"static\" when no class scope is active".to_string())
+                }
                 _ => None,
             }
         }
@@ -12778,8 +15283,16 @@ fn expr_is_in_nullsafe_chain(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::MethodCall { nullsafe: true, .. } => true,
         ExprKind::PropertyAccess { nullsafe: true, .. } => true,
-        ExprKind::MethodCall { object, nullsafe: false, .. } => expr_is_in_nullsafe_chain(object),
-        ExprKind::PropertyAccess { object, nullsafe: false, .. } => expr_is_in_nullsafe_chain(object),
+        ExprKind::MethodCall {
+            object,
+            nullsafe: false,
+            ..
+        } => expr_is_in_nullsafe_chain(object),
+        ExprKind::PropertyAccess {
+            object,
+            nullsafe: false,
+            ..
+        } => expr_is_in_nullsafe_chain(object),
         ExprKind::ArrayAccess { array, .. } => expr_is_in_nullsafe_chain(array),
         ExprKind::StaticPropertyAccess { class, .. } => expr_is_in_nullsafe_chain(class),
         ExprKind::DynamicStaticPropertyAccess { class, .. } => expr_is_in_nullsafe_chain(class),
@@ -12957,12 +15470,18 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
             collect_expr_variables(left, vars);
             collect_expr_variables(right, vars);
         }
-        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => {
+        ExprKind::Cast(_, e)
+        | ExprKind::Clone(e)
+        | ExprKind::Spread(e)
+        | ExprKind::Print(e)
+        | ExprKind::ThrowExpr(e) => {
             collect_expr_variables(e, vars);
         }
         ExprKind::CloneWith { object, with_args } => {
             collect_expr_variables(object, vars);
-            for (_, e) in with_args { collect_expr_variables(e, vars); }
+            for (_, e) in with_args {
+                collect_expr_variables(e, vars);
+            }
         }
         ExprKind::PropertyAccess { object, .. } => {
             collect_expr_variables(object, vars);
@@ -13031,8 +15550,12 @@ fn expr_contains_yield(expr: &Expr) -> bool {
             expr_contains_yield(left) || expr_contains_yield(right)
         }
         ExprKind::Cast(_, e) => expr_contains_yield(e),
-        ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => expr_contains_yield(e),
-        ExprKind::CloneWith { object, with_args } => expr_contains_yield(object) || with_args.iter().any(|(_, e)| expr_contains_yield(e)),
+        ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::ThrowExpr(e) => {
+            expr_contains_yield(e)
+        }
+        ExprKind::CloneWith { object, with_args } => {
+            expr_contains_yield(object) || with_args.iter().any(|(_, e)| expr_contains_yield(e))
+        }
         ExprKind::PropertyAccess { object, .. } => expr_contains_yield(object),
         ExprKind::Include { path, .. } => expr_contains_yield(path),
         ExprKind::New { class, args } => {
@@ -13063,36 +15586,70 @@ fn expr_contains_yield(expr: &Expr) -> bool {
 
 /// Check if a list of statements references $this->propname (indicating a backed property)
 fn stmts_reference_backing_store(stmts: &[Statement], prop_name: &[u8]) -> bool {
-    stmts.iter().any(|stmt| stmt_references_backing_store(stmt, prop_name))
+    stmts
+        .iter()
+        .any(|stmt| stmt_references_backing_store(stmt, prop_name))
 }
 
 fn stmt_references_backing_store(stmt: &Statement, prop_name: &[u8]) -> bool {
     match &stmt.kind {
         StmtKind::Expression(e) => expr_references_backing_store(e, prop_name),
         StmtKind::Return(Some(e)) => expr_references_backing_store(e, prop_name),
-        StmtKind::Echo(exprs) => exprs.iter().any(|e| expr_references_backing_store(e, prop_name)),
-        StmtKind::If { condition, body, elseif_clauses, else_body } => {
+        StmtKind::Echo(exprs) => exprs
+            .iter()
+            .any(|e| expr_references_backing_store(e, prop_name)),
+        StmtKind::If {
+            condition,
+            body,
+            elseif_clauses,
+            else_body,
+        } => {
             expr_references_backing_store(condition, prop_name)
                 || stmts_reference_backing_store(body, prop_name)
-                || elseif_clauses.iter().any(|(c, b)| expr_references_backing_store(c, prop_name) || stmts_reference_backing_store(b, prop_name))
-                || else_body.as_ref().is_some_and(|b| stmts_reference_backing_store(b, prop_name))
+                || elseif_clauses.iter().any(|(c, b)| {
+                    expr_references_backing_store(c, prop_name)
+                        || stmts_reference_backing_store(b, prop_name)
+                })
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| stmts_reference_backing_store(b, prop_name))
         }
         StmtKind::While { condition, body } | StmtKind::DoWhile { body, condition } => {
-            expr_references_backing_store(condition, prop_name) || stmts_reference_backing_store(body, prop_name)
+            expr_references_backing_store(condition, prop_name)
+                || stmts_reference_backing_store(body, prop_name)
         }
-        StmtKind::For { init, condition, update, body } => {
-            init.iter().any(|e| expr_references_backing_store(e, prop_name))
-                || condition.iter().any(|e| expr_references_backing_store(e, prop_name))
-                || update.iter().any(|e| expr_references_backing_store(e, prop_name))
+        StmtKind::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            init.iter()
+                .any(|e| expr_references_backing_store(e, prop_name))
+                || condition
+                    .iter()
+                    .any(|e| expr_references_backing_store(e, prop_name))
+                || update
+                    .iter()
+                    .any(|e| expr_references_backing_store(e, prop_name))
                 || stmts_reference_backing_store(body, prop_name)
         }
         StmtKind::Foreach { expr, body, .. } => {
-            expr_references_backing_store(expr, prop_name) || stmts_reference_backing_store(body, prop_name)
+            expr_references_backing_store(expr, prop_name)
+                || stmts_reference_backing_store(body, prop_name)
         }
-        StmtKind::TryCatch { try_body, catches, finally_body } => {
+        StmtKind::TryCatch {
+            try_body,
+            catches,
+            finally_body,
+        } => {
             stmts_reference_backing_store(try_body, prop_name)
-                || catches.iter().any(|c| stmts_reference_backing_store(&c.body, prop_name))
-                || finally_body.as_ref().is_some_and(|b| stmts_reference_backing_store(b, prop_name))
+                || catches
+                    .iter()
+                    .any(|c| stmts_reference_backing_store(&c.body, prop_name))
+                || finally_body
+                    .as_ref()
+                    .is_some_and(|b| stmts_reference_backing_store(b, prop_name))
         }
         StmtKind::Throw(e) => expr_references_backing_store(e, prop_name),
         _ => false,
@@ -13101,7 +15658,9 @@ fn stmt_references_backing_store(stmt: &Statement, prop_name: &[u8]) -> bool {
 
 fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
     match &expr.kind {
-        ExprKind::PropertyAccess { object, property, .. } => {
+        ExprKind::PropertyAccess {
+            object, property, ..
+        } => {
             // Check if this is $this->propname
             if let ExprKind::Variable(var) = &object.kind {
                 if var == b"this" {
@@ -13112,23 +15671,33 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
                     }
                 }
             }
-            expr_references_backing_store(object, prop_name) || expr_references_backing_store(property, prop_name)
+            expr_references_backing_store(object, prop_name)
+                || expr_references_backing_store(property, prop_name)
         }
         ExprKind::Assign { target, value } | ExprKind::AssignRef { target, value } => {
-            expr_references_backing_store(target, prop_name) || expr_references_backing_store(value, prop_name)
+            expr_references_backing_store(target, prop_name)
+                || expr_references_backing_store(value, prop_name)
         }
         ExprKind::CompoundAssign { target, value, .. } => {
-            expr_references_backing_store(target, prop_name) || expr_references_backing_store(value, prop_name)
+            expr_references_backing_store(target, prop_name)
+                || expr_references_backing_store(value, prop_name)
         }
         ExprKind::BinaryOp { left, right, .. } => {
-            expr_references_backing_store(left, prop_name) || expr_references_backing_store(right, prop_name)
+            expr_references_backing_store(left, prop_name)
+                || expr_references_backing_store(right, prop_name)
         }
         ExprKind::UnaryOp { operand, .. } => expr_references_backing_store(operand, prop_name),
         ExprKind::FunctionCall { name, args, .. } => {
-            expr_references_backing_store(name, prop_name) || args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+            expr_references_backing_store(name, prop_name)
+                || args
+                    .iter()
+                    .any(|a| expr_references_backing_store(&a.value, prop_name))
         }
         ExprKind::MethodCall { object, args, .. } => {
-            expr_references_backing_store(object, prop_name) || args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+            expr_references_backing_store(object, prop_name)
+                || args
+                    .iter()
+                    .any(|a| expr_references_backing_store(&a.value, prop_name))
         }
         ExprKind::StaticMethodCall { method, args, .. } => {
             // parent::$prop::get() / ::set() is lowered by the parser to
@@ -13141,43 +15710,70 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
             if is_parent_hook {
                 return true;
             }
-            args.iter().any(|a| expr_references_backing_store(&a.value, prop_name))
+            args.iter()
+                .any(|a| expr_references_backing_store(&a.value, prop_name))
         }
-        ExprKind::Ternary { condition, if_true, if_false } => {
+        ExprKind::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => {
             expr_references_backing_store(condition, prop_name)
-                || if_true.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
+                || if_true
+                    .as_ref()
+                    .is_some_and(|e| expr_references_backing_store(e, prop_name))
                 || expr_references_backing_store(if_false, prop_name)
         }
         ExprKind::NullCoalesce { left, right } => {
-            expr_references_backing_store(left, prop_name) || expr_references_backing_store(right, prop_name)
+            expr_references_backing_store(left, prop_name)
+                || expr_references_backing_store(right, prop_name)
         }
         ExprKind::CloneWith { object, with_args } => {
-            expr_references_backing_store(object, prop_name) || with_args.iter().any(|(_, e)| expr_references_backing_store(e, prop_name))
+            expr_references_backing_store(object, prop_name)
+                || with_args
+                    .iter()
+                    .any(|(_, e)| expr_references_backing_store(e, prop_name))
         }
-        ExprKind::Cast(_, e) | ExprKind::Clone(e) | ExprKind::Spread(e) | ExprKind::Print(e) | ExprKind::YieldFrom(e) => {
-            expr_references_backing_store(e, prop_name)
-        }
+        ExprKind::Cast(_, e)
+        | ExprKind::Clone(e)
+        | ExprKind::Spread(e)
+        | ExprKind::Print(e)
+        | ExprKind::YieldFrom(e) => expr_references_backing_store(e, prop_name),
         ExprKind::Yield(k, v) => {
-            k.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
-                || v.as_ref().is_some_and(|e| expr_references_backing_store(e, prop_name))
+            k.as_ref()
+                .is_some_and(|e| expr_references_backing_store(e, prop_name))
+                || v.as_ref()
+                    .is_some_and(|e| expr_references_backing_store(e, prop_name))
         }
-        ExprKind::Array(elements) => {
-            elements.iter().any(|el| {
-                expr_references_backing_store(&el.value, prop_name)
-                    || el.key.as_ref().is_some_and(|k| expr_references_backing_store(k, prop_name))
-            })
-        }
-        ExprKind::Isset(exprs) => exprs.iter().any(|e| expr_references_backing_store(e, prop_name)),
+        ExprKind::Array(elements) => elements.iter().any(|el| {
+            expr_references_backing_store(&el.value, prop_name)
+                || el
+                    .key
+                    .as_ref()
+                    .is_some_and(|k| expr_references_backing_store(k, prop_name))
+        }),
+        ExprKind::Isset(exprs) => exprs
+            .iter()
+            .any(|e| expr_references_backing_store(e, prop_name)),
         ExprKind::ArrayAccess { array, index } => {
-            expr_references_backing_store(array, prop_name) || index.as_ref().is_some_and(|i| expr_references_backing_store(i, prop_name))
+            expr_references_backing_store(array, prop_name)
+                || index
+                    .as_ref()
+                    .is_some_and(|i| expr_references_backing_store(i, prop_name))
         }
-        ExprKind::New { args, .. } => args.iter().any(|a| expr_references_backing_store(&a.value, prop_name)),
+        ExprKind::New { args, .. } => args
+            .iter()
+            .any(|a| expr_references_backing_store(&a.value, prop_name)),
         ExprKind::Instanceof { expr, .. } => expr_references_backing_store(expr, prop_name),
         ExprKind::Match { subject, arms } => {
             expr_references_backing_store(subject, prop_name)
                 || arms.iter().any(|arm| {
                     expr_references_backing_store(&arm.body, prop_name)
-                        || arm.conditions.as_ref().is_some_and(|conds| conds.iter().any(|c| expr_references_backing_store(c, prop_name)))
+                        || arm.conditions.as_ref().is_some_and(|conds| {
+                            conds
+                                .iter()
+                                .any(|c| expr_references_backing_store(c, prop_name))
+                        })
                 })
         }
         _ => false,
@@ -13211,15 +15807,12 @@ fn expr_to_source_string(expr: &Expr) -> String {
         ExprKind::Variable(name) => {
             format!("${}", String::from_utf8_lossy(name))
         }
-        ExprKind::Identifier(parts) => {
-            String::from_utf8_lossy(parts).to_string()
-        }
-        ExprKind::ConstantAccess(parts) => {
-            parts.iter()
-                .map(|p| String::from_utf8_lossy(p).to_string())
-                .collect::<Vec<_>>()
-                .join("\\")
-        }
+        ExprKind::Identifier(parts) => String::from_utf8_lossy(parts).to_string(),
+        ExprKind::ConstantAccess(parts) => parts
+            .iter()
+            .map(|p| String::from_utf8_lossy(p).to_string())
+            .collect::<Vec<_>>()
+            .join("\\"),
         ExprKind::BinaryOp { op, left, right } => {
             let op_str = match op {
                 BinaryOp::Add => "+",
@@ -13249,9 +15842,18 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 BinaryOp::GreaterEqual => ">=",
                 BinaryOp::Spaceship => "<=>",
             };
-            format!("{} {} {}", expr_to_source_string(left), op_str, expr_to_source_string(right))
+            format!(
+                "{} {} {}",
+                expr_to_source_string(left),
+                op_str,
+                expr_to_source_string(right)
+            )
         }
-        ExprKind::UnaryOp { op, operand, prefix } => {
+        ExprKind::UnaryOp {
+            op,
+            operand,
+            prefix,
+        } => {
             let op_str = match op {
                 UnaryOp::Negate => "-",
                 UnaryOp::Plus => "+",
@@ -13274,13 +15876,22 @@ fn expr_to_source_string(expr: &Expr) -> String {
             let args_str = args_to_source_string(args);
             format!("{}({})", name_str, args_str)
         }
-        ExprKind::MethodCall { object, method, args, .. } => {
+        ExprKind::MethodCall {
+            object,
+            method,
+            args,
+            ..
+        } => {
             let obj_str = expr_to_source_string(object);
             let method_str = expr_to_source_string(method);
             let args_str = args_to_source_string(args);
             format!("{}->{}({})", obj_str, method_str, args_str)
         }
-        ExprKind::StaticMethodCall { class, method, args } => {
+        ExprKind::StaticMethodCall {
+            class,
+            method,
+            args,
+        } => {
             let class_str = expr_to_source_string(class);
             let method_str = String::from_utf8_lossy(method).to_string();
             let args_str = args_to_source_string(args);
@@ -13293,30 +15904,42 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 None => format!("{}[]", arr_str),
             }
         }
-        ExprKind::PropertyAccess { object, property, .. } => {
-            format!("{}->{}",
+        ExprKind::PropertyAccess {
+            object, property, ..
+        } => {
+            format!(
+                "{}->{}",
                 expr_to_source_string(object),
-                expr_to_source_string(property))
+                expr_to_source_string(property)
+            )
         }
         ExprKind::StaticPropertyAccess { class, property } => {
-            format!("{}::${}",
+            format!(
+                "{}::${}",
                 expr_to_source_string(class),
-                String::from_utf8_lossy(property))
+                String::from_utf8_lossy(property)
+            )
         }
         ExprKind::DynamicStaticPropertyAccess { class, property } => {
-            format!("{}::${}",
+            format!(
+                "{}::${}",
                 expr_to_source_string(class),
-                expr_to_source_string(property))
+                expr_to_source_string(property)
+            )
         }
         ExprKind::ClassConstAccess { class, constant } => {
-            format!("{}::{}",
+            format!(
+                "{}::{}",
                 expr_to_source_string(class),
-                String::from_utf8_lossy(constant))
+                String::from_utf8_lossy(constant)
+            )
         }
         ExprKind::Instanceof { expr, class } => {
-            format!("{} instanceof {}",
+            format!(
+                "{} instanceof {}",
                 expr_to_source_string(expr),
-                expr_to_source_string(class))
+                expr_to_source_string(class)
+            )
         }
         ExprKind::Cast(cast_type, inner) => {
             let cast_str = match cast_type {
@@ -13332,7 +15955,11 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("{}{}", cast_str, expr_to_source_string(inner))
         }
         ExprKind::Assign { target, value } => {
-            format!("{} = {}", expr_to_source_string(target), expr_to_source_string(value))
+            format!(
+                "{} = {}",
+                expr_to_source_string(target),
+                expr_to_source_string(value)
+            )
         }
         ExprKind::CompoundAssign { op, target, value } => {
             let op_str = match op {
@@ -13350,24 +15977,43 @@ fn expr_to_source_string(expr: &Expr) -> String {
                 BinaryOp::ShiftRight => ">>=",
                 _ => "?=",
             };
-            format!("({} {} {})", expr_to_source_string(target), op_str, expr_to_source_string(value))
+            format!(
+                "({} {} {})",
+                expr_to_source_string(target),
+                op_str,
+                expr_to_source_string(value)
+            )
         }
         ExprKind::AssignRef { target, value } => {
-            format!("{} = &{}", expr_to_source_string(target), expr_to_source_string(value))
+            format!(
+                "{} = &{}",
+                expr_to_source_string(target),
+                expr_to_source_string(value)
+            )
         }
-        ExprKind::Ternary { condition, if_true, if_false } => {
-            match if_true {
-                Some(t) => format!("{} ? {} : {}",
-                    expr_to_source_string(condition),
-                    expr_to_source_string(t),
-                    expr_to_source_string(if_false)),
-                None => format!("{} ?: {}",
-                    expr_to_source_string(condition),
-                    expr_to_source_string(if_false)),
-            }
-        }
+        ExprKind::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => match if_true {
+            Some(t) => format!(
+                "{} ? {} : {}",
+                expr_to_source_string(condition),
+                expr_to_source_string(t),
+                expr_to_source_string(if_false)
+            ),
+            None => format!(
+                "{} ?: {}",
+                expr_to_source_string(condition),
+                expr_to_source_string(if_false)
+            ),
+        },
         ExprKind::NullCoalesce { left, right } => {
-            format!("{} ?? {}", expr_to_source_string(left), expr_to_source_string(right))
+            format!(
+                "{} ?? {}",
+                expr_to_source_string(left),
+                expr_to_source_string(right)
+            )
         }
         ExprKind::New { class, args } => {
             let class_str = expr_to_source_string(class);
@@ -13394,7 +16040,8 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("print {}", expr_to_source_string(inner))
         }
         ExprKind::Isset(exprs) => {
-            let args_str = exprs.iter()
+            let args_str = exprs
+                .iter()
                 .map(expr_to_source_string)
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -13409,12 +16056,10 @@ fn expr_to_source_string(expr: &Expr) -> String {
         ExprKind::Suppress(inner) => {
             format!("@{}", expr_to_source_string(inner))
         }
-        ExprKind::Exit(arg) => {
-            match arg {
-                Some(e) => format!("\\exit({})", expr_to_source_string(e)),
-                None => "\\exit()".to_string(),
-            }
-        }
+        ExprKind::Exit(arg) => match arg {
+            Some(e) => format!("\\exit({})", expr_to_source_string(e)),
+            None => "\\exit()".to_string(),
+        },
         ExprKind::Eval(inner) => {
             format!("eval({})", expr_to_source_string(inner))
         }
@@ -13427,13 +16072,15 @@ fn expr_to_source_string(expr: &Expr) -> String {
             };
             format!("{} {}", kind_str, expr_to_source_string(path))
         }
-        ExprKind::Yield(key, val) => {
-            match (key, val) {
-                (Some(k), Some(v)) => format!("yield {} => {}", expr_to_source_string(k), expr_to_source_string(v)),
-                (None, Some(v)) => format!("yield {}", expr_to_source_string(v)),
-                _ => "yield".to_string(),
-            }
-        }
+        ExprKind::Yield(key, val) => match (key, val) {
+            (Some(k), Some(v)) => format!(
+                "yield {} => {}",
+                expr_to_source_string(k),
+                expr_to_source_string(v)
+            ),
+            (None, Some(v)) => format!("yield {}", expr_to_source_string(v)),
+            _ => "yield".to_string(),
+        },
         ExprKind::YieldFrom(inner) => {
             format!("yield from {}", expr_to_source_string(inner))
         }
@@ -13448,13 +16095,23 @@ fn expr_to_source_string(expr: &Expr) -> String {
 
 /// Convert a list of function call arguments to source string.
 fn args_to_source_string(args: &[Argument]) -> String {
-    args.iter().map(|arg| {
-        let prefix = if arg.unpack { "..." } else { "" };
-        let name_prefix = arg.name.as_ref()
-            .map(|n| format!("{}: ", String::from_utf8_lossy(n)))
-            .unwrap_or_default();
-        format!("{}{}{}", name_prefix, prefix, expr_to_source_string(&arg.value))
-    }).collect::<Vec<_>>().join(", ")
+    args.iter()
+        .map(|arg| {
+            let prefix = if arg.unpack { "..." } else { "" };
+            let name_prefix = arg
+                .name
+                .as_ref()
+                .map(|n| format!("{}: ", String::from_utf8_lossy(n)))
+                .unwrap_or_default();
+            format!(
+                "{}{}{}",
+                name_prefix,
+                prefix,
+                expr_to_source_string(&arg.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// "Redefinition of parameter $x" for duplicate parameter names.
@@ -13463,7 +16120,10 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
     for p in params {
         if !seen.insert(p.name.as_slice()) {
             return Err(CompileError {
-                message: format!("Redefinition of parameter ${}", String::from_utf8_lossy(&p.name)),
+                message: format!(
+                    "Redefinition of parameter ${}",
+                    String::from_utf8_lossy(&p.name)
+                ),
                 line,
             });
         }
@@ -13474,8 +16134,16 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
 /// A constant non-string class expression such as `(0)::X` (PHP: "Illegal class name").
 fn is_illegal_class_literal(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null => true,
-        ExprKind::UnaryOp { op: UnaryOp::Negate | UnaryOp::Plus, operand, .. } => {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::True
+        | ExprKind::False
+        | ExprKind::Null => true,
+        ExprKind::UnaryOp {
+            op: UnaryOp::Negate | UnaryOp::Plus,
+            operand,
+            ..
+        } => {
             matches!(operand.kind, ExprKind::Int(_) | ExprKind::Float(_))
         }
         _ => false,
@@ -13518,12 +16186,20 @@ impl Compiler {
                 b"null" | b"\\null" => Some(Value::Null),
                 _ => None,
             },
-            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => match self.fold_literal_default(operand)? {
+            ExprKind::UnaryOp {
+                op: UnaryOp::Negate,
+                operand,
+                ..
+            } => match self.fold_literal_default(operand)? {
                 Value::Long(n) => Some(Value::Long(n.wrapping_neg())),
                 Value::Double(f) => Some(Value::Double(-f)),
                 _ => None,
             },
-            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => match self.fold_literal_default(operand)? {
+            ExprKind::UnaryOp {
+                op: UnaryOp::Plus,
+                operand,
+                ..
+            } => match self.fold_literal_default(operand)? {
                 v @ (Value::Long(_) | Value::Double(_)) => Some(v),
                 _ => None,
             },
@@ -13539,14 +16215,21 @@ impl Compiler {
                         Some(k) => match self.fold_literal_default(k)? {
                             Value::Long(n) => arr.set(crate::array::ArrayKey::Int(n), v),
                             Value::String(s) => {
-                                let key = match std::str::from_utf8(s.as_bytes()).ok().and_then(|t| t.parse::<i64>().ok()) {
-                                    Some(n) if n.to_string().as_bytes() == s.as_bytes() => crate::array::ArrayKey::Int(n),
+                                let key = match std::str::from_utf8(s.as_bytes())
+                                    .ok()
+                                    .and_then(|t| t.parse::<i64>().ok())
+                                {
+                                    Some(n) if n.to_string().as_bytes() == s.as_bytes() => {
+                                        crate::array::ArrayKey::Int(n)
+                                    }
                                     _ => crate::array::ArrayKey::String(s),
                                 };
                                 arr.set(key, v)
                             }
                             Value::True => arr.set(crate::array::ArrayKey::Int(1), v),
-                            Value::False | Value::Null => arr.set(crate::array::ArrayKey::Int(0), v),
+                            Value::False | Value::Null => {
+                                arr.set(crate::array::ArrayKey::Int(0), v)
+                            }
                             _ => return None,
                         },
                     }
@@ -13557,12 +16240,26 @@ impl Compiler {
                 let l = self.fold_literal_default(left)?;
                 let r = self.fold_literal_default(right)?;
                 match (op, &l, &r) {
-                    (BinaryOp::Add, Value::Long(a), Value::Long(b)) => a.checked_add(*b).map(Value::Long),
-                    (BinaryOp::Sub, Value::Long(a), Value::Long(b)) => a.checked_sub(*b).map(Value::Long),
-                    (BinaryOp::Mul, Value::Long(a), Value::Long(b)) => a.checked_mul(*b).map(Value::Long),
-                    (BinaryOp::BitwiseOr, Value::Long(a), Value::Long(b)) => Some(Value::Long(a | b)),
-                    (BinaryOp::BitwiseAnd, Value::Long(a), Value::Long(b)) => Some(Value::Long(a & b)),
-                    (BinaryOp::ShiftLeft, Value::Long(a), Value::Long(b)) if (0..64).contains(b) => Some(Value::Long(a << b)),
+                    (BinaryOp::Add, Value::Long(a), Value::Long(b)) => {
+                        a.checked_add(*b).map(Value::Long)
+                    }
+                    (BinaryOp::Sub, Value::Long(a), Value::Long(b)) => {
+                        a.checked_sub(*b).map(Value::Long)
+                    }
+                    (BinaryOp::Mul, Value::Long(a), Value::Long(b)) => {
+                        a.checked_mul(*b).map(Value::Long)
+                    }
+                    (BinaryOp::BitwiseOr, Value::Long(a), Value::Long(b)) => {
+                        Some(Value::Long(a | b))
+                    }
+                    (BinaryOp::BitwiseAnd, Value::Long(a), Value::Long(b)) => {
+                        Some(Value::Long(a & b))
+                    }
+                    (BinaryOp::ShiftLeft, Value::Long(a), Value::Long(b))
+                        if (0..64).contains(b) =>
+                    {
+                        Some(Value::Long(a << b))
+                    }
                     (BinaryOp::Concat, Value::String(a), Value::String(b)) => {
                         let mut v = a.as_bytes().to_vec();
                         v.extend_from_slice(b.as_bytes());
@@ -13598,7 +16295,11 @@ impl Compiler {
             ExprKind::Int(n) => n.to_string(),
             ExprKind::Float(f) => {
                 let s = crate::value::format_php_float(*f);
-                if f.is_finite() && !s.contains('.') { format!("{}.0", s) } else { s }
+                if f.is_finite() && !s.contains('.') {
+                    format!("{}.0", s)
+                } else {
+                    s
+                }
             }
             ExprKind::String(s) => qstr(s),
             ExprKind::True => "true".to_string(),
@@ -13612,7 +16313,10 @@ impl Compiler {
                         if let Some(rest) = n.strip_prefix(b"\\") {
                             String::from_utf8_lossy(rest).to_string()
                         } else if lower.starts_with(b"namespace\\") {
-                            String::from_utf8_lossy(&self.prefix_with_namespace(&n[b"namespace\\".len()..])).to_string()
+                            String::from_utf8_lossy(
+                                &self.prefix_with_namespace(&n[b"namespace\\".len()..]),
+                            )
+                            .to_string()
                         } else if n.contains(&b'\\') {
                             String::from_utf8_lossy(&self.resolve_class_name(n)).to_string()
                         } else {
@@ -13627,27 +16331,63 @@ impl Compiler {
                         // Zend marks the name fully qualified only if resolution
                         // changed it (or it was written that way).
                         let full = self.export_class_name(n);
-                        if !n.starts_with(b"\\") && full.as_bytes().get(1..) == Some(&n[..]) { String::from_utf8_lossy(n).to_string() } else { full }
+                        if !n.starts_with(b"\\") && full.as_bytes().get(1..) == Some(&n[..]) {
+                            String::from_utf8_lossy(n).to_string()
+                        } else {
+                            full
+                        }
                     }
                     _ => return None,
                 };
                 format!("{}::{}", cls, String::from_utf8_lossy(constant))
             }
-            ExprKind::UnaryOp { op: UnaryOp::Negate, operand, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::Negate,
+                operand,
+                ..
+            } => {
                 let s = format!("-{}", self.export_const_expr(operand, 241)?);
-                if priority > 240 { format!("({})", s) } else { s }
+                if priority > 240 {
+                    format!("({})", s)
+                } else {
+                    s
+                }
             }
-            ExprKind::UnaryOp { op: UnaryOp::Plus, operand, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::Plus,
+                operand,
+                ..
+            } => {
                 let s = format!("+{}", self.export_const_expr(operand, 241)?);
-                if priority > 240 { format!("({})", s) } else { s }
+                if priority > 240 {
+                    format!("({})", s)
+                } else {
+                    s
+                }
             }
-            ExprKind::UnaryOp { op: UnaryOp::BooleanNot, operand, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::BooleanNot,
+                operand,
+                ..
+            } => {
                 let s = format!("!{}", self.export_const_expr(operand, 241)?);
-                if priority > 240 { format!("({})", s) } else { s }
+                if priority > 240 {
+                    format!("({})", s)
+                } else {
+                    s
+                }
             }
-            ExprKind::UnaryOp { op: UnaryOp::BitwiseNot, operand, .. } => {
+            ExprKind::UnaryOp {
+                op: UnaryOp::BitwiseNot,
+                operand,
+                ..
+            } => {
                 let s = format!("~{}", self.export_const_expr(operand, 241)?);
-                if priority > 240 { format!("({})", s) } else { s }
+                if priority > 240 {
+                    format!("({})", s)
+                } else {
+                    s
+                }
             }
             ExprKind::BinaryOp { op, left, right } => {
                 let (sym, p, pl, pr) = match op {
@@ -13679,15 +16419,25 @@ impl Compiler {
                 };
                 return bin(sym, p, pl, pr, left, right);
             }
-            ExprKind::NullCoalesce { left, right } => return bin(" ?? ", 110, 111, 110, left, right),
-            ExprKind::Ternary { condition, if_true, if_false } => {
+            ExprKind::NullCoalesce { left, right } => {
+                return bin(" ?? ", 110, 111, 110, left, right);
+            }
+            ExprKind::Ternary {
+                condition,
+                if_true,
+                if_false,
+            } => {
                 let c = self.export_const_expr(condition, 100)?;
                 let f = self.export_const_expr(if_false, 101)?;
                 let s = match if_true {
                     Some(t) => format!("{} ? {} : {}", c, self.export_const_expr(t, 101)?, f),
                     None => format!("{} ?: {}", c, f),
                 };
-                if priority > 100 { format!("({})", s) } else { s }
+                if priority > 100 {
+                    format!("({})", s)
+                } else {
+                    s
+                }
             }
             ExprKind::Array(elems) => {
                 let mut parts = Vec::new();
@@ -13737,12 +16487,23 @@ impl Compiler {
 
     /// Like `default_value_repr`; `self::class` folds to the name of
     /// `class_scope` (a non-trait class) as PHP does at compile time.
-    pub(crate) fn default_value_repr_scoped(&self, expr: &Expr, class_scope: Option<&[u8]>) -> Option<String> {
-        if let (Some(cls), ExprKind::ClassConstAccess { class, constant }) = (class_scope, &expr.kind) {
-            if constant.eq_ignore_ascii_case(b"class") && !cls.starts_with(b"__anonymous") && !cls.contains(&0u8) {
+    pub(crate) fn default_value_repr_scoped(
+        &self,
+        expr: &Expr,
+        class_scope: Option<&[u8]>,
+    ) -> Option<String> {
+        if let (Some(cls), ExprKind::ClassConstAccess { class, constant }) =
+            (class_scope, &expr.kind)
+        {
+            if constant.eq_ignore_ascii_case(b"class")
+                && !cls.starts_with(b"__anonymous")
+                && !cls.contains(&0u8)
+            {
                 if let ExprKind::Identifier(n) = &class.kind {
                     if n.eq_ignore_ascii_case(b"self") {
-                        return Some(crate::reflection::format_default_value(&Value::String(PhpString::from_vec(cls.to_vec()))));
+                        return Some(crate::reflection::format_default_value(&Value::String(
+                            PhpString::from_vec(cls.to_vec()),
+                        )));
                     }
                 }
             }
@@ -13757,7 +16518,9 @@ impl Compiler {
                     let lower = n.to_ascii_lowercase();
                     if !matches!(lower.as_slice(), b"self" | b"parent" | b"static") {
                         let resolved = self.resolve_class_name(n);
-                        return Some(crate::reflection::format_default_value(&Value::String(PhpString::from_vec(resolved))));
+                        return Some(crate::reflection::format_default_value(&Value::String(
+                            PhpString::from_vec(resolved),
+                        )));
                     }
                 }
             }

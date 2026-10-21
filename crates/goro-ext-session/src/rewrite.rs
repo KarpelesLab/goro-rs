@@ -3,7 +3,7 @@
 use goro_core::vm::Vm;
 use goro_ext_standard::url_scanner;
 
-use crate::{err, E_DEPRECATED};
+use crate::{E_DEPRECATED, err};
 
 pub(crate) fn reset() {}
 
@@ -13,12 +13,20 @@ pub(crate) fn register(_vm: &mut Vm) {}
 pub(crate) fn on_update_ini(vm: &mut Vm, key: &str, value: &[u8], _startup: bool) -> bool {
     if key == "trans_sid_tags" {
         if !value.starts_with(b"a=href,area=href,frame=src,form=") {
-            err(vm, E_DEPRECATED, "Usage of session.trans_sid_tags INI setting is deprecated");
+            err(
+                vm,
+                E_DEPRECATED,
+                "Usage of session.trans_sid_tags INI setting is deprecated",
+            );
         }
         url_scanner::set_tags(true, value);
     } else {
         if !value.is_empty() {
-            err(vm, E_DEPRECATED, "Usage of session.trans_sid_hosts INI setting is deprecated");
+            err(
+                vm,
+                E_DEPRECATED,
+                "Usage of session.trans_sid_hosts INI setting is deprecated",
+            );
         }
         url_scanner::set_hosts(true, value);
     }

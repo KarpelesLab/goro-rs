@@ -30,7 +30,8 @@ fn fa_size(obj: &Rc<RefCell<PhpObject>>) -> i64 {
 
 fn sync_size(obj: &Rc<RefCell<PhpObject>>) {
     let n = fa_size(obj);
-    obj.borrow_mut().set_property(b"__spl_size".to_vec(), Value::Long(n));
+    obj.borrow_mut()
+        .set_property(b"__spl_size".to_vec(), Value::Long(n));
 }
 
 impl Vm {
@@ -41,9 +42,17 @@ impl Vm {
         if size == cur {
             return;
         }
-        if size > cur && (size as u64).checked_mul(16).map(|b| b > isize::MAX as u64).unwrap_or(true) {
+        if size > cur
+            && (size as u64)
+                .checked_mul(16)
+                .map(|b| b > isize::MAX as u64)
+                .unwrap_or(true)
+        {
             // safe_erealloc(elements, size, sizeof(zval), 0)
-            let msg = format!("Possible integer overflow in memory allocation ({} * 16 + 0)", size as u64);
+            let msg = format!(
+                "Possible integer overflow in memory allocation ({} * 16 + 0)",
+                size as u64
+            );
             self.spl_fatal(&msg);
             return;
         }
@@ -82,7 +91,10 @@ impl Vm {
                 match canon {
                     Some(n) => Some(n),
                     None => {
-                        self.spl_throw(b"TypeError", "Cannot access offset of type string on SplFixedArray");
+                        self.spl_throw(
+                            b"TypeError",
+                            "Cannot access offset of type string on SplFixedArray",
+                        );
                         None
                     }
                 }
@@ -100,7 +112,10 @@ impl Vm {
             Value::False => Some(0),
             Value::True => Some(1),
             Value::Resource(r) => {
-                let msg = format!("Resource ID#{} used as offset, casting to integer ({})", r, r);
+                let msg = format!(
+                    "Resource ID#{} used as offset, casting to integer ({})",
+                    r, r
+                );
                 self.emit_warning(&msg);
                 Some(r)
             }
@@ -108,7 +123,9 @@ impl Vm {
                 let t = match other {
                     Value::Null | Value::Undef => "null".to_string(),
                     Value::Array(_) => "array".to_string(),
-                    Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
+                    Value::Object(o) => {
+                        crate::value::display_class_name(&o.borrow().class_name).to_string()
+                    }
                     _ => Self::value_type_name(&other),
                 };
                 let msg = format!("Cannot access offset of type {} on SplFixedArray", t);
@@ -127,7 +144,11 @@ impl Vm {
     }
 
     /// Properties for var_dump / (array): elements, then real properties.
-    pub(crate) fn fa_debug_info(&mut self, obj: &Rc<RefCell<PhpObject>>, with_elements: bool) -> PhpArray {
+    pub(crate) fn fa_debug_info(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        with_elements: bool,
+    ) -> PhpArray {
         let mut out = PhpArray::new();
         if with_elements {
             for (_, v) in storage(obj).borrow().iter() {
@@ -160,12 +181,19 @@ impl Vm {
         let data = match args.first().map(|v| v.deref()) {
             Some(Value::Array(a)) => a.borrow().clone(),
             Some(other) => {
-                let msg = format!("{}(): Argument #1 ($array) must be of type array, {} given", func, Self::value_type_name(&other));
+                let msg = format!(
+                    "{}(): Argument #1 ($array) must be of type array, {} given",
+                    func,
+                    Self::value_type_name(&other)
+                );
                 self.spl_throw(b"TypeError", &msg);
                 return Value::Null;
             }
             None => {
-                self.spl_throw(b"ArgumentCountError", "SplFixedArray::fromArray() expects at least 1 argument, 0 given");
+                self.spl_throw(
+                    b"ArgumentCountError",
+                    "SplFixedArray::fromArray() expects at least 1 argument, 0 given",
+                );
                 return Value::Null;
             }
         };
@@ -181,7 +209,10 @@ impl Vm {
                         }
                     }
                     _ => {
-                        self.spl_throw(b"InvalidArgumentException", "array must contain only positive integer keys");
+                        self.spl_throw(
+                            b"InvalidArgumentException",
+                            "array must contain only positive integer keys",
+                        );
                         return Value::Null;
                     }
                 }
@@ -221,7 +252,12 @@ impl Vm {
     ) -> Option<Value> {
         let needs_args = matches!(
             method,
-            b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset" | b"setsize" | b"__unserialize"
+            b"offsetget"
+                | b"offsetset"
+                | b"offsetexists"
+                | b"offsetunset"
+                | b"setsize"
+                | b"__unserialize"
         );
         if needs_args && args.is_none() {
             return None;
@@ -258,8 +294,16 @@ impl Vm {
                 if idx < 0 || idx >= fa_size(obj) {
                     return Some(Value::False);
                 }
-                let v = storage(obj).borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null);
-                if matches!(v.deref(), Value::Null) { Value::False } else { Value::True }
+                let v = storage(obj)
+                    .borrow()
+                    .get(&ArrayKey::Int(idx))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if matches!(v.deref(), Value::Null) {
+                    Value::False
+                } else {
+                    Value::True
+                }
             }
             b"offsetget" => {
                 let idx = match self.fa_offset(a.first().unwrap_or(&Value::Null)) {
@@ -269,7 +313,11 @@ impl Vm {
                 if !self.fa_bounds(obj, idx) {
                     return Some(Value::Null);
                 }
-                storage(obj).borrow().get(&ArrayKey::Int(idx)).cloned().unwrap_or(Value::Null)
+                storage(obj)
+                    .borrow()
+                    .get(&ArrayKey::Int(idx))
+                    .cloned()
+                    .unwrap_or(Value::Null)
             }
             b"offsetset" => {
                 let idx = match self.fa_offset(a.first().unwrap_or(&Value::Null)) {
@@ -280,7 +328,10 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
-                let old = storage(obj).borrow_mut().get_mut(&ArrayKey::Int(idx)).map(|slot| std::mem::replace(slot, v));
+                let old = storage(obj)
+                    .borrow_mut()
+                    .get_mut(&ArrayKey::Int(idx))
+                    .map(|slot| std::mem::replace(slot, v));
                 drop(old);
                 Value::Null
             }
@@ -292,7 +343,10 @@ impl Vm {
                 if !self.fa_bounds(obj, idx) {
                     return Some(Value::Null);
                 }
-                let old = storage(obj).borrow_mut().get_mut(&ArrayKey::Int(idx)).map(|slot| std::mem::replace(slot, Value::Null));
+                let old = storage(obj)
+                    .borrow_mut()
+                    .get_mut(&ArrayKey::Int(idx))
+                    .map(|slot| std::mem::replace(slot, Value::Null));
                 drop(old);
                 Value::Null
             }
@@ -312,7 +366,9 @@ impl Vm {
                         .filter(|(k, _)| k.starts_with(b"__"))
                         .map(|(k, _)| k.clone())
                         .collect();
-                    obj.borrow_mut().properties.retain(|(k, _)| keep.contains(k));
+                    obj.borrow_mut()
+                        .properties
+                        .retain(|(k, _)| keep.contains(k));
                     sync_size(obj);
                 }
                 Value::Null
@@ -366,7 +422,11 @@ impl Vm {
     }
 
     /// InternalIterator methods (only the SplFixedArray kind is produced).
-    pub(crate) fn spl_internal_iterator_call(&mut self, method: &[u8], it: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    pub(crate) fn spl_internal_iterator_call(
+        &mut self,
+        method: &[u8],
+        it: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
         let target = match it.borrow().get_property(b"__spl_fa_target") {
             Value::Object(o) => o,
             _ => return None,
@@ -377,20 +437,32 @@ impl Vm {
         };
         let r = match method {
             b"rewind" => {
-                it.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                it.borrow_mut()
+                    .set_property(b"__spl_pos".to_vec(), Value::Long(0));
                 Value::Null
             }
-            b"valid" => if pos >= 0 && pos < fa_size(&target) { Value::True } else { Value::False },
+            b"valid" => {
+                if pos >= 0 && pos < fa_size(&target) {
+                    Value::True
+                } else {
+                    Value::False
+                }
+            }
             b"key" => Value::Long(pos),
             b"current" => {
                 if pos < 0 || pos >= fa_size(&target) {
                     self.spl_throw(b"OutOfBoundsException", "Index invalid or out of range");
                     return Some(Value::Null);
                 }
-                storage(&target).borrow().get(&ArrayKey::Int(pos)).cloned().unwrap_or(Value::Null)
+                storage(&target)
+                    .borrow()
+                    .get(&ArrayKey::Int(pos))
+                    .cloned()
+                    .unwrap_or(Value::Null)
             }
             b"next" => {
-                it.borrow_mut().set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                it.borrow_mut()
+                    .set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
                 Value::Null
             }
             _ => return None,
@@ -402,7 +474,11 @@ impl Vm {
     pub fn spl_fixed_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, args: &[Value]) -> bool {
         let func = "SplFixedArray::__construct";
         if args.len() > 1 {
-            let msg = format!("{}() expects at most 1 argument, {} given", func, args.len());
+            let msg = format!(
+                "{}() expects at most 1 argument, {} given",
+                func,
+                args.len()
+            );
             self.spl_throw(b"ArgumentCountError", &msg);
             return false;
         }
@@ -414,7 +490,10 @@ impl Vm {
             None => 0,
         };
         if size < 0 {
-            let msg = format!("{}(): Argument #1 ($size) must be greater than or equal to 0", func);
+            let msg = format!(
+                "{}(): Argument #1 ($size) must be greater than or equal to 0",
+                func
+            );
             self.spl_throw(b"ValueError", &msg);
             return false;
         }
@@ -429,7 +508,10 @@ impl Vm {
     /// user's getIterator() override.
     pub(crate) fn fa_user_get_iterator(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
-        self.classes.get(&cl).map(|c| c.get_method(b"getiterator").is_some()).unwrap_or(false)
+        self.classes
+            .get(&cl)
+            .map(|c| c.get_method(b"getiterator").is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -446,10 +528,13 @@ pub fn spl_fixed_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Re
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)
     }
 }
-

@@ -222,7 +222,9 @@ fn smime_signed_wrap(headers: &[String], cms_b64: &str) -> String {
     }
     hdr.push_str("MIME-Version: 1.0\r\n");
     hdr.push_str("Content-Disposition: attachment; filename=\"smime.p7m\"\r\n");
-    hdr.push_str("Content-Type: application/x-pkcs7-mime; smime-type=signed-data; name=\"smime.p7m\"\r\n");
+    hdr.push_str(
+        "Content-Type: application/x-pkcs7-mime; smime-type=signed-data; name=\"smime.p7m\"\r\n",
+    );
     hdr.push_str("Content-Transfer-Encoding: base64\r\n");
     hdr.push_str("\r\n");
     // Body: base64 with 64-byte lines
@@ -237,7 +239,12 @@ fn smime_signed_wrap(headers: &[String], cms_b64: &str) -> String {
     hdr + &body
 }
 
-fn smime_enveloped_wrap(headers: &[String], cms_b64: &str, content_type: &str, binary: bool) -> String {
+fn smime_enveloped_wrap(
+    headers: &[String],
+    cms_b64: &str,
+    content_type: &str,
+    binary: bool,
+) -> String {
     let nl = if binary { "\n" } else { "\r\n" };
     let mut hdr = String::new();
     for h in headers {
@@ -306,8 +313,7 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
                 if let Some(stripped) = after.strip_prefix('"') {
                     stripped.find('"').map(|q| &stripped[..q])
                 } else {
-                    after.find(['\r', '\n', ';', ' '])
-                        .map(|q| &after[..q])
+                    after.find(['\r', '\n', ';', ' ']).map(|q| &after[..q])
                 }
             });
             if let Some(boundary) = boundary {
@@ -324,14 +330,14 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
                         if ct_line.contains("pkcs7-signature") || ct_line.contains("pkcs7-mime") {
                             let sep_info = if let Some(p) = part.find("\r\n\r\n") {
                                 Some((p, 4))
-                            } else { part.find("\n\n").map(|p| (p, 2)) };
+                            } else {
+                                part.find("\n\n").map(|p| (p, 2))
+                            };
                             if let Some((sep, sep_len)) = sep_info {
                                 let body = &part[sep + sep_len..];
                                 let body = body.trim_end_matches('-').trim_end();
-                                let cleaned: String = body
-                                    .chars()
-                                    .filter(|c| !c.is_whitespace())
-                                    .collect();
+                                let cleaned: String =
+                                    body.chars().filter(|c| !c.is_whitespace()).collect();
                                 if let Some(der) = base64_decode_global(&cleaned) {
                                     if der.len() > 8 && der[0] == 0x30 {
                                         return Some(der);
@@ -349,13 +355,12 @@ fn extract_cms_der(input: &[u8]) -> Option<Vec<u8>> {
     if let Some(s) = s {
         let sep_info = if let Some(p) = s.find("\r\n\r\n") {
             Some((p, 4))
-        } else { s.find("\n\n").map(|p| (p, 2)) };
+        } else {
+            s.find("\n\n").map(|p| (p, 2))
+        };
         if let Some((sep, sep_len)) = sep_info {
             let body = &s[sep + sep_len..];
-            let cleaned: String = body
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
+            let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
             if !cleaned.is_empty() {
                 if let Some(der) = base64_decode_global(&cleaned) {
                     if der.len() > 8 && der[0] == 0x30 {
@@ -715,9 +720,7 @@ fn build_enveloped_data(
             <RsaPublicKey as rsa::pkcs8::DecodePublicKey>::from_public_key_der(&spki_der).ok()?;
 
         // Encrypt sym_key with the recipient's RSA public key, using PKCS#1 v1.5
-        let enc_key = pub_key
-            .encrypt(&mut rng, Pkcs1v15Encrypt, &sym_key)
-            .ok()?;
+        let enc_key = pub_key.encrypt(&mut rng, Pkcs1v15Encrypt, &sym_key).ok()?;
 
         let key_enc_alg = algid_with_null(OID_RSA_ENCRYPTION)?;
         let mut ri_body = Vec::new();
@@ -892,7 +895,7 @@ fn pkcs7_or_cms_sign_impl(
     vm: &mut Vm,
     args: &[Value],
     func_name: &str,
-    encoding: i64,  // 0=DER, 1=SMIME, 2=PEM
+    encoding: i64, // 0=DER, 1=SMIME, 2=PEM
     is_cms: bool,
 ) -> Result<Value, VmError> {
     let infile = args.first().cloned().unwrap_or(Value::Null);
@@ -984,7 +987,7 @@ fn pkcs7_or_cms_sign_impl(
     }
 
     let out_bytes: Vec<u8> = match encoding {
-        0 => cms_der,                          // DER
+        0 => cms_der, // DER
         2 => {
             let label = if is_cms { "CMS" } else { "PKCS7" };
             pem_wrap(label, &cms_der).into_bytes()
@@ -1330,7 +1333,10 @@ fn pkcs7_or_cms_verify_impl(
     // For detached signatures, the signature is in arg 7 (sigfile) and the
     // input file is the content. For non-detached, the input file IS the CMS.
     let sigfile_arg = args.get(7).cloned().unwrap_or(Value::Null);
-    let sigfile_path = deref(&sigfile_arg).to_php_string().to_string_lossy().to_string();
+    let sigfile_path = deref(&sigfile_arg)
+        .to_php_string()
+        .to_string_lossy()
+        .to_string();
     let (cms_input_path, detached_content) = if detached && !sigfile_path.is_empty() {
         (sigfile_path.clone(), Some(infile_str.clone()))
     } else {
@@ -1855,17 +1861,13 @@ pub fn openssl_pkcs12_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     let priv_key = match resolve_private_key_pub(&priv_arg, None) {
         Some(k) => k,
         None => {
-            vm.emit_warning(
-                "openssl_pkcs12_export(): Cannot get private key from parameter 3",
-            );
+            vm.emit_warning("openssl_pkcs12_export(): Cannot get private key from parameter 3");
             return Ok(Value::False);
         }
     };
 
     if !crate::x509::key_matches_cert(&cert, &priv_key) {
-        vm.emit_warning(
-            "openssl_pkcs12_export(): Private key does not correspond to cert",
-        );
+        vm.emit_warning("openssl_pkcs12_export(): Private key does not correspond to cert");
         return Ok(Value::False);
     }
 
@@ -1953,9 +1955,7 @@ pub fn openssl_pkcs12_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Valu
     };
 
     if !crate::x509::key_matches_cert(&cert, &priv_key) {
-        vm.emit_warning(
-            "openssl_pkcs12_export_to_file(): Private key does not correspond to cert",
-        );
+        vm.emit_warning("openssl_pkcs12_export_to_file(): Private key does not correspond to cert");
         return Ok(Value::False);
     }
 

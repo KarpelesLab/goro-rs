@@ -1,10 +1,10 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::opcode::ParamType;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"strlen", strlen);
@@ -106,8 +106,16 @@ pub fn register(vm: &mut Vm) {
     // Register parameter types for strict_types enforcement on builtins
     let s = || Some(ParamType::Simple(b"string".to_vec()));
     let i = || Some(ParamType::Simple(b"int".to_vec()));
-    let ns = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"string".to_vec()))));
-    let ni = || Some(ParamType::Nullable(Box::new(ParamType::Simple(b"int".to_vec()))));
+    let ns = || {
+        Some(ParamType::Nullable(Box::new(ParamType::Simple(
+            b"string".to_vec(),
+        ))))
+    };
+    let ni = || {
+        Some(ParamType::Nullable(Box::new(ParamType::Simple(
+            b"int".to_vec(),
+        ))))
+    };
     vm.register_builtin_param_types(b"strlen", vec![s()]);
     vm.register_builtin_param_types(b"ord", vec![s()]);
     vm.register_builtin_param_types(b"chr", vec![i()]);
@@ -262,7 +270,10 @@ fn expand_charlist_inner(charlist: &[u8], vm_ptr: Option<*mut Vm>, func_name: &s
             if i == 0 {
                 if let Some(vm_ptr) = vm_ptr {
                     let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!("{}(): Invalid '..'-range, no character to the left of '..'", func_name));
+                    vm.emit_warning(&format!(
+                        "{}(): Invalid '..'-range, no character to the left of '..'",
+                        func_name
+                    ));
                 }
                 // Skip the ".." and the character after
                 if i + 2 < charlist.len() {
@@ -273,15 +284,15 @@ fn expand_charlist_inner(charlist: &[u8], vm_ptr: Option<*mut Vm>, func_name: &s
                 continue;
             }
         }
-        if i + 2 < charlist.len()
-            && charlist[i + 1] == b'.'
-            && charlist[i + 2] == b'.'
-        {
+        if i + 2 < charlist.len() && charlist[i + 1] == b'.' && charlist[i + 2] == b'.' {
             if i + 3 >= charlist.len() {
                 // ".." at end - no character to the right
                 if let Some(vm_ptr) = vm_ptr {
                     let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!("{}(): Invalid '..'-range, no character to the right of '..'", func_name));
+                    vm.emit_warning(&format!(
+                        "{}(): Invalid '..'-range, no character to the right of '..'",
+                        func_name
+                    ));
                 }
                 result.push(charlist[i]);
                 i += 3;
@@ -298,13 +309,17 @@ fn expand_charlist_inner(charlist: &[u8], vm_ptr: Option<*mut Vm>, func_name: &s
                 // Invalid range - from > to
                 if let Some(vm_ptr) = vm_ptr {
                     let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!("{}(): Invalid '..'-range, '..'-range needs to be incrementing", func_name));
+                    vm.emit_warning(&format!(
+                        "{}(): Invalid '..'-range, '..'-range needs to be incrementing",
+                        func_name
+                    ));
                 }
                 result.push(from);
             }
             i += 4;
             // Check if this is followed by another ".." immediately (like "a..b..c")
-            if i < charlist.len() && i + 1 < charlist.len()
+            if i < charlist.len()
+                && i + 1 < charlist.len()
                 && charlist[i] == b'.'
                 && i + 1 < charlist.len()
                 && charlist[i + 1] == b'.'
@@ -404,15 +419,29 @@ fn substr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let start = start.min(len) as usize;
 
-    let length = args.get(2).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_long()) });
+    let length = args.get(2).and_then(|v| {
+        if matches!(v, Value::Null) {
+            None
+        } else {
+            Some(v.to_long())
+        }
+    });
     let end = match length {
         Some(l) if l < 0 => {
             let end_pos = len + l;
-            if end_pos <= start as i64 { start } else { end_pos as usize }
+            if end_pos <= start as i64 {
+                start
+            } else {
+                end_pos as usize
+            }
         }
         Some(l) if l >= 0 => {
             let end_pos = start as i64 + l;
-            if end_pos > bytes.len() as i64 { bytes.len() } else { end_pos as usize }
+            if end_pos > bytes.len() as i64 {
+                bytes.len()
+            } else {
+                end_pos as usize
+            }
         }
         Some(_) => start, // shouldn't happen but safety fallback
         None => bytes.len(),
@@ -436,10 +465,14 @@ fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::String(s) => {
                 // Non-numeric string offset throws TypeError
                 if !is_numeric_string(s.as_bytes()) {
-                    let msg = "strpos(): Argument #3 ($offset) must be of type int, string given".to_string();
+                    let msg = "strpos(): Argument #3 ($offset) must be of type int, string given"
+                        .to_string();
                     let exc = vm.create_exception(b"TypeError", &msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
             Value::Double(f) => {
@@ -459,19 +492,27 @@ fn strpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = if offset_val < 0 {
         let abs = (-offset_val) as usize;
         if abs > h.len() {
-            let msg = "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         h.len() - abs
     } else {
         let o = offset_val as usize;
         if o > h.len() {
-            let msg = "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         o
     };
@@ -546,13 +587,17 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let times = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if times < 0 {
-        let msg = "str_repeat(): Argument #2 ($times) must be greater than or equal to 0".to_string();
+        let msg =
+            "str_repeat(): Argument #2 ($times) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let total_len = s.len().saturating_mul(times as usize);
     // zend_string_safe_alloc(): bail out like the Zend allocator would.
@@ -565,15 +610,19 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if over {
         let msg = format!(
             "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
-            mem_limit, total_len.saturating_add(25) & !7,
+            mem_limit,
+            total_len.saturating_add(25) & !7,
         );
         let line = vm.current_line;
         return Err(vm.emit_fatal_at(&msg, line));
     }
     let mut repeated: Vec<u8> = Vec::new();
     if repeated.try_reserve_exact(total_len).is_err() {
-        let msg = format!("Out of memory (allocated {}) (tried to allocate {} bytes)",
-            goro_core::value::memory_get_usage(), total_len);
+        let msg = format!(
+            "Out of memory (allocated {}) (tried to allocate {} bytes)",
+            goro_core::value::memory_get_usage(),
+            total_len
+        );
         let line = vm.current_line;
         return Err(vm.emit_fatal_at(&msg, line));
     }
@@ -584,12 +633,24 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// One php_str_to_str_ex / php_str_to_str_i_ex / php_char_to_str_ex pass.
-fn str_replace_once(subject: &[u8], needle: &[u8], repl: &[u8], ci: bool, count: &mut i64) -> Vec<u8> {
+fn str_replace_once(
+    subject: &[u8],
+    needle: &[u8],
+    repl: &[u8],
+    ci: bool,
+    count: &mut i64,
+) -> Vec<u8> {
     let n = needle.len();
     if n == 0 || subject.len() < n {
         return subject.to_vec();
     }
-    let eq = |a: &[u8]| if ci { a.eq_ignore_ascii_case(needle) } else { a == needle };
+    let eq = |a: &[u8]| {
+        if ci {
+            a.eq_ignore_ascii_case(needle)
+        } else {
+            a == needle
+        }
+    };
     let mut out = Vec::with_capacity(subject.len());
     let mut i = 0;
     while i < subject.len() {
@@ -611,12 +672,24 @@ enum StrOrArr {
 }
 
 /// php_str_replace_common() for str_replace / str_ireplace.
-fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) -> Result<Value, VmError> {
+fn php_str_replace_common(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    ci: bool,
+) -> Result<Value, VmError> {
     if args.len() < 3 {
-        let msg = format!("{}() expects at least 3 arguments, {} given", fname, args.len());
+        let msg = format!(
+            "{}() expects at least 3 arguments, {} given",
+            fname,
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // Z_PARAM_ARRAY_HT_OR_STR
     let parse = |vm: &mut Vm, idx: usize, name: &str| -> Result<StrOrArr, VmError> {
@@ -624,27 +697,53 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
         match &v {
             Value::Array(a) => {
                 let b = a.borrow();
-                Ok(StrOrArr::Arr(b.values().cloned().collect(), b.keys().cloned().collect()))
+                Ok(StrOrArr::Arr(
+                    b.values().cloned().collect(),
+                    b.keys().cloned().collect(),
+                ))
             }
             Value::String(s) => Ok(StrOrArr::Str(s.as_bytes().to_vec())),
             Value::Null | Value::Undef => Ok(StrOrArr::Str(Vec::new())),
-            Value::Long(_) | Value::Double(_) | Value::True | Value::False => Ok(StrOrArr::Str(v.to_php_string().as_bytes().to_vec())),
+            Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                Ok(StrOrArr::Str(v.to_php_string().as_bytes().to_vec()))
+            }
             Value::Object(o) => {
-                let has = vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+                let has = vm
+                    .get_class_def(&o.borrow().class_name.to_ascii_lowercase())
+                    .map(|c| c.get_method(b"__tostring").is_some())
+                    .unwrap_or(false);
                 if has {
                     Ok(StrOrArr::Str(vm.value_to_string(&v).as_bytes().to_vec()))
                 } else {
-                    let msg = format!("{}(): Argument #{} (${}) must be of type array|string, {} given", fname, idx + 1, name, goro_core::value::display_class_name(&o.borrow().class_name));
+                    let msg = format!(
+                        "{}(): Argument #{} (${}) must be of type array|string, {} given",
+                        fname,
+                        idx + 1,
+                        name,
+                        goro_core::value::display_class_name(&o.borrow().class_name)
+                    );
                     let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                     vm.current_exception = Some(exc);
-                    Err(VmError { message: msg, line: vm.current_line })
+                    Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    })
                 }
             }
             other => {
-                let msg = format!("{}(): Argument #{} (${}) must be of type array|string, {} given", fname, idx + 1, name, Vm::value_type_name(other));
+                let msg = format!(
+                    "{}(): Argument #{} (${}) must be of type array|string, {} given",
+                    fname,
+                    idx + 1,
+                    name,
+                    Vm::value_type_name(other)
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                Err(VmError { message: msg, line: vm.current_line })
+                Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                })
             }
         }
     };
@@ -652,10 +751,16 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
     let replace = parse(vm, 1, "replace")?;
     let subject = parse(vm, 2, "subject")?;
     if let (StrOrArr::Str(_), StrOrArr::Arr(..)) = (&search, &replace) {
-        let msg = format!("{}(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string", fname);
+        let msg = format!(
+            "{}(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string",
+            fname
+        );
         let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // Pre-convert search/replace array entries lazily per subject, like PHP.
     let mut count: i64 = 0;
@@ -665,7 +770,10 @@ fn php_str_replace_common(vm: &mut Vm, args: &[Value], fname: &str, ci: bool) ->
         }
         match &search {
             StrOrArr::Str(needle) => {
-                let repl = match &replace { StrOrArr::Str(r) => r.clone(), _ => Vec::new() };
+                let repl = match &replace {
+                    StrOrArr::Str(r) => r.clone(),
+                    _ => Vec::new(),
+                };
                 str_replace_once(&subj, needle, &repl, ci, count)
             }
             StrOrArr::Arr(needles, _) => {
@@ -828,12 +936,19 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             // Stringable scalars and null: PHP coerces these to string for the separator.
-            Value::String(_) | Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null | Value::Undef => {
-                (vm.value_to_string(&args[0]), &args[1])
-            }
+            Value::String(_)
+            | Value::Long(_)
+            | Value::Double(_)
+            | Value::True
+            | Value::False
+            | Value::Null
+            | Value::Undef => (vm.value_to_string(&args[0]), &args[1]),
             Value::Object(obj) => {
                 // Only accept objects implementing __toString (Stringable).
                 let class_lower: Vec<u8> = obj
@@ -855,7 +970,10 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                     );
                     let exc = vm.create_exception(b"TypeError", &msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
                 (vm.value_to_string(&args[0]), &args[1])
             }
@@ -866,7 +984,10 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             _ => {
                 let type_name = Vm::value_type_name(&a0);
@@ -876,7 +997,10 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
     } else if let Some(first) = args.first() {
@@ -887,16 +1011,25 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
         } else {
             // implode(non-array) with no second arg - TypeError.
             // PHP collapses several types into the same "...argument #2 must be array, null given" message.
-            let msg = format!("{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given", func_name);
+            let msg = format!(
+                "{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given",
+                func_name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     } else {
         let msg = format!("{}() expects at least 1 argument, 0 given", func_name);
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     };
 
     let pieces_d = pieces.deref();
@@ -919,7 +1052,10 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 let s = vm.value_to_string(v);
                 // If __toString raised an exception, propagate it.
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: String::new(), line: vm.current_line });
+                    return Err(VmError {
+                        message: String::new(),
+                        line: vm.current_line,
+                    });
                 }
                 result.extend_from_slice(s.as_bytes());
             }
@@ -927,10 +1063,16 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
         }
         Value::Null | Value::Undef => {
             // Two-arg case: implode(glue, null) - now a TypeError in PHP 8.1+
-            let msg = format!("{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given", func_name);
+            let msg = format!(
+                "{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given",
+                func_name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
         _ => {
             let type_name = match &pieces_d {
@@ -943,10 +1085,16 @@ fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, 
                 Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).to_string(),
                 _ => "unknown".to_string(),
             };
-            let msg = format!("{}(): Argument #2 ($array) must be of type ?array, {} given", func_name, type_name);
+            let msg = format!(
+                "{}(): Argument #2 ($array) must be of type ?array, {} given",
+                func_name, type_name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -956,13 +1104,19 @@ fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "chr() expects exactly 1 argument, 0 given";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     if args.len() > 1 {
         let msg = format!("chr() expects exactly 1 argument, {} given", args.len());
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let n = args[0].to_long();
     if !(0..=255).contains(&n) {
@@ -994,35 +1148,60 @@ fn ord(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// Validate that the format argument to sprintf/printf is a string (not array/resource/non-Stringable object)
-fn validate_sprintf_format_arg(vm: &mut Vm, func_name: &str, format_arg: Option<&Value>) -> Result<(), VmError> {
+fn validate_sprintf_format_arg(
+    vm: &mut Vm,
+    func_name: &str,
+    format_arg: Option<&Value>,
+) -> Result<(), VmError> {
     if let Some(arg) = format_arg {
         let derefed = arg.deref();
         match &derefed {
             Value::Array(_) => {
-                let msg = format!("{}(): Argument #1 ($format) must be of type string, array given", func_name);
+                let msg = format!(
+                    "{}(): Argument #1 ($format) must be of type string, array given",
+                    func_name
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             Value::Resource(_) => {
-                let msg = format!("{}(): Argument #1 ($format) must be of type string, resource given", func_name);
+                let msg = format!(
+                    "{}(): Argument #1 ($format) must be of type string, resource given",
+                    func_name
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             Value::Object(obj) => {
                 // Check if the object implements __toString (Stringable)
                 let class_name = obj.borrow().class_name.clone();
-                let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let has_tostring = vm.classes.get(&class_lower)
+                let class_lower: Vec<u8> =
+                    class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let has_tostring = vm
+                    .classes
+                    .get(&class_lower)
                     .map(|c| c.get_method(b"__tostring").is_some())
                     .unwrap_or(false);
                 if !has_tostring {
                     let class_display = String::from_utf8_lossy(&class_name).to_string();
-                    let msg = format!("{}(): Argument #1 ($format) must be of type string, {} given", func_name, class_display);
+                    let msg = format!(
+                        "{}(): Argument #1 ($format) must be of type string, {} given",
+                        func_name, class_display
+                    );
                     let exc = vm.create_exception(b"TypeError", &msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
             _ => {}
@@ -1032,7 +1211,11 @@ fn validate_sprintf_format_arg(vm: &mut Vm, func_name: &str, format_arg: Option<
 }
 
 /// Validate that the second argument of vsprintf/vprintf/vfprintf is an array.
-fn validate_sprintf_values_arg(vm: &mut Vm, func_name: &str, values_arg: &Value) -> Result<(), VmError> {
+fn validate_sprintf_values_arg(
+    vm: &mut Vm,
+    func_name: &str,
+    values_arg: &Value,
+) -> Result<(), VmError> {
     let derefed = values_arg.deref();
     let type_name = match &derefed {
         Value::Array(_) => return Ok(()),
@@ -1045,21 +1228,37 @@ fn validate_sprintf_values_arg(vm: &mut Vm, func_name: &str, values_arg: &Value)
         Value::Resource(_) => "resource",
         Value::Object(obj) => {
             let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            let msg = format!("{}(): Argument #2 ($values) must be of type array, {} given", func_name, name);
+            let msg = format!(
+                "{}(): Argument #2 ($values) must be of type array, {} given",
+                func_name, name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => "unknown",
     };
-    let msg = format!("{}(): Argument #2 ($values) must be of type array, {} given", func_name, type_name);
+    let msg = format!(
+        "{}(): Argument #2 ($values) must be of type array, {} given",
+        func_name, type_name
+    );
     let exc = vm.create_exception(b"TypeError", &msg, 0);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 /// Count the number of format specifiers in a sprintf format string and validate arg count
-fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> Result<(), VmError> {
+fn validate_sprintf_arg_count(
+    vm: &mut Vm,
+    _func_name: &str,
+    args: &[Value],
+) -> Result<(), VmError> {
     if args.is_empty() {
         return Ok(());
     }
@@ -1077,7 +1276,10 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
                 let msg = "Missing format specifier at end of string";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             if format_bytes[i] == b'%' {
                 i += 1;
@@ -1088,7 +1290,9 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
             let mut num = 0usize;
             let mut has_num = false;
             while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                num = num.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as usize);
+                num = num
+                    .saturating_mul(10)
+                    .saturating_add((format_bytes[i] - b'0') as usize);
                 has_num = true;
                 i += 1;
             }
@@ -1109,7 +1313,9 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
                 }
             }
             // Skip flags, width, precision, length modifiers, and type
-            while i < format_bytes.len() && matches!(format_bytes[i], b'-' | b'+' | b' ' | b'0' | b'\'') {
+            while i < format_bytes.len()
+                && matches!(format_bytes[i], b'-' | b'+' | b' ' | b'0' | b'\'')
+            {
                 if format_bytes[i] == b'\'' {
                     i += 1; // consume apostrophe
                     if i >= format_bytes.len() {
@@ -1117,7 +1323,10 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
                         let msg = "Missing padding character";
                         let exc = vm.create_exception(b"ValueError", msg, 0);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg.into(), line: vm.current_line });
+                        return Err(VmError {
+                            message: msg.into(),
+                            line: vm.current_line,
+                        });
                     }
                     i += 1; // skip pad char
                     continue;
@@ -1136,7 +1345,12 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
                 }
             }
             // Length modifiers
-            while i < format_bytes.len() && matches!(format_bytes[i], b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't') {
+            while i < format_bytes.len()
+                && matches!(
+                    format_bytes[i],
+                    b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't'
+                )
+            {
                 i += 1;
             }
             // Type specifier - if missing, it's an error
@@ -1144,7 +1358,10 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
                 let msg = "Missing format specifier at end of string";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             i += 1;
         } else {
@@ -1154,10 +1371,17 @@ fn validate_sprintf_arg_count(vm: &mut Vm, _func_name: &str, args: &[Value]) -> 
 
     let available = args.len() - 1; // subtract the format arg
     if max_arg > available {
-        let msg = format!("{} arguments are required, {} given", max_arg + 1, available + 1);
+        let msg = format!(
+            "{} arguments are required, {} given",
+            max_arg + 1,
+            available + 1
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(())
 }
@@ -1167,7 +1391,10 @@ fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "sprintf() expects at least 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     // TypeError for non-string format argument (array, resource)
     validate_sprintf_format_arg(vm, "sprintf", args.first())?;
@@ -1205,9 +1432,15 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
         if let Some(vm_ref) = vm.as_deref_mut() {
             let exc = vm_ref.create_exception(b"ValueError", &msg, 0);
             vm_ref.current_exception = Some(exc);
-            return VmError { message: msg, line: vm_ref.current_line };
+            return VmError {
+                message: msg,
+                line: vm_ref.current_line,
+            };
         }
-        VmError { message: msg, line: 0 }
+        VmError {
+            message: msg,
+            line: 0,
+        }
     }
 
     // Parse an optional argument-position specifier (digits followed by '$').
@@ -1215,7 +1448,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
     // Matches PHP: scan past any digits first; only if `$` follows do we treat
     // this as an argpos spec (and then parse the number, which may be 0/missing
     // which triggers a ValueError).
-    fn parse_argpos(fmt: &[u8], i: &mut usize, vm: &mut Option<&mut Vm>) -> Result<Option<usize>, VmError> {
+    fn parse_argpos(
+        fmt: &[u8],
+        i: &mut usize,
+        vm: &mut Option<&mut Vm>,
+    ) -> Result<Option<usize>, VmError> {
         let save_i = *i;
         let mut lookahead = *i;
         while lookahead < fmt.len() && fmt[lookahead].is_ascii_digit() {
@@ -1230,16 +1467,23 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
         let mut num: u64 = 0;
         let mut overflow = false;
         while *i < fmt.len() && fmt[*i].is_ascii_digit() {
-            num = num.saturating_mul(10).saturating_add((fmt[*i] - b'0') as u64);
-            if num >= i32::MAX as u64 { overflow = true; }
+            num = num
+                .saturating_mul(10)
+                .saturating_add((fmt[*i] - b'0') as u64);
+            if num >= i32::MAX as u64 {
+                overflow = true;
+            }
             *i += 1;
         }
         *i += 1; // skip $
         if num == 0 || overflow {
-            return Err(raise(vm, format!(
-                "Argument number specifier must be greater than zero and less than {}",
-                i32::MAX
-            )));
+            return Err(raise(
+                vm,
+                format!(
+                    "Argument number specifier must be greater than zero and less than {}",
+                    i32::MAX
+                ),
+            ));
         }
         Ok(Some(num as usize))
     }
@@ -1311,7 +1555,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 let w_idx = match w_argpos {
                     Some(n) => n,
                     None => {
-                        let n = arg_idx; arg_idx += 1; n
+                        let n = arg_idx;
+                        arg_idx += 1;
+                        n
                     }
                 };
                 let w_arg = args.get(w_idx).unwrap_or(&Value::Null);
@@ -1320,19 +1566,29 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 }
                 let w_val = w_arg.to_long();
                 if w_val < 0 || w_val > i32::MAX as i64 {
-                    return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
+                    return Err(raise(
+                        &mut vm,
+                        format!("Width must be between 0 and {}", i32::MAX),
+                    ));
                 }
                 w_val as usize
             } else {
                 let mut w: u64 = 0;
                 let mut overflow = false;
                 while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    w = w.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as u64);
-                    if w > i32::MAX as u64 { overflow = true; }
+                    w = w
+                        .saturating_mul(10)
+                        .saturating_add((format_bytes[i] - b'0') as u64);
+                    if w > i32::MAX as u64 {
+                        overflow = true;
+                    }
                     i += 1;
                 }
                 if overflow {
-                    return Err(raise(&mut vm, format!("Width must be between 0 and {}", i32::MAX)));
+                    return Err(raise(
+                        &mut vm,
+                        format!("Width must be between 0 and {}", i32::MAX),
+                    ));
                 }
                 w as usize
             };
@@ -1349,7 +1605,9 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     let p_idx = match p_argpos {
                         Some(n) => n,
                         None => {
-                            let n = arg_idx; arg_idx += 1; n
+                            let n = arg_idx;
+                            arg_idx += 1;
+                            n
                         }
                     };
                     let p_arg = args.get(p_idx).unwrap_or(&Value::Null);
@@ -1358,7 +1616,10 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                     let p_val = p_arg.to_long();
                     if p_val < -1 || p_val > i32::MAX as i64 {
-                        return Err(raise(&mut vm, format!("Precision must be between -1 and {}", i32::MAX)));
+                        return Err(raise(
+                            &mut vm,
+                            format!("Precision must be between -1 and {}", i32::MAX),
+                        ));
                     }
                     precision = Some(p_val);
                 } else {
@@ -1366,13 +1627,20 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     let mut overflow = false;
                     let mut has_digits = false;
                     while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                        p = p.saturating_mul(10).saturating_add((format_bytes[i] - b'0') as u64);
-                        if p > i32::MAX as u64 { overflow = true; }
+                        p = p
+                            .saturating_mul(10)
+                            .saturating_add((format_bytes[i] - b'0') as u64);
+                        if p > i32::MAX as u64 {
+                            overflow = true;
+                        }
                         has_digits = true;
                         i += 1;
                     }
                     if overflow {
-                        return Err(raise(&mut vm, format!("Precision must be between 0 and {}", i32::MAX)));
+                        return Err(raise(
+                            &mut vm,
+                            format!("Precision must be between 0 and {}", i32::MAX),
+                        ));
                     }
                     precision = Some(if has_digits { p as i64 } else { 0 });
                 }
@@ -1395,14 +1663,19 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
 
             // PHP: precision = -1 only allowed for g/G/h/H.
             if precision == Some(-1) && !matches!(spec, b'g' | b'G' | b'h' | b'H') {
-                return Err(raise(&mut vm, "Precision -1 is only supported for %g, %G, %h and %H".to_string()));
+                return Err(raise(
+                    &mut vm,
+                    "Precision -1 is only supported for %g, %G, %h and %H".to_string(),
+                ));
             }
 
             // Determine value arg index now (after parsing all width/precision).
             let use_arg_idx = match arg_pos {
                 Some(n) => n,
                 None => {
-                    let n = arg_idx; arg_idx += 1; n
+                    let n = arg_idx;
+                    arg_idx += 1;
+                    n
                 }
             };
             let arg = args.get(use_arg_idx).unwrap_or(&Value::Null);
@@ -1411,7 +1684,8 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             // "auto/shortest" (g/G/h/H only). For floating-point specifiers
             // PHP caps precision at MAX_FLOAT_PRECISION (53) and emits a Notice.
             const PHP_MAX_FLOAT_PRECISION: i64 = 53;
-            let is_float_spec = matches!(spec, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'h' | b'H');
+            let is_float_spec =
+                matches!(spec, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'h' | b'H');
             let precision_usize: Option<usize> = match precision {
                 Some(-1) => None, // sentinel handled per-type below
                 Some(p) if p >= 0 => {
@@ -1452,9 +1726,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 }
                 if let Value::Object(obj) = arg.deref() {
                     if let Some(vm_ref) = vm.as_deref_mut() {
-                        let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                        let class_name =
+                            goro_core::value::display_class_name(&obj.borrow().class_name);
                         vm_ref.emit_warning(&format!(
-                            "Object of class {} could not be converted to int", class_name
+                            "Object of class {} could not be converted to int",
+                            class_name
                         ));
                     }
                 }
@@ -1467,7 +1743,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 match &v {
                     Value::Object(_) => {
                         if let Some(vm_ref) = vm.as_deref_mut() {
-                            if vm_ref.object_is_operator_type.map(|f| f(&v)).unwrap_or(false) {
+                            if vm_ref
+                                .object_is_operator_type
+                                .map(|f| f(&v))
+                                .unwrap_or(false)
+                            {
                                 if let Some(n) = vm_ref.object_to_long.and_then(|f| f(&v)) {
                                     return n;
                                 }
@@ -1478,14 +1758,17 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                     Value::Double(f) => {
                         let f = *f;
-                        if !f.is_finite() || !(-9223372036854775808.0..9223372036854775808.0).contains(&f) {
+                        if !f.is_finite()
+                            || !(-9223372036854775808.0..9223372036854775808.0).contains(&f)
+                        {
                             if let Some(vm_ref) = vm.as_deref_mut() {
                                 let prev = goro_core::value::get_php_precision();
                                 goro_core::value::set_php_precision(-1);
                                 let fs = goro_core::value::format_php_float(f);
                                 goro_core::value::set_php_precision(prev);
                                 vm_ref.emit_warning(&format!(
-                                    "The float {} is not representable as an int, cast occurred", fs
+                                    "The float {} is not representable as an int, cast occurred",
+                                    fs
                                 ));
                             }
                             if !f.is_finite() {
@@ -1512,9 +1795,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             fn object_warn_float(vm: &mut Option<&mut Vm>, arg: &Value) {
                 if let Value::Object(obj) = arg.deref() {
                     if let Some(vm_ref) = vm.as_deref_mut() {
-                        let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                        let class_name =
+                            goro_core::value::display_class_name(&obj.borrow().class_name);
                         vm_ref.emit_warning(&format!(
-                            "Object of class {} could not be converted to float", class_name
+                            "Object of class {} could not be converted to float",
+                            class_name
                         ));
                     }
                 }
@@ -1610,7 +1895,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     } else if f.is_nan() {
                         "NAN".to_string()
                     } else if f.is_infinite() {
-                        if f > 0.0 { "INF".to_string() } else { "-INF".to_string() }
+                        if f > 0.0 {
+                            "INF".to_string()
+                        } else {
+                            "-INF".to_string()
+                        }
                     } else if prec == usize::MAX {
                         // Shortest round-trip via Rust default Display.
                         let abs = f.abs();
@@ -1629,7 +1918,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                         let exp = abs.log10().floor() as i32;
                         if exp >= -1_i32 && exp < prec as i32 {
                             // Use fixed notation
-                            let decimal_digits = if prec as i32 > exp + 1 { (prec as i32 - exp - 1) as usize } else { 0 };
+                            let decimal_digits = if prec as i32 > exp + 1 {
+                                (prec as i32 - exp - 1) as usize
+                            } else {
+                                0
+                            };
                             let s = format!("{:.decimal_digits$}", f);
                             // Remove trailing zeros after decimal point (PHP %g behavior)
                             if s.contains('.') {
@@ -1649,7 +1942,8 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                                 let mantissa = &s[..e_pos];
                                 let exponent = &s[e_pos..];
                                 if mantissa.contains('.') {
-                                    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+                                    let mantissa =
+                                        mantissa.trim_end_matches('0').trim_end_matches('.');
                                     format!("{}{}", mantissa, exponent)
                                 } else {
                                     s
@@ -1669,26 +1963,40 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 }
                 b'x' => {
                     let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() { Vec::new() } else { format!("{:x}", n).into_bytes() }
+                    if precision_usize.is_some() {
+                        Vec::new()
+                    } else {
+                        format!("{:x}", n).into_bytes()
+                    }
                 }
                 b'X' => {
                     let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() { Vec::new() } else { format!("{:X}", n).into_bytes() }
+                    if precision_usize.is_some() {
+                        Vec::new()
+                    } else {
+                        format!("{:X}", n).into_bytes()
+                    }
                 }
                 b'o' => {
                     let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() { Vec::new() } else { format!("{:o}", n).into_bytes() }
+                    if precision_usize.is_some() {
+                        Vec::new()
+                    } else {
+                        format!("{:o}", n).into_bytes()
+                    }
                 }
                 b'b' => {
                     let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() { Vec::new() } else { format!("{:b}", n).into_bytes() }
+                    if precision_usize.is_some() {
+                        Vec::new()
+                    } else {
+                        format!("{:b}", n).into_bytes()
+                    }
                 }
                 b'c' => {
                     vec![int_arg(&mut vm, arg) as u8]
                 }
-                b'u' => {
-                    format!("{}", int_arg(&mut vm, arg) as u64).into_bytes()
-                }
+                b'u' => format!("{}", int_arg(&mut vm, arg) as u64).into_bytes(),
                 b'%' => {
                     // `%` as type specifier (after flags/width): output literal `%` and consume arg
                     vec![b'%']
@@ -1704,7 +2012,11 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
 
             // php_sprintf_appendint/appenduint: left-aligned integers never
             // pad with zeros.
-            let pad_char = if left_align && pad_char == b'0' && matches!(spec, b'd' | b'u') { b' ' } else { pad_char };
+            let pad_char = if left_align && pad_char == b'0' && matches!(spec, b'd' | b'u') {
+                b' '
+            } else {
+                pad_char
+            };
             // Apply width and padding (byte-level). php_sprintf_appendchar()
             // ignores width and padding for %c.
             if spec != b'c' && width > 0 && formatted.len() < width {
@@ -1716,7 +2028,10 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 } else {
                     // For zero-padding with sign, put sign before zeros
-                    if pad_zero && !formatted.is_empty() && (formatted[0] == b'-' || formatted[0] == b'+') {
+                    if pad_zero
+                        && !formatted.is_empty()
+                        && (formatted[0] == b'-' || formatted[0] == b'+')
+                    {
                         result.push(formatted[0]);
                         result.extend(std::iter::repeat_n(b'0', padding));
                         result.extend_from_slice(&formatted[1..]);
@@ -1758,7 +2073,11 @@ fn php_fix_exponent(s: &str) -> String {
 fn nl2br(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let br = if is_xhtml { b"<br />" as &[u8] } else { b"<br>" };
+    let br = if is_xhtml {
+        b"<br />" as &[u8]
+    } else {
+        b"<br>"
+    };
     let bytes = s.as_bytes();
     let mut result = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1802,10 +2121,14 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Double(f)) => {
             let f = *f;
             if !f.is_finite() || f.fract() != 0.0 || f > i64::MAX as f64 || f < i64::MIN as f64 {
-                let msg = "chunk_split(): Argument #2 ($length) must be of type int, float given".to_string();
+                let msg = "chunk_split(): Argument #2 ($length) must be of type int, float given"
+                    .to_string();
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             f as i64
         }
@@ -1824,7 +2147,10 @@ fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let chunklen = chunklen as usize;
 
@@ -1855,7 +2181,10 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "str_pad(): Argument #3 ($pad_string) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: 0 });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: 0,
+        });
     }
 
     // Validate pad_type
@@ -1863,7 +2192,10 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: 0 });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: 0,
+        });
     }
 
     let bytes = input.as_bytes();
@@ -2006,7 +2338,8 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let charlist_val = args.get(1).unwrap_or(&Value::Null);
     // TypeError if charlist is an array
     if matches!(charlist_val, Value::Array(_)) {
-        let msg = "addcslashes(): Argument #2 ($characters) must be of type string, array given".to_string();
+        let msg = "addcslashes(): Argument #2 ($characters) must be of type string, array given"
+            .to_string();
         let exc = vm.throw_type_error(msg.clone());
         vm.current_exception = Some(exc);
         return Err(VmError {
@@ -2029,7 +2362,9 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             } else {
                 // Invalid range - warn and set each individual character
-                vm.emit_warning("addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing");
+                vm.emit_warning(
+                    "addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing",
+                );
                 char_set[start as usize] = true;
                 char_set[b'.' as usize] = true;
                 char_set[end as usize] = true;
@@ -2186,7 +2521,9 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         while j < ab.len() && ab[j] != b'>' {
                             j += 1;
                         }
-                        if j < ab.len() { j += 1; }
+                        if j < ab.len() {
+                            j += 1;
+                        }
                     } else {
                         j += 1;
                     }
@@ -2283,11 +2620,19 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             // Check for HTML comments: <!-- ... -->
-            if i + 3 < bytes.len() && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
+            if i + 3 < bytes.len()
+                && bytes[i + 1] == b'!'
+                && bytes[i + 2] == b'-'
+                && bytes[i + 3] == b'-'
+            {
                 // HTML comment - skip until -->
                 i += 4;
                 while i < bytes.len() {
-                    if bytes[i] == b'-' && i + 2 < bytes.len() && bytes[i + 1] == b'-' && bytes[i + 2] == b'>' {
+                    if bytes[i] == b'-'
+                        && i + 2 < bytes.len()
+                        && bytes[i + 1] == b'-'
+                        && bytes[i + 2] == b'>'
+                    {
                         i += 3;
                         break;
                     }
@@ -2303,7 +2648,9 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 while i < bytes.len() && bytes[i] != b'>' {
                     i += 1;
                 }
-                if i < bytes.len() { i += 1; }
+                if i < bytes.len() {
+                    i += 1;
+                }
                 continue;
             }
 
@@ -2311,12 +2658,20 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let tag_start = i;
             i += 1;
             let is_closing = i < bytes.len() && bytes[i] == b'/';
-            if is_closing { i += 1; }
+            if is_closing {
+                i += 1;
+            }
 
             // Extract tag name following PHP's php_tag_find normalization:
             // '/' is part of the tag name UNLESS right before '>' (self-closing).
             let mut tag_name_lower: Vec<u8> = Vec::new();
-            while i < bytes.len() && bytes[i] != b'>' && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' {
+            while i < bytes.len()
+                && bytes[i] != b'>'
+                && bytes[i] != b' '
+                && bytes[i] != b'\t'
+                && bytes[i] != b'\n'
+                && bytes[i] != b'\r'
+            {
                 if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
                     // self-closing slash — skip it
                 } else {
@@ -2339,10 +2694,15 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 i += 1;
             }
-            if i < bytes.len() { i += 1; } // skip >
+            if i < bytes.len() {
+                i += 1;
+            } // skip >
 
             // Check if this tag is allowed
-            if !allowed_tags.is_empty() && !tag_name_lower.is_empty() && allowed_tags.iter().any(|t| t == &tag_name_lower) {
+            if !allowed_tags.is_empty()
+                && !tag_name_lower.is_empty()
+                && allowed_tags.iter().any(|t| t == &tag_name_lower)
+            {
                 result.extend_from_slice(&bytes[tag_start..i]);
             }
             // Otherwise, the tag is stripped (nothing added to result)
@@ -2373,7 +2733,12 @@ pub(crate) fn php_quot_print_encode(src: &[u8]) -> Vec<u8> {
             i += 1;
             length -= 1;
             lp = 0;
-        } else if c < 0x20 || c == 0x7f || c & 0x80 != 0 || c == b'=' || (c == b' ' && at(i) == b'\r') {
+        } else if c < 0x20
+            || c == 0x7f
+            || c & 0x80 != 0
+            || c == b'='
+            || (c == b' ' && at(i) == b'\r')
+        {
             lp += 3;
             if (lp > MAXL && c <= 0x7f)
                 || (c > 0x7f && c <= 0xdf && lp + 3 > MAXL)
@@ -2400,7 +2765,9 @@ pub(crate) fn php_quot_print_encode(src: &[u8]) -> Vec<u8> {
 
 fn quoted_printable_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = zpp_str(vm, args, 0, "quoted_printable_encode", "string")?;
-    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(s.as_bytes()))))
+    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(
+        s.as_bytes(),
+    ))))
 }
 
 fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2468,7 +2835,11 @@ fn convert_uuencode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         out.push(enc(at(s) >> 2));
         out.push(enc_c2(s));
         out.push(if e - s > 1 { enc_c3(s) } else { enc(0) });
-        out.push(if e - s > 2 { enc(at(s + 2) & 0o77) } else { enc(0) });
+        out.push(if e - s > 2 {
+            enc(at(s + 2) & 0o77)
+        } else {
+            enc(0)
+        });
     }
     if len < 45 {
         out.push(b'\n');
@@ -2505,7 +2876,11 @@ fn convert_uudecode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return fail(vm);
         }
         total += len;
-        let ee = s + if len == 45 { 60 } else { (len as f64 * 1.33).floor() as usize };
+        let ee = s + if len == 45 {
+            60
+        } else {
+            (len as f64 * 1.33).floor() as usize
+        };
         if ee > e {
             return fail(vm);
         }
@@ -2553,16 +2928,24 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let from_val = args[1].deref();
         match &from_val {
             Value::Array(_) => {
-                let msg = "strtr(): Argument #2 ($from) must be of type string, array given".to_string();
+                let msg =
+                    "strtr(): Argument #2 ($from) must be of type string, array given".to_string();
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             Value::Resource(_) => {
-                let msg = "strtr(): Argument #2 ($from) must be of type string, resource given".to_string();
+                let msg = "strtr(): Argument #2 ($from) must be of type string, resource given"
+                    .to_string();
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             Value::Null | Value::Undef => {
                 vm.emit_deprecated_at(
@@ -2573,8 +2956,12 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::Object(obj) => {
                 // Only objects with __toString coerce cleanly to a string; the
                 // rest must raise TypeError like for any string-typed param.
-                let class_lower: Vec<u8> =
-                    obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let class_lower: Vec<u8> = obj
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 let has_to_string = vm
                     .classes
                     .get(&class_lower)
@@ -2582,10 +2969,16 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .unwrap_or(false);
                 if !has_to_string {
                     let type_name = Vm::value_type_name(&from_val);
-                    let msg = format!("strtr(): Argument #2 ($from) must be of type string, {} given", type_name);
+                    let msg = format!(
+                        "strtr(): Argument #2 ($from) must be of type string, {} given",
+                        type_name
+                    );
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
             _ => {}
@@ -2653,10 +3046,16 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // strtr($str, $replace_pairs) - second arg must be an array
         let val = &args[1];
         let type_name = goro_core::vm::Vm::value_type_name(val);
-        let msg = format!("strtr(): Argument #2 ($from) must be of type array, {} given", type_name);
+        let msg = format!(
+            "strtr(): Argument #2 ($from) must be of type array, {} given",
+            type_name
+        );
         let exc = vm.throw_type_error(msg.clone());
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg, line: vm.current_line })
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
     } else {
         Ok(Value::String(subject))
     }
@@ -2674,7 +3073,9 @@ fn str_shuffle(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or_default()
             .as_nanos() as u64;
         // Avoid zero seed (xorshift64 fixed point).
-        if seed == 0 { seed = 0x9E3779B97F4A7C15; }
+        if seed == 0 {
+            seed = 0x9E3779B97F4A7C15;
+        }
         for i in (1..len).rev() {
             seed ^= seed << 13;
             seed ^= seed >> 7;
@@ -2703,13 +3104,17 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check negative length first (ValueError)
     if let Some(l) = length {
         if l < 0 {
-            let msg = "substr_compare(): Argument #4 ($length) must be greater than or equal to 0".to_string();
+            let msg = "substr_compare(): Argument #4 ($length) must be greater than or equal to 0"
+                .to_string();
             let exc = vm.throw_type_error(msg.clone());
             if let Value::Object(obj) = &exc {
                 obj.borrow_mut().class_name = b"ValueError".to_vec();
             }
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
 
@@ -2720,13 +3125,18 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         offset
     };
     if resolved_offset > main_len {
-        let msg = "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)".to_string();
+        let msg =
+            "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)"
+                .to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let start = resolved_offset as usize;
 
@@ -2749,8 +3159,14 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // then if equal, three-way-compare MIN(cmp_len, len1) vs MIN(cmp_len, len2).
     let prefix_len = cmp_len.min(len1).min(len2);
     let (a_prefix, b_prefix) = if case_insensitive {
-        let a: Vec<u8> = sub[..prefix_len].iter().map(|c| c.to_ascii_lowercase()).collect();
-        let b: Vec<u8> = s2_bytes[..prefix_len].iter().map(|c| c.to_ascii_lowercase()).collect();
+        let a: Vec<u8> = sub[..prefix_len]
+            .iter()
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let b: Vec<u8> = s2_bytes[..prefix_len]
+            .iter()
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
         (a, b)
     } else {
         (sub[..prefix_len].to_vec(), s2_bytes[..prefix_len].to_vec())
@@ -2814,7 +3230,11 @@ fn similar_text(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let total = (a.len() + b.len()) as f64;
 
     if let Some(Value::Reference(r)) = percent_ref {
-        let pct = if total > 0.0 { (sim as f64 * 200.0) / total } else { 0.0 };
+        let pct = if total > 0.0 {
+            (sim as f64 * 200.0) / total
+        } else {
+            0.0
+        };
         *r.borrow_mut() = Value::Double(pct);
     }
 
@@ -2873,16 +3293,24 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let word = args.first().unwrap_or(&Value::Null).to_php_string();
     let max_phonemes = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if max_phonemes < 0 {
-        let msg = "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0".to_string();
+        let msg = "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0"
+            .to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let word_bytes = word.as_bytes();
-    let max = if max_phonemes > 0 { max_phonemes as usize } else { usize::MAX };
+    let max = if max_phonemes > 0 {
+        max_phonemes as usize
+    } else {
+        usize::MAX
+    };
 
     // _codes table from metachar.h, indexed by letter (A-Z, uppercase).
     // bit 0: vowel (AEIOU)
@@ -2896,7 +3324,9 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let encode = |c: u8| -> u8 {
         if c.is_ascii_alphabetic() {
             CODES[(c.to_ascii_uppercase() - b'A') as usize]
-        } else { 0 }
+        } else {
+            0
+        }
     };
     let isvowel = |c: u8| encode(c) & 1 != 0;
     let affecth = |c: u8| encode(c) & 4 != 0;
@@ -2907,7 +3337,11 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let convert_raw = |c: u8| c.to_ascii_uppercase();
 
     let read_at = |idx: usize| -> u8 {
-        if idx < word_bytes.len() { word_bytes[idx] } else { 0 }
+        if idx < word_bytes.len() {
+            word_bytes[idx]
+        } else {
+            0
+        }
     };
     let read_letter_at = |idx: usize| -> u8 { convert_raw(read_at(idx)) };
 
@@ -2983,7 +3417,11 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let curr = convert_raw(raw);
         // Look at previous letter (in the raw input)
-        let prev = if w_idx >= 1 { convert_raw(word_bytes[w_idx - 1]) } else { 0 };
+        let prev = if w_idx >= 1 {
+            convert_raw(word_bytes[w_idx - 1])
+        } else {
+            0
+        };
 
         // Drop duplicates, except CC
         if curr == prev && curr != b'C' {
@@ -2997,7 +3435,9 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
         match curr {
             b'B' => {
-                if prev != b'M' { phonize(&mut result, b'B'); }
+                if prev != b'M' {
+                    phonize(&mut result, b'B');
+                }
             }
             b'C' => {
                 if makesoft(next) {
@@ -3027,8 +3467,16 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'G' => {
                 if next == b'H' {
-                    let look3 = if w_idx >= 3 { convert_raw(word_bytes[w_idx - 3]) } else { 0 };
-                    let look4 = if w_idx >= 4 { convert_raw(word_bytes[w_idx - 4]) } else { 0 };
+                    let look3 = if w_idx >= 3 {
+                        convert_raw(word_bytes[w_idx - 3])
+                    } else {
+                        0
+                    };
+                    let look4 = if w_idx >= 4 {
+                        convert_raw(word_bytes[w_idx - 4])
+                    } else {
+                        0
+                    };
                     if !(noghtof(look3) || look4 == b'H') {
                         phonize(&mut result, b'F');
                         skip += 1;
@@ -3055,7 +3503,9 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             b'K' => {
-                if prev != b'C' { phonize(&mut result, b'K'); }
+                if prev != b'C' {
+                    phonize(&mut result, b'K');
+                }
             }
             b'P' => {
                 if next == b'H' {
@@ -3064,7 +3514,9 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     phonize(&mut result, b'P');
                 }
             }
-            b'Q' => { phonize(&mut result, b'K'); }
+            b'Q' => {
+                phonize(&mut result, b'K');
+            }
             b'S' => {
                 if next == b'I' && (after_next == b'O' || after_next == b'A') {
                     phonize(&mut result, b'X');
@@ -3086,18 +3538,26 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     phonize(&mut result, b'T');
                 }
             }
-            b'V' => { phonize(&mut result, b'F'); }
+            b'V' => {
+                phonize(&mut result, b'F');
+            }
             b'W' => {
-                if isvowel(next) { phonize(&mut result, b'W'); }
+                if isvowel(next) {
+                    phonize(&mut result, b'W');
+                }
             }
             b'X' => {
                 phonize(&mut result, b'K');
                 phonize(&mut result, b'S');
             }
             b'Y' => {
-                if isvowel(next) { phonize(&mut result, b'Y'); }
+                if isvowel(next) {
+                    phonize(&mut result, b'Y');
+                }
             }
-            b'Z' => { phonize(&mut result, b'S'); }
+            b'Z' => {
+                phonize(&mut result, b'S');
+            }
             b'F' | b'J' | b'L' | b'M' | b'N' | b'R' => {
                 phonize(&mut result, curr);
             }
@@ -3160,13 +3620,17 @@ fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
 
     if !(0..=4).contains(&mode) {
-        let msg = "count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)".to_string();
+        let msg =
+            "count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     let mut counts = [0i64; 256];
@@ -3232,13 +3696,22 @@ fn count_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// Z_PARAM_STR: scalars convert, Stringable objects use __toString; arrays,
 /// resources and other objects throw a TypeError.
-pub(crate) fn zpp_str(vm: &mut Vm, args: &[Value], idx: usize, fname: &str, pname: &str) -> Result<PhpString, VmError> {
+pub(crate) fn zpp_str(
+    vm: &mut Vm,
+    args: &[Value],
+    idx: usize,
+    fname: &str,
+    pname: &str,
+) -> Result<PhpString, VmError> {
     let v = args.get(idx).cloned().unwrap_or(Value::Null).deref();
     let given = match &v {
         Value::Array(_) => "array".to_string(),
         Value::Resource(_) => "resource".to_string(),
         Value::Object(o) => {
-            let has = vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+            let has = vm
+                .get_class_def(&o.borrow().class_name.to_ascii_lowercase())
+                .map(|c| c.get_method(b"__tostring").is_some())
+                .unwrap_or(false);
             if has {
                 return Ok(vm.value_to_string(&v));
             }
@@ -3246,10 +3719,19 @@ pub(crate) fn zpp_str(vm: &mut Vm, args: &[Value], idx: usize, fname: &str, pnam
         }
         _ => return Ok(v.to_php_string()),
     };
-    let msg = format!("{}(): Argument #{} (${}) must be of type string, {} given", fname, idx + 1, pname, given);
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type string, {} given",
+        fname,
+        idx + 1,
+        pname,
+        given
+    );
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn str_split_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3309,7 +3791,10 @@ fn strpbrk_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "strpbrk(): Argument #2 ($characters) must be a non-empty string";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     let h = haystack.as_bytes();
     let chars = char_list.as_bytes();
@@ -3364,7 +3849,11 @@ fn strnatcmp_impl(a: &[u8], b: &[u8], case_insensitive: bool) -> i64 {
                 if a_num_len == 0 && b_num_len == 0 {
                     // Both are all zeros - compare by number of zeros
                     if a_leading_zeros != b_leading_zeros {
-                        return if a_leading_zeros < b_leading_zeros { -1 } else { 1 };
+                        return if a_leading_zeros < b_leading_zeros {
+                            -1
+                        } else {
+                            1
+                        };
                     }
                 } else {
                     return if a_num_len < b_num_len { -1 } else { 1 };
@@ -3373,19 +3862,35 @@ fn strnatcmp_impl(a: &[u8], b: &[u8], case_insensitive: bool) -> i64 {
                 // Same length - compare digit by digit
                 for k in 0..a_num_len {
                     if a[a_start + k] != b[b_start + k] {
-                        return if a[a_start + k] < b[b_start + k] { -1 } else { 1 };
+                        return if a[a_start + k] < b[b_start + k] {
+                            -1
+                        } else {
+                            1
+                        };
                     }
                 }
                 // Same numeric value - fewer leading zeros comes first
                 if a_leading_zeros != b_leading_zeros {
-                    return if a_leading_zeros < b_leading_zeros { -1 } else { 1 };
+                    return if a_leading_zeros < b_leading_zeros {
+                        -1
+                    } else {
+                        1
+                    };
                 }
             }
             ai = a_end;
             bi = b_end;
         } else {
-            let ca = if case_insensitive { a[ai].to_ascii_lowercase() } else { a[ai] };
-            let cb = if case_insensitive { b[bi].to_ascii_lowercase() } else { b[bi] };
+            let ca = if case_insensitive {
+                a[ai].to_ascii_lowercase()
+            } else {
+                a[ai]
+            };
+            let cb = if case_insensitive {
+                b[bi].to_ascii_lowercase()
+            } else {
+                b[bi]
+            };
             if ca != cb {
                 return if ca < cb { -1 } else { 1 };
             }
@@ -3405,13 +3910,21 @@ fn strnatcmp_impl(a: &[u8], b: &[u8], case_insensitive: bool) -> i64 {
 fn strnatcmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
-    Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), false)))
+    Ok(Value::Long(strnatcmp_impl(
+        a.as_bytes(),
+        b.as_bytes(),
+        false,
+    )))
 }
 
 fn strnatcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
-    Ok(Value::Long(strnatcmp_impl(a.as_bytes(), b.as_bytes(), true)))
+    Ok(Value::Long(strnatcmp_impl(
+        a.as_bytes(),
+        b.as_bytes(),
+        true,
+    )))
 }
 
 fn strcmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3435,7 +3948,10 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let len = len_raw as usize;
     let a_bytes = a.as_bytes();
@@ -3451,7 +3967,13 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let d = a_sub_len as i64 - b_sub_len as i64;
-    Ok(Value::Long(if d < 0 { -1 } else if d > 0 { 1 } else { 0 }))
+    Ok(Value::Long(if d < 0 {
+        -1
+    } else if d > 0 {
+        1
+    } else {
+        0
+    }))
 }
 
 fn strcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3469,7 +3991,13 @@ fn strcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let d = a_bytes.len() as i64 - b_bytes.len() as i64;
-    Ok(Value::Long(if d < 0 { -1 } else if d > 0 { 1 } else { 0 }))
+    Ok(Value::Long(if d < 0 {
+        -1
+    } else if d > 0 {
+        1
+    } else {
+        0
+    }))
 }
 
 fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3477,13 +4005,17 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
     let len_raw = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     if len_raw < 0 {
-        let msg = "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
+        let msg =
+            "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let len = len_raw as usize;
     let a_bytes = a.as_bytes();
@@ -3501,7 +4033,13 @@ fn strncasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     let len_diff = a_sub_len as i64 - b_sub_len as i64;
-    Ok(Value::Long(if len_diff < 0 { -1 } else if len_diff > 0 { 1 } else { 0 }))
+    Ok(Value::Long(if len_diff < 0 {
+        -1
+    } else if len_diff > 0 {
+        1
+    } else {
+        0
+    }))
 }
 
 fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3509,7 +4047,10 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "vprintf() expects at least 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     // Check format arg type
     validate_sprintf_format_arg(vm, "vprintf", args.first())?;
@@ -3535,7 +4076,10 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "printf() expects at least 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
     validate_sprintf_arg_count(vm, "printf", args)?;
@@ -3707,11 +4251,21 @@ fn compute_substr_range(s_len: usize, offset: i64, length: Option<i64>) -> (usiz
     let end = match length {
         Some(l) if l < 0 => {
             let end_pos = s_len as i64 + l;
-            if end_pos <= start as i64 { start } else { end_pos as usize }
+            if end_pos <= start as i64 {
+                start
+            } else {
+                end_pos as usize
+            }
         }
         Some(l) => {
             let end_pos = start as i64 + l;
-            if end_pos > s_len as i64 { s_len } else if end_pos < start as i64 { start } else { end_pos as usize }
+            if end_pos > s_len as i64 {
+                s_len
+            } else if end_pos < start as i64 {
+                start
+            } else {
+                end_pos as usize
+            }
         }
         None => s_len,
     };
@@ -3759,7 +4313,10 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "vsprintf() expects at least 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     validate_sprintf_format_arg(vm, "vsprintf", args.first())?;
     let format = vm.value_to_string(args.first().unwrap_or(&Value::Null));
@@ -3785,7 +4342,10 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "substr_count(): Argument #2 ($needle) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     let h_bytes = haystack.as_bytes();
     let h_len = h_bytes.len() as i64;
@@ -3798,7 +4358,10 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         s as usize
     } else {
@@ -3806,7 +4369,10 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         raw_offset as usize
     };
@@ -3820,7 +4386,10 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
                     let exc = vm.create_exception(b"ValueError", msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg.into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: msg.into(),
+                        line: vm.current_line,
+                    });
                 }
                 e as usize
             } else {
@@ -3829,7 +4398,10 @@ fn substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let msg = "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)";
                     let exc = vm.create_exception(b"ValueError", msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg.into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: msg.into(),
+                        line: vm.current_line,
+                    });
                 }
                 e
             }
@@ -3875,7 +4447,10 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
 
     let bytes = s.as_bytes();
@@ -3888,7 +4463,10 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     if bytes.is_empty() {
@@ -3927,7 +4505,9 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // 3. For cut_long: if line_len >= width and no valid space, force cut.
     // 4. For word boundary: if line_len >= width and valid space, break at lastspace.
 
-    let cap = bytes.len().saturating_add(est_breaks.saturating_mul(brk_bytes.len()));
+    let cap = bytes
+        .len()
+        .saturating_add(est_breaks.saturating_mul(brk_bytes.len()));
     let mut result = Vec::with_capacity(cap);
     let mut laststart: i64 = 0;
     let mut lastspace: i64 = 0;
@@ -3991,10 +4571,14 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // TypeError: offset must be int (not float)
     if let Some(offset_v) = args.get(2) {
         if matches!(offset_v, Value::Double(_)) {
-            let msg = "strrpos(): Argument #3 ($offset) must be of type int, float given".to_string();
+            let msg =
+                "strrpos(): Argument #3 ($offset) must be of type int, float given".to_string();
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -4005,19 +4589,27 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if offset >= 0 {
             let start = offset as usize;
             if start > h.len() {
-                let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let msg =
+                    "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             return Ok(Value::Long(h.len() as i64));
         } else {
             let abs = (-offset) as usize;
             if abs > h.len() {
-                let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+                let msg =
+                    "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             return Ok(Value::Long((h.len() - abs) as i64));
         }
@@ -4025,10 +4617,14 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if offset >= 0 {
         let start = offset as usize;
         if start > h.len() {
-            let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         if n.len() > h.len() || start >= h.len() {
             return Ok(Value::False);
@@ -4043,10 +4639,14 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // *start* may be. Match start must be <= (h.len() + offset).
         let abs = (-offset) as usize;
         if abs > h.len() {
-            let msg = "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         if h.len() < n.len() {
             return Ok(Value::False);
@@ -4054,7 +4654,9 @@ fn strrpos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let limit = h.len() - abs;
         // Find rightmost match whose start is <= limit.
         for (i, w) in h.windows(n.len()).enumerate().rev() {
-            if i > limit { continue; }
+            if i > limit {
+                continue;
+            }
             if w == n {
                 return Ok(Value::Long(i as i64));
             }
@@ -4081,19 +4683,27 @@ fn stripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let offset = if offset_val < 0 {
         let abs = (-offset_val) as usize;
         if abs > h.len() {
-            let msg = "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         h.len() - abs
     } else {
         let o = offset_val as usize;
         if o > h.len() {
-            let msg = "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         o
     };
@@ -4115,10 +4725,14 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let needle = args.get(1).unwrap_or(&Value::Null).to_php_string();
     if let Some(offset_v) = args.get(2) {
         if matches!(offset_v, Value::Double(_)) {
-            let msg = "strripos(): Argument #3 ($offset) must be of type int, float given".to_string();
+            let msg =
+                "strripos(): Argument #3 ($offset) must be of type int, float given".to_string();
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -4139,7 +4753,10 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             return Ok(Value::Long(h.len() as i64));
         } else {
@@ -4148,7 +4765,10 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.into(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.into(),
+                    line: vm.current_line,
+                });
             }
             return Ok(Value::Long((h.len() - abs) as i64));
         }
@@ -4156,10 +4776,14 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if offset >= 0 {
         let start = offset as usize;
         if start > h.len() {
-            let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         // Search from start to end, find last occurrence
         if start >= h.len() {
@@ -4174,17 +4798,23 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Negative offset for strripos: match start must be <= (h.len() + offset).
         let abs = (-offset) as usize;
         if abs > h.len() {
-            let msg = "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
+            let msg =
+                "strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.into(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
         }
         if h.len() < n.len() {
             return Ok(Value::False);
         }
         let limit = h.len() - abs;
         for (i, w) in h.windows(n.len()).enumerate().rev() {
-            if i > limit { continue; }
+            if i > limit {
+                continue;
+            }
             if w == n.as_slice() {
                 return Ok(Value::Long(i as i64));
             }
@@ -4225,14 +4855,20 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string".to_string();
             let exc = _vm.create_exception(b"TypeError", &msg, 0);
             _vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: _vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: _vm.current_line,
+            });
         }
         if let Some(la) = length_arg {
             if matches!(la, Value::Array(_)) {
                 let msg = "substr_replace(): Argument #4 ($length) cannot be an array when working on a single string".to_string();
                 let exc = _vm.create_exception(b"TypeError", &msg, 0);
                 _vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: _vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: _vm.current_line,
+                });
             }
         }
     }
@@ -4248,7 +4884,9 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Get replacement for this element
             let repl = if let Value::Array(repl_arr) = replacement_arg {
                 let repl_arr = repl_arr.borrow();
-                repl_arr.iter().nth(i)
+                repl_arr
+                    .iter()
+                    .nth(i)
                     .map(|(_, v)| v.to_php_string())
                     .unwrap_or(PhpString::empty())
             } else {
@@ -4258,7 +4896,9 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Get start for this element
             let start = if let Value::Array(start_arr) = start_arg {
                 let start_arr = start_arr.borrow();
-                start_arr.iter().nth(i)
+                start_arr
+                    .iter()
+                    .nth(i)
                     .map(|(_, v)| v.to_long())
                     .unwrap_or(0)
             } else {
@@ -4269,8 +4909,7 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let length = length_arg.and_then(|la| {
                 if let Value::Array(len_arr) = la {
                     let len_arr = len_arr.borrow();
-                    len_arr.iter().nth(i)
-                        .map(|(_, v)| v.to_long())
+                    len_arr.iter().nth(i).map(|(_, v)| v.to_long())
                 } else {
                     Some(la.to_long())
                 }
@@ -4280,13 +4919,17 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
         }
 
-        Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(result))))
+        Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+            result,
+        ))))
     } else {
         let s = string_arg.to_php_string();
         // When replacement is array, use array[0] as the replacement
         let replacement = if let Value::Array(repl_arr) = replacement_arg {
             let repl_arr = repl_arr.borrow();
-            repl_arr.iter().next()
+            repl_arr
+                .iter()
+                .next()
                 .map(|(_, v)| v.to_php_string())
                 .unwrap_or(PhpString::empty())
         } else {
@@ -4295,7 +4938,11 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // When start is array, use array[0]
         let start = if let Value::Array(start_arr) = start_arg {
             let start_arr = start_arr.borrow();
-            start_arr.iter().next().map(|(_, v)| v.to_long()).unwrap_or(0)
+            start_arr
+                .iter()
+                .next()
+                .map(|(_, v)| v.to_long())
+                .unwrap_or(0)
         } else {
             start_arg.to_long()
         };
@@ -4312,7 +4959,6 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::String(PhpString::from_vec(result)))
     }
 }
-
 
 fn hex2bin(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -4466,16 +5112,35 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_numeric_type = matches!(
             code,
             b'C' | b'c'
-                | b'S' | b'v' | b'n' | b's'
-                | b'L' | b'V' | b'l' | b'i' | b'I' | b'N'
-                | b'q' | b'Q' | b'P' | b'J'
-                | b'f' | b'g' | b'G' | b'd' | b'e' | b'E'
+                | b'S'
+                | b'v'
+                | b'n'
+                | b's'
+                | b'L'
+                | b'V'
+                | b'l'
+                | b'i'
+                | b'I'
+                | b'N'
+                | b'q'
+                | b'Q'
+                | b'P'
+                | b'J'
+                | b'f'
+                | b'g'
+                | b'G'
+                | b'd'
+                | b'e'
+                | b'E'
         );
         if is_numeric_type && arg_idx + repeat > args.len() {
             let msg = format!("Type {}: too few arguments", code as char);
             let exc = _vm.create_exception(b"ValueError", &msg, 0);
             _vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: _vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: _vm.current_line,
+            });
         }
 
         match code {
@@ -4637,10 +5302,17 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .unwrap_or_else(PhpString::empty);
                 arg_idx += 1;
                 let hex = s.as_bytes();
-                let want_nibbles = if count == u32::MAX { hex.len() } else { count as usize };
+                let want_nibbles = if count == u32::MAX {
+                    hex.len()
+                } else {
+                    count as usize
+                };
                 if want_nibbles > hex.len() {
                     _vm.emit_warning_at(
-                        &format!("pack(): Type {}: not enough characters in string", code as char),
+                        &format!(
+                            "pack(): Type {}: not enough characters in string",
+                            code as char
+                        ),
                         _vm.current_line,
                     );
                 }
@@ -4719,7 +5391,10 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)";
         let exc = _vm.create_exception(b"ValueError", msg, 0);
         _vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: _vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: _vm.current_line,
+        });
     }
     let offset = raw_offset as usize;
     let bytes = &data.as_bytes()[offset..];
@@ -4755,7 +5430,10 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if overflow {
-            _vm.emit_warning(&format!("unpack(): Type {}: integer overflow", code as char));
+            _vm.emit_warning(&format!(
+                "unpack(): Type {}: integer overflow",
+                code as char
+            ));
             return Ok(Value::False);
         }
 
@@ -4903,9 +5581,14 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             u16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64
                         };
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 2;
@@ -4921,11 +5604,21 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 4 <= bytes.len() {
-                        let v = i32::from_ne_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let v = i32::from_ne_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                        ]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 4;
@@ -4943,9 +5636,14 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if pos + 2 <= bytes.len() {
                         let v = i16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 2;
@@ -4961,11 +5659,21 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 4 <= bytes.len() {
-                        let v = u32::from_ne_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let v = u32::from_ne_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                        ]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 4;
@@ -4981,11 +5689,21 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 4 <= bytes.len() {
-                        let v = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as i64;
+                        let v = u32::from_le_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                        ]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 4;
@@ -5002,16 +5720,37 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 for j in 0..repeat {
                     if pos + 8 <= bytes.len() {
                         let v = if code == b'q' {
-                            i64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                               bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]])
+                            i64::from_ne_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                                bytes[pos + 4],
+                                bytes[pos + 5],
+                                bytes[pos + 6],
+                                bytes[pos + 7],
+                            ])
                         } else {
-                            u64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                               bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64
+                            u64::from_ne_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                                bytes[pos + 4],
+                                bytes[pos + 5],
+                                bytes[pos + 6],
+                                bytes[pos + 7],
+                            ]) as i64
                         };
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 8;
@@ -5027,12 +5766,25 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 8 <= bytes.len() {
-                        let v = u64::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64;
+                        let v = u64::from_le_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                            bytes[pos + 4],
+                            bytes[pos + 5],
+                            bytes[pos + 6],
+                            bytes[pos + 7],
+                        ]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 8;
@@ -5048,12 +5800,25 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 for j in 0..repeat {
                     if pos + 8 <= bytes.len() {
-                        let v = u64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]) as i64;
+                        let v = u64::from_be_bytes([
+                            bytes[pos],
+                            bytes[pos + 1],
+                            bytes[pos + 2],
+                            bytes[pos + 3],
+                            bytes[pos + 4],
+                            bytes[pos + 5],
+                            bytes[pos + 6],
+                            bytes[pos + 7],
+                        ]) as i64;
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Long(v));
                         field_num += 1;
                         pos += 8;
@@ -5070,14 +5835,34 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 for j in 0..repeat {
                     if pos + 4 <= bytes.len() {
                         let v = match code {
-                            b'g' => f32::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
-                            b'G' => f32::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
-                            _ => f32::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as f64,
+                            b'g' => f32::from_le_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                            ]) as f64,
+                            b'G' => f32::from_be_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                            ]) as f64,
+                            _ => f32::from_ne_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                            ]) as f64,
                         };
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Double(v));
                         field_num += 1;
                         pos += 4;
@@ -5094,17 +5879,46 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 for j in 0..repeat {
                     if pos + 8 <= bytes.len() {
                         let v = match code {
-                            b'e' => f64::from_le_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                       bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
-                            b'E' => f64::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                       bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
-                            _ => f64::from_ne_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                                                   bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]]),
+                            b'e' => f64::from_le_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                                bytes[pos + 4],
+                                bytes[pos + 5],
+                                bytes[pos + 6],
+                                bytes[pos + 7],
+                            ]),
+                            b'E' => f64::from_be_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                                bytes[pos + 4],
+                                bytes[pos + 5],
+                                bytes[pos + 6],
+                                bytes[pos + 7],
+                            ]),
+                            _ => f64::from_ne_bytes([
+                                bytes[pos],
+                                bytes[pos + 1],
+                                bytes[pos + 2],
+                                bytes[pos + 3],
+                                bytes[pos + 4],
+                                bytes[pos + 5],
+                                bytes[pos + 6],
+                                bytes[pos + 7],
+                            ]),
                         };
                         let k = if let Some(ref n) = name {
-                            if repeat > 1 { ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1))) }
-                            else { ArrayKey::String(PhpString::from_string(n.clone())) }
-                        } else { ArrayKey::Int(field_num as i64) };
+                            if repeat > 1 {
+                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
+                            } else {
+                                ArrayKey::String(PhpString::from_string(n.clone()))
+                            }
+                        } else {
+                            ArrayKey::Int(field_num as i64)
+                        };
                         result.set(k, Value::Double(v));
                         field_num += 1;
                         pos += 8;
@@ -5133,7 +5947,10 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     );
                     let exc = _vm.create_exception(b"ValueError", &msg, 0);
                     _vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: _vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: _vm.current_line,
+                    });
                 }
                 let len = if count == u32::MAX {
                     (bytes.len() - pos) * 2
@@ -5235,7 +6052,10 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = format!("Invalid format type {}", code as char);
                 let exc = _vm.create_exception(b"ValueError", &msg, 0);
                 _vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: _vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: _vm.current_line,
+                });
             }
         }
     }
@@ -5266,7 +6086,10 @@ fn str_decrement(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     loop {
         let ch = result[i];
         match ch {
-            b'1'..=b'9' => { result[i] -= 1; break; }
+            b'1'..=b'9' => {
+                result[i] -= 1;
+                break;
+            }
             b'0' => {
                 if i == 0 {
                     if result.len() > 1 {
@@ -5277,7 +6100,10 @@ fn str_decrement(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result[i] = b'9';
                 i -= 1;
             }
-            b'b'..=b'z' => { result[i] -= 1; break; }
+            b'b'..=b'z' => {
+                result[i] -= 1;
+                break;
+            }
             b'a' => {
                 if i == 0 {
                     // Underflow at position 0 - remove this char
@@ -5289,7 +6115,10 @@ fn str_decrement(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result[i] = b'z';
                 i -= 1;
             }
-            b'B'..=b'Z' => { result[i] -= 1; break; }
+            b'B'..=b'Z' => {
+                result[i] -= 1;
+                break;
+            }
             b'A' => {
                 if i == 0 {
                     if result.len() > 1 {
@@ -5374,36 +6203,90 @@ fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, 
 
     if table_type == 0 {
         // HTML_SPECIALCHARS
-        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"&")),
+            Value::String(PhpString::from_bytes(b"&amp;")),
+        );
         if quote_style & 2 != 0 {
-            result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"\"")),
+                Value::String(PhpString::from_bytes(b"&quot;")),
+            );
         }
-        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"<")),
+            Value::String(PhpString::from_bytes(b"&lt;")),
+        );
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b">")),
+            Value::String(PhpString::from_bytes(b"&gt;")),
+        );
         if quote_style & 1 != 0 {
-            result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"'")),
+                Value::String(PhpString::from_bytes(b"&#039;")),
+            );
         }
     } else {
         // HTML_ENTITIES - include common entities
-        result.set(ArrayKey::String(PhpString::from_bytes(b"&")), Value::String(PhpString::from_bytes(b"&amp;")));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"&")),
+            Value::String(PhpString::from_bytes(b"&amp;")),
+        );
         if quote_style & 2 != 0 {
-            result.set(ArrayKey::String(PhpString::from_bytes(b"\"")), Value::String(PhpString::from_bytes(b"&quot;")));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"\"")),
+                Value::String(PhpString::from_bytes(b"&quot;")),
+            );
         }
-        result.set(ArrayKey::String(PhpString::from_bytes(b"<")), Value::String(PhpString::from_bytes(b"&lt;")));
-        result.set(ArrayKey::String(PhpString::from_bytes(b">")), Value::String(PhpString::from_bytes(b"&gt;")));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"<")),
+            Value::String(PhpString::from_bytes(b"&lt;")),
+        );
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b">")),
+            Value::String(PhpString::from_bytes(b"&gt;")),
+        );
         if quote_style & 1 != 0 {
-            result.set(ArrayKey::String(PhpString::from_bytes(b"'")), Value::String(PhpString::from_bytes(b"&#039;")));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"'")),
+                Value::String(PhpString::from_bytes(b"&#039;")),
+            );
         }
         // Add more HTML entities for characters 160-255
         let entities = [
-            (160, "&nbsp;"), (161, "&iexcl;"), (162, "&cent;"), (163, "&pound;"),
-            (164, "&curren;"), (165, "&yen;"), (166, "&brvbar;"), (167, "&sect;"),
-            (168, "&uml;"), (169, "&copy;"), (170, "&ordf;"), (171, "&laquo;"),
-            (172, "&not;"), (173, "&shy;"), (174, "&reg;"), (175, "&macr;"),
-            (176, "&deg;"), (177, "&plusmn;"), (178, "&sup2;"), (179, "&sup3;"),
-            (180, "&acute;"), (181, "&micro;"), (182, "&para;"), (183, "&middot;"),
-            (184, "&cedil;"), (185, "&sup1;"), (186, "&ordm;"), (187, "&raquo;"),
-            (188, "&frac14;"), (189, "&frac12;"), (190, "&frac34;"), (191, "&iquest;"),
+            (160, "&nbsp;"),
+            (161, "&iexcl;"),
+            (162, "&cent;"),
+            (163, "&pound;"),
+            (164, "&curren;"),
+            (165, "&yen;"),
+            (166, "&brvbar;"),
+            (167, "&sect;"),
+            (168, "&uml;"),
+            (169, "&copy;"),
+            (170, "&ordf;"),
+            (171, "&laquo;"),
+            (172, "&not;"),
+            (173, "&shy;"),
+            (174, "&reg;"),
+            (175, "&macr;"),
+            (176, "&deg;"),
+            (177, "&plusmn;"),
+            (178, "&sup2;"),
+            (179, "&sup3;"),
+            (180, "&acute;"),
+            (181, "&micro;"),
+            (182, "&para;"),
+            (183, "&middot;"),
+            (184, "&cedil;"),
+            (185, "&sup1;"),
+            (186, "&ordm;"),
+            (187, "&raquo;"),
+            (188, "&frac14;"),
+            (189, "&frac12;"),
+            (190, "&frac34;"),
+            (191, "&iquest;"),
         ];
         for (code, entity) in &entities {
             let ch = [*code as u8];
@@ -5419,7 +6302,8 @@ fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, 
 fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
-    let encoding = args.get(2)
+    let encoding = args
+        .get(2)
         .map(|v| v.to_php_string().to_string_lossy().to_ascii_lowercase())
         .unwrap_or_else(|| "utf-8".to_string());
     let is_iso88591 = matches!(encoding.as_str(), "iso-8859-1" | "iso8859-1" | "latin1");
@@ -5431,7 +6315,7 @@ fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         if bytes[i] == b'&' {
             // Try to find closing ;
             if let Some(semi_offset) = bytes[i..].iter().position(|&b| b == b';') {
-                let entity = &bytes[i+1..i+semi_offset];
+                let entity = &bytes[i + 1..i + semi_offset];
                 let decoded = decode_html_entity(entity, flags, is_iso88591);
                 if let Some(decoded_bytes) = decoded {
                     result.extend_from_slice(&decoded_bytes);
@@ -5646,7 +6530,10 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             );
             let exc = _vm.create_exception(b"TypeError", &msg, 0);
             _vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: _vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: _vm.current_line,
+            });
         }
     }
 
@@ -5754,11 +6641,19 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             // Check for HTML comments: <!-- ... -->
-            if i + 3 < bytes.len() && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
+            if i + 3 < bytes.len()
+                && bytes[i + 1] == b'!'
+                && bytes[i + 2] == b'-'
+                && bytes[i + 3] == b'-'
+            {
                 // HTML comment - skip until -->
                 i += 4;
                 while i < bytes.len() {
-                    if bytes[i] == b'-' && i + 2 < bytes.len() && bytes[i + 1] == b'-' && bytes[i + 2] == b'>' {
+                    if bytes[i] == b'-'
+                        && i + 2 < bytes.len()
+                        && bytes[i + 1] == b'-'
+                        && bytes[i + 2] == b'>'
+                    {
                         i += 3;
                         break;
                     }
@@ -5774,7 +6669,9 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 while i < bytes.len() && bytes[i] != b'>' {
                     i += 1;
                 }
-                if i < bytes.len() { i += 1; }
+                if i < bytes.len() {
+                    i += 1;
+                }
                 continue;
             }
 
@@ -5814,7 +6711,9 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             while i < bytes.len() {
                 let c = bytes[i];
                 if in_quote != 0 {
-                    if c == in_quote { in_quote = 0; }
+                    if c == in_quote {
+                        in_quote = 0;
+                    }
                     tbuf.push(c);
                 } else if c == b'"' || c == b'\'' {
                     in_quote = c;
@@ -5854,7 +6753,10 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 needle.push(b'<');
                 needle.extend_from_slice(&tag_name_lower);
                 needle.push(b'>');
-                if allow_lower.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                if allow_lower
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_slice())
+                {
                     result.extend_from_slice(&tbuf);
                 }
             }
@@ -5869,7 +6771,11 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let br = if is_xhtml { b"<br />" as &[u8] } else { b"<br>" as &[u8] };
+    let br = if is_xhtml {
+        b"<br />" as &[u8]
+    } else {
+        b"<br>" as &[u8]
+    };
     let bytes = s.as_bytes();
     let mut result = Vec::with_capacity(bytes.len() * 2);
     let mut i = 0;
@@ -5917,10 +6823,14 @@ fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format = args.get(1).map(|v| v.to_long()).unwrap_or(0);
 
     if format != 0 && format != 1 && format != 2 {
-        let msg = "str_word_count(): Argument #2 ($format) must be a valid format value".to_string();
+        let msg =
+            "str_word_count(): Argument #2 ($format) must be a valid format value".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     // Build the 256-byte char mask from optional $characters (with `..` ranges).
@@ -5933,8 +6843,11 @@ fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let cb = cl_str.as_bytes();
             let mut i = 0;
             while i < cb.len() {
-                if i + 3 < cb.len() && cb[i + 1] == b'.' && cb[i + 2] == b'.' && cb[i + 3] >= cb[i] {
-                    for c in cb[i]..=cb[i + 3] { mask[c as usize] = true; }
+                if i + 3 < cb.len() && cb[i + 1] == b'.' && cb[i + 2] == b'.' && cb[i + 3] >= cb[i]
+                {
+                    for c in cb[i]..=cb[i + 3] {
+                        mask[c as usize] = true;
+                    }
                     i += 4;
                 } else {
                     mask[cb[i] as usize] = true;
@@ -6016,7 +6929,9 @@ fn convert_uudecode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn quoted_printable_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = zpp_str(vm, args, 0, "quoted_printable_encode", "string")?;
-    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(s.as_bytes()))))
+    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(
+        s.as_bytes(),
+    ))))
 }
 
 fn quoted_printable_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6081,4 +6996,3 @@ fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::True)
 }
-

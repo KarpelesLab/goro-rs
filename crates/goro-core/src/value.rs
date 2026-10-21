@@ -208,9 +208,7 @@ pub fn reset_resources() {
 
 /// Return the registered resource type name for this id, or None if not registered.
 pub fn resource_type_of(id: i64) -> Option<Vec<u8>> {
-    RESOURCE_REGISTRY.with(|r| {
-        r.borrow().get(&id).map(|e| e.resource_type.clone())
-    })
+    RESOURCE_REGISTRY.with(|r| r.borrow().get(&id).map(|e| e.resource_type.clone()))
 }
 
 /// True iff id is registered as a resource (even if closed).
@@ -220,9 +218,7 @@ pub fn is_registered_resource(id: i64) -> bool {
 
 /// True iff id is registered as a resource AND has not been closed.
 pub fn is_open_resource(id: i64) -> bool {
-    RESOURCE_REGISTRY.with(|r| {
-        r.borrow().get(&id).map(|e| !e.closed).unwrap_or(false)
-    })
+    RESOURCE_REGISTRY.with(|r| r.borrow().get(&id).map(|e| !e.closed).unwrap_or(false))
 }
 
 impl Value {
@@ -273,7 +269,11 @@ impl Value {
             Value::Object(_) | Value::Generator(_) => "object",
             Value::Reference(r) => r.borrow().type_name(),
             Value::Resource(id) => {
-                if is_open_resource(*id) { "resource" } else { "resource (closed)" }
+                if is_open_resource(*id) {
+                    "resource"
+                } else {
+                    "resource (closed)"
+                }
             }
         }
     }
@@ -603,12 +603,10 @@ impl Value {
     pub fn negate(&self) -> Value {
         match self {
             Value::Reference(r) => r.borrow().negate(),
-            Value::Long(n) => {
-                match n.checked_neg() {
-                    Some(neg) => Value::Long(neg),
-                    None => Value::Double(-(*n as f64)),
-                }
-            }
+            Value::Long(n) => match n.checked_neg() {
+                Some(neg) => Value::Long(neg),
+                None => Value::Double(-(*n as f64)),
+            },
             Value::Double(f) => Value::Double(-f),
             _ => {
                 let n = self.to_numeric();
@@ -690,10 +688,9 @@ impl Value {
                             compare_integer_strings(a_trimmed, b_trimmed) == 0
                         }
                     }
-                } else if let (Some(na), Some(nb)) = (
-                    parse_numeric_string(a_bytes),
-                    parse_numeric_string(b_bytes),
-                ) {
+                } else if let (Some(na), Some(nb)) =
+                    (parse_numeric_string(a_bytes), parse_numeric_string(b_bytes))
+                {
                     na == nb
                 } else {
                     a_bytes == b_bytes
@@ -751,19 +748,35 @@ impl Value {
                     let b_b = b.borrow();
                     // Built-in DateTime hierarchy: compare by timestamp.
                     // Use presence of internal __timestamp property as a marker.
-                    let a_has_ts = !matches!(a_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
-                    let b_has_ts = !matches!(b_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
-                    let a_has_tzt = !matches!(a_b.get_property(b"timezone_type"), Value::Null | Value::Undef);
-                    let b_has_tzt = !matches!(b_b.get_property(b"timezone_type"), Value::Null | Value::Undef);
+                    let a_has_ts =
+                        !matches!(a_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
+                    let b_has_ts =
+                        !matches!(b_b.get_property(b"__timestamp"), Value::Null | Value::Undef);
+                    let a_has_tzt = !matches!(
+                        a_b.get_property(b"timezone_type"),
+                        Value::Null | Value::Undef
+                    );
+                    let b_has_tzt = !matches!(
+                        b_b.get_property(b"timezone_type"),
+                        Value::Null | Value::Undef
+                    );
                     if a_has_ts && b_has_ts && a_has_tzt && b_has_tzt {
                         let ta = a_b.get_property(b"__timestamp").to_long();
                         let tb = b_b.get_property(b"__timestamp").to_long();
-                        ta == tb && a_b.get_property(b"__timestamp_us").to_long() == b_b.get_property(b"__timestamp_us").to_long()
-                    } else if a_b.has_property(b"__timestamp_tzobj") && b_b.has_property(b"__timestamp_tzobj") {
+                        ta == tb
+                            && a_b.get_property(b"__timestamp_us").to_long()
+                                == b_b.get_property(b"__timestamp_us").to_long()
+                    } else if a_b.has_property(b"__timestamp_tzobj")
+                        && b_b.has_property(b"__timestamp_tzobj")
+                    {
                         // ext/date DateTimeZone: same kind and same zone
-                        a_b.get_property(b"timezone_type").to_long() == b_b.get_property(b"timezone_type").to_long()
-                            && a_b.get_property(b"timezone").to_php_string().as_bytes() == b_b.get_property(b"timezone").to_php_string().as_bytes()
-                    } else if a_b.has_property(b"__timestamp_ival") && b_b.has_property(b"__timestamp_ival") {
+                        a_b.get_property(b"timezone_type").to_long()
+                            == b_b.get_property(b"timezone_type").to_long()
+                            && a_b.get_property(b"timezone").to_php_string().as_bytes()
+                                == b_b.get_property(b"timezone").to_php_string().as_bytes()
+                    } else if a_b.has_property(b"__timestamp_ival")
+                        && b_b.has_property(b"__timestamp_ival")
+                    {
                         // ext/date DateInterval objects are not comparable
                         false
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
@@ -786,9 +799,7 @@ impl Value {
                 result
             }
             // Object vs scalar: convert object to int(1) for comparison
-            (Value::Object(_), Value::Long(n)) | (Value::Long(n), Value::Object(_)) => {
-                *n == 1
-            }
+            (Value::Object(_), Value::Long(n)) | (Value::Long(n), Value::Object(_)) => *n == 1,
             (Value::Object(_), Value::Double(f)) | (Value::Double(f), Value::Object(_)) => {
                 *f == 1.0
             }
@@ -867,21 +878,51 @@ impl Value {
         }
         match (self, other) {
             (Value::Resource(a), Value::Resource(b)) => {
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Resource(a), Value::Long(b)) => {
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Long(a), Value::Resource(b)) => {
-                if a < b { -1 } else if a > b { 1 } else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Resource(a), Value::Double(b)) => {
                 let a = *a as f64;
-                if a < *b { -1 } else if a > *b { 1 } else { 0 }
+                if a < *b {
+                    -1
+                } else if a > *b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Double(a), Value::Resource(b)) => {
                 let b = *b as f64;
-                if *a < b { -1 } else if *a > b { 1 } else { 0 }
+                if *a < b {
+                    -1
+                } else if *a > b {
+                    1
+                } else {
+                    0
+                }
             }
             (Value::Long(a), Value::Long(b)) => {
                 if a < b {
@@ -950,16 +991,32 @@ impl Value {
             // NULL == 0 for equality AND ordering (compare returns 0 for NULL vs 0)
             // NULL < positive_int, NULL < negative_int (NULL is always <= any nonzero)
             (Value::Null | Value::Undef, Value::Long(n)) => {
-                if *n == 0 { 0 } else { -1 }
+                if *n == 0 {
+                    0
+                } else {
+                    -1
+                }
             }
             (Value::Long(n), Value::Null | Value::Undef) => {
-                if *n == 0 { 0 } else { 1 }
+                if *n == 0 {
+                    0
+                } else {
+                    1
+                }
             }
             (Value::Null | Value::Undef, Value::Double(f)) => {
-                if *f == 0.0 { 0 } else { -1 }
+                if *f == 0.0 {
+                    0
+                } else {
+                    -1
+                }
             }
             (Value::Double(f), Value::Null | Value::Undef) => {
-                if *f == 0.0 { 0 } else { 1 }
+                if *f == 0.0 {
+                    0
+                } else {
+                    1
+                }
             }
             (Value::Null | Value::Undef, Value::String(s)) => {
                 if s.is_empty() {
@@ -976,10 +1033,18 @@ impl Value {
                 }
             }
             (Value::Null | Value::Undef, Value::Array(a)) => {
-                if a.borrow().is_empty() { 0 } else { -1 }
+                if a.borrow().is_empty() {
+                    0
+                } else {
+                    -1
+                }
             }
             (Value::Array(a), Value::Null | Value::Undef) => {
-                if a.borrow().is_empty() { 0 } else { 1 }
+                if a.borrow().is_empty() {
+                    0
+                } else {
+                    1
+                }
             }
             (Value::Null | Value::Undef, _) => -1,
             (_, Value::Null | Value::Undef) => 1,
@@ -1027,7 +1092,13 @@ impl Value {
                 if a_is_int && b_is_int {
                     match (a_trimmed.parse::<i64>(), b_trimmed.parse::<i64>()) {
                         (Ok(na), Ok(nb)) => {
-                            if na < nb { -1 } else if na > nb { 1 } else { 0 }
+                            if na < nb {
+                                -1
+                            } else if na > nb {
+                                1
+                            } else {
+                                0
+                            }
                         }
                         _ => compare_integer_strings(a_trimmed, b_trimmed),
                     }
@@ -1056,9 +1127,21 @@ impl Value {
                 if let Some(num) = parse_numeric_string(s.as_bytes()) {
                     let n_f = *n as f64;
                     if is_left_long {
-                        if n_f < num { -1 } else if n_f > num { 1 } else { 0 }
+                        if n_f < num {
+                            -1
+                        } else if n_f > num {
+                            1
+                        } else {
+                            0
+                        }
                     } else {
-                        if num < n_f { -1 } else if num > n_f { 1 } else { 0 }
+                        if num < n_f {
+                            -1
+                        } else if num > n_f {
+                            1
+                        } else {
+                            0
+                        }
                     }
                 } else {
                     // PHP 8: non-numeric string always > int in comparison
@@ -1087,9 +1170,21 @@ impl Value {
                 let is_left_double = matches!(self, Value::Double(_));
                 if let Some(num) = parse_numeric_string(s.as_bytes()) {
                     if is_left_double {
-                        if *f < num { -1 } else if *f > num { 1 } else { 0 }
+                        if *f < num {
+                            -1
+                        } else if *f > num {
+                            1
+                        } else {
+                            0
+                        }
                     } else {
-                        if num < *f { -1 } else if num > *f { 1 } else { 0 }
+                        if num < *f {
+                            -1
+                        } else if num > *f {
+                            1
+                        } else {
+                            0
+                        }
                     }
                 } else {
                     // PHP 8: non-numeric string - cast float to string and compare as strings
@@ -1134,9 +1229,17 @@ impl Value {
                     return i64::MIN; // Not comparable
                 }
                 // ext/date DateTimeInterface objects compare by (timestamp, microseconds).
-                if a_borrow.has_property(b"__timestamp_us") && b_borrow.has_property(b"__timestamp_us") {
-                    let a_key = (a_borrow.get_property(b"__timestamp").to_long(), a_borrow.get_property(b"__timestamp_us").to_long());
-                    let b_key = (b_borrow.get_property(b"__timestamp").to_long(), b_borrow.get_property(b"__timestamp_us").to_long());
+                if a_borrow.has_property(b"__timestamp_us")
+                    && b_borrow.has_property(b"__timestamp_us")
+                {
+                    let a_key = (
+                        a_borrow.get_property(b"__timestamp").to_long(),
+                        a_borrow.get_property(b"__timestamp_us").to_long(),
+                    );
+                    let b_key = (
+                        b_borrow.get_property(b"__timestamp").to_long(),
+                        b_borrow.get_property(b"__timestamp_us").to_long(),
+                    );
                     return match a_key.cmp(&b_key) {
                         std::cmp::Ordering::Less => -1,
                         std::cmp::Ordering::Equal => 0,
@@ -1144,16 +1247,31 @@ impl Value {
                     };
                 }
                 // ext/date DateTimeZone: equal or uncomparable; DateInterval: uncomparable.
-                if a_borrow.has_property(b"__timestamp_tzobj") && b_borrow.has_property(b"__timestamp_tzobj") {
-                    let same = a_borrow.get_property(b"timezone_type").to_long() == b_borrow.get_property(b"timezone_type").to_long()
-                        && a_borrow.get_property(b"timezone").to_php_string().as_bytes() == b_borrow.get_property(b"timezone").to_php_string().as_bytes();
+                if a_borrow.has_property(b"__timestamp_tzobj")
+                    && b_borrow.has_property(b"__timestamp_tzobj")
+                {
+                    let same = a_borrow.get_property(b"timezone_type").to_long()
+                        == b_borrow.get_property(b"timezone_type").to_long()
+                        && a_borrow
+                            .get_property(b"timezone")
+                            .to_php_string()
+                            .as_bytes()
+                            == b_borrow
+                                .get_property(b"timezone")
+                                .to_php_string()
+                                .as_bytes();
                     return if same { 0 } else { i64::MIN };
                 }
-                if a_borrow.has_property(b"__timestamp_ival") && b_borrow.has_property(b"__timestamp_ival") {
+                if a_borrow.has_property(b"__timestamp_ival")
+                    && b_borrow.has_property(b"__timestamp_ival")
+                {
                     return i64::MIN;
                 }
                 // Regular objects: compare by class name and properties
-                if !a_borrow.class_name.eq_ignore_ascii_case(&b_borrow.class_name) {
+                if !a_borrow
+                    .class_name
+                    .eq_ignore_ascii_case(&b_borrow.class_name)
+                {
                     // Different classes - not comparable in PHP 8
                     // <, >, <=, >= all return false; == returns false
                     // <=> returns 1 but </>/>=/<=  use i64::MIN to indicate incomparable
@@ -1161,7 +1279,11 @@ impl Value {
                 }
                 // Same class: compare properties
                 if a_borrow.properties.len() != b_borrow.properties.len() {
-                    return if a_borrow.properties.len() < b_borrow.properties.len() { -1 } else { 1 };
+                    return if a_borrow.properties.len() < b_borrow.properties.len() {
+                        -1
+                    } else {
+                        1
+                    };
                 }
                 // Compare each property value
                 for (key, a_val) in &a_borrow.properties {
@@ -1570,7 +1692,10 @@ pub fn php_str_to_lval(b: &[u8]) -> i64 {
     }
     let int_digits = j - digits_start;
     let mut is_float = false;
-    if j < b.len() && b[j] == b'.' && (int_digits > 0 || (j + 1 < b.len() && b[j + 1].is_ascii_digit())) {
+    if j < b.len()
+        && b[j] == b'.'
+        && (int_digits > 0 || (j + 1 < b.len() && b[j + 1].is_ascii_digit()))
+    {
         is_float = true;
     } else if int_digits > 0 && j < b.len() && (b[j] == b'e' || b[j] == b'E') {
         let mut k = j + 1;
@@ -1590,7 +1715,13 @@ pub fn php_str_to_lval(b: &[u8]) -> i64 {
         let mut overflow = false;
         for &c in &b[digits_start..j] {
             let d = (c - b'0') as i64;
-            match acc.checked_mul(10).and_then(|v| if neg { v.checked_sub(d) } else { v.checked_add(d) }) {
+            match acc.checked_mul(10).and_then(|v| {
+                if neg {
+                    v.checked_sub(d)
+                } else {
+                    v.checked_add(d)
+                }
+            }) {
                 Some(v) => acc = v,
                 None => {
                     overflow = true;
@@ -1668,7 +1799,10 @@ pub fn parse_leading_numeric_string(s: &[u8]) -> Option<(f64, bool)> {
     }
     let numeric_part = &trimmed[..end];
     let is_fully_numeric = end == trimmed.len();
-    numeric_part.parse::<f64>().ok().map(|v| (v, is_fully_numeric))
+    numeric_part
+        .parse::<f64>()
+        .ok()
+        .map(|v| (v, is_fully_numeric))
 }
 
 /// Parse a PHP numeric string, returning its value as f64 if it's numeric.
@@ -1767,7 +1901,11 @@ fn compare_integer_strings(a: &str, b: &str) -> i64 {
     let a_digits = a.trim_start_matches(['-', '+']).trim_start_matches('0');
     let b_digits = b.trim_start_matches(['-', '+']).trim_start_matches('0');
     let cmp = if a_digits.len() != b_digits.len() {
-        if a_digits.len() < b_digits.len() { -1 } else { 1 }
+        if a_digits.len() < b_digits.len() {
+            -1
+        } else {
+            1
+        }
     } else {
         match a_digits.cmp(b_digits) {
             std::cmp::Ordering::Less => -1,
@@ -1901,6 +2039,10 @@ pub fn parse_numeric_str(bytes: &[u8], allow_errors: bool) -> Option<(NumStr, bo
             return Some((NumStr::Double(txt.parse::<f64>().unwrap_or(0.0)), trailing));
         }
     }
-    let v = if neg { (tmp as i64).wrapping_neg() } else { tmp as i64 };
+    let v = if neg {
+        (tmp as i64).wrapping_neg()
+    } else {
+        tmp as i64
+    };
     Some((NumStr::Long(v), trailing))
 }

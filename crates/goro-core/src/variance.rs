@@ -88,7 +88,11 @@ impl TypeView {
                         self.push_name(b"Traversable".to_vec());
                     }
                     _ => {
-                        let name = if n.first() == Some(&b'\\') { n[1..].to_vec() } else { n.clone() };
+                        let name = if n.first() == Some(&b'\\') {
+                            n[1..].to_vec()
+                        } else {
+                            n.clone()
+                        };
                         self.push_name(name);
                     }
                 }
@@ -105,7 +109,13 @@ impl TypeView {
             ParamType::Intersection(parts) => {
                 let names: Vec<Vec<u8>> = parts
                     .iter()
-                    .filter_map(|p| if let ParamType::Simple(n) = p { Some(n.clone()) } else { None })
+                    .filter_map(|p| {
+                        if let ParamType::Simple(n) = p {
+                            Some(n.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 self.elems.push(TElem::Inter(names));
             }
@@ -113,7 +123,10 @@ impl TypeView {
     }
 
     fn push_name(&mut self, name: Vec<u8>) {
-        let dup = self.elems.iter().any(|e| matches!(e, TElem::Name(n) if n.eq_ignore_ascii_case(&name)));
+        let dup = self
+            .elems
+            .iter()
+            .any(|e| matches!(e, TElem::Name(n) if n.eq_ignore_ascii_case(&name)));
         if !dup {
             self.elems.push(TElem::Name(name));
         }
@@ -236,7 +249,13 @@ pub(crate) fn take_autoload_fatal() -> Option<super::VmError> {
 /// A class whose linking is in progress (PHP's "nearly linked" class-table
 /// entry), usable as a parent by classes loaded meanwhile.
 pub(crate) fn linking_entry(name_lower: &[u8]) -> Option<ClassEntry> {
-    LINKING.with(|s| s.borrow().iter().rev().find(|(c, nl)| *nl && lower(&c.name) == name_lower).map(|(c, _)| c.clone()))
+    LINKING.with(|s| {
+        s.borrow()
+            .iter()
+            .rev()
+            .find(|(c, nl)| *nl && lower(&c.name) == name_lower)
+            .map(|(c, _)| c.clone())
+    })
 }
 
 pub(crate) fn pop_linking() {
@@ -253,7 +272,11 @@ pub(crate) enum Status {
 }
 
 fn lower(n: &[u8]) -> Vec<u8> {
-    let n = if n.first() == Some(&b'\\') { &n[1..] } else { n };
+    let n = if n.first() == Some(&b'\\') {
+        &n[1..]
+    } else {
+        n
+    };
     n.iter().map(|b| b.to_ascii_lowercase()).collect()
 }
 
@@ -272,7 +295,11 @@ pub(crate) struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(vm: &'a Vm, cur: &'a LinkClass) -> Self {
-        Ctx { vm, cur, unresolved: RefCell::new(Vec::new()) }
+        Ctx {
+            vm,
+            cur,
+            unresolved: RefCell::new(Vec::new()),
+        }
     }
 
     pub(crate) fn lookup(&self, name: &[u8]) -> Option<LinkClass> {
@@ -280,7 +307,13 @@ impl<'a> Ctx<'a> {
         if lower(&self.cur.name) == l {
             return Some(self.cur.clone());
         }
-        let linking = LINKING.with(|s| s.borrow().iter().rev().find(|(c, _)| lower(&c.name) == l).map(|(c, _)| LinkClass::from_entry(c)));
+        let linking = LINKING.with(|s| {
+            s.borrow()
+                .iter()
+                .rev()
+                .find(|(c, _)| lower(&c.name) == l)
+                .map(|(c, _)| LinkClass::from_entry(c))
+        });
         if linking.is_some() {
             return linking;
         }
@@ -289,10 +322,17 @@ impl<'a> Ctx<'a> {
         }
         if self.vm.is_known_builtin_class(&l) {
             return Some(LinkClass {
-                name: if name.first() == Some(&b'\\') { name[1..].to_vec() } else { name.to_vec() },
+                name: if name.first() == Some(&b'\\') {
+                    name[1..].to_vec()
+                } else {
+                    name.to_vec()
+                },
                 parent: None,
                 interfaces: Vec::new(),
-                is_final: matches!(l.as_slice(), b"closure" | b"generator" | b"weakreference" | b"weakmap"),
+                is_final: matches!(
+                    l.as_slice(),
+                    b"closure" | b"generator" | b"weakreference" | b"weakmap"
+                ),
                 has_tostring: false,
                 builtin: true,
                 is_trait: false,
@@ -420,7 +460,11 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        if have_unresolved { Status::Unresolved } else { Status::Error }
+        if have_unresolved {
+            Status::Unresolved
+        } else {
+            Status::Error
+        }
     }
 
     fn is_class_subtype_of_type(
@@ -471,7 +515,8 @@ impl<'a> Ctx<'a> {
             match e {
                 TElem::Inter(names) => {
                     let sub = TypeView::intersection_of(names);
-                    match self.is_class_subtype_of_type(fe_scope, fe_class_name, proto_scope, &sub) {
+                    match self.is_class_subtype_of_type(fe_scope, fe_class_name, proto_scope, &sub)
+                    {
                         Status::Error => {
                             if is_intersection {
                                 return Status::Error;
@@ -515,7 +560,11 @@ impl<'a> Ctx<'a> {
         if have_unresolved {
             return Status::Unresolved;
         }
-        if is_intersection { Status::Success } else { Status::Error }
+        if is_intersection {
+            Status::Success
+        } else {
+            Status::Error
+        }
     }
 
     fn is_intersection_subtype_of_type(
@@ -538,7 +587,11 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        let early_exit = if proto.is_intersection { Status::Error } else { Status::Success };
+        let early_exit = if proto.is_intersection {
+            Status::Error
+        } else {
+            Status::Success
+        };
         for e in &proto.elems {
             let status = match e {
                 TElem::Inter(names) => {
@@ -547,7 +600,12 @@ impl<'a> Ctx<'a> {
                 }
                 TElem::Name(n) => {
                     let proto_class_name = self.resolve(proto_scope, n);
-                    self.is_intersection_subtype_of_class(fe_scope, fe, proto_scope, &proto_class_name)
+                    self.is_intersection_subtype_of_class(
+                        fe_scope,
+                        fe,
+                        proto_scope,
+                        &proto_class_name,
+                    )
                 }
             };
             if status == early_exit {
@@ -560,7 +618,11 @@ impl<'a> Ctx<'a> {
         if have_unresolved {
             return Status::Unresolved;
         }
-        if early_exit == Status::Error { Status::Success } else { Status::Error }
+        if early_exit == Status::Error {
+            Status::Success
+        } else {
+            Status::Error
+        }
     }
 
     /// zend_perform_covariant_type_check: is `fe` a subtype of `proto`?
@@ -590,7 +652,11 @@ impl<'a> Ctx<'a> {
         let early_exit;
         let mut have_unresolved = false;
         if fe.is_intersection {
-            early_exit = if proto.is_intersection { Status::Error } else { Status::Success };
+            early_exit = if proto.is_intersection {
+                Status::Error
+            } else {
+                Status::Success
+            };
             let status = self.is_intersection_subtype_of_type(fe_scope, fe, proto_scope, proto);
             if status == early_exit {
                 return status;
@@ -620,7 +686,11 @@ impl<'a> Ctx<'a> {
             }
         }
         if !have_unresolved {
-            return if early_exit == Status::Error { Status::Success } else { Status::Error };
+            return if early_exit == Status::Error {
+                Status::Success
+            } else {
+                Status::Error
+            };
         }
         self.register_unresolved_classes(fe_scope, fe);
         self.register_unresolved_classes(proto_scope, proto);
@@ -649,8 +719,20 @@ impl<'a> Ctx<'a> {
         let num_args = pr_a.num.max(fe_a.num);
         let mut status = Status::Success;
         for i in 0..num_args {
-            let p = if i < pr_a.num { Some(i) } else if pr_a.variadic { Some(pr_a.num - 1) } else { None };
-            let f = if i < fe_a.num { Some(i) } else if fe_a.variadic { Some(fe_a.num - 1) } else { None };
+            let p = if i < pr_a.num {
+                Some(i)
+            } else if pr_a.variadic {
+                Some(pr_a.num - 1)
+            } else {
+                None
+            };
+            let f = if i < fe_a.num {
+                Some(i)
+            } else if fe_a.variadic {
+                Some(fe_a.num - 1)
+            } else {
+                None
+            };
             let p = match p {
                 Some(p) => p,
                 None => continue,
@@ -700,7 +782,11 @@ impl<'a> Ctx<'a> {
     }
 
     pub(crate) fn first_unresolved(&self) -> Vec<u8> {
-        self.unresolved.borrow().first().cloned().unwrap_or_default()
+        self.unresolved
+            .borrow()
+            .first()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -715,9 +801,24 @@ struct FnArgs {
 impl FnArgs {
     fn of(m: &MethodDef) -> FnArgs {
         let oa = &m.op_array;
-        let off = if !m.is_static && oa.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false) { 1 } else { 0 };
+        let off = if !m.is_static
+            && oa
+                .cv_names
+                .first()
+                .map(|n| n.as_slice() == b"this")
+                .unwrap_or(false)
+        {
+            1
+        } else {
+            0
+        };
         let num = (oa.param_count as usize).saturating_sub(off);
-        FnArgs { off, num, required: oa.required_param_count as usize, variadic: oa.variadic_param.is_some() }
+        FnArgs {
+            off,
+            num,
+            required: oa.required_param_count as usize,
+            variadic: oa.variadic_param.is_some(),
+        }
     }
 
     fn type_of(&self, oa: &OpArray, i: usize) -> Option<TypeView> {
@@ -737,22 +838,35 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
     let resolve = |n: &[u8]| -> String {
         let r: Vec<u8> = match scope {
             Some(s) if n.eq_ignore_ascii_case(b"self") => s.name.clone(),
-            Some(s) if n.eq_ignore_ascii_case(b"parent") && s.parent.is_some() => s.parent.clone().unwrap(),
+            Some(s) if n.eq_ignore_ascii_case(b"parent") && s.parent.is_some() => {
+                s.parent.clone().unwrap()
+            }
             _ => n.to_vec(),
         };
-        let cut = r.iter().position(|b| *b == 0).map(|p| &r[..p]).unwrap_or(&r[..]);
+        let cut = r
+            .iter()
+            .position(|b| *b == 0)
+            .map(|p| &r[..p])
+            .unwrap_or(&r[..]);
         String::from_utf8_lossy(cut).to_string()
     };
     let mut parts: Vec<String> = Vec::new();
     if tv.is_intersection {
-        let s: Vec<String> = tv.all_names().iter().map(|n| String::from_utf8_lossy(n).to_string()).collect();
+        let s: Vec<String> = tv
+            .all_names()
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).to_string())
+            .collect();
         parts.push(s.join("&"));
     } else {
         for e in &tv.elems {
             match e {
                 TElem::Name(n) => parts.push(resolve(n)),
                 TElem::Inter(ns) => {
-                    let s: Vec<String> = ns.iter().map(|n| String::from_utf8_lossy(n).to_string()).collect();
+                    let s: Vec<String> = ns
+                        .iter()
+                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .collect();
                     parts.push(format!("({})", s.join("&")));
                 }
             }
@@ -763,13 +877,27 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
         parts.push("mixed".into());
         return parts.join("|");
     }
-    if m & T_STATIC != 0 { parts.push("static".into()); }
-    if m & T_CALLABLE != 0 { parts.push("callable".into()); }
-    if m & T_OBJECT != 0 { parts.push("object".into()); }
-    if m & T_ARRAY != 0 { parts.push("array".into()); }
-    if m & T_STRING != 0 { parts.push("string".into()); }
-    if m & T_LONG != 0 { parts.push("int".into()); }
-    if m & T_DOUBLE != 0 { parts.push("float".into()); }
+    if m & T_STATIC != 0 {
+        parts.push("static".into());
+    }
+    if m & T_CALLABLE != 0 {
+        parts.push("callable".into());
+    }
+    if m & T_OBJECT != 0 {
+        parts.push("object".into());
+    }
+    if m & T_ARRAY != 0 {
+        parts.push("array".into());
+    }
+    if m & T_STRING != 0 {
+        parts.push("string".into());
+    }
+    if m & T_LONG != 0 {
+        parts.push("int".into());
+    }
+    if m & T_DOUBLE != 0 {
+        parts.push("float".into());
+    }
     if m & T_BOOL == T_BOOL {
         parts.push("bool".into());
     } else if m & T_FALSE != 0 {
@@ -777,8 +905,12 @@ pub(crate) fn type_to_string(tv: &TypeView, scope: Option<&LinkClass>) -> String
     } else if m & T_TRUE != 0 {
         parts.push("true".into());
     }
-    if m & T_VOID != 0 { parts.push("void".into()); }
-    if m & T_NEVER != 0 { parts.push("never".into()); }
+    if m & T_VOID != 0 {
+        parts.push("void".into());
+    }
+    if m & T_NEVER != 0 {
+        parts.push("never".into());
+    }
     if m & T_NULL != 0 {
         let s = parts.join("|");
         if parts.len() == 1 && !s.contains('&') {
@@ -827,19 +959,31 @@ fn default_display(oa: &OpArray, cv: u32) -> String {
                             }
                         }
                         OpCode::StaticPropGet => {
-                            if let (OperandType::Const(ci), OperandType::Const(ni)) = (p.op1, p.op2) {
+                            if let (OperandType::Const(ci), OperandType::Const(ni)) = (p.op1, p.op2)
+                            {
                                 if let (Some(Value::String(c)), Some(Value::String(n))) =
                                     (oa.literals.get(ci as usize), oa.literals.get(ni as usize))
                                 {
-                                    return format!("{}::{}", c.to_string_lossy(), n.to_string_lossy());
+                                    return format!(
+                                        "{}::{}",
+                                        c.to_string_lossy(),
+                                        n.to_string_lossy()
+                                    );
                                 }
                             }
                         }
                         OpCode::ArrayNew => {
                             let has_elems = ops[j + 1..i].iter().any(|o| {
-                                matches!(o.opcode, OpCode::ArrayAppend | OpCode::ArraySet | OpCode::ArraySpread)
+                                matches!(
+                                    o.opcode,
+                                    OpCode::ArrayAppend | OpCode::ArraySet | OpCode::ArraySpread
+                                )
                             });
-                            return if has_elems { "[...]".into() } else { "[]".into() };
+                            return if has_elems {
+                                "[...]".into()
+                            } else {
+                                "[]".into()
+                            };
                         }
                         _ => {}
                     }
@@ -862,23 +1006,39 @@ fn value_display(v: &Value) -> String {
         Value::String(s) => {
             let b = s.as_bytes();
             let shown = String::from_utf8_lossy(&b[..b.len().min(10)]).to_string();
-            if b.len() > 10 { format!("'{}...'", shown) } else { format!("'{}'", shown) }
+            if b.len() > 10 {
+                format!("'{}...'", shown)
+            } else {
+                format!("'{}'", shown)
+            }
         }
         Value::Array(a) => {
-            if a.borrow().is_empty() { "[]".into() } else { "[...]".into() }
+            if a.borrow().is_empty() {
+                "[]".into()
+            } else {
+                "[...]".into()
+            }
         }
         other => other.to_php_string().to_string_lossy(),
     }
 }
 
 /// zend_get_function_declaration
-pub(crate) fn function_declaration(m: &MethodDef, class_display: &[u8], scope: &LinkClass) -> String {
+pub(crate) fn function_declaration(
+    m: &MethodDef,
+    class_display: &[u8],
+    scope: &LinkClass,
+) -> String {
     let oa = &m.op_array;
     let mut s = String::new();
     if oa.returns_by_ref {
         s.push_str("& ");
     }
-    let cut = class_display.iter().position(|b| *b == 0).map(|p| &class_display[..p]).unwrap_or(class_display);
+    let cut = class_display
+        .iter()
+        .position(|b| *b == 0)
+        .map(|p| &class_display[..p])
+        .unwrap_or(class_display);
     s.push_str(&String::from_utf8_lossy(cut));
     s.push_str("::");
     s.push_str(&String::from_utf8_lossy(&m.name));
@@ -934,9 +1094,14 @@ impl Vm {
         loop {
             let (status, unresolved, msg) = {
                 let ctx = Ctx::new(self, &cur_lc);
-                let parent_decl_lc = self.variance_scope_for(&ctx, &parent.declaring_class, parent_class);
+                let parent_decl_lc =
+                    self.variance_scope_for(&ctx, &parent.declaring_class, parent_class);
                 // Trait methods resolve self/parent against the using class.
-                let parent_lc = if parent_decl_lc.is_trait { cur_lc.clone() } else { parent_decl_lc.clone() };
+                let parent_lc = if parent_decl_lc.is_trait {
+                    cur_lc.clone()
+                } else {
+                    parent_decl_lc.clone()
+                };
                 let child_lc = cur_lc.clone();
                 let status = ctx.implementation_check(child, &child_lc, parent, &parent_lc);
                 if status == Status::Success {
@@ -955,7 +1120,10 @@ impl Vm {
                         String::from_utf8_lossy(&ctx.first_unresolved())
                     )
                 } else {
-                    format!("Declaration of {} must be compatible with {}", child_decl, parent_decl)
+                    format!(
+                        "Declaration of {} must be compatible with {}",
+                        child_decl, parent_decl
+                    )
                 };
                 (status, unresolved, msg)
             };
@@ -1029,8 +1197,16 @@ impl Vm {
             (Some(p), Some(c)) => (TypeView::from_param_type(p), TypeView::from_param_type(c)),
             _ => return (Status::Error, parent_str, parent_name),
         };
-        let s1 = if variance == 2 { Status::Success } else { ctx.covariant(&cur_lc, &ct, &parent_lc, &pt) };
-        let s2 = if variance == 1 { Status::Success } else { ctx.covariant(&parent_lc, &pt, &cur_lc, &ct) };
+        let s1 = if variance == 2 {
+            Status::Success
+        } else {
+            ctx.covariant(&cur_lc, &ct, &parent_lc, &pt)
+        };
+        let s2 = if variance == 1 {
+            Status::Success
+        } else {
+            ctx.covariant(&parent_lc, &pt, &cur_lc, &ct)
+        };
         let st = if s1 == Status::Success && s2 == Status::Success {
             Status::Success
         } else if s1 == Status::Error || s2 == Status::Error {
@@ -1047,35 +1223,57 @@ pub(crate) fn numeric_str(b: &[u8]) -> Option<Value> {
     let t: &[u8] = {
         let mut st = 0;
         let mut en = b.len();
-        while st < en && matches!(b[st], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { st += 1; }
-        while en > st && matches!(b[en - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { en -= 1; }
+        while st < en && matches!(b[st], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            st += 1;
+        }
+        while en > st && matches!(b[en - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            en -= 1;
+        }
         &b[st..en]
     };
     if t.is_empty() {
         return None;
     }
-    let digits = if t[0] == b'+' || t[0] == b'-' { &t[1..] } else { t };
+    let digits = if t[0] == b'+' || t[0] == b'-' {
+        &t[1..]
+    } else {
+        t
+    };
     if !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit()) {
-        if let Ok(n) = std::str::from_utf8(t).ok()?.trim_start_matches('+').parse::<i64>() {
+        if let Ok(n) = std::str::from_utf8(t)
+            .ok()?
+            .trim_start_matches('+')
+            .parse::<i64>()
+        {
             return Some(Value::Long(n));
         }
     }
     // float syntax: digits with optional '.', optional exponent
     let mut i = 0;
     let mut nd = 0;
-    while i < digits.len() && digits[i].is_ascii_digit() { i += 1; nd += 1; }
+    while i < digits.len() && digits[i].is_ascii_digit() {
+        i += 1;
+        nd += 1;
+    }
     if i < digits.len() && digits[i] == b'.' {
         i += 1;
-        while i < digits.len() && digits[i].is_ascii_digit() { i += 1; nd += 1; }
+        while i < digits.len() && digits[i].is_ascii_digit() {
+            i += 1;
+            nd += 1;
+        }
     }
     if nd == 0 {
         return None;
     }
     if i < digits.len() && (digits[i] == b'e' || digits[i] == b'E') {
         let mut j = i + 1;
-        if j < digits.len() && (digits[j] == b'+' || digits[j] == b'-') { j += 1; }
+        if j < digits.len() && (digits[j] == b'+' || digits[j] == b'-') {
+            j += 1;
+        }
         let es = j;
-        while j < digits.len() && digits[j].is_ascii_digit() { j += 1; }
+        while j < digits.len() && digits[j].is_ascii_digit() {
+            j += 1;
+        }
         if j == es {
             return None;
         }
@@ -1084,7 +1282,11 @@ pub(crate) fn numeric_str(b: &[u8]) -> Option<Value> {
     if i != digits.len() {
         return None;
     }
-    std::str::from_utf8(t).ok()?.parse::<f64>().ok().map(Value::Double)
+    std::str::from_utf8(t)
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .map(Value::Double)
 }
 
 impl Vm {
@@ -1139,21 +1341,29 @@ impl Vm {
         if st == Status::Success {
             return None;
         }
-        Some((format!(
-            "Type of {}::{} must be compatible with {}::{} of type {}",
-            String::from_utf8_lossy(&cur.name),
-            String::from_utf8_lossy(const_name),
-            String::from_utf8_lossy(&parent_lc.name),
-            String::from_utf8_lossy(const_name),
-            type_to_string(&pt, Some(&parent_lc))
-        ), st == Status::Unresolved))
+        Some((
+            format!(
+                "Type of {}::{} must be compatible with {}::{} of type {}",
+                String::from_utf8_lossy(&cur.name),
+                String::from_utf8_lossy(const_name),
+                String::from_utf8_lossy(&parent_lc.name),
+                String::from_utf8_lossy(const_name),
+                type_to_string(&pt, Some(&parent_lc))
+            ),
+            st == Status::Unresolved,
+        ))
     }
 }
 
 impl Vm {
     /// Strict type check of a value against a declared type (no coercion),
     /// with real class-hierarchy checks for objects.
-    pub(crate) fn value_satisfies_type_strict(&self, v: &Value, pt: &ParamType, scope: Option<&[u8]>) -> bool {
+    pub(crate) fn value_satisfies_type_strict(
+        &self,
+        v: &Value,
+        pt: &ParamType,
+        scope: Option<&[u8]>,
+    ) -> bool {
         let tv = TypeView::from_param_type(pt);
         let bit = match v {
             Value::Null | Value::Undef => T_NULL,
@@ -1168,7 +1378,15 @@ impl Vm {
                     return true;
                 }
                 let cname = o.borrow().class_name.clone();
-                let dummy = LinkClass { name: Vec::new(), parent: None, interfaces: Vec::new(), is_final: false, has_tostring: false, builtin: false, is_trait: false };
+                let dummy = LinkClass {
+                    name: Vec::new(),
+                    parent: None,
+                    interfaces: Vec::new(),
+                    is_final: false,
+                    has_tostring: false,
+                    builtin: false,
+                    is_trait: false,
+                };
                 let ctx = Ctx::new(self, &dummy);
                 let oc = match ctx.lookup(&cname) {
                     Some(c) => c,
@@ -1185,7 +1403,9 @@ impl Vm {
                 let is_a = |n: &[u8]| -> bool {
                     let n: Vec<u8> = match &scope_lc {
                         Some(sc) if n.eq_ignore_ascii_case(b"self") => sc.name.clone(),
-                        Some(sc) if n.eq_ignore_ascii_case(b"parent") => sc.parent.clone().unwrap_or_default(),
+                        Some(sc) if n.eq_ignore_ascii_case(b"parent") => {
+                            sc.parent.clone().unwrap_or_default()
+                        }
                         _ => n.to_vec(),
                     };
                     match ctx.lookup(&n) {
@@ -1221,7 +1441,11 @@ impl Vm {
         }
         let ic = self.classes.get(iface_lower)?;
         if let Some(m) = ic.methods.get(b"__construct".as_slice()) {
-            let decl = self.classes.get(&m.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| ic.name.clone());
+            let decl = self
+                .classes
+                .get(&m.declaring_class)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| ic.name.clone());
             return Some((decl, m.clone()));
         }
         let mut parents: Vec<Vec<u8>> = ic.interfaces.clone();
@@ -1242,7 +1466,11 @@ impl Vm {
         }
         let c = self.classes.get(class_lower)?;
         let m = c.methods.get(b"__construct".as_slice())?;
-        let decl_lower = if m.declaring_class.is_empty() { class_lower.to_vec() } else { lower(&m.declaring_class) };
+        let decl_lower = if m.declaring_class.is_empty() {
+            class_lower.to_vec()
+        } else {
+            lower(&m.declaring_class)
+        };
         let d = self.classes.get(&decl_lower).unwrap_or(c);
         if m.is_abstract {
             return Some((d.name.clone(), m.clone()));
@@ -1262,7 +1490,10 @@ impl Vm {
 impl Vm {
     /// zend_enum_build_backed_enum_table: validates the (lazily evaluated)
     /// backing values of a backed enum. Returns (exception class, message).
-    pub(crate) fn enum_backed_table_error(&mut self, class_lower: &[u8]) -> Option<(&'static [u8], String)> {
+    pub(crate) fn enum_backed_table_error(
+        &mut self,
+        class_lower: &[u8],
+    ) -> Option<(&'static [u8], String)> {
         let class = self.classes.get(class_lower)?.clone();
         let bt = class.enum_backing_type.clone()?;
         let mut seen: Vec<(Vec<u8>, Value)> = Vec::new();
@@ -1274,12 +1505,25 @@ impl Vm {
                 matches!(v, Value::String(_))
             };
             if !ok {
-                return Some((b"TypeError", format!("Enum case type {} does not match enum backing type {}",
-                    v.type_name(), String::from_utf8_lossy(&bt))));
+                return Some((
+                    b"TypeError",
+                    format!(
+                        "Enum case type {} does not match enum backing type {}",
+                        v.type_name(),
+                        String::from_utf8_lossy(&bt)
+                    ),
+                ));
             }
             if let Some((prev, _)) = seen.iter().find(|(_, pv)| pv.identical(&v)) {
-                return Some((b"Error", format!("Duplicate value in enum {} for cases {} and {}",
-                    String::from_utf8_lossy(&class.name), String::from_utf8_lossy(prev), String::from_utf8_lossy(case_name))));
+                return Some((
+                    b"Error",
+                    format!(
+                        "Duplicate value in enum {} for cases {} and {}",
+                        String::from_utf8_lossy(&class.name),
+                        String::from_utf8_lossy(prev),
+                        String::from_utf8_lossy(case_name)
+                    ),
+                ));
             }
             seen.push((case_name.clone(), v));
         }

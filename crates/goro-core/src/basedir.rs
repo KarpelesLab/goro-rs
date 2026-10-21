@@ -23,7 +23,11 @@ pub fn expand_filepath(path: &str) -> Option<String> {
     } else {
         std::env::current_dir().ok()?.to_string_lossy().to_string()
     };
-    let full = if base.is_empty() { path.to_string() } else { format!("{}/{}", base, path) };
+    let full = if base.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}/{}", base, path)
+    };
     let mut parts: Vec<&str> = Vec::new();
     for comp in full.split('/') {
         match comp {
@@ -116,7 +120,11 @@ pub fn check_open_basedir_ex(vm: &mut Vm, func_name: &str, path: &str, warn: boo
             path
         }
     };
-    let prefix = if func_name.is_empty() { String::new() } else { format!("{}(): ", func_name) };
+    let prefix = if func_name.is_empty() {
+        String::new()
+    } else {
+        format!("{}(): ", func_name)
+    };
     if path.len() > MAXPATHLEN - 1 {
         if warn {
             vm.emit_warning(&format!(

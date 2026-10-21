@@ -5,7 +5,9 @@
 use std::sync::OnceLock;
 
 use super::common::{mbfl_bisec_srch, mbfl_bisec_srch2};
-use super::tables::filt_cjk::{hankana2zenhira_table, hankana2zenkana_table, zenkana2hankana_table};
+use super::tables::filt_cjk::{
+    hankana2zenhira_table, hankana2zenkana_table, zenkana2hankana_table,
+};
 use super::tables::translit_kana_jisx0201_jisx0208::*;
 use super::tables::unicode_table_cp932_ext::*;
 use super::tables::unicode_table_jis::*;
@@ -468,7 +470,8 @@ fn mb_iso2022jp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) 
                         w = jisx0213_ucs_table[w1 as usize] as u32;
                     }
                     if w == 0 {
-                        let k = mbfl_bisec_srch2(w1 as i32, &jisx0213_jis_u5_key, jisx0213_u5_tbl_len);
+                        let k =
+                            mbfl_bisec_srch2(w1 as i32, &jisx0213_jis_u5_key, jisx0213_u5_tbl_len);
                         if k >= 0 {
                             w = jisx0213_jis_u5_tbl[k as usize] as u32 + 0x20000;
                         }
@@ -477,7 +480,12 @@ fn mb_iso2022jp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) 
                 } else if *state == JISX0213_PLANE2 {
                     let s1 = c as u32 - 0x21;
                     let s2 = c2 as u32 - 0x21;
-                    if ((s1 <= 4 && s1 != 1) || s1 == 7 || (11..=14).contains(&s1) || (77..94).contains(&s1)) && s2 < 94 {
+                    if ((s1 <= 4 && s1 != 1)
+                        || s1 == 7
+                        || (11..=14).contains(&s1)
+                        || (77..94).contains(&s1))
+                        && s2 < 94
+                    {
                         let mut k: i32 = 0;
                         while k < jisx0213_p2_ofst_len {
                             if s1 == jisx0213_p2_ofst[k as usize] as u32 {
@@ -489,7 +497,11 @@ fn mb_iso2022jp2004_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32) 
                         let s = ((s1 as i32 + 94 + k) * 94 + s2 as i32) as u32;
                         let mut w = jisx0213_ucs_table.get(s as usize).copied().unwrap_or(0) as u32;
                         if w == 0 {
-                            let k = mbfl_bisec_srch2(s as i32, &jisx0213_jis_u5_key, jisx0213_u5_tbl_len);
+                            let k = mbfl_bisec_srch2(
+                                s as i32,
+                                &jisx0213_jis_u5_key,
+                                jisx0213_u5_tbl_len,
+                            );
                             if k >= 0 {
                                 w = jisx0213_jis_u5_tbl[k as usize] as u32 + 0x20000;
                             }
@@ -538,7 +550,12 @@ fn mb_wchar_to_iso2022jp2004(input: &[u32], buf: &mut ConvBuf, end: bool) {
         };
         // `len` in C: number of remaining input codepoints
         let mut s: u32 = 0;
-        if w == 0xE6 || (0x254..=0x2E9).contains(&w) || (0x304B..=0x3053).contains(&w) || (0x30AB..=0x30C8).contains(&w) || w == 0x31F7 {
+        if w == 0xE6
+            || (0x254..=0x2E9).contains(&w)
+            || (0x304B..=0x3053).contains(&w)
+            || (0x30AB..=0x30C8).contains(&w)
+            || w == 0x31F7
+        {
             let mut k = 0usize;
             while (k as i32) < jisx0213_u2_tbl_len {
                 if w == jisx0213_u2_tbl[2 * k] as u32 {
@@ -580,12 +597,17 @@ fn mb_wchar_to_iso2022jp2004(input: &[u32], buf: &mut ConvBuf, end: bool) {
         if s == 0 && w >= ucs_c1_jisx0213_min as u32 && w <= ucs_c1_jisx0213_max as u32 {
             let k = mbfl_bisec_srch(w as i32, &ucs_c1_jisx0213_tbl, ucs_c1_jisx0213_tbl_len);
             if k >= 0 {
-                s = ucs_c1_jisx0213_ofst[k as usize] as u32 + w - ucs_c1_jisx0213_tbl[2 * k as usize] as u32;
+                s = ucs_c1_jisx0213_ofst[k as usize] as u32 + w
+                    - ucs_c1_jisx0213_tbl[2 * k as usize] as u32;
             }
         }
 
         if s == 0 && w >= jisx0213_u5_tbl_min as u32 && w <= jisx0213_u5_tbl_max as u32 {
-            let k = mbfl_bisec_srch2((w - 0x20000) as i32, &jisx0213_u5_jis_key, jisx0213_u5_tbl_len);
+            let k = mbfl_bisec_srch2(
+                (w - 0x20000) as i32,
+                &jisx0213_u5_jis_key,
+                jisx0213_u5_tbl_len,
+            );
             if k >= 0 {
                 s = jisx0213_u5_jis_tbl[k as usize] as u32;
             }
@@ -597,7 +619,11 @@ fn mb_wchar_to_iso2022jp2004(input: &[u32], buf: &mut ConvBuf, end: bool) {
             } else if w == 0xFE46 {
                 s = 0x233D;
             } else if (0xF91D..=0xF9DC).contains(&w) {
-                let k = mbfl_bisec_srch2(w as i32, &ucs_r2b_jisx0213_cmap_key, ucs_r2b_jisx0213_cmap_len);
+                let k = mbfl_bisec_srch2(
+                    w as i32,
+                    &ucs_r2b_jisx0213_cmap_key,
+                    ucs_r2b_jisx0213_cmap_len,
+                );
                 if k >= 0 {
                     s = ucs_r2b_jisx0213_cmap_val[k as usize] as u32;
                 }
@@ -640,12 +666,25 @@ fn mb_wchar_to_iso2022jp2004(input: &[u32], buf: &mut ConvBuf, end: bool) {
 /* ===== Kana conversion ===== */
 
 /// C: `mb_convert_kana_codepoint`. Returns (codepoint, consumed_next, second).
-pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: &mut bool, second: &mut u32, mode: u32) -> u32 {
+pub fn mb_convert_kana_codepoint(
+    c: u32,
+    next: u32,
+    consumed: &mut bool,
+    second: &mut u32,
+    mode: u32,
+) -> u32 {
     let mode = mode as i32;
-    if (mode & MBFL_HAN2ZEN_ALL) != 0 && (0x21..=0x7D).contains(&c) && c != '"' as u32 && c != '\'' as u32 && c != '\\' as u32 {
+    if (mode & MBFL_HAN2ZEN_ALL) != 0
+        && (0x21..=0x7D).contains(&c)
+        && c != '"' as u32
+        && c != '\'' as u32
+        && c != '\\' as u32
+    {
         return c + 0xFEE0;
     }
-    if (mode & MBFL_HAN2ZEN_ALPHA) != 0 && ((c >= 'A' as u32 && c <= 'Z' as u32) || (c >= 'a' as u32 && c <= 'z' as u32)) {
+    if (mode & MBFL_HAN2ZEN_ALPHA) != 0
+        && ((c >= 'A' as u32 && c <= 'Z' as u32) || (c >= 'a' as u32 && c <= 'z' as u32))
+    {
         return c + 0xFEE0;
     }
     if (mode & MBFL_HAN2ZEN_NUMERIC) != 0 && c >= '0' as u32 && c <= '9' as u32 {
@@ -656,7 +695,10 @@ pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: &mut bool, second:
     }
 
     if mode & (MBFL_HAN2ZEN_KATAKANA | MBFL_HAN2ZEN_HIRAGANA) != 0 {
-        if (mode & MBFL_HAN2ZEN_KATAKANA) != 0 && (mode & MBFL_HAN2ZEN_GLUE) != 0 && (0xFF61..=0xFF9F).contains(&c) {
+        if (mode & MBFL_HAN2ZEN_KATAKANA) != 0
+            && (mode & MBFL_HAN2ZEN_GLUE) != 0
+            && (0xFF61..=0xFF9F).contains(&c)
+        {
             let n = (c - 0xFF60) as usize;
             if (0xFF61..=0xFF9F).contains(&next) {
                 if next == 0xFF9E && ((22..=36).contains(&n) || (42..=46).contains(&n)) {
@@ -674,7 +716,10 @@ pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: &mut bool, second:
             }
             return 0x3000 + hankana2zenkana_table[n] as u32;
         }
-        if (mode & MBFL_HAN2ZEN_HIRAGANA) != 0 && (mode & MBFL_HAN2ZEN_GLUE) != 0 && (0xFF61..=0xFF9F).contains(&c) {
+        if (mode & MBFL_HAN2ZEN_HIRAGANA) != 0
+            && (mode & MBFL_HAN2ZEN_GLUE) != 0
+            && (0xFF61..=0xFF9F).contains(&c)
+        {
             let n = (c - 0xFF60) as usize;
             if (0xFF61..=0xFF9F).contains(&next) {
                 if next == 0xFF9E && ((22..=36).contains(&n) || (42..=46).contains(&n)) {
@@ -711,11 +756,20 @@ pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: &mut bool, second:
         }
     }
 
-    if mode & (MBFL_ZEN2HAN_ALL | MBFL_ZEN2HAN_ALPHA | MBFL_ZEN2HAN_NUMERIC | MBFL_ZEN2HAN_SPACE) != 0 {
-        if (mode & MBFL_ZEN2HAN_ALL) != 0 && (0xFF01..=0xFF5D).contains(&c) && c != 0xFF02 && c != 0xFF07 && c != 0xFF3C {
+    if mode & (MBFL_ZEN2HAN_ALL | MBFL_ZEN2HAN_ALPHA | MBFL_ZEN2HAN_NUMERIC | MBFL_ZEN2HAN_SPACE)
+        != 0
+    {
+        if (mode & MBFL_ZEN2HAN_ALL) != 0
+            && (0xFF01..=0xFF5D).contains(&c)
+            && c != 0xFF02
+            && c != 0xFF07
+            && c != 0xFF3C
+        {
             return c - 0xFEE0;
         }
-        if (mode & MBFL_ZEN2HAN_ALPHA) != 0 && ((0xFF21..=0xFF3A).contains(&c) || (0xFF41..=0xFF5A).contains(&c)) {
+        if (mode & MBFL_ZEN2HAN_ALPHA) != 0
+            && ((0xFF21..=0xFF3A).contains(&c) || (0xFF41..=0xFF5A).contains(&c))
+        {
             return c - 0xFEE0;
         }
         if (mode & MBFL_ZEN2HAN_NUMERIC) != 0 && (0xFF10..=0xFF19).contains(&c) {
@@ -758,10 +812,14 @@ pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: &mut bool, second:
     }
 
     if mode & (MBFL_ZENKAKU_HIRA2KATA | MBFL_ZENKAKU_KATA2HIRA) != 0 {
-        if (mode & MBFL_ZENKAKU_HIRA2KATA) != 0 && ((0x3041..=0x3093).contains(&c) || c == 0x309D || c == 0x309E) {
+        if (mode & MBFL_ZENKAKU_HIRA2KATA) != 0
+            && ((0x3041..=0x3093).contains(&c) || c == 0x309D || c == 0x309E)
+        {
             return c + 0x60;
         }
-        if (mode & MBFL_ZENKAKU_KATA2HIRA) != 0 && ((0x30A1..=0x30F3).contains(&c) || c == 0x30FD || c == 0x30FE) {
+        if (mode & MBFL_ZENKAKU_KATA2HIRA) != 0
+            && ((0x30A1..=0x30F3).contains(&c) || c == 0x30FD || c == 0x30FE)
+        {
             return c - 0x60;
         }
     }
@@ -904,11 +962,17 @@ fn cp932ext12_reverse(w: u32) -> Option<u32> {
         let mut m = std::collections::HashMap::new();
         for (i, &v) in cp932ext1_ucs_table.iter().enumerate() {
             let i = i as i32;
-            m.entry(v).or_insert(((((i / 94) + (cp932ext1_ucs_table_min / 94) + 0x21) << 8) + (i % 94) + 0x21) as u32);
+            m.entry(v).or_insert(
+                ((((i / 94) + (cp932ext1_ucs_table_min / 94) + 0x21) << 8) + (i % 94) + 0x21)
+                    as u32,
+            );
         }
         for (i, &v) in cp932ext2_ucs_table.iter().enumerate() {
             let i = i as i32;
-            m.entry(v).or_insert(((((i / 94) + (cp932ext2_ucs_table_min / 94) + 0x21) << 8) + (i % 94) + 0x21) as u32);
+            m.entry(v).or_insert(
+                ((((i / 94) + (cp932ext2_ucs_table_min / 94) + 0x21) << 8) + (i % 94) + 0x21)
+                    as u32,
+            );
         }
         m
     });
@@ -997,7 +1061,13 @@ fn mb_wchar_to_cp50220(input: &[u32], buf: &mut ConvBuf, end: bool) {
         let mut consumed = false;
         let mut second = 0u32;
         let next = if len > 0 { input[i] } else { 0 };
-        let w = mb_convert_kana_codepoint(w, next, &mut consumed, &mut second, (MBFL_HAN2ZEN_KATAKANA | MBFL_HAN2ZEN_GLUE) as u32);
+        let w = mb_convert_kana_codepoint(
+            w,
+            next,
+            &mut consumed,
+            &mut second,
+            (MBFL_HAN2ZEN_KATAKANA | MBFL_HAN2ZEN_GLUE) as u32,
+        );
         if consumed {
             i += 1;
         }
@@ -1198,7 +1268,8 @@ fn cp932ext1_reverse_ms(w: u32) -> Option<u32> {
         let mut m = std::collections::HashMap::new();
         for (i, &v) in cp932ext1_ucs_table.iter().enumerate() {
             let i = i as u32;
-            m.entry(v).or_insert((((i / 94) + 0x2D) << 8) + (i % 94) + 0x21);
+            m.entry(v)
+                .or_insert((((i / 94) + 0x2D) << 8) + (i % 94) + 0x21);
         }
         m
     });

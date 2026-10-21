@@ -1,16 +1,48 @@
 use std::collections::HashMap;
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
+use std::path::Path;
 
 pub mod mysqli_test;
 
 const VALID_SECTIONS: &[&str] = &[
-    "TEST", "FILE", "FILEEOF", "EXPECT", "EXPECTF", "EXPECTREGEX", "SKIPIF", "INI", "ARGS",
-    "ENV", "STDIN", "POST", "POST_RAW", "GZIP_POST", "DEFLATE_POST", "PUT", "GET", "COOKIE",
-    "HEADERS", "CLEAN", "CREDITS", "DESCRIPTION", "EXTENSIONS", "CONFLICTS", "XFAIL", "XLEAK",
-    "CAPTURE_STDIO", "FILE_EXTERNAL", "EXPECT_EXTERNAL", "EXPECTF_EXTERNAL", "EXPECTHEADERS",
-    "CGI", "PHPDBG", "REDIRECTTEST", "FLAKY", "WHITESPACE_SENSITIVE", "EXPECTREGEX_EXTERNAL",
+    "TEST",
+    "FILE",
+    "FILEEOF",
+    "EXPECT",
+    "EXPECTF",
+    "EXPECTREGEX",
+    "SKIPIF",
+    "INI",
+    "ARGS",
+    "ENV",
+    "STDIN",
+    "POST",
+    "POST_RAW",
+    "GZIP_POST",
+    "DEFLATE_POST",
+    "PUT",
+    "GET",
+    "COOKIE",
+    "HEADERS",
+    "CLEAN",
+    "CREDITS",
+    "DESCRIPTION",
+    "EXTENSIONS",
+    "CONFLICTS",
+    "XFAIL",
+    "XLEAK",
+    "CAPTURE_STDIO",
+    "FILE_EXTERNAL",
+    "EXPECT_EXTERNAL",
+    "EXPECTF_EXTERNAL",
+    "EXPECTHEADERS",
+    "CGI",
+    "PHPDBG",
+    "REDIRECTTEST",
+    "FLAKY",
+    "WHITESPACE_SENSITIVE",
+    "EXPECTREGEX_EXTERNAL",
 ];
 
 /// A parsed PHPT test file
@@ -76,12 +108,19 @@ impl PhptTest {
         let name = sections.get("TEST")?.clone();
 
         let mut raw_sections = HashMap::new();
-        for sec in ["POST", "POST_RAW", "PUT", "GET", "COOKIE", "ARGS", "ENV", "STDIN"] {
+        for sec in [
+            "POST", "POST_RAW", "PUT", "GET", "COOKIE", "ARGS", "ENV", "STDIN",
+        ] {
             if let Some(r) = Self::raw_section(content, sec) {
                 raw_sections.insert(sec.to_string(), r);
             }
         }
-        Some(PhptTest { name, sections, raw_sections, latin1: false })
+        Some(PhptTest {
+            name,
+            sections,
+            raw_sections,
+            latin1: false,
+        })
     }
 
     /// Extract a section byte-exactly (keeping `\r\n` line endings).
@@ -90,7 +129,9 @@ impl PhptTest {
         let mut inside = false;
         for line in content.split_inclusive('\n') {
             let bare = line.trim_end_matches(['\n', '\r']);
-            if bare.len() > 4 && bare.starts_with("--") && bare.ends_with("--")
+            if bare.len() > 4
+                && bare.starts_with("--")
+                && bare.ends_with("--")
                 && VALID_SECTIONS.contains(&&bare[2..bare.len() - 2])
             {
                 inside = &bare[2..bare.len() - 2] == want;
@@ -116,7 +157,9 @@ impl PhptTest {
         let mut done = false;
         for line in content.split_inclusive('\n') {
             let bare = line.trim_end_matches(['\n', '\r']);
-            if bare.len() > 4 && bare.starts_with("--") && bare.ends_with("--")
+            if bare.len() > 4
+                && bare.starts_with("--")
+                && bare.ends_with("--")
                 && VALID_SECTIONS.contains(&&bare[2..bare.len() - 2])
             {
                 let name = &bare[2..bare.len() - 2];
@@ -223,14 +266,25 @@ fn split_test_args(s: &str) -> Vec<String> {
         match quote {
             Some(q) if c == q => quote = None,
             Some(_) => cur.push(c),
-            None if c == '\'' || c == '"' => { quote = Some(c); in_word = true; }
-            None if c.is_whitespace() => {
-                if in_word { out.push(std::mem::take(&mut cur)); in_word = false; }
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                in_word = true;
             }
-            None => { cur.push(c); in_word = true; }
+            None if c.is_whitespace() => {
+                if in_word {
+                    out.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                in_word = true;
+            }
         }
     }
-    if in_word { out.push(cur); }
+    if in_word {
+        out.push(cur);
+    }
     out
 }
 
@@ -242,13 +296,19 @@ pub fn run_test_with_dir(test: &PhptTest, test_dir: Option<&Path>) -> TestResult
     run_test_with_dir_and_filename(test, test_dir, "Unknown.php")
 }
 
-pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
+pub fn run_test_with_dir_and_filename(
+    test: &PhptTest,
+    test_dir: Option<&Path>,
+    filename: &str,
+) -> TestResult {
     // Parse INI settings
     let mut ini_settings = parse_ini_settings(test.ini_section());
     // run-tests.php placeholders: {PWD}, {TMP}, {MAIL:path}
     for (_, v) in ini_settings.iter_mut() {
         if v.contains("{PWD}") {
-            let pwd = test_dir.map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+            let pwd = test_dir
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
             *v = v.replace("{PWD}", &pwd);
         }
         if v.contains("{TMP}") {
@@ -256,7 +316,9 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
         while let Some(start) = v.find("{MAIL:") {
             let rest = &v[start + 6..];
-            let end = rest.find(|c: char| c == '}' || c.is_whitespace()).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| c == '}' || c.is_whitespace())
+                .unwrap_or(rest.len());
             if !rest[end..].starts_with('}') {
                 break;
             }
@@ -351,7 +413,9 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     let external_source: Option<String> = if inline_source.is_none() {
         test.sections.get("FILE_EXTERNAL").and_then(|raw| {
             let rel = raw.trim();
-            if rel.is_empty() { return None; }
+            if rel.is_empty() {
+                return None;
+            }
             let path = match test_dir {
                 Some(dir) => dir.join(rel),
                 None => std::path::PathBuf::from(rel),
@@ -368,11 +432,21 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     };
 
     // Execute the source with a timeout (longer for tests that spawn a server).
-    let timeout_secs: u64 = if source.contains("php_cli_server_start") { 30 } else { 5 };
+    let timeout_secs: u64 = if source.contains("php_cli_server_start") {
+        30
+    } else {
+        5
+    };
     let req = build_request(test, test_dir, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
     let source_bytes = test.bytes(source);
-    let output = execute_php_with_timeout_and_filename(&source_bytes, timeout_secs, test_dir, &ini_settings, filename);
+    let output = execute_php_with_timeout_and_filename(
+        &source_bytes,
+        timeout_secs,
+        test_dir,
+        &ini_settings,
+        filename,
+    );
     PHPT_REQUEST.with(|r| *r.borrow_mut() = None);
     let output = match output {
         Ok(output) => output,
@@ -386,11 +460,17 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
                     } else {
                         format!("{}.clean.php", filename)
                     };
-                    let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, &clean_filename);
+                    let _ = execute_php_with_timeout_and_filename(
+                        clean_trimmed.as_bytes(),
+                        5,
+                        test_dir,
+                        &ini_settings,
+                        &clean_filename,
+                    );
                 }
             }
             return TestResult::Error(e);
-        },
+        }
     };
 
     // Run CLEAN section after the main FILE section so that leftover files
@@ -406,7 +486,13 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             } else {
                 format!("{}.clean.php", filename)
             };
-            let _ = execute_php_with_timeout_and_filename(clean_trimmed.as_bytes(), 5, test_dir, &ini_settings, &clean_filename);
+            let _ = execute_php_with_timeout_and_filename(
+                clean_trimmed.as_bytes(),
+                5,
+                test_dir,
+                &ini_settings,
+                &clean_filename,
+            );
         }
     }
 
@@ -441,10 +527,18 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
             TestResult::Pass
         } else {
             if std::env::var("GORO_DEBUG_EXPECTF").is_ok() {
-                eprintln!("EXPECTF FAIL — pattern bytes: {}, actual bytes: {}", pattern_trimmed.len(), actual_trimmed.len());
+                eprintln!(
+                    "EXPECTF FAIL — pattern bytes: {}, actual bytes: {}",
+                    pattern_trimmed.len(),
+                    actual_trimmed.len()
+                );
                 let p_lines: Vec<&str> = pattern_trimmed.lines().collect();
                 let a_lines: Vec<&str> = actual_trimmed.lines().collect();
-                eprintln!("pattern lines: {}, actual lines: {}", p_lines.len(), a_lines.len());
+                eprintln!(
+                    "pattern lines: {}, actual lines: {}",
+                    p_lines.len(),
+                    a_lines.len()
+                );
                 for (i, (p, a)) in p_lines.iter().zip(a_lines.iter()).enumerate() {
                     if !match_expectf_line(p, a) {
                         eprintln!("LINE {} MISMATCH:", i + 1);
@@ -564,8 +658,7 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     //    (whose whole purpose is to spawn `php -S`).
     if filename.contains("/ext/curl/tests/")
         && (file_section.contains("curl_cli_server_start(")
-            || (file_section.contains("curl_exec(")
-                && has_remote_curl_url(file_section)))
+            || (file_section.contains("curl_exec(") && has_remote_curl_url(file_section)))
     {
         return Some("Live HTTP server required for curl".into());
     }
@@ -612,7 +705,6 @@ fn requires_active_jit(test: &PhptTest) -> bool {
     false
 }
 
-
 /// Check whether a FILE section makes a network call to something that isn't
 /// clearly the loopback address. We treat 127.0.0.1, ::1, and "localhost" as
 /// safe (loopback). We treat anything else, plus bare http(s):// URLs to
@@ -625,9 +717,7 @@ fn has_remote_network_call(file: &str) -> bool {
             let after = &search[pos + fn_name.len()..];
             // Grab the first argument: roughly the text up to the first comma
             // or closing paren, on a single line.
-            let end = after
-                .find([',', ')', '\n'])
-                .unwrap_or(after.len());
+            let end = after.find([',', ')', '\n']).unwrap_or(after.len());
             let first_arg = &after[..end];
             if !is_loopback_arg(first_arg) {
                 return true;
@@ -641,9 +731,7 @@ fn has_remote_network_call(file: &str) -> bool {
         let mut search = file;
         while let Some(pos) = search.find(fn_name) {
             let after = &search[pos + fn_name.len()..];
-            let end = after
-                .find([',', ')', '\n'])
-                .unwrap_or(after.len());
+            let end = after.find([',', ')', '\n']).unwrap_or(after.len());
             let first_arg = &after[..end];
             if url_is_remote(first_arg) {
                 return true;
@@ -668,7 +756,8 @@ fn is_loopback_arg(arg: &str) -> bool {
         || lower.contains("[::1]")
         || lower.contains("0.0.0.0")
         || lower.contains("unix://") // unix-domain sockets aren't network
-        || lower.contains("udg://")  // unix-datagram sockets aren't network
+        || lower.contains("udg://")
+    // unix-datagram sockets aren't network
     {
         return true;
     }
@@ -746,9 +835,7 @@ fn has_remote_curl_url(file: &str) -> bool {
             None => return false,
         };
         let value = &after[val_start..];
-        let end = value
-            .find([')', ';', '\n'])
-            .unwrap_or(value.len());
+        let end = value.find([')', ';', '\n']).unwrap_or(value.len());
         let url_expr = &value[..end];
         if url_is_remote(url_expr) {
             return true;
@@ -960,7 +1047,13 @@ fn execute_php_with_timeout(
     test_dir: Option<&Path>,
     ini_settings: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
-    execute_php_with_timeout_and_filename(source, timeout_secs, test_dir, ini_settings, "Unknown.php")
+    execute_php_with_timeout_and_filename(
+        source,
+        timeout_secs,
+        test_dir,
+        ini_settings,
+        "Unknown.php",
+    )
 }
 
 fn execute_php_with_timeout_and_filename(
@@ -988,13 +1081,18 @@ fn execute_php_with_timeout_and_filename(
 
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            unsafe { libc::close(read_fd); libc::close(write_fd); }
+            unsafe {
+                libc::close(read_fd);
+                libc::close(write_fd);
+            }
             return Err("Failed to fork".to_string());
         }
 
         if pid == 0 {
             // Child process
-            unsafe { libc::close(read_fd); }
+            unsafe {
+                libc::close(read_fd);
+            }
 
             // Change to test directory
             if let Some(dir) = test_dir {
@@ -1012,18 +1110,29 @@ fn execute_php_with_timeout_and_filename(
                 Ok(Err(e)) => (1u8, format!("ERROR: {}", e).into_bytes()),
                 Err(_) => (2u8, b"PANIC".to_vec()),
             };
-            let _ = unsafe { libc::write(write_fd, &status as *const u8 as *const libc::c_void, 1) };
+            let _ =
+                unsafe { libc::write(write_fd, &status as *const u8 as *const libc::c_void, 1) };
             let len = output.len() as u64;
             let _ = unsafe { libc::write(write_fd, &len as *const u64 as *const libc::c_void, 8) };
             if !output.is_empty() {
-                let _ = unsafe { libc::write(write_fd, output.as_ptr() as *const libc::c_void, output.len()) };
+                let _ = unsafe {
+                    libc::write(
+                        write_fd,
+                        output.as_ptr() as *const libc::c_void,
+                        output.len(),
+                    )
+                };
             }
-            unsafe { libc::close(write_fd); }
+            unsafe {
+                libc::close(write_fd);
+            }
             std::process::exit(0);
         }
 
         // Parent process
-        unsafe { libc::close(write_fd); }
+        unsafe {
+            libc::close(write_fd);
+        }
 
         // Wait for child with timeout
         let start = std::time::Instant::now();
@@ -1034,14 +1143,22 @@ fn execute_php_with_timeout_and_filename(
                 break; // Child exited
             }
             if ret < 0 {
-                unsafe { libc::close(read_fd); }
+                unsafe {
+                    libc::close(read_fd);
+                }
                 return Err("waitpid error".to_string());
             }
             if start.elapsed().as_secs() >= timeout_secs {
                 // Kill the child
-                unsafe { libc::kill(pid, libc::SIGKILL); }
-                unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0); }
-                unsafe { libc::close(read_fd); }
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                unsafe {
+                    libc::waitpid(pid, std::ptr::null_mut(), 0);
+                }
+                unsafe {
+                    libc::close(read_fd);
+                }
                 return Err("Timeout: execution exceeded time limit".to_string());
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1065,7 +1182,7 @@ fn execute_php_with_timeout_and_filename(
         }
         let len = u64::from_ne_bytes(buf[1..9].try_into().unwrap()) as usize;
         let data = if len > 0 && buf.len() >= 9 + len {
-            buf[9..9+len].to_vec()
+            buf[9..9 + len].to_vec()
         } else {
             Vec::new()
         };
@@ -1093,13 +1210,17 @@ fn execute_php_with_timeout_and_filename(
                 } else {
                     let _ = std::env::set_current_dir(std::env::temp_dir());
                 }
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_php_inner(&source, &ini, &fname)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_php_inner(&source, &ini, &fname)
+                }))
             })
             .map_err(|e| format!("Thread error: {}", e))?;
 
         let start = std::time::Instant::now();
         loop {
-            if handle.is_finished() { break; }
+            if handle.is_finished() {
+                break;
+            }
             if start.elapsed().as_secs() >= timeout_secs {
                 return Err("Timeout: execution exceeded time limit".to_string());
             }
@@ -1114,13 +1235,11 @@ fn execute_php_with_timeout_and_filename(
     }
 }
 
-fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
-    
-    
-    
-    
-    
-
+fn execute_php_inner(
+    source: &[u8],
+    ini_settings: &[(String, String)],
+    filename: &str,
+) -> Result<Vec<u8>, String> {
     // Write source to the expected file path so __FILE__ works with fopen/file etc.
     let file_written = if !filename.is_empty() && filename != "Unknown.php" {
         let path = std::path::Path::new(filename);
@@ -1145,11 +1264,17 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
     result
 }
 
-fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], filename: &str) -> Result<Vec<u8>, String> {
+fn execute_php_inner_impl(
+    source: &[u8],
+    ini_settings: &[(String, String)],
+    filename: &str,
+) -> Result<Vec<u8>, String> {
     use goro_core::compiler::Compiler;
-    use goro_core::vm::Vm;
-    use goro_core::value::{Value, set_php_precision, set_php_serialize_precision, memory_reset, set_memory_limit};
     use goro_core::string::PhpString;
+    use goro_core::value::{
+        Value, memory_reset, set_memory_limit, set_php_precision, set_php_serialize_precision,
+    };
+    use goro_core::vm::Vm;
     use goro_parser::{Lexer, Parser};
 
     // Reset memory tracking and limits for this test
@@ -1178,8 +1303,16 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     }
 
     // Lex
-    let short_tags = ini_settings.iter().rev().find(|(k, _)| k == "short_open_tag")
-        .map(|(_, v)| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+    let short_tags = ini_settings
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "short_open_tag")
+        .map(|(_, v)| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "on" | "true" | "yes"
+            )
+        })
         .unwrap_or(false);
     goro_parser::set_short_open_tag(short_tags);
     let mut lexer = Lexer::new(source);
@@ -1353,7 +1486,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             for func_name in value.split(',') {
                 let func_name = func_name.trim();
                 if !func_name.is_empty() {
-                    let lower: Vec<u8> = func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                    let lower: Vec<u8> =
+                        func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
                     vm.functions.remove(&lower);
                     vm.disabled_functions.insert(lower);
                 }
@@ -1376,7 +1510,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
         // INI handlers that emit "PHP Startup" deprecations.
         if let Some(msg) = goro_ext_standard::misc::assert_ini_deprecation(key.as_bytes(), &val) {
             startup_messages.extend_from_slice(
-                format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
+                format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
+            );
         }
         // Apply zend.exception_string_param_max_len to the VM (PHP rejects values outside [0,1_000_000])
         if key == "zend.exception_string_param_max_len" {
@@ -1396,8 +1531,12 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
     // clamped with a startup warning.
     if let (Some(ml), Some(mx)) = (
-        vm.constants.get(b"memory_limit".as_ref()).map(|v| v.to_php_string()),
-        vm.constants.get(b"max_memory_limit".as_ref()).map(|v| v.to_php_string()),
+        vm.constants
+            .get(b"memory_limit".as_ref())
+            .map(|v| v.to_php_string()),
+        vm.constants
+            .get(b"max_memory_limit".as_ref())
+            .map(|v| v.to_php_string()),
     ) {
         let (v, _) = goro_core::ini_quantity::parse_quantity(ml.as_bytes(), false);
         let (max, _) = goro_core::ini_quantity::parse_quantity(mx.as_bytes(), false);
@@ -1409,7 +1548,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 ).as_bytes());
             }
             set_memory_limit(max as i64);
-            vm.constants.insert(b"memory_limit".to_vec(), Value::String(mx));
+            vm.constants
+                .insert(b"memory_limit".to_vec(), Value::String(mx));
         }
     }
     // Extension startup (MINIT/RINIT) now that INI settings are in place;
@@ -1437,7 +1577,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
     if let Some(req) = PHPT_REQUEST.with(|r| r.borrow_mut().take()) {
         for (k, v) in &req.env {
-            unsafe { std::env::set_var(k, v); }
+            unsafe {
+                std::env::set_var(k, v);
+            }
         }
         if let Some(stdin) = &req.stdin {
             if let Ok(mut f) = tempfile::tempfile() {
@@ -1445,11 +1587,17 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 let _ = f.write_all(stdin);
                 let _ = f.seek(SeekFrom::Start(0));
                 use std::os::unix::io::AsRawFd;
-                unsafe { libc::dup2(f.as_raw_fd(), 0); }
+                unsafe {
+                    libc::dup2(f.as_raw_fd(), 0);
+                }
             }
         }
         let ini_lookup = |k: &str| -> Option<String> {
-            ini_settings.iter().rev().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+            ini_settings
+                .iter()
+                .rev()
+                .find(|(a, _)| a == k)
+                .map(|(_, v)| v.clone())
         };
         goro_ext_standard::request::startup(&mut vm, &req.info, &ini_lookup);
     }
@@ -1517,7 +1665,13 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             ArrayKey::String(PhpString::from_bytes(b"argc")),
             Value::Long(0),
         );
-        for k in ["PATH", "HOME", "USER", "TEST_PHP_EXECUTABLE", "TEST_PHP_EXECUTABLE_ESCAPED"] {
+        for k in [
+            "PATH",
+            "HOME",
+            "USER",
+            "TEST_PHP_EXECUTABLE",
+            "TEST_PHP_EXECUTABLE_ESCAPED",
+        ] {
             if let Ok(v) = std::env::var(k) {
                 server.set(
                     ArrayKey::String(PhpString::from_string(k.to_string())),
@@ -1538,7 +1692,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 let k = k.trim();
                 // run-tests.php does not export empty variables.
                 if !k.is_empty() && !v.is_empty() {
-                    unsafe { std::env::set_var(k, v); }
+                    unsafe {
+                        std::env::set_var(k, v);
+                    }
                 }
             }
         }
@@ -1558,8 +1714,13 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             Some(Value::Array(a)) => a,
             _ => std::rc::Rc::new(std::cell::RefCell::new(PhpArray::new())),
         };
-        server.borrow_mut().set(ArrayKey::String(PhpString::from_bytes(b"argv")), argv_val);
-        server.borrow_mut().set(ArrayKey::String(PhpString::from_bytes(b"argc")), Value::Long(argc));
+        server
+            .borrow_mut()
+            .set(ArrayKey::String(PhpString::from_bytes(b"argv")), argv_val);
+        server.borrow_mut().set(
+            ArrayKey::String(PhpString::from_bytes(b"argc")),
+            Value::Long(argc),
+        );
         vm.set_global(b"_SERVER".to_vec(), Value::Array(server));
     }
 
@@ -1878,8 +2039,16 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                         while let Some(c) = chars.next() {
                             if c == '\\' {
                                 match chars.peek() {
-                                    Some('0') => { chars.next(); pat.push_str("\\x00"); continue; }
-                                    Some(_) => { pat.push(c); pat.push(chars.next().unwrap()); continue; }
+                                    Some('0') => {
+                                        chars.next();
+                                        pat.push_str("\\x00");
+                                        continue;
+                                    }
+                                    Some(_) => {
+                                        pat.push(c);
+                                        pat.push(chars.next().unwrap());
+                                        continue;
+                                    }
                                     None => {}
                                 }
                             }
@@ -1962,8 +2131,15 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     // php_cli_server.inc) use this goro binary rather than the system `php`.
     if std::env::var("TEST_PHP_EXECUTABLE").is_err() {
         if let Ok(exe) = std::env::current_exe() {
-            unsafe { std::env::set_var("TEST_PHP_EXECUTABLE", &exe); }
-            unsafe { std::env::set_var("TEST_PHP_EXECUTABLE_ESCAPED", exe.to_string_lossy().to_string()); }
+            unsafe {
+                std::env::set_var("TEST_PHP_EXECUTABLE", &exe);
+            }
+            unsafe {
+                std::env::set_var(
+                    "TEST_PHP_EXECUTABLE_ESCAPED",
+                    exe.to_string_lossy().to_string(),
+                );
+            }
         }
     }
 
@@ -1980,17 +2156,21 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     // tests' connect.inc picks them up. If startup fails (no binary, init
     // error, port in use), we silently fall back to the existing skip
     // behavior — no regression.
-    let has_mysqli_tests = files.iter().any(|p| {
-        p.to_string_lossy().contains("/ext/mysqli/tests/")
-    });
+    let has_mysqli_tests = files
+        .iter()
+        .any(|p| p.to_string_lossy().contains("/ext/mysqli/tests/"));
     if has_mysqli_tests {
         let start = std::time::Instant::now();
         let up = mysqli_test::ensure_started();
         if up {
-            eprintln!("[goro-phpt] embedded MySQL fixture ready in {:.2}s",
-                start.elapsed().as_secs_f32());
+            eprintln!(
+                "[goro-phpt] embedded MySQL fixture ready in {:.2}s",
+                start.elapsed().as_secs_f32()
+            );
         } else {
-            eprintln!("[goro-phpt] no embedded MySQL fixture available; mysqli tests will be skipped");
+            eprintln!(
+                "[goro-phpt] no embedded MySQL fixture available; mysqli tests will be skipped"
+            );
         }
     }
 
@@ -2012,7 +2192,10 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_test_with_dir_and_filename(&test, test_dir, &test_filename)
                 }));
-                let _dbg_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let _dbg_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 match result {
                     Ok(TestResult::Pass) => {
                         pass += 1;
@@ -2034,7 +2217,10 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
                     }
                     Err(_) => {
                         error += 1;
-                        println!("ERROR: {} [{}] (panic/stack overflow)", test_name, _dbg_name);
+                        println!(
+                            "ERROR: {} [{}] (panic/stack overflow)",
+                            test_name, _dbg_name
+                        );
                     }
                 }
             }
@@ -2064,13 +2250,15 @@ fn collect_phpt_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 fn parse_memory_limit_value(val: &goro_core::value::Value) -> i64 {
     let s = val.to_php_string().to_string_lossy();
     let s = s.trim();
-    if s == "-1" { return -1; }
+    if s == "-1" {
+        return -1;
+    }
     let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
-        (&s[..s.len()-1], 1024 * 1024 * 1024i64)
+        (&s[..s.len() - 1], 1024 * 1024 * 1024i64)
     } else if s.ends_with('M') || s.ends_with('m') {
-        (&s[..s.len()-1], 1024 * 1024i64)
+        (&s[..s.len() - 1], 1024 * 1024i64)
     } else if s.ends_with('K') || s.ends_with('k') {
-        (&s[..s.len()-1], 1024i64)
+        (&s[..s.len() - 1], 1024i64)
     } else {
         (s, 1i64)
     };
@@ -2162,15 +2350,22 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     let raw = |k: &str| test.raw_sections.get(k).map(|s| s.as_str());
     let not_empty = |k: &str| raw(k).is_some_and(|s| !php_trim(s).is_empty());
     let is_cgi = test.sections.contains_key("CGI")
-        || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"].iter().any(|k| not_empty(k))
-        || test.sections.get("EXPECTHEADERS").is_some_and(|s| !php_trim(s).is_empty());
+        || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"]
+            .iter()
+            .any(|k| not_empty(k))
+        || test
+            .sections
+            .get("EXPECTHEADERS")
+            .is_some_and(|s| !php_trim(s).is_empty());
     let mut env: Vec<(String, String)> = Vec::new();
     let set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
         env.retain(|(a, _)| a != k);
         env.push((k.to_string(), v));
     };
     set(&mut env, "REDIRECT_STATUS", "1".into());
-    let query = raw("GET").map(|s| php_trim(s).to_string()).unwrap_or_default();
+    let query = raw("GET")
+        .map(|s| php_trim(s).to_string())
+        .unwrap_or_default();
     set(&mut env, "QUERY_STRING", query.clone());
     set(&mut env, "PATH_TRANSLATED", filename.to_string());
     set(&mut env, "SCRIPT_FILENAME", filename.to_string());
@@ -2178,7 +2373,9 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     set(&mut env, "HTTP_COOKIE", cookie.clone().unwrap_or_default());
     set(&mut env, "TZ", String::new());
     if let Some(e) = raw("ENV") {
-        let dir = test_dir.map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+        let dir = test_dir
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
         let e = e.replace("{PWD}", &dir);
         for line in e.split('\n') {
             let line = php_trim(line);
@@ -2198,7 +2395,8 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         let mut request = String::new();
         let mut started = false;
         for line in post.split('\n') {
-            if ct.is_empty() && line.len() >= 13 && line[..13].eq_ignore_ascii_case("Content-Type:") {
+            if ct.is_empty() && line.len() >= 13 && line[..13].eq_ignore_ascii_case("Content-Type:")
+            {
                 *ct = line[13..].replace('\r', "").trim().to_string();
                 continue;
             }
@@ -2237,7 +2435,11 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         info.request_method = Some(method.into_bytes());
         info.query_string = test.bytes(&query);
         info.cookie_data = cookie.map(|c| test.bytes(&c));
-        info.content_type = if content_type.is_empty() { None } else { Some(content_type.into_bytes()) };
+        info.content_type = if content_type.is_empty() {
+            None
+        } else {
+            Some(content_type.into_bytes())
+        };
         info.content_length = content_length.parse().unwrap_or(0);
         info.body = body;
     } else {

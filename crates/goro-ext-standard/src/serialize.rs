@@ -59,21 +59,47 @@ pub(crate) fn is_internal_property(name: &[u8]) -> bool {
 
 /// zend_is_valid_class_name()
 fn is_valid_class_name(name: &[u8]) -> bool {
-    name.iter().all(|&c| c >= 0x80 || c.is_ascii_alphanumeric() || c == b'_' || c == b'\\')
+    name.iter()
+        .all(|&c| c >= 0x80 || c.is_ascii_alphanumeric() || c == b'_' || c == b'\\')
 }
 
 /// Classes flagged ZEND_ACC_NOT_SERIALIZABLE (inherited by subclasses).
 fn not_serializable_builtin(cl: &[u8]) -> bool {
-    matches!(cl,
-        b"closure" | b"generator" | b"fiber" | b"weakreference" | b"weakmap"
-        | b"xmlparser" | b"internaliterator" | b"random\\engine\\secure"
-        | b"simplexmlelement" | b"splfileinfo" | b"directoryiterator" | b"filesystemiterator"
-        | b"recursivedirectoryiterator" | b"globiterator" | b"splfileobject" | b"spltempfileobject"
-        | b"sensitiveparametervalue" | b"socket" | b"addressinfo" | b"directory" | b"finfo"
-        | b"inflatecontext" | b"deflatecontext" | b"curlfile" | b"curlhandle" | b"curlmultihandle"
-        | b"curlsharehandle" | b"curlsharepersistenthandle"
-        | b"opensslcertificate" | b"opensslcertificatesigningrequest" | b"opensslasymmetrickey"
-        | b"domxpath" | b"hashcontext_never"
+    matches!(
+        cl,
+        b"closure"
+            | b"generator"
+            | b"fiber"
+            | b"weakreference"
+            | b"weakmap"
+            | b"xmlparser"
+            | b"internaliterator"
+            | b"random\\engine\\secure"
+            | b"simplexmlelement"
+            | b"splfileinfo"
+            | b"directoryiterator"
+            | b"filesystemiterator"
+            | b"recursivedirectoryiterator"
+            | b"globiterator"
+            | b"splfileobject"
+            | b"spltempfileobject"
+            | b"sensitiveparametervalue"
+            | b"socket"
+            | b"addressinfo"
+            | b"directory"
+            | b"finfo"
+            | b"inflatecontext"
+            | b"deflatecontext"
+            | b"curlfile"
+            | b"curlhandle"
+            | b"curlmultihandle"
+            | b"curlsharehandle"
+            | b"curlsharepersistenthandle"
+            | b"opensslcertificate"
+            | b"opensslcertificatesigningrequest"
+            | b"opensslasymmetrickey"
+            | b"domxpath"
+            | b"hashcontext_never"
     ) || (cl.starts_with(b"reflection") && cl != b"reflectionexception")
 }
 
@@ -82,7 +108,9 @@ fn class_chain(vm: &Vm, class_lower: &[u8]) -> Vec<Vec<u8>> {
     let mut out = vec![class_lower.to_vec()];
     let mut cur = class_lower.to_vec();
     for _ in 0..64 {
-        let next: Option<Vec<u8>> = vm.classes.get(&cur)
+        let next: Option<Vec<u8>> = vm
+            .classes
+            .get(&cur)
             .and_then(|c| c.parent.as_ref().map(|p| lower(p)))
             .or_else(|| goro_core::vm::get_builtin_parent(&cur).map(lower));
         match next {
@@ -100,39 +128,60 @@ fn is_not_serializable(vm: &Vm, class_name: &[u8]) -> bool {
     if class_name.windows(10).any(|w| w == b"@anonymous") {
         return true;
     }
-    class_chain(vm, &lower(class_name)).iter().any(|c| not_serializable_builtin(c))
+    class_chain(vm, &lower(class_name))
+        .iter()
+        .any(|c| not_serializable_builtin(c))
         || goro_core::stubs::class_is_not_serializable(vm, &lower(class_name))
 }
 
 /// Builtin classes that provide native __serialize/__unserialize handlers.
 fn builtin_has_magic_serialize(cl: &[u8]) -> bool {
-    matches!(cl,
-        b"spldoublylinkedlist" | b"splstack" | b"splqueue"
-        | b"splfixedarray" | b"splobjectstorage"
-        | b"splheap" | b"splminheap" | b"splmaxheap"
-        | b"splpriorityqueue"
-        | b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-        | b"random\\engine\\mt19937"
-        | b"random\\engine\\xoshiro256starstar"
-        | b"random\\engine\\pcgoneseq128xslrr64"
-        | b"random\\randomizer"
-        | b"datetime" | b"datetimeimmutable" | b"datetimezone" | b"dateinterval" | b"dateperiod"
-        | b"gmp"
+    matches!(
+        cl,
+        b"spldoublylinkedlist"
+            | b"splstack"
+            | b"splqueue"
+            | b"splfixedarray"
+            | b"splobjectstorage"
+            | b"splheap"
+            | b"splminheap"
+            | b"splmaxheap"
+            | b"splpriorityqueue"
+            | b"arrayobject"
+            | b"arrayiterator"
+            | b"recursivearrayiterator"
+            | b"random\\engine\\mt19937"
+            | b"random\\engine\\xoshiro256starstar"
+            | b"random\\engine\\pcgoneseq128xslrr64"
+            | b"random\\randomizer"
+            | b"datetime"
+            | b"datetimeimmutable"
+            | b"datetimezone"
+            | b"dateinterval"
+            | b"dateperiod"
+            | b"gmp"
     )
 }
 
 fn has_user_method(vm: &Vm, class_lower: &[u8], m: &[u8]) -> bool {
-    vm.classes.get(class_lower).map(|c| c.get_method(m).is_some()).unwrap_or(false)
+    vm.classes
+        .get(class_lower)
+        .map(|c| c.get_method(m).is_some())
+        .unwrap_or(false)
 }
 
 fn has_magic_serialize(vm: &Vm, class_lower: &[u8]) -> bool {
     has_user_method(vm, class_lower, b"__serialize")
-        || class_chain(vm, class_lower).iter().any(|c| builtin_has_magic_serialize(c))
+        || class_chain(vm, class_lower)
+            .iter()
+            .any(|c| builtin_has_magic_serialize(c))
 }
 
 fn has_magic_unserialize(vm: &Vm, class_lower: &[u8]) -> bool {
     has_user_method(vm, class_lower, b"__unserialize")
-        || class_chain(vm, class_lower).iter().any(|c| builtin_has_magic_serialize(c))
+        || class_chain(vm, class_lower)
+            .iter()
+            .any(|c| builtin_has_magic_serialize(c))
 }
 
 /// Whether the class uses the Serializable interface (ce->serialize != NULL).
@@ -214,12 +263,24 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
     if let Some(base) = exc_base {
         // Builtin Exception/Error properties, in declaration order.
         let order: [(&[u8], bool); 7] = [
-            (b"message", false), (b"string", true), (b"code", false), (b"file", false),
-            (b"line", false), (b"trace", true), (b"previous", true),
+            (b"message", false),
+            (b"string", true),
+            (b"code", false),
+            (b"file", false),
+            (b"line", false),
+            (b"trace", true),
+            (b"previous", true),
         ];
         for (name, private) in order {
-            let user_override = ce.map(|c| c.properties.iter().any(|p| p.name == name && !p.is_static
-                && lower(&p.declaring_class) != b"exception" && lower(&p.declaring_class) != b"error"))
+            let user_override = ce
+                .map(|c| {
+                    c.properties.iter().any(|p| {
+                        p.name == name
+                            && !p.is_static
+                            && lower(&p.declaring_class) != b"exception"
+                            && lower(&p.declaring_class) != b"error"
+                    })
+                })
                 .unwrap_or(false);
             if user_override {
                 continue;
@@ -233,8 +294,16 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             } else {
                 continue;
             };
-            let php_key = if private { mangle(base, name) } else { mangle(b"*", name) };
-            out.push(PropEntry { php_key, storage_key: name.to_vec(), value });
+            let php_key = if private {
+                mangle(base, name)
+            } else {
+                mangle(b"*", name)
+            };
+            out.push(PropEntry {
+                php_key,
+                storage_key: name.to_vec(),
+                value,
+            });
         }
     }
     for (key, value) in obj.properties.iter() {
@@ -245,20 +314,34 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             continue;
         }
         if key.first() == Some(&0) {
-            out.push(PropEntry { php_key: key.clone(), storage_key: key.clone(), value: value.clone() });
+            out.push(PropEntry {
+                php_key: key.clone(),
+                storage_key: key.clone(),
+                value: value.clone(),
+            });
             continue;
         }
         let php_key = match ce {
             Some(c) => {
-                let defs: Vec<_> = c.properties.iter().filter(|p| p.name == *key && !p.is_static).collect();
+                let defs: Vec<_> = c
+                    .properties
+                    .iter()
+                    .filter(|p| p.name == *key && !p.is_static)
+                    .collect();
                 let def = if defs.len() > 1 {
-                    defs.iter().find(|p| p.visibility != Visibility::Private).copied()
+                    defs.iter()
+                        .find(|p| p.visibility != Visibility::Private)
+                        .copied()
                 } else {
                     defs.first().copied()
                 };
                 match def {
                     Some(p) if p.visibility == Visibility::Private => {
-                        let decl = canonical_class_name(vm, &lower(&p.declaring_class), &p.declaring_class);
+                        let decl = canonical_class_name(
+                            vm,
+                            &lower(&p.declaring_class),
+                            &p.declaring_class,
+                        );
                         mangle(&decl, key)
                     }
                     Some(p) if p.visibility == Visibility::Protected => mangle(b"*", key),
@@ -267,7 +350,11 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             }
             None => key.clone(),
         };
-        out.push(PropEntry { php_key, storage_key: key.clone(), value: value.clone() });
+        out.push(PropEntry {
+            php_key,
+            storage_key: key.clone(),
+            value: value.clone(),
+        });
     }
     out
 }
@@ -286,7 +373,11 @@ struct SerHash {
 fn ser_init() -> Rc<RefCell<SerHash>> {
     let level = SER_LEVEL.with(|l| l.get());
     if locked() || level == 0 {
-        let d = Rc::new(RefCell::new(SerHash { n: 0, map: HashMap::new(), keep: Vec::new() }));
+        let d = Rc::new(RefCell::new(SerHash {
+            n: 0,
+            map: HashMap::new(),
+            keep: Vec::new(),
+        }));
         if !locked() {
             SER_DATA.with(|s| *s.borrow_mut() = Some(d.clone()));
             SER_LEVEL.with(|l| l.set(1));
@@ -294,7 +385,9 @@ fn ser_init() -> Rc<RefCell<SerHash>> {
         d
     } else {
         SER_LEVEL.with(|l| l.set(level + 1));
-        SER_DATA.with(|s| s.borrow().clone()).expect("serialize data")
+        SER_DATA
+            .with(|s| s.borrow().clone())
+            .expect("serialize data")
     }
 }
 
@@ -353,13 +446,20 @@ pub(crate) fn format_serialize_double(f: f64) -> String {
         return "NAN".to_string();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "INF".to_string() } else { "-INF".to_string() };
+        return if f > 0.0 {
+            "INF".to_string()
+        } else {
+            "-INF".to_string()
+        };
     }
     let sp = goro_core::value::get_php_serialize_precision();
     if sp < 0 {
         goro_core::value::format_php_float_shortest_pub(f)
     } else {
-        goro_core::value::format_php_float_with_precision_pub(f, if sp == 0 { 1 } else { sp as usize })
+        goro_core::value::format_php_float_with_precision_pub(
+            f,
+            if sp == 0 { 1 } else { sp as usize },
+        )
     }
 }
 
@@ -389,7 +489,11 @@ impl Serializer {
             Value::Reference(r) => {
                 let inner = r.borrow();
                 if let Value::Object(o) = &*inner {
-                    (true, Rc::as_ptr(o) as *const u8 as usize, Value::Object(o.clone()))
+                    (
+                        true,
+                        Rc::as_ptr(o) as *const u8 as usize,
+                        Value::Object(o.clone()),
+                    )
                 } else {
                     (true, Rc::as_ptr(r) as *const u8 as usize, var.clone())
                 }
@@ -421,7 +525,11 @@ impl Serializer {
             return;
         }
         if self.depth > 3000 {
-            throw(vm, b"Error", "Maximum call stack size of 8339456 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?");
+            throw(
+                vm,
+                b"Error",
+                "Maximum call stack size of 8339456 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?",
+            );
             return;
         }
         let already = self.add_var_hash(val);
@@ -431,11 +539,13 @@ impl Serializer {
                 return;
             }
             if matches!(val, Value::Reference(_)) {
-                self.buf.extend_from_slice(format!("R:{};", already).as_bytes());
+                self.buf
+                    .extend_from_slice(format!("R:{};", already).as_bytes());
                 return;
             }
             if matches!(val, Value::Object(_)) {
-                self.buf.extend_from_slice(format!("r:{};", already).as_bytes());
+                self.buf
+                    .extend_from_slice(format!("r:{};", already).as_bytes());
                 return;
             }
         }
@@ -450,27 +560,39 @@ impl Serializer {
             Value::Long(n) => push_long(&mut self.buf, *n),
             Value::Double(f) => {
                 self.buf.extend_from_slice(b"d:");
-                self.buf.extend_from_slice(format_serialize_double(*f).as_bytes());
+                self.buf
+                    .extend_from_slice(format_serialize_double(*f).as_bytes());
                 self.buf.push(b';');
             }
             Value::String(s) => {
                 if is_closure_name(s.as_bytes()) || s.as_bytes().starts_with(b"__closure_fcc_") {
-                    throw(vm, b"Exception", "Serialization of 'Closure' is not allowed");
+                    throw(
+                        vm,
+                        b"Exception",
+                        "Serialization of 'Closure' is not allowed",
+                    );
                     return;
                 }
                 push_str(&mut self.buf, s.as_bytes())
             }
             Value::Generator(_) => {
-                throw(vm, b"Exception", "Serialization of 'Generator' is not allowed");
+                throw(
+                    vm,
+                    b"Exception",
+                    "Serialization of 'Generator' is not allowed",
+                );
             }
             Value::Array(arr) => {
                 self.buf.extend_from_slice(b"a:");
                 let items: Vec<(ArrayKey, Value)> = {
                     let a = arr.borrow();
-                    a.iter().map(|(k, v)| (k.clone(), element_value(v))).collect()
+                    a.iter()
+                        .map(|(k, v)| (k.clone(), element_value(v)))
+                        .collect()
                 };
                 self.depth += 1;
-                self.buf.extend_from_slice(format!("{}:{{", items.len()).as_bytes());
+                self.buf
+                    .extend_from_slice(format!("{}:{{", items.len()).as_bytes());
                 for (k, item) in &items {
                     push_key(&mut self.buf, k);
                     if let Value::Array(inner) = item {
@@ -504,7 +626,11 @@ impl Serializer {
         let mut obj = obj_in.clone();
         let (lazy_state, has_real, flags) = {
             let ob = obj.borrow();
-            (ob.get_property(b"__lazy_state"), ob.has_property(b"__lazy_real"), ob.get_property(b"__lazy_flags").to_long())
+            (
+                ob.get_property(b"__lazy_state"),
+                ob.has_property(b"__lazy_real"),
+                ob.get_property(b"__lazy_flags").to_long(),
+            )
         };
         if let Value::String(st) = &lazy_state {
             if st.as_bytes() == b"proxy" && has_real {
@@ -526,7 +652,10 @@ impl Serializer {
         let display = canonical_class_name(vm, &class_lower, &class_name);
 
         if is_not_serializable(vm, &class_name) {
-            let msg = format!("Serialization of '{}' is not allowed", goro_core::value::display_class_name(&display));
+            let msg = format!(
+                "Serialization of '{}' is not allowed",
+                goro_core::value::display_class_name(&display)
+            );
             throw(vm, b"Exception", &msg);
             return;
         }
@@ -536,7 +665,8 @@ impl Serializer {
             let mut full = display.clone();
             full.push(b':');
             full.extend_from_slice(case_name.as_bytes());
-            self.buf.extend_from_slice(format!("E:{}:\"", full.len()).as_bytes());
+            self.buf
+                .extend_from_slice(format!("E:{}:\"", full.len()).as_bytes());
             self.buf.extend_from_slice(&full);
             self.buf.extend_from_slice(b"\";");
             return;
@@ -555,7 +685,10 @@ impl Serializer {
             let arr = match result {
                 Some(Value::Array(a)) => a,
                 _ => {
-                    let msg = format!("{}::__serialize() must return an array", goro_core::value::display_class_name(&display));
+                    let msg = format!(
+                        "{}::__serialize() must return an array",
+                        goro_core::value::display_class_name(&display)
+                    );
                     throw(vm, b"TypeError", &msg);
                     return;
                 }
@@ -563,9 +696,12 @@ impl Serializer {
             push_class_name(&mut self.buf, &display);
             let items: Vec<(ArrayKey, Value)> = {
                 let a = arr.borrow();
-                a.iter().map(|(k, v)| (k.clone(), element_value(v))).collect()
+                a.iter()
+                    .map(|(k, v)| (k.clone(), element_value(v)))
+                    .collect()
             };
-            self.buf.extend_from_slice(format!("{}:{{", items.len()).as_bytes());
+            self.buf
+                .extend_from_slice(format!("{}:{{", items.len()).as_bytes());
             for (k, item) in &items {
                 push_key(&mut self.buf, k);
                 self.serialize(vm, item, false);
@@ -583,7 +719,10 @@ impl Serializer {
                 Some(Value::Null) => None,
                 _ => {
                     if vm.current_exception.is_none() {
-                        let msg = format!("{}::serialize() must return a string or NULL", goro_core::value::display_class_name(&display));
+                        let msg = format!(
+                            "{}::serialize() must return a string or NULL",
+                            goro_core::value::display_class_name(&display)
+                        );
                         throw(vm, b"Exception", &msg);
                     }
                     None
@@ -591,9 +730,11 @@ impl Serializer {
             };
             match ok {
                 Some(s) => {
-                    self.buf.extend_from_slice(format!("C:{}:\"", display.len()).as_bytes());
+                    self.buf
+                        .extend_from_slice(format!("C:{}:\"", display.len()).as_bytes());
                     self.buf.extend_from_slice(&display);
-                    self.buf.extend_from_slice(format!("\":{}:{{", s.len()).as_bytes());
+                    self.buf
+                        .extend_from_slice(format!("\":{}:{{", s.len()).as_bytes());
                     self.buf.extend_from_slice(s.as_bytes());
                     self.buf.push(b'}');
                 }
@@ -641,9 +782,13 @@ impl Serializer {
                             break;
                         }
                         if chosen.iter().any(|(k, _)| k == cand) {
-                            vm.emit_warning_at(&format!(
-                                "serialize(): \"{}\" is returned from __sleep() multiple times",
-                                String::from_utf8_lossy(&name)), saved_line);
+                            vm.emit_warning_at(
+                                &format!(
+                                    "serialize(): \"{}\" is returned from __sleep() multiple times",
+                                    String::from_utf8_lossy(&name)
+                                ),
+                                saved_line,
+                            );
                         } else {
                             chosen.push((cand.clone(), e.value.clone()));
                         }
@@ -657,7 +802,8 @@ impl Serializer {
                 }
             }
             push_class_name(&mut self.buf, &display);
-            self.buf.extend_from_slice(format!("{}:{{", chosen.len()).as_bytes());
+            self.buf
+                .extend_from_slice(format!("{}:{{", chosen.len()).as_bytes());
             for (k, v) in &chosen {
                 push_str(&mut self.buf, k);
                 let item = element_value(v);
@@ -678,7 +824,8 @@ impl Serializer {
             display.clone()
         };
         let mut skip_magic = incomplete;
-        let items: Vec<(Vec<u8>, Value)> = props.into_iter()
+        let items: Vec<(Vec<u8>, Value)> = props
+            .into_iter()
             .filter(|e| !matches!(e.value, Value::Undef))
             .filter(|e| {
                 if skip_magic && e.php_key == MAGIC_MEMBER {
@@ -690,7 +837,8 @@ impl Serializer {
             .map(|e| (e.php_key, element_value(&e.value)))
             .collect();
         push_class_name(&mut self.buf, &out_name);
-        self.buf.extend_from_slice(format!("{}:{{", items.len()).as_bytes());
+        self.buf
+            .extend_from_slice(format!("{}:{{", items.len()).as_bytes());
         for (k, item) in &items {
             push_str(&mut self.buf, k);
             self.serialize(vm, item, false);
@@ -703,7 +851,12 @@ impl Serializer {
 /// On exception returns None (the exception is left in vm.current_exception).
 pub fn php_serialize(vm: &mut Vm, val: &Value) -> Option<Vec<u8>> {
     let hash = ser_init();
-    let mut s = Serializer { buf: Vec::new(), hash, depth: 0, line: vm.current_line };
+    let mut s = Serializer {
+        buf: Vec::new(),
+        hash,
+        depth: 0,
+        line: vm.current_line,
+    };
     s.serialize(vm, val, true);
     let _ = s.line;
     ser_destroy();
@@ -717,12 +870,20 @@ pub fn php_serialize(vm: &mut Vm, val: &Value) -> Option<Vec<u8>> {
 fn exception_err(vm: &Vm) -> VmError {
     let msg = if let Some(Value::Object(o)) = &vm.current_exception {
         let ob = o.borrow();
-        format!("Uncaught {}: {}", goro_core::value::display_class_name(&ob.class_name),
-            ob.get_property(b"message").to_php_string().to_string_lossy())
+        format!(
+            "Uncaught {}: {}",
+            goro_core::value::display_class_name(&ob.class_name),
+            ob.get_property(b"message")
+                .to_php_string()
+                .to_string_lossy()
+        )
     } else {
         "Uncaught exception".to_string()
     };
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 pub fn serialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -731,7 +892,13 @@ pub fn serialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Reference(r) => r.borrow().clone(),
         v => v,
     };
-    vm.call_stack.push(("serialize".to_string(), vm.current_file.clone(), vm.current_line, vec![val.clone()], false));
+    vm.call_stack.push((
+        "serialize".to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        vec![val.clone()],
+        false,
+    ));
     let line = vm.current_line;
     let r = php_serialize(vm, &val);
     vm.current_line = line;
@@ -805,7 +972,9 @@ fn slot_set(d: &Rc<RefCell<UnserData>>, s: &Slot, v: Value) {
 fn unser_init(vm: &Vm) -> Rc<RefCell<UnserData>> {
     let level = UNSER_LEVEL.with(|l| l.get());
     if locked() || level == 0 {
-        let max_depth = vm.constants.get(b"unserialize_max_depth".as_ref())
+        let max_depth = vm
+            .constants
+            .get(b"unserialize_max_depth".as_ref())
             .map(|v| v.to_long())
             .unwrap_or(4096);
         let d = Rc::new(RefCell::new(UnserData {
@@ -823,7 +992,9 @@ fn unser_init(vm: &Vm) -> Rc<RefCell<UnserData>> {
         d
     } else {
         UNSER_LEVEL.with(|l| l.set(level + 1));
-        UNSER_DATA.with(|s| s.borrow().clone()).expect("unserialize data")
+        UNSER_DATA
+            .with(|s| s.borrow().clone())
+            .expect("unserialize data")
     }
 }
 
@@ -900,7 +1071,11 @@ fn parse_iv2(vm: &mut Vm, data: &[u8], mut p: usize, line: u32) -> (i64, usize) 
         vm.emit_warning_at("unserialize(): Numerical result out of range", line);
         return (if neg { i64::MIN } else { i64::MAX }, p);
     }
-    let v = if neg { (result as i64).wrapping_neg() } else { result as i64 };
+    let v = if neg {
+        (result as i64).wrapping_neg()
+    } else {
+        result as i64
+    };
     (v, p)
 }
 
@@ -988,11 +1163,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if self.at(e) == b';' {
-            Some(e)
-        } else {
-            None
-        }
+        if self.at(e) == b';' { Some(e) } else { None }
     }
 
     fn push_var(&self, slot: &Slot) {
@@ -1025,7 +1196,12 @@ impl<'a> Parser<'a> {
         Some(v)
     }
 
-    fn unserialize_internal(&mut self, vm: &mut Vm, p: &mut usize, slot: Option<&Slot>) -> Option<Value> {
+    fn unserialize_internal(
+        &mut self,
+        vm: &mut Vm,
+        p: &mut usize,
+        slot: Option<&Slot>,
+    ) -> Option<Value> {
         let start = *p;
         if start >= self.max() {
             return None;
@@ -1049,7 +1225,13 @@ impl<'a> Parser<'a> {
                 if id < 0 {
                     return None;
                 }
-                let target = self.d.borrow().entries.get(id as usize).cloned().flatten()?;
+                let target = self
+                    .d
+                    .borrow()
+                    .entries
+                    .get(id as usize)
+                    .cloned()
+                    .flatten()?;
                 if target.same(slot) {
                     return None;
                 }
@@ -1096,7 +1278,11 @@ impl<'a> Parser<'a> {
             }
             (b'd', b':') => {
                 let rest = &self.data[(start + 2).min(self.max())..];
-                for (tok, val) in [(&b"NAN;"[..], f64::NAN), (&b"INF;"[..], f64::INFINITY), (&b"-INF;"[..], f64::NEG_INFINITY)] {
+                for (tok, val) in [
+                    (&b"NAN;"[..], f64::NAN),
+                    (&b"INF;"[..], f64::INFINITY),
+                    (&b"-INF;"[..], f64::NEG_INFINITY),
+                ] {
                     if rest.starts_with(tok) {
                         *p = start + 2 + tok.len();
                         return self.set(slot, Value::Double(val));
@@ -1164,7 +1350,10 @@ impl<'a> Parser<'a> {
                 }
                 *p = cursor + 2;
                 if c0 == b'S' {
-                    vm.emit_deprecated_at("unserialize(): Unserializing the 'S' format is deprecated", self.line);
+                    vm.emit_deprecated_at(
+                        "unserialize(): Unserializing the 'S' format is deprecated",
+                        self.line,
+                    );
                 }
                 self.set(slot, Value::String(PhpString::from_vec(bytes)))
             }
@@ -1224,7 +1413,13 @@ impl<'a> Parser<'a> {
                 let colon = match s.iter().position(|&b| b == b':') {
                     Some(c) => c,
                     None => {
-                        self.warn(vm, &format!("Invalid enum name '{}' (missing colon)", String::from_utf8_lossy(&s)));
+                        self.warn(
+                            vm,
+                            &format!(
+                                "Invalid enum name '{}' (missing colon)",
+                                String::from_utf8_lossy(&s)
+                            ),
+                        );
                         return None;
                     }
                 };
@@ -1308,7 +1503,13 @@ impl<'a> Parser<'a> {
         true
     }
 
-    fn nested_array(&mut self, vm: &mut Vm, p: &mut usize, arr: &Rc<RefCell<PhpArray>>, elements: i64) -> bool {
+    fn nested_array(
+        &mut self,
+        vm: &mut Vm,
+        p: &mut usize,
+        arr: &Rc<RefCell<PhpArray>>,
+        elements: i64,
+    ) -> bool {
         if !self.depth_enter(vm) {
             return false;
         }
@@ -1365,11 +1566,15 @@ impl<'a> Parser<'a> {
             return Ok((lower(INCOMPLETE_CLASS), INCOMPLETE_CLASS.to_vec(), true));
         }
         let exists = |vm: &Vm| -> bool {
-            vm.classes.get(&lc).map(|c| !c.name.windows(10).any(|w| w == b"@anonymous")).unwrap_or(false)
+            vm.classes
+                .get(&lc)
+                .map(|c| !c.name.windows(10).any(|w| w == b"@anonymous"))
+                .unwrap_or(false)
                 || (vm.is_known_builtin_class(&lc) && !vm.classes.contains_key(&lc))
                 || not_serializable_builtin(&lc)
                 || (!vm.classes.contains_key(&lc)
-                    && (lc == b"exception" || lc == b"error"
+                    && (lc == b"exception"
+                        || lc == b"error"
                         || goro_core::vm::is_builtin_subclass(&lc, b"exception")
                         || goro_core::vm::is_builtin_subclass(&lc, b"error")))
         };
@@ -1387,21 +1592,32 @@ impl<'a> Parser<'a> {
         if exists(vm) {
             return Ok((lc.clone(), canonical_class_name(vm, &lc, name), false));
         }
-        let cb = vm.constants.get(b"unserialize_callback_func".as_ref())
+        let cb = vm
+            .constants
+            .get(b"unserialize_callback_func".as_ref())
             .map(|v| v.to_php_string().as_bytes().to_vec())
             .unwrap_or_default();
         if cb.is_empty() {
             return Ok((lower(INCOMPLETE_CLASS), INCOMPLETE_CLASS.to_vec(), true));
         }
         let cb_lower = lower(&cb);
-        let fn_exists = vm.user_functions.contains_key(&cb_lower) || vm.functions.contains_key(&cb_lower);
+        let fn_exists =
+            vm.user_functions.contains_key(&cb_lower) || vm.functions.contains_key(&cb_lower);
         if !fn_exists {
             let cbs = String::from_utf8_lossy(&cb).to_string();
-            throw(vm, b"Error", &format!("Invalid callback {}, function \"{}\" not found or invalid function name", cbs, cbs));
+            throw(
+                vm,
+                b"Error",
+                &format!(
+                    "Invalid callback {}, function \"{}\" not found or invalid function name",
+                    cbs, cbs
+                ),
+            );
             return Err(());
         }
         let arg = Value::String(PhpString::from_bytes(name));
-        let _ = with_lock(|| vm.call_callback(&Value::String(PhpString::from_vec(cb.clone())), &[arg]));
+        let _ =
+            with_lock(|| vm.call_callback(&Value::String(PhpString::from_vec(cb.clone())), &[arg]));
         vm.current_line = self.line;
         if vm.current_exception.is_some() {
             return Err(());
@@ -1416,16 +1632,36 @@ impl<'a> Parser<'a> {
         if exists(vm) {
             return Ok((lc.clone(), canonical_class_name(vm, &lc, name), false));
         }
-        self.warn(vm, &format!("Function {}() hasn't defined the class it was called for", String::from_utf8_lossy(&cb)));
+        self.warn(
+            vm,
+            &format!(
+                "Function {}() hasn't defined the class it was called for",
+                String::from_utf8_lossy(&cb)
+            ),
+        );
         Ok((lower(INCOMPLETE_CLASS), INCOMPLETE_CLASS.to_vec(), true))
     }
 
     /// object_init_ex(): create an instance with default properties.
-    fn instantiate(&mut self, vm: &mut Vm, class_lower: &[u8], canonical: &[u8]) -> Option<Rc<RefCell<PhpObject>>> {
+    fn instantiate(
+        &mut self,
+        vm: &mut Vm,
+        class_lower: &[u8],
+        canonical: &[u8],
+    ) -> Option<Rc<RefCell<PhpObject>>> {
         if !vm.classes.contains_key(class_lower)
-            && matches!(class_lower, b"filteriterator" | b"recursivefilteriterator" | b"splheap" | b"reflectionfunctionabstract")
+            && matches!(
+                class_lower,
+                b"filteriterator"
+                    | b"recursivefilteriterator"
+                    | b"splheap"
+                    | b"reflectionfunctionabstract"
+            )
         {
-            let msg = format!("Cannot instantiate abstract class {}", goro_core::value::display_class_name(canonical));
+            let msg = format!(
+                "Cannot instantiate abstract class {}",
+                goro_core::value::display_class_name(canonical)
+            );
             throw(vm, b"Error", &msg);
             return None;
         }
@@ -1442,7 +1678,11 @@ impl<'a> Parser<'a> {
                 None
             };
             if let Some(kind) = kind {
-                let msg = format!("Cannot instantiate {} {}", kind, goro_core::value::display_class_name(canonical));
+                let msg = format!(
+                    "Cannot instantiate {} {}",
+                    kind,
+                    goro_core::value::display_class_name(canonical)
+                );
                 throw(vm, b"Error", &msg);
                 return None;
             }
@@ -1455,16 +1695,25 @@ impl<'a> Parser<'a> {
                 for p in class.properties.iter().filter(|p| !p.is_static) {
                     *counts.entry(p.name.as_slice()).or_insert(0) += 1;
                 }
-                class.properties.iter().filter(|p| !p.is_static).map(|p| {
-                    let conflicted = counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
-                    let key = if conflicted && p.visibility == Visibility::Private {
-                        let decl = canonical_class_name(vm, &lower(&p.declaring_class), &p.declaring_class);
-                        mangle(&decl, &p.name)
-                    } else {
-                        p.name.clone()
-                    };
-                    (key, p.default.clone(), p.is_readonly, p.is_virtual)
-                }).collect()
+                class
+                    .properties
+                    .iter()
+                    .filter(|p| !p.is_static)
+                    .map(|p| {
+                        let conflicted = counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
+                        let key = if conflicted && p.visibility == Visibility::Private {
+                            let decl = canonical_class_name(
+                                vm,
+                                &lower(&p.declaring_class),
+                                &p.declaring_class,
+                            );
+                            mangle(&decl, &p.name)
+                        } else {
+                            p.name.clone()
+                        };
+                        (key, p.default.clone(), p.is_readonly, p.is_virtual)
+                    })
+                    .collect()
             }
             None => Vec::new(),
         };
@@ -1490,7 +1739,10 @@ impl<'a> Parser<'a> {
                 (b"file", Value::String(PhpString::empty())),
                 (b"line", Value::Long(0)),
                 (b"previous", Value::Null),
-                (b"trace", Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+                (
+                    b"trace",
+                    Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                ),
             ] {
                 if !obj.has_property(k) {
                     obj.set_property(k.to_vec(), v);
@@ -1500,13 +1752,24 @@ impl<'a> Parser<'a> {
         if goro_core::spl::spl_class_needs_storage(class_lower)
             && !matches!(obj.get_property(b"__spl_array"), Value::Array(_))
         {
-            obj.set_property(b"__spl_array".to_vec(), Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+            obj.set_property(
+                b"__spl_array".to_vec(),
+                Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+            );
         }
         Some(Rc::new(RefCell::new(obj)))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn parse_object(&mut self, vm: &mut Vm, p: &mut usize, start: usize, name_start: usize, custom: bool, slot: &Slot) -> Option<Value> {
+    fn parse_object(
+        &mut self,
+        vm: &mut Vm,
+        p: &mut usize,
+        start: usize,
+        name_start: usize,
+        custom: bool,
+        slot: &Slot,
+    ) -> Option<Value> {
         let len = parse_uiv(self.data, start + 2);
         let maxlen = (self.max() - name_start.min(self.max())) as u64;
         if maxlen < len || len == 0 {
@@ -1530,7 +1793,10 @@ impl<'a> Parser<'a> {
         *p = cursor;
 
         if !incomplete && is_not_serializable(vm, &canonical) {
-            let msg = format!("Unserialization of '{}' is not allowed", goro_core::value::display_class_name(&canonical));
+            let msg = format!(
+                "Unserialization of '{}' is not allowed",
+                goro_core::value::display_class_name(&canonical)
+            );
             throw(vm, b"Exception", &msg);
             return None;
         }
@@ -1561,13 +1827,22 @@ impl<'a> Parser<'a> {
 
         let has_unserialize = !incomplete && has_magic_unserialize(vm, &class_lower);
         if !incomplete && !has_unserialize && is_serializable_iface(vm, &class_lower) {
-            self.warn_raw(vm, &format!("Erroneous data format for unserializing '{}'", goro_core::value::display_class_name(&canonical)));
+            self.warn_raw(
+                vm,
+                &format!(
+                    "Erroneous data format for unserializing '{}'",
+                    goro_core::value::display_class_name(&canonical)
+                ),
+            );
             return None;
         }
 
         let obj = self.instantiate(vm, &class_lower, &canonical)?;
         if incomplete {
-            obj.borrow_mut().set_property(MAGIC_MEMBER.to_vec(), Value::String(PhpString::from_vec(name.clone())));
+            obj.borrow_mut().set_property(
+                MAGIC_MEMBER.to_vec(),
+                Value::String(PhpString::from_vec(name.clone())),
+            );
         }
         let obj_val = Value::Object(obj.clone());
         slot_set(&self.d, slot, obj_val.clone());
@@ -1580,7 +1855,10 @@ impl<'a> Parser<'a> {
             if !self.nested_array(vm, p, &ary, elements) {
                 return None;
             }
-            self.d.borrow_mut().delayed.push(Delayed { obj: obj_val.clone(), data: Some(Value::Array(ary)) });
+            self.d.borrow_mut().delayed.push(Delayed {
+                obj: obj_val.clone(),
+                data: Some(Value::Array(ary)),
+            });
             if !self.finish_nested(p) {
                 return None;
             }
@@ -1592,7 +1870,10 @@ impl<'a> Parser<'a> {
             return None;
         }
         if has_wakeup {
-            self.d.borrow_mut().delayed.push(Delayed { obj: obj_val.clone(), data: None });
+            self.d.borrow_mut().delayed.push(Delayed {
+                obj: obj_val.clone(),
+                data: None,
+            });
         }
         if !self.finish_nested(p) {
             return None;
@@ -1601,7 +1882,16 @@ impl<'a> Parser<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn object_custom(&mut self, vm: &mut Vm, p: &mut usize, class_lower: &[u8], canonical: &[u8], incomplete: bool, name: &[u8], slot: &Slot) -> Option<Value> {
+    fn object_custom(
+        &mut self,
+        vm: &mut Vm,
+        p: &mut usize,
+        class_lower: &[u8],
+        canonical: &[u8],
+        incomplete: bool,
+        name: &[u8],
+        slot: &Slot,
+    ) -> Option<Value> {
         let (datalen, e) = parse_iv2(vm, self.data, *p + 2, self.line);
         *p = e;
         if self.max() < *p + 2 {
@@ -1617,7 +1907,13 @@ impl<'a> Parser<'a> {
         *p += 2;
         let present = self.max() as i64 - *p as i64;
         if datalen < 0 || present <= datalen {
-            self.warn_raw(vm, &format!("Insufficient data for unserializing - {} required, {} present", datalen, present));
+            self.warn_raw(
+                vm,
+                &format!(
+                    "Insufficient data for unserializing - {} required, {} present",
+                    datalen, present
+                ),
+            );
             return None;
         }
         let datalen = datalen as usize;
@@ -1626,10 +1922,21 @@ impl<'a> Parser<'a> {
             return None;
         }
         let payload = self.data[*p..*p + datalen].to_vec();
-        let user_serializable = !incomplete && vm.class_implements_interface(class_lower, b"serializable");
-        let builtin_unser = !incomplete && class_chain(vm, class_lower).iter().any(|c| matches!(c.as_slice(),
-            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" | b"splobjectstorage"
-            | b"spldoublylinkedlist" | b"splqueue" | b"splstack"));
+        let user_serializable =
+            !incomplete && vm.class_implements_interface(class_lower, b"serializable");
+        let builtin_unser = !incomplete
+            && class_chain(vm, class_lower).iter().any(|c| {
+                matches!(
+                    c.as_slice(),
+                    b"arrayobject"
+                        | b"arrayiterator"
+                        | b"recursivearrayiterator"
+                        | b"splobjectstorage"
+                        | b"spldoublylinkedlist"
+                        | b"splqueue"
+                        | b"splstack"
+                )
+            });
         if !incomplete && class_lower == b"gmp" {
             let v = self.gmp_custom(vm, &payload)?;
             slot_set(&self.d, slot, v.clone());
@@ -1637,10 +1944,19 @@ impl<'a> Parser<'a> {
             return Some(v);
         }
         if !user_serializable && !builtin_unser {
-            self.warn_raw(vm, &format!("Class {} has no unserializer", goro_core::value::display_class_name(canonical)));
+            self.warn_raw(
+                vm,
+                &format!(
+                    "Class {} has no unserializer",
+                    goro_core::value::display_class_name(canonical)
+                ),
+            );
             let obj = self.instantiate(vm, class_lower, canonical)?;
             if incomplete {
-                obj.borrow_mut().set_property(MAGIC_MEMBER.to_vec(), Value::String(PhpString::from_bytes(name)));
+                obj.borrow_mut().set_property(
+                    MAGIC_MEMBER.to_vec(),
+                    Value::String(PhpString::from_bytes(name)),
+                );
             }
             let v = Value::Object(obj);
             slot_set(&self.d, slot, v.clone());
@@ -1651,7 +1967,11 @@ impl<'a> Parser<'a> {
         let v = Value::Object(obj);
         slot_set(&self.d, slot, v.clone());
         let saved_line = vm.current_line;
-        vm.call_object_method(&v, b"unserialize", &[Value::String(PhpString::from_vec(payload))]);
+        vm.call_object_method(
+            &v,
+            b"unserialize",
+            &[Value::String(PhpString::from_vec(payload))],
+        );
         vm.current_line = saved_line;
         if vm.current_exception.is_some() {
             return None;
@@ -1662,7 +1982,11 @@ impl<'a> Parser<'a> {
 
     /// Legacy GMP `C:3:"GMP":N:{s:N:"num";a:N:{props}}` format.
     fn gmp_custom(&mut self, vm: &mut Vm, payload: &[u8]) -> Option<Value> {
-        let mut sub = Parser { data: payload, d: self.d.clone(), line: self.line };
+        let mut sub = Parser {
+            data: payload,
+            d: self.d.clone(),
+            line: self.line,
+        };
         let mut p2 = 0usize;
         let num_idx = {
             let mut d = self.d.borrow_mut();
@@ -1673,13 +1997,28 @@ impl<'a> Parser<'a> {
         if vm.current_exception.is_some() {
             return None;
         }
-        let num_val = self.d.borrow().tmps.get(num_idx).cloned().unwrap_or(Value::Null).deref();
+        let num_val = self
+            .d
+            .borrow()
+            .tmps
+            .get(num_idx)
+            .cloned()
+            .unwrap_or(Value::Null)
+            .deref();
         let num = match (ok, num_val) {
-            (true, Value::String(s)) if {
-                let b = s.as_bytes();
-                let digits = if b.first() == Some(&b'-') || b.first() == Some(&b'+') { &b[1..] } else { b };
-                !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit())
-            } => s.to_string_lossy(),
+            (true, Value::String(s))
+                if {
+                    let b = s.as_bytes();
+                    let digits = if b.first() == Some(&b'-') || b.first() == Some(&b'+') {
+                        &b[1..]
+                    } else {
+                        b
+                    };
+                    !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit())
+                } =>
+            {
+                s.to_string_lossy()
+            }
             _ => {
                 throw(vm, b"Exception", "Could not unserialize number");
                 return None;
@@ -1687,7 +2026,10 @@ impl<'a> Parser<'a> {
         };
         let id = vm.alloc_object_id();
         let obj = Rc::new(RefCell::new(PhpObject::new(b"GMP".to_vec(), id)));
-        obj.borrow_mut().set_property(b"num".to_vec(), Value::String(PhpString::from_string(num.clone())));
+        obj.borrow_mut().set_property(
+            b"num".to_vec(),
+            Value::String(PhpString::from_string(num.clone())),
+        );
         let obj_val = Value::Object(obj.clone());
         let hex = match num.parse::<i128>() {
             Ok(n) if n >= 0 => format!("{:x}", n),
@@ -1705,7 +2047,14 @@ impl<'a> Parser<'a> {
             d.tmps.len() - 1
         };
         let ok = sub.unserialize(vm, &mut p2, &Slot::Tmp(tmp_idx));
-        let props = self.d.borrow().tmps.get(tmp_idx).cloned().unwrap_or(Value::Null).deref();
+        let props = self
+            .d
+            .borrow()
+            .tmps
+            .get(tmp_idx)
+            .cloned()
+            .unwrap_or(Value::Null)
+            .deref();
         let props = match (ok, props) {
             (true, Value::Array(a)) => a,
             _ => {
@@ -1715,7 +2064,11 @@ impl<'a> Parser<'a> {
                 return None;
             }
         };
-        let items: Vec<(ArrayKey, Value)> = props.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let items: Vec<(ArrayKey, Value)> = props
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if !items.is_empty() {
             let mut ob = obj.borrow_mut();
             ob.remove_property(b"num");
@@ -1736,32 +2089,61 @@ impl<'a> Parser<'a> {
 
     /// Map a serialized (mangled) property name to the object's storage key.
     /// Returns Err(()) on failure (warning already emitted).
-    fn resolve_prop(&mut self, vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, class_lower: &[u8], key: &[u8])
-        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()>
-    {
+    fn resolve_prop(
+        &mut self,
+        vm: &mut Vm,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        key: &[u8],
+    ) -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()> {
         // Declared properties, keyed by their PHP mangled name.
-        let decl: Vec<(Vec<u8>, Vec<u8>, Option<goro_core::opcode::ParamType>, bool, Vec<u8>, Visibility, Vec<u8>)> = {
+        let decl: Vec<(
+            Vec<u8>,
+            Vec<u8>,
+            Option<goro_core::opcode::ParamType>,
+            bool,
+            Vec<u8>,
+            Visibility,
+            Vec<u8>,
+        )> = {
             match vm.classes.get(class_lower) {
                 Some(ce) => {
                     let mut counts: HashMap<&[u8], usize> = HashMap::new();
                     for p in ce.properties.iter().filter(|p| !p.is_static) {
                         *counts.entry(p.name.as_slice()).or_insert(0) += 1;
                     }
-                    ce.properties.iter().filter(|p| !p.is_static).map(|p| {
-                        let decl_name = canonical_class_name(vm, &lower(&p.declaring_class), &p.declaring_class);
-                        let php_key = match p.visibility {
-                            Visibility::Private => mangle(&decl_name, &p.name),
-                            Visibility::Protected => mangle(b"*", &p.name),
-                            _ => p.name.clone(),
-                        };
-                        let conflicted = counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
-                        let storage = if conflicted && p.visibility == Visibility::Private {
-                            mangle(&decl_name, &p.name)
-                        } else {
-                            p.name.clone()
-                        };
-                        (php_key, storage, p.property_type.clone(), p.is_virtual, p.name.clone(), p.visibility, lower(&p.declaring_class))
-                    }).collect()
+                    ce.properties
+                        .iter()
+                        .filter(|p| !p.is_static)
+                        .map(|p| {
+                            let decl_name = canonical_class_name(
+                                vm,
+                                &lower(&p.declaring_class),
+                                &p.declaring_class,
+                            );
+                            let php_key = match p.visibility {
+                                Visibility::Private => mangle(&decl_name, &p.name),
+                                Visibility::Protected => mangle(b"*", &p.name),
+                                _ => p.name.clone(),
+                            };
+                            let conflicted =
+                                counts.get(p.name.as_slice()).copied().unwrap_or(0) > 1;
+                            let storage = if conflicted && p.visibility == Visibility::Private {
+                                mangle(&decl_name, &p.name)
+                            } else {
+                                p.name.clone()
+                            };
+                            (
+                                php_key,
+                                storage,
+                                p.property_type.clone(),
+                                p.is_virtual,
+                                p.name.clone(),
+                                p.visibility,
+                                lower(&p.declaring_class),
+                            )
+                        })
+                        .collect()
                 }
                 None => Vec::new(),
             }
@@ -1784,7 +2166,9 @@ impl<'a> Parser<'a> {
                             b"string" | b"file" => Some(ParamType::Simple(b"string".to_vec())),
                             b"line" => Some(ParamType::Simple(b"int".to_vec())),
                             b"trace" => Some(ParamType::Simple(b"array".to_vec())),
-                            b"previous" => Some(ParamType::Nullable(Box::new(ParamType::Simple(b"Throwable".to_vec())))),
+                            b"previous" => Some(ParamType::Nullable(Box::new(ParamType::Simple(
+                                b"Throwable".to_vec(),
+                            )))),
                             _ => None,
                         };
                         return Ok((name.to_vec(), ty, base.to_vec()));
@@ -1796,7 +2180,11 @@ impl<'a> Parser<'a> {
             if d.3 {
                 return self.virtual_prop(vm, class_lower, &d.4);
             }
-            return Ok((d.1.clone(), d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
+            return Ok((
+                d.1.clone(),
+                d.2.clone(),
+                canonical_class_name(vm, &d.6, &d.6),
+            ));
         }
         // Existing dynamic property with this exact key?
         if obj.borrow().has_property(key) && !decl.iter().any(|d| d.1 == key) {
@@ -1815,13 +2203,19 @@ impl<'a> Parser<'a> {
             };
             if candidate {
                 // properties_info lookup: the class's own view of `uname`
-                let found = decl.iter().find(|d| d.4 == uname && (d.6 == class_lower || d.5 != Visibility::Private))
+                let found = decl
+                    .iter()
+                    .find(|d| d.4 == uname && (d.6 == class_lower || d.5 != Visibility::Private))
                     .or_else(|| decl.iter().find(|d| d.4 == uname && d.6 == class_lower));
                 if let Some(d) = found {
                     if d.3 {
                         return self.virtual_prop(vm, class_lower, &d.4);
                     }
-                    return Ok((d.1.clone(), d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
+                    return Ok((
+                        d.1.clone(),
+                        d.2.clone(),
+                        canonical_class_name(vm, &d.6, &d.6),
+                    ));
                 }
             }
         }
@@ -1832,19 +2226,50 @@ impl<'a> Parser<'a> {
         let (readonly, allow_dynamic, is_enum, display) = {
             let chain = class_chain(vm, class_lower);
             let ce = vm.classes.get(class_lower);
-            let allow = class_lower == b"stdclass" || class_lower == lower(INCOMPLETE_CLASS)
-                || chain.iter().any(|c| vm.classes.get(c).map(|ce| ce.allow_dynamic_properties).unwrap_or(false))
+            let allow = class_lower == b"stdclass"
+                || class_lower == lower(INCOMPLETE_CLASS)
+                || chain.iter().any(|c| {
+                    vm.classes
+                        .get(c)
+                        .map(|ce| ce.allow_dynamic_properties)
+                        .unwrap_or(false)
+                })
                 || ce.is_none();
-            (ce.map(|c| c.is_readonly).unwrap_or(false), allow, ce.map(|c| c.is_enum).unwrap_or(false),
-             goro_core::value::display_class_name(&canonical_class_name(vm, class_lower, class_lower)))
+            (
+                ce.map(|c| c.is_readonly).unwrap_or(false),
+                allow,
+                ce.map(|c| c.is_enum).unwrap_or(false),
+                goro_core::value::display_class_name(&canonical_class_name(
+                    vm,
+                    class_lower,
+                    class_lower,
+                )),
+            )
         };
-        let uname = unmangle(key).map(|(_, n)| n.to_vec()).unwrap_or_else(|| key.to_vec());
+        let uname = unmangle(key)
+            .map(|(_, n)| n.to_vec())
+            .unwrap_or_else(|| key.to_vec());
         if readonly || is_enum {
-            throw(vm, b"Error", &format!("Cannot create dynamic property {}::${}", display, String::from_utf8_lossy(&uname)));
+            throw(
+                vm,
+                b"Error",
+                &format!(
+                    "Cannot create dynamic property {}::${}",
+                    display,
+                    String::from_utf8_lossy(&uname)
+                ),
+            );
             return Err(());
         }
         if !allow_dynamic {
-            vm.emit_deprecated_at(&format!("Creation of dynamic property {}::${} is deprecated", display, String::from_utf8_lossy(&uname)), self.line);
+            vm.emit_deprecated_at(
+                &format!(
+                    "Creation of dynamic property {}::${} is deprecated",
+                    display,
+                    String::from_utf8_lossy(&uname)
+                ),
+                self.line,
+            );
             if vm.current_exception.is_some() {
                 return Err(());
             }
@@ -1852,15 +2277,36 @@ impl<'a> Parser<'a> {
         Ok((key.to_vec(), None, Vec::new()))
     }
 
-    fn virtual_prop(&self, vm: &mut Vm, class_lower: &[u8], name: &[u8])
-        -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()>
-    {
-        let display = goro_core::value::display_class_name(&canonical_class_name(vm, class_lower, class_lower));
-        self.warn(vm, &format!("Cannot unserialize value for virtual property {}::${}", display, String::from_utf8_lossy(name)));
+    fn virtual_prop(
+        &self,
+        vm: &mut Vm,
+        class_lower: &[u8],
+        name: &[u8],
+    ) -> Result<(Vec<u8>, Option<goro_core::opcode::ParamType>, Vec<u8>), ()> {
+        let display = goro_core::value::display_class_name(&canonical_class_name(
+            vm,
+            class_lower,
+            class_lower,
+        ));
+        self.warn(
+            vm,
+            &format!(
+                "Cannot unserialize value for virtual property {}::${}",
+                display,
+                String::from_utf8_lossy(name)
+            ),
+        );
         Err(())
     }
 
-    fn nested_object(&mut self, vm: &mut Vm, p: &mut usize, obj: &Rc<RefCell<PhpObject>>, class_lower: &[u8], elements: i64) -> bool {
+    fn nested_object(
+        &mut self,
+        vm: &mut Vm,
+        p: &mut usize,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        elements: i64,
+    ) -> bool {
         if !self.depth_enter(vm) {
             return false;
         }
@@ -1892,10 +2338,21 @@ impl<'a> Parser<'a> {
                 let v = obj.borrow().get_property(&storage);
                 let inner = v.deref();
                 if !vm.value_matches_type_strict_pub(&inner, &pt) {
-                    let display = if decl_name.is_empty() { goro_core::value::display_class_name(&obj.borrow().class_name) } else { goro_core::value::display_class_name(&decl_name) };
-                    let prop_name = unmangle(&storage).map(|(_, n)| n.to_vec()).unwrap_or(storage.clone());
-                    let msg = format!("Cannot assign {} to property {}::${} of type {}",
-                        Vm::value_type_name(&inner), display, String::from_utf8_lossy(&prop_name), vm.param_type_name(&pt));
+                    let display = if decl_name.is_empty() {
+                        goro_core::value::display_class_name(&obj.borrow().class_name)
+                    } else {
+                        goro_core::value::display_class_name(&decl_name)
+                    };
+                    let prop_name = unmangle(&storage)
+                        .map(|(_, n)| n.to_vec())
+                        .unwrap_or(storage.clone());
+                    let msg = format!(
+                        "Cannot assign {} to property {}::${} of type {}",
+                        Vm::value_type_name(&inner),
+                        display,
+                        String::from_utf8_lossy(&prop_name),
+                        vm.param_type_name(&pt)
+                    );
                     obj.borrow_mut().set_property(storage.clone(), Value::Undef);
                     throw(vm, b"TypeError", &msg);
                     break false;
@@ -1923,7 +2380,11 @@ fn option_class_name(vm: &mut Vm, v: &Value) -> Option<Vec<u8>> {
                 Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
                 _ => {
                     let cn = Vm::value_type_name(v);
-                    throw(vm, b"Error", &format!("Object of class {} could not be converted to string", cn));
+                    throw(
+                        vm,
+                        b"Error",
+                        &format!("Object of class {} could not be converted to string", cn),
+                    );
                     None
                 }
             }
@@ -1934,7 +2395,12 @@ fn option_class_name(vm: &mut Vm, v: &Value) -> Option<Vec<u8>> {
 
 /// php_unserialize_with_options(). Returns Err when an exception is pending.
 #[allow(clippy::result_unit_err)] // error is reported via vm.current_exception
-pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Value>, function_name: &str) -> Result<Value, ()> {
+pub fn php_unserialize_with_options(
+    vm: &mut Vm,
+    buf: &[u8],
+    options: Option<&Value>,
+    function_name: &str,
+) -> Result<Value, ()> {
     if buf.is_empty() {
         return Ok(Value::False);
     }
@@ -1963,7 +2429,14 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
                     let mut names = Vec::new();
                     for e in entries {
                         if !matches!(e, Value::String(_) | Value::Object(_)) {
-                            err = Some((b"TypeError", format!("{}(): Option \"allowed_classes\" must be an array of class names, {} given", function_name, Vm::value_type_name(&e))));
+                            err = Some((
+                                b"TypeError",
+                                format!(
+                                    "{}(): Option \"allowed_classes\" must be an array of class names, {} given",
+                                    function_name,
+                                    Vm::value_type_name(&e)
+                                ),
+                            ));
                             break;
                         }
                         let name = match option_class_name(vm, &e) {
@@ -1972,8 +2445,16 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
                         };
                         if !is_valid_class_name(&name) {
                             // %s in the C message stops at a NUL byte
-                            let shown = &name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())];
-                            err = Some((b"ValueError", format!("{}(): Option \"allowed_classes\" must be an array of class names, \"{}\" given", function_name, String::from_utf8_lossy(shown))));
+                            let shown =
+                                &name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())];
+                            err = Some((
+                                b"ValueError",
+                                format!(
+                                    "{}(): Option \"allowed_classes\" must be an array of class names, \"{}\" given",
+                                    function_name,
+                                    String::from_utf8_lossy(shown)
+                                ),
+                            ));
                             break;
                         }
                         names.push(lower(&name));
@@ -1981,7 +2462,14 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
                     d.borrow_mut().allowed_classes = Some(names);
                 }
                 other => {
-                    err = Some((b"TypeError", format!("{}(): Option \"allowed_classes\" must be of type array|bool, {} given", function_name, Vm::value_type_name(other))));
+                    err = Some((
+                        b"TypeError",
+                        format!(
+                            "{}(): Option \"allowed_classes\" must be of type array|bool, {} given",
+                            function_name,
+                            Vm::value_type_name(other)
+                        ),
+                    ));
                 }
             }
         }
@@ -1989,7 +2477,13 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
             if let Some(md) = &max_depth {
                 match md {
                     Value::Long(n) if *n < 0 => {
-                        err = Some((b"ValueError", format!("{}(): Option \"max_depth\" must be greater than or equal to 0", function_name)));
+                        err = Some((
+                            b"ValueError",
+                            format!(
+                                "{}(): Option \"max_depth\" must be greater than or equal to 0",
+                                function_name
+                            ),
+                        ));
                     }
                     Value::Long(n) => {
                         let mut dd = d.borrow_mut();
@@ -1997,7 +2491,14 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
                         dd.cur_depth = 0;
                     }
                     other => {
-                        err = Some((b"TypeError", format!("{}(): Option \"max_depth\" must be of type int, {} given", function_name, Vm::value_type_name(other))));
+                        err = Some((
+                            b"TypeError",
+                            format!(
+                                "{}(): Option \"max_depth\" must be of type int, {} given",
+                                function_name,
+                                Vm::value_type_name(other)
+                            ),
+                        ));
                     }
                 }
             }
@@ -2017,17 +2518,41 @@ pub fn php_unserialize_with_options(vm: &mut Vm, buf: &[u8], options: Option<&Va
         dd.tmps.push(Value::Null);
         dd.tmps.len() - 1
     };
-    let mut parser = Parser { data: buf, d: d.clone(), line };
+    let mut parser = Parser {
+        data: buf,
+        d: d.clone(),
+        line,
+    };
     let mut p = 0usize;
     let ok = parser.unserialize(vm, &mut p, &Slot::Tmp(tmp_idx));
     let mut result = if ok {
         if p < buf.len() && vm.current_exception.is_none() {
-            vm.emit_warning_at(&format!("{}(): Extra data starting at offset {} of {} bytes", function_name, p, buf.len()), line);
+            vm.emit_warning_at(
+                &format!(
+                    "{}(): Extra data starting at offset {} of {} bytes",
+                    function_name,
+                    p,
+                    buf.len()
+                ),
+                line,
+            );
         }
-        d.borrow().tmps.get(tmp_idx).cloned().unwrap_or(Value::False)
+        d.borrow()
+            .tmps
+            .get(tmp_idx)
+            .cloned()
+            .unwrap_or(Value::False)
     } else {
         if vm.current_exception.is_none() {
-            vm.emit_warning_at(&format!("{}(): Error at offset {} of {} bytes", function_name, p, buf.len()), line);
+            vm.emit_warning_at(
+                &format!(
+                    "{}(): Error at offset {} of {} bytes",
+                    function_name,
+                    p,
+                    buf.len()
+                ),
+                line,
+            );
         }
         Value::False
     };
@@ -2049,7 +2574,10 @@ pub fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = match &data_val {
         Value::String(s) => s.as_bytes().to_vec(),
         Value::Array(_) | Value::Object(_) => {
-            let msg = format!("unserialize(): Argument #1 ($data) must be of type string, {} given", Vm::value_type_name(&data_val));
+            let msg = format!(
+                "unserialize(): Argument #1 ($data) must be of type string, {} given",
+                Vm::value_type_name(&data_val)
+            );
             throw(vm, b"TypeError", &msg);
             return Err(exception_err(vm));
         }
@@ -2058,7 +2586,10 @@ pub fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let options = args.get(1).map(|v| v.deref());
     if let Some(o) = &options {
         if !matches!(o, Value::Array(_)) {
-            let msg = format!("unserialize(): Argument #2 ($options) must be of type array, {} given", Vm::value_type_name(o));
+            let msg = format!(
+                "unserialize(): Argument #2 ($options) must be of type array, {} given",
+                Vm::value_type_name(o)
+            );
             throw(vm, b"TypeError", &msg);
             return Err(exception_err(vm));
         }
@@ -2088,9 +2619,17 @@ pub(crate) fn unserialize_value_hook(vm: &mut Vm, data: &[u8], pos: &mut usize) 
         dd.tmps.push(Value::Null);
         dd.tmps.len() - 1
     };
-    let mut parser = Parser { data, d: d.clone(), line };
+    let mut parser = Parser {
+        data,
+        d: d.clone(),
+        line,
+    };
     let ok = parser.unserialize(vm, pos, &Slot::Tmp(tmp_idx));
-    let result = if ok { d.borrow().tmps.get(tmp_idx).cloned() } else { None };
+    let result = if ok {
+        d.borrow().tmps.get(tmp_idx).cloned()
+    } else {
+        None
+    };
     unser_destroy(vm, &d);
     result.map(|v| match v {
         Value::Reference(r) => r.borrow().clone(),

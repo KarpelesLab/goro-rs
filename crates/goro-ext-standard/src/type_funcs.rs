@@ -141,13 +141,22 @@ fn is_numeric(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "is_numeric() expects exactly 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     if args.len() > 1 {
-        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let msg = format!(
+            "is_numeric() expects exactly 1 argument, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let val = &args[0];
     Ok(match val {
@@ -171,7 +180,14 @@ fn php_is_numeric_string(s: &[u8]) -> bool {
     }
     let mut i = 0;
     // Skip leading whitespace
-    while i < s.len() && (s[i] == b' ' || s[i] == b'\t' || s[i] == b'\n' || s[i] == b'\r' || s[i] == 0x0b || s[i] == 0x0c) {
+    while i < s.len()
+        && (s[i] == b' '
+            || s[i] == b'\t'
+            || s[i] == b'\n'
+            || s[i] == b'\r'
+            || s[i] == 0x0b
+            || s[i] == 0x0c)
+    {
         i += 1;
     }
     if i >= s.len() {
@@ -255,7 +271,8 @@ fn intval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::Long(sign * result));
         } else if (2..=36).contains(&base) {
             // Strip prefix for matching bases
-            let digits = if (base == 16) && (trimmed.starts_with("0x") || trimmed.starts_with("0X")) {
+            let digits = if (base == 16) && (trimmed.starts_with("0x") || trimmed.starts_with("0X"))
+            {
                 &trimmed[2..]
             } else if (base == 2) && (trimmed.starts_with("0b") || trimmed.starts_with("0B")) {
                 &trimmed[2..]
@@ -312,7 +329,10 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Object without a __toString hook is not convertible — PHP throws Error.
     if let Value::Object(obj) = &derefed {
         let class_name_bytes = obj.borrow().class_name.clone();
-        let class_lower: Vec<u8> = class_name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let class_lower: Vec<u8> = class_name_bytes
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         let has_to_string = {
             let mut found = false;
             let mut cur = Some(class_lower);
@@ -322,7 +342,10 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         found = true;
                         break;
                     }
-                    cur = cls.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                    cur = cls
+                        .parent
+                        .as_ref()
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
                 } else {
                     break;
                 }
@@ -331,10 +354,16 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         if !has_to_string {
             let class_name = goro_core::value::display_class_name(&class_name_bytes);
-            let msg = format!("Object of class {} could not be converted to string", class_name);
+            let msg = format!(
+                "Object of class {} could not be converted to string",
+                class_name
+            );
             let exc = vm.create_exception(b"Error", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         return Ok(Value::String(vm.value_to_string_checked(&derefed)?));
     }
@@ -361,7 +390,10 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "int" | "integer" => {
                 if let Value::Object(obj) = &current {
                     let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
-                    _vm.emit_warning(&format!("Object of class {} could not be converted to int", class_name));
+                    _vm.emit_warning(&format!(
+                        "Object of class {} could not be converted to int",
+                        class_name
+                    ));
                 }
                 let l = current.to_long();
                 let line = _vm.current_line;
@@ -371,7 +403,10 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "float" | "double" => {
                 if let Value::Object(obj) = &current {
                     let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
-                    _vm.emit_warning(&format!("Object of class {} could not be converted to float", class_name));
+                    _vm.emit_warning(&format!(
+                        "Object of class {} could not be converted to float",
+                        class_name
+                    ));
                 }
                 Value::Double(current.to_double())
             }
@@ -403,13 +438,19 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::False
                 }
             }
-            "array" => match { let line = _vm.current_line; _vm.warn_nan_coercion(&current, "array", line); if matches!(current, Value::Double(d) if d.is_nan()) { r.borrow().clone() } else { current } } {
-                cur @ Value::Array(_) => cur,
-                Value::Null | Value::Undef => {
-                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                        goro_core::array::PhpArray::new(),
-                    )))
+            "array" => match {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "array", line);
+                if matches!(current, Value::Double(d) if d.is_nan()) {
+                    r.borrow().clone()
+                } else {
+                    current
                 }
+            } {
+                cur @ Value::Array(_) => cur,
+                Value::Null | Value::Undef => Value::Array(std::rc::Rc::new(
+                    std::cell::RefCell::new(goro_core::array::PhpArray::new()),
+                )),
                 Value::Object(ref o) => Value::Array(_vm.object_to_array(o)),
                 other => {
                     let mut arr = goro_core::array::PhpArray::new();
@@ -417,17 +458,26 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
                 }
             },
-            "object" => match { let line = _vm.current_line; _vm.warn_nan_coercion(&current, "object", line); if matches!(current, Value::Double(d) if d.is_nan()) { r.borrow().clone() } else { current } } {
+            "object" => match {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "object", line);
+                if matches!(current, Value::Double(d) if d.is_nan()) {
+                    r.borrow().clone()
+                } else {
+                    current
+                }
+            } {
                 cur @ Value::Object(_) => cur,
                 Value::Array(arr) => {
-                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
+                    let mut obj = goro_core::object::PhpObject::new(
+                        b"stdClass".to_vec(),
+                        _vm.alloc_object_id(),
+                    );
                     {
                         let arr_borrow = arr.borrow();
                         for (k, v) in arr_borrow.iter() {
                             let key_bytes = match k {
-                                goro_core::array::ArrayKey::Int(i) => {
-                                    format!("{}", i).into_bytes()
-                                }
+                                goro_core::array::ArrayKey::Int(i) => format!("{}", i).into_bytes(),
                                 goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
                             };
                             obj.set_property(key_bytes, v.clone());
@@ -436,7 +486,10 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
                 }
                 cur => {
-                    let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
+                    let mut obj = goro_core::object::PhpObject::new(
+                        b"stdClass".to_vec(),
+                        _vm.alloc_object_id(),
+                    );
                     if !matches!(cur, Value::Null | Value::Undef) {
                         obj.set_property(b"scalar".to_vec(), cur);
                     }
@@ -452,13 +505,19 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "Cannot convert to resource type";
                 let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
                 _vm.current_exception = Some(exc);
-                return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: _vm.current_line });
+                return Err(VmError {
+                    message: format!("Uncaught ValueError: {}", msg),
+                    line: _vm.current_line,
+                });
             }
             _ => {
                 let msg = "settype(): Argument #2 ($type) must be a valid type";
                 let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
                 _vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: _vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: _vm.current_line,
+                });
             }
         };
         *r.borrow_mut() = new_val;
@@ -501,7 +560,10 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
     // Dereference if a reference
     let val_owned;
     let val: &Value = match val_raw {
-        Value::Reference(r) => { val_owned = r.borrow().clone(); &val_owned }
+        Value::Reference(r) => {
+            val_owned = r.borrow().clone();
+            &val_owned
+        }
         _ => val_raw,
     };
     let mode = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -514,7 +576,10 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
         );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     match val {
         Value::Array(arr) => {
@@ -527,10 +592,17 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
         }
         Value::Object(obj) => {
             // Check for Countable interface - try to call count() method
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
 
             // First check if user class has overridden count() method
-            let has_user_count = vm.classes.get(&class_lower)
+            let has_user_count = vm
+                .classes
+                .get(&class_lower)
                 .map(|c| c.get_method(b"count").is_some())
                 .unwrap_or(false);
 
@@ -539,15 +611,28 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
                 // zval_get_long().
                 let result = vm.call_object_method(val, b"count", &[]);
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: "Uncaught exception".to_string(), line: vm.current_line });
+                    return Err(VmError {
+                        message: "Uncaught exception".to_string(),
+                        line: vm.current_line,
+                    });
                 }
                 let n = match result.unwrap_or(Value::Null).deref() {
                     Value::Object(o) => {
-                        let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
-                        vm.emit_warning(&format!("Object of class {} could not be converted to int", cn));
+                        let cn = goro_core::value::display_class_name(&o.borrow().class_name)
+                            .to_string();
+                        vm.emit_warning(&format!(
+                            "Object of class {} could not be converted to int",
+                            cn
+                        ));
                         1
                     }
-                    Value::Array(a) => if !a.borrow().is_empty() { 1 } else { 0 },
+                    Value::Array(a) => {
+                        if !a.borrow().is_empty() {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     other => other.to_long(),
                 };
                 return Ok(Value::Long(n));
@@ -568,38 +653,65 @@ fn count_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError
 
             // Non-countable object: TypeError in PHP 8+
             let class_name = String::from_utf8_lossy(&obj.borrow().class_name).into_owned();
-            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, {} given", fname, class_name);
+            let err_msg = format!(
+                "{}(): Argument #1 ($value) must be of type Countable|array, {} given",
+                fname, class_name
+            );
             let exc = vm.throw_type_error(err_msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
+            Err(VmError {
+                message: format!("Uncaught TypeError: {}", err_msg),
+                line: vm.current_line,
+            })
         }
         Value::Generator(_) => {
-            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, Generator given", fname);
+            let err_msg = format!(
+                "{}(): Argument #1 ($value) must be of type Countable|array, Generator given",
+                fname
+            );
             let exc = vm.throw_type_error(err_msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
+            Err(VmError {
+                message: format!("Uncaught TypeError: {}", err_msg),
+                line: vm.current_line,
+            })
         }
         _ => {
             // null, bool, int, float, string -> TypeError in PHP 8+
             let type_name = Vm::value_type_name(val);
-            let err_msg = format!("{}(): Argument #1 ($value) must be of type Countable|array, {} given", fname, type_name);
+            let err_msg = format!(
+                "{}(): Argument #1 ($value) must be of type Countable|array, {} given",
+                fname, type_name
+            );
             let exc = vm.throw_type_error(err_msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: vm.current_line })
+            Err(VmError {
+                message: format!("Uncaught TypeError: {}", err_msg),
+                line: vm.current_line,
+            })
         }
     }
 }
 
 /// php_count_recursive()
-fn count_recursive(vm: &mut Vm, arr: &std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>, stack: &mut Vec<usize>) -> i64 {
+fn count_recursive(
+    vm: &mut Vm,
+    arr: &std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>,
+    stack: &mut Vec<usize>,
+) -> i64 {
     let ptr = std::rc::Rc::as_ptr(arr) as usize;
     if stack.contains(&ptr) {
         vm.emit_warning("count(): Recursion detected");
         return 0;
     }
     stack.push(ptr);
-    let children: Vec<std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>> = arr.borrow().values()
-        .filter_map(|v| match v.deref() { Value::Array(a) => Some(a), _ => None })
+    let children: Vec<std::rc::Rc<std::cell::RefCell<goro_core::array::PhpArray>>> = arr
+        .borrow()
+        .values()
+        .filter_map(|v| match v.deref() {
+            Value::Array(a) => Some(a),
+            _ => None,
+        })
         .collect();
     let mut total = arr.borrow().len() as i64;
     for c in children {
@@ -635,24 +747,34 @@ fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn is_resource(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     // is_resource returns false for closed resources (matches PHP semantics)
-    Ok(if val.is_resource() && goro_core::value::is_open_resource(val.resource_id()) {
-        Value::True
-    } else {
-        Value::False
-    })
+    Ok(
+        if val.is_resource() && goro_core::value::is_open_resource(val.resource_id()) {
+            Value::True
+        } else {
+            Value::False
+        },
+    )
 }
 
 /// `$obj instanceof $target` for user and builtin classes/interfaces.
 fn class_instanceof(vm: &Vm, class_lower: &[u8], target: &[u8]) -> bool {
     let mut cur = class_lower.to_vec();
     for _ in 0..64 {
-        if cur == target || vm.class_implements_interface(&cur, target)
+        if cur == target
+            || vm.class_implements_interface(&cur, target)
             || goro_core::vm::is_builtin_subclass(&cur, target)
         {
             return true;
         }
-        let next = vm.classes.get(&cur).and_then(|c| c.parent.as_ref())
-            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+        let next = vm
+            .classes
+            .get(&cur)
+            .and_then(|c| c.parent.as_ref())
+            .map(|p| {
+                p.iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect::<Vec<u8>>()
+            });
         match next {
             Some(n) => cur = n,
             None => return false,
@@ -666,8 +788,17 @@ fn is_countable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match &val {
         Value::Array(_) => Value::True,
         Value::Object(obj) => {
-            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if class_instanceof(vm, &cl, b"countable") { Value::True } else { Value::False }
+            let cl: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            if class_instanceof(vm, &cl, b"countable") {
+                Value::True
+            } else {
+                Value::False
+            }
         }
         _ => Value::False,
     })
@@ -678,8 +809,17 @@ fn is_iterable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(match &val {
         Value::Array(_) | Value::Generator(_) => Value::True,
         Value::Object(obj) => {
-            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if class_instanceof(vm, &cl, b"traversable") { Value::True } else { Value::False }
+            let cl: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            if class_instanceof(vm, &cl, b"traversable") {
+                Value::True
+            } else {
+                Value::False
+            }
         }
         _ => Value::False,
     })

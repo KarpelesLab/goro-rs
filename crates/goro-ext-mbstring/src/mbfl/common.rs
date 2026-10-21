@@ -64,11 +64,19 @@ pub const fn nflags(c: u8) -> u32 {
     0x1F1A5 + c as u32
 }
 
-pub const nflags_s: [[u8; 2]; 10] = [*b"CN", *b"DE", *b"ES", *b"FR", *b"GB", *b"IT", *b"JP", *b"KR", *b"RU", *b"US"];
+pub const nflags_s: [[u8; 2]; 10] = [
+    *b"CN", *b"DE", *b"ES", *b"FR", *b"GB", *b"IT", *b"JP", *b"KR", *b"RU", *b"US",
+];
 pub const nflags_kddi: [[u8; 2]; 6] = [*b"FR", *b"DE", *b"IT", *b"GB", *b"CN", *b"KR"];
-pub const nflags_sb: [[u8; 2]; 10] = [*b"JP", *b"US", *b"FR", *b"DE", *b"IT", *b"GB", *b"ES", *b"RU", *b"CN", *b"KR"];
-pub const nflags_code_kddi: [i32; 10] = [0x2549, 0x2546, 0x24C0, 0x2545, 0x2548, 0x2547, 0x2750, 0x254A, 0x24C1, 0x27F7];
-pub const nflags_code_sb: [i32; 10] = [0x2B0A, 0x2B05, 0x2B08, 0x2B04, 0x2B07, 0x2B06, 0x2B02, 0x2B0B, 0x2B09, 0x2B03];
+pub const nflags_sb: [[u8; 2]; 10] = [
+    *b"JP", *b"US", *b"FR", *b"DE", *b"IT", *b"GB", *b"ES", *b"RU", *b"CN", *b"KR",
+];
+pub const nflags_code_kddi: [i32; 10] = [
+    0x2549, 0x2546, 0x24C0, 0x2545, 0x2548, 0x2547, 0x2750, 0x254A, 0x24C1, 0x27F7,
+];
+pub const nflags_code_sb: [i32; 10] = [
+    0x2B0A, 0x2B05, 0x2B08, 0x2B04, 0x2B07, 0x2B06, 0x2B02, 0x2B0B, 0x2B09, 0x2B03,
+];
 
 /// number -> (ku*94)+ten value for telephone keypad character
 #[inline]

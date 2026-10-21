@@ -16,7 +16,11 @@ impl Vm {
     /// Walk the class chain (user parents, then built-in parents) of
     /// `class_lower` and return the first built-in SPL class from `bases`
     /// that it is or extends.
-    pub(crate) fn spl_find_base(&self, class_lower: &[u8], bases: &[&'static [u8]]) -> Option<&'static [u8]> {
+    pub(crate) fn spl_find_base(
+        &self,
+        class_lower: &[u8],
+        bases: &[&'static [u8]],
+    ) -> Option<&'static [u8]> {
         let mut cur: Vec<u8> = class_lower.to_vec();
         for _ in 0..64 {
             if let Some(b) = bases.iter().find(|b| **b == cur.as_slice()) {
@@ -42,7 +46,8 @@ impl Vm {
     /// Whether objects of this class get a built-in SPL `__toString`
     /// (SplFileInfo family and CachingIterator family).
     pub(crate) fn spl_has_builtin_tostring(&self, class_lower: &[u8]) -> bool {
-        self.spl_find_base(class_lower, &[b"splfileinfo", b"cachingiterator"]).is_some()
+        self.spl_find_base(class_lower, &[b"splfileinfo", b"cachingiterator"])
+            .is_some()
     }
 
     /// Set current_exception to a new exception of `class` and return
@@ -63,14 +68,26 @@ impl Vm {
             (Value::Object(_), Value::String(_)) | (Value::String(_), Value::Object(_)) => {
                 let obj_left = matches!(a, Value::Object(_));
                 let o = if obj_left { &a } else { &b };
-                let cl = if let Value::Object(ob) = o { obj_class_lower(ob) } else { Vec::new() };
-                let has_ts = self.classes.get(&cl).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false);
+                let cl = if let Value::Object(ob) = o {
+                    obj_class_lower(ob)
+                } else {
+                    Vec::new()
+                };
+                let has_ts = self
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__tostring").is_some())
+                    .unwrap_or(false);
                 if has_ts {
                     let s = Value::String(self.value_to_string(o));
                     if self.current_exception.is_some() {
                         return 0;
                     }
-                    return if obj_left { s.compare(&b) } else { a.compare(&s) };
+                    return if obj_left {
+                        s.compare(&b)
+                    } else {
+                        a.compare(&s)
+                    };
                 }
                 a.compare(&b)
             }
@@ -86,7 +103,11 @@ impl Vm {
 
     /// Stub signature of an SPL method, looked up on `class_lower` and its
     /// built-in parents.
-    pub(crate) fn spl_stub_lookup(&self, class_lower: &[u8], method_lower: &[u8]) -> Option<&'static crate::spl_stubs::StubMethod> {
+    pub(crate) fn spl_stub_lookup(
+        &self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<&'static crate::spl_stubs::StubMethod> {
         let mut cur = class_lower.to_vec();
         for _ in 0..16 {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
@@ -101,7 +122,11 @@ impl Vm {
     }
 
     /// Like spl_stub_lookup but also returns the declaring class (lowercase).
-    pub(crate) fn spl_stub_lookup_decl(&self, class_lower: &[u8], method_lower: &[u8]) -> Option<(Vec<u8>, &'static crate::spl_stubs::StubMethod)> {
+    pub(crate) fn spl_stub_lookup_decl(
+        &self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<(Vec<u8>, &'static crate::spl_stubs::StubMethod)> {
         let mut cur = class_lower.to_vec();
         for _ in 0..16 {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
@@ -161,7 +186,8 @@ impl Vm {
         let decl_disp = self.builtin_canonical_name(&decl);
         let method_disp = String::from_utf8_lossy(method_orig).to_string();
         let mut call_args: Vec<Value> = args.to_vec();
-        if !named.is_empty() && !self.spl_map_named_args(base, &method_lower, &mut call_args, named) {
+        if !named.is_empty() && !self.spl_map_named_args(base, &method_lower, &mut call_args, named)
+        {
             return Value::Null;
         }
         // Drop trailing skipped (Undef) optionals.
@@ -187,16 +213,28 @@ impl Vm {
                 if n == 1 { "" } else { "s" },
                 given
             );
-            self.call_stack.push((format!("{}->{}", decl_disp, method_disp), self.current_file.clone(), line, call_args[1..].to_vec(), true));
+            self.call_stack.push((
+                format!("{}->{}", decl_disp, method_disp),
+                self.current_file.clone(),
+                line,
+                call_args[1..].to_vec(),
+                true,
+            ));
             self.spl_throw(b"ArgumentCountError", &msg);
             self.call_stack.pop();
             return Value::Null;
         }
         if let Some((since, message)) = stub.deprecated {
             let msg = if message.is_empty() {
-                format!("Method {}::{}() is deprecated since {}", decl_disp, stub.name, since)
+                format!(
+                    "Method {}::{}() is deprecated since {}",
+                    decl_disp, stub.name, since
+                )
             } else {
-                format!("Method {}::{}() is deprecated since {}, {}", decl_disp, stub.name, since, message)
+                format!(
+                    "Method {}::{}() is deprecated since {}, {}",
+                    decl_disp, stub.name, since, message
+                )
             };
             self.emit_deprecated_at(&msg, line);
             if self.current_exception.is_some() {
@@ -204,8 +242,15 @@ impl Vm {
             }
         }
         let frame = format!("{}->{}", decl_disp, method_disp);
-        self.call_stack.push((frame.clone(), self.current_file.clone(), line, call_args[1..].to_vec(), true));
-        self.spl_internal_frames.push((self.call_stack.len(), frame));
+        self.call_stack.push((
+            frame.clone(),
+            self.current_file.clone(),
+            line,
+            call_args[1..].to_vec(),
+            true,
+        ));
+        self.spl_internal_frames
+            .push((self.call_stack.len(), frame));
         let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
         self.spl_internal_frames.pop();
         drop(call_args);
@@ -232,7 +277,11 @@ impl Vm {
 
     /// Whether argument `arg_index` (counting $this) of a deferred SPL call
     /// is a by-reference parameter of the built-in method.
-    pub(crate) fn spl_deferred_arg_by_ref(&self, call: &crate::vm::PendingCall, arg_index: usize) -> bool {
+    pub(crate) fn spl_deferred_arg_by_ref(
+        &self,
+        call: &crate::vm::PendingCall,
+        arg_index: usize,
+    ) -> bool {
         let name = call.name.as_bytes();
         if !name.starts_with(b"__splx::") || arg_index == 0 {
             return false;
@@ -272,7 +321,10 @@ impl Vm {
                 .get(&cur)
                 .and_then(|c| c.parent.clone())
                 .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                .or_else(|| crate::vm::get_builtin_parent(&cur).map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect()));
+                .or_else(|| {
+                    crate::vm::get_builtin_parent(&cur)
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                });
             match next {
                 Some(n) => {
                     chain.push(n.clone());
@@ -316,7 +368,11 @@ impl Vm {
     /// RecursiveIteratorIterator, the current sub-iterator). `name` is
     /// "Class::method" and `args[0]` is $this. Returns None when not
     /// applicable.
-    pub(crate) fn spl_forward_unknown_method(&mut self, name: &[u8], args: &[Value]) -> Option<Value> {
+    pub(crate) fn spl_forward_unknown_method(
+        &mut self,
+        name: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
         let sep = name.windows(2).position(|w| w == b"::")?;
         let class_lower: Vec<u8> = name[..sep].iter().map(|b| b.to_ascii_lowercase()).collect();
         let method = &name[sep + 2..];
@@ -327,7 +383,10 @@ impl Vm {
         if obj_class_lower(&obj) != class_lower {
             return None;
         }
-        let base = self.spl_find_base(&class_lower, &[b"recursiveiteratoriterator", b"iteratoriterator"])?;
+        let base = self.spl_find_base(
+            &class_lower,
+            &[b"recursiveiteratoriterator", b"iteratoriterator"],
+        )?;
         let target = if base == b"recursiveiteratoriterator" {
             let stack = obj.borrow().get_property(b"__spl_rii_its");
             let top = match &stack {
@@ -345,7 +404,11 @@ impl Vm {
         // Only forward when the target actually has the method.
         let tcl = obj_class_lower(&tobj);
         let mlower: Vec<u8> = method.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let user_has = self.classes.get(&tcl).map(|c| c.get_method(&mlower).is_some()).unwrap_or(false);
+        let user_has = self
+            .classes
+            .get(&tcl)
+            .map(|c| c.get_method(&mlower).is_some())
+            .unwrap_or(false);
         let builtin_has = self
             .spl_builtin_base(&tcl)
             .map(|b| self.spl_stub_lookup(b, &mlower).is_some())
@@ -379,7 +442,10 @@ impl Vm {
         };
         let positional = args.len().saturating_sub(1);
         for (name, v) in named {
-            let idx = stub.params.iter().position(|p| p.as_bytes() == name.as_slice());
+            let idx = stub
+                .params
+                .iter()
+                .position(|p| p.as_bytes() == name.as_slice());
             match idx {
                 None => {
                     let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(name));
@@ -387,7 +453,10 @@ impl Vm {
                     return false;
                 }
                 Some(i) if i < positional => {
-                    let msg = format!("Named parameter ${} overwrites previous argument", String::from_utf8_lossy(name));
+                    let msg = format!(
+                        "Named parameter ${} overwrites previous argument",
+                        String::from_utf8_lossy(name)
+                    );
                     self.spl_throw(b"Error", &msg);
                     return false;
                 }
@@ -444,13 +513,23 @@ impl Vm {
     /// spl_autoload_register: function name, [class|object, method], or a
     /// closure/invokable) with the class name. Pushes an
     /// "[internal function]" frame like zend_call_known_function.
-    pub fn spl_call_autoloader(&mut self, cb: &Value, class_name: &Value) -> Option<crate::vm::VmError> {
+    pub fn spl_call_autoloader(
+        &mut self,
+        cb: &Value,
+        class_name: &Value,
+    ) -> Option<crate::vm::VmError> {
         let mut fatal: Option<crate::vm::VmError> = None;
         let args = vec![class_name.clone()];
         // Invokable objects: call __invoke with the object's class scope.
         if let Value::Object(o) = cb {
             let cl = obj_class_lower(o);
-            if cl != b"closure" && self.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false) {
+            if cl != b"closure"
+                && self
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__invoke").is_some())
+                    .unwrap_or(false)
+            {
                 let mut a = PhpArray::new();
                 a.push(cb.clone());
                 a.push(Value::String(PhpString::from_bytes(b"__invoke")));
@@ -462,7 +541,11 @@ impl Vm {
                 let vals: Vec<Value> = a.borrow().values().cloned().collect();
                 if vals.len() == 2 {
                     let method = vals[1].to_php_string();
-                    let mlower: Vec<u8> = method.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let mlower: Vec<u8> = method
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     let (called_lower, this, disp_cls) = match &vals[0] {
                         Value::Object(o) => (
                             obj_class_lower(o),
@@ -472,18 +555,30 @@ impl Vm {
                         other => {
                             let s = other.to_php_string();
                             (
-                                s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
+                                s.as_bytes()
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect(),
                                 None,
                                 s.to_string_lossy(),
                             )
                         }
                     };
-                    let mut mdef = self.classes.get(&called_lower).and_then(|c| c.get_method(&mlower)).cloned();
+                    let mut mdef = self
+                        .classes
+                        .get(&called_lower)
+                        .and_then(|c| c.get_method(&mlower))
+                        .cloned();
                     // Non-public methods are not callable from the internal
                     // scope: route through __call when available.
                     if let Some(m) = &mdef {
                         if m.visibility != crate::object::Visibility::Public && this.is_some() {
-                            if let Some(call) = self.classes.get(&called_lower).and_then(|c| c.get_method(b"__call")).cloned() {
+                            if let Some(call) = self
+                                .classes
+                                .get(&called_lower)
+                                .and_then(|c| c.get_method(b"__call"))
+                                .cloned()
+                            {
                                 let mut argv = PhpArray::new();
                                 for a in &args {
                                     argv.push(a.clone());
@@ -491,7 +586,14 @@ impl Vm {
                                 let call_args = vec![Value::String(method.clone()), val_arr(argv)];
                                 self.called_class_stack.push(called_lower.clone());
                                 self.push_class_scope(call.declaring_class.clone());
-                                if let Err(e) = self.execute_fn_with_named_args(&call.op_array, call_args, vec![], this.clone()) { fatal = Some(e); }
+                                if let Err(e) = self.execute_fn_with_named_args(
+                                    &call.op_array,
+                                    call_args,
+                                    vec![],
+                                    this.clone(),
+                                ) {
+                                    fatal = Some(e);
+                                }
                                 self.pop_class_scope();
                                 self.called_class_stack.pop();
                                 return fatal;
@@ -506,31 +608,60 @@ impl Vm {
                             .get(&m.declaring_class)
                             .map(|c| String::from_utf8_lossy(&c.name).to_string())
                             .unwrap_or(disp_cls);
-                        let fname = format!("{}{}{}", decl_disp, sep, String::from_utf8_lossy(&m.name));
-                        self.call_stack.push((fname, String::new(), 0, args.clone(), this.is_some()));
+                        let fname =
+                            format!("{}{}{}", decl_disp, sep, String::from_utf8_lossy(&m.name));
+                        self.call_stack.push((
+                            fname,
+                            String::new(),
+                            0,
+                            args.clone(),
+                            this.is_some(),
+                        ));
                         self.called_class_stack.push(called_lower.clone());
                         self.push_class_scope(m.declaring_class.clone());
-                        if let Err(e) = self.execute_fn_with_named_args(&m.op_array, args, vec![], this) { fatal = Some(e); }
+                        if let Err(e) =
+                            self.execute_fn_with_named_args(&m.op_array, args, vec![], this)
+                        {
+                            fatal = Some(e);
+                        }
                         self.pop_class_scope();
                         self.called_class_stack.pop();
                         self.call_stack.pop();
                         return fatal;
                     }
                 }
-                if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                if let Err(e) = self.call_callback(cb, &args) {
+                    fatal = Some(e);
+                }
             }
             Value::String(s) => {
-                let lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let lower: Vec<u8> = s
+                    .as_bytes()
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if self.user_functions.contains_key(&lower) {
-                    self.call_stack.push((s.to_string_lossy(), String::new(), 0, args.clone(), false));
-                    if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                    self.call_stack.push((
+                        s.to_string_lossy(),
+                        String::new(),
+                        0,
+                        args.clone(),
+                        false,
+                    ));
+                    if let Err(e) = self.call_callback(cb, &args) {
+                        fatal = Some(e);
+                    }
                     self.call_stack.pop();
                 } else {
-                    if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                    if let Err(e) = self.call_callback(cb, &args) {
+                        fatal = Some(e);
+                    }
                 }
             }
             _ => {
-                if let Err(e) = self.call_callback(cb, &args) { fatal = Some(e); }
+                if let Err(e) = self.call_callback(cb, &args) {
+                    fatal = Some(e);
+                }
             }
         }
         fatal
@@ -553,7 +684,10 @@ impl Vm {
 
     /// Whether `class_lower` declares a userland constructor.
     pub(crate) fn spl_has_user_ctor(&self, class_lower: &[u8]) -> bool {
-        self.classes.get(class_lower).map(|c| c.get_method(b"__construct").is_some()).unwrap_or(false)
+        self.classes
+            .get(class_lower)
+            .map(|c| c.get_method(b"__construct").is_some())
+            .unwrap_or(false)
     }
 
     /// Native get_debug_info for SPL classes: the property table (mangled
@@ -563,10 +697,19 @@ impl Vm {
         let base = self.spl_find_base(
             &cl,
             &[
-                b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap",
-                b"directoryiterator", b"splfileobject", b"splfileinfo", b"splfixedarray",
-                b"spldoublylinkedlist", b"splobjectstorage", b"multipleiterator",
-                b"arrayobject", b"arrayiterator",
+                b"splpriorityqueue",
+                b"splminheap",
+                b"splmaxheap",
+                b"splheap",
+                b"directoryiterator",
+                b"splfileobject",
+                b"splfileinfo",
+                b"splfixedarray",
+                b"spldoublylinkedlist",
+                b"splobjectstorage",
+                b"multipleiterator",
+                b"arrayobject",
+                b"arrayiterator",
             ],
         )?;
         match base {
@@ -574,7 +717,9 @@ impl Vm {
             b"splobjectstorage" | b"multipleiterator" => Some(self.sos_debug_info(obj)),
             b"spldoublylinkedlist" => Some(self.dll_debug_info(obj)),
             b"splfixedarray" => Some(self.fa_debug_info(obj, true)),
-            b"splfileobject" | b"splfileinfo" | b"directoryiterator" => Some(self.fs_debug_info(obj)),
+            b"splfileobject" | b"splfileinfo" | b"directoryiterator" => {
+                Some(self.fs_debug_info(obj))
+            }
             b"splpriorityqueue" => Some(self.heap_debug_info(obj, true)),
             b"splminheap" | b"splmaxheap" | b"splheap" => Some(self.heap_debug_info(obj, false)),
             _ => None,
@@ -589,8 +734,15 @@ impl Vm {
         let disp = self.builtin_canonical_name(&base);
         let line = self.current_line;
         let frame = format!("{}->__construct", disp);
-        self.call_stack.push((frame.clone(), self.current_file.clone(), line, args.to_vec(), true));
-        self.spl_internal_frames.push((self.call_stack.len(), frame));
+        self.call_stack.push((
+            frame.clone(),
+            self.current_file.clone(),
+            line,
+            args.to_vec(),
+            true,
+        ));
+        self.spl_internal_frames
+            .push((self.call_stack.len(), frame));
     }
 
     /// Raise a fatal error from a built-in SPL method; the deferred call
@@ -616,27 +768,43 @@ impl Vm {
     /// Call a method from built-in SPL code. A user-defined method gets a
     /// stack frame located at "[internal function]" when called from a
     /// built-in method, or at the current line otherwise (e.g. foreach).
-    pub(crate) fn spl_call_method(&mut self, obj_val: &Value, method: &[u8], args: &[Value]) -> Option<Value> {
+    pub(crate) fn spl_call_method(
+        &mut self,
+        obj_val: &Value,
+        method: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
         let internal = self.spl_caller_is_internal();
         self.spl_call_method_at(obj_val, method, args, internal)
     }
 
     /// spl_call_method() with an explicit caller kind (`internal`: called
     /// from a built-in function or method).
-    pub(crate) fn spl_call_method_at(&mut self, obj_val: &Value, method: &[u8], args: &[Value], internal: bool) -> Option<Value> {
+    pub(crate) fn spl_call_method_at(
+        &mut self,
+        obj_val: &Value,
+        method: &[u8],
+        args: &[Value],
+        internal: bool,
+    ) -> Option<Value> {
         let frame = match obj_val {
             Value::Object(o) => {
                 let cl = obj_class_lower(o);
                 let ml: Vec<u8> = method.iter().map(|b| b.to_ascii_lowercase()).collect();
-                self.classes.get(&cl).and_then(|c| c.get_method(&ml)).map(|m| {
-                    let decl = self
-                        .classes
-                        .get(&m.declaring_class)
-                        .map(|dc| String::from_utf8_lossy(&dc.name).to_string())
-                        .unwrap_or_else(|| String::from_utf8_lossy(&m.declaring_class).to_string());
-                    let sep = if m.is_static { "::" } else { "->" };
-                    format!("{}{}{}", decl, sep, String::from_utf8_lossy(&m.name))
-                })
+                self.classes
+                    .get(&cl)
+                    .and_then(|c| c.get_method(&ml))
+                    .map(|m| {
+                        let decl = self
+                            .classes
+                            .get(&m.declaring_class)
+                            .map(|dc| String::from_utf8_lossy(&dc.name).to_string())
+                            .unwrap_or_else(|| {
+                                String::from_utf8_lossy(&m.declaring_class).to_string()
+                            });
+                        let sep = if m.is_static { "::" } else { "->" };
+                        format!("{}{}{}", decl, sep, String::from_utf8_lossy(&m.name))
+                    })
             }
             _ => None,
         };
@@ -647,7 +815,8 @@ impl Vm {
                 } else {
                     (self.current_file.clone(), self.current_line)
                 };
-                self.call_stack.push((name, file, line, args.to_vec(), true));
+                self.call_stack
+                    .push((name, file, line, args.to_vec(), true));
                 let r = self.call_object_method(obj_val, method, args);
                 self.call_stack.pop();
                 r
@@ -660,7 +829,9 @@ impl Vm {
     /// exception set when iteration must not start.
     pub(crate) fn spl_foreach_check(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
-        if self.spl_find_base(&cl, &[b"recursiveiteratoriterator"]).is_some()
+        if self
+            .spl_find_base(&cl, &[b"recursiveiteratoriterator"])
+            .is_some()
             && !matches!(obj.borrow().get_property(b"__spl_rii_its"), Value::Array(_))
         {
             self.spl_throw(b"Error", "Object is not initialized");
@@ -687,9 +858,17 @@ impl Vm {
             if base == b"arrayiterator"
                 && [&b"rewind"[..], b"valid", b"current", b"key", b"next"]
                     .iter()
-                    .any(|m| self.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false))
+                    .any(|m| {
+                        self.classes
+                            .get(&cl)
+                            .map(|c| c.get_method(m).is_some())
+                            .unwrap_or(false)
+                    })
             {
-                self.spl_throw(b"Error", "An iterator cannot be used with foreach by reference");
+                self.spl_throw(
+                    b"Error",
+                    "An iterator cannot be used with foreach by reference",
+                );
                 return Err(());
             }
             return Ok(match obj.borrow().get_property(b"__spl_array") {
@@ -700,7 +879,10 @@ impl Vm {
         let is_iter = self.class_implements_interface(&cl, b"iterator")
             || crate::vm::is_builtin_subclass(&cl, b"iterator");
         if is_iter {
-            self.spl_throw(b"Error", "An iterator cannot be used with foreach by reference");
+            self.spl_throw(
+                b"Error",
+                "An iterator cannot be used with foreach by reference",
+            );
             return Err(());
         }
         let is_agg = self.class_implements_interface(&cl, b"iteratoraggregate")
@@ -742,17 +924,43 @@ impl Vm {
 
 /// All built-in SPL classes (lowercase).
 pub(crate) const SPL_CLASSES: &[&[u8]] = &[
-    b"arrayobject", b"arrayiterator", b"recursivearrayiterator",
-    b"splfixedarray", b"spldoublylinkedlist", b"splqueue", b"splstack",
-    b"splheap", b"splminheap", b"splmaxheap", b"splpriorityqueue",
-    b"splobjectstorage", b"multipleiterator",
-    b"splfileinfo", b"directoryiterator", b"filesystemiterator",
-    b"recursivedirectoryiterator", b"globiterator", b"splfileobject", b"spltempfileobject",
-    b"emptyiterator", b"iteratoriterator", b"recursiveiteratoriterator", b"recursivetreeiterator",
-    b"filteriterator", b"recursivefilteriterator", b"callbackfilteriterator",
-    b"recursivecallbackfilteriterator", b"parentiterator", b"limititerator",
-    b"cachingiterator", b"recursivecachingiterator", b"norewinditerator",
-    b"appenditerator", b"infiniteiterator", b"regexiterator", b"recursiveregexiterator",
+    b"arrayobject",
+    b"arrayiterator",
+    b"recursivearrayiterator",
+    b"splfixedarray",
+    b"spldoublylinkedlist",
+    b"splqueue",
+    b"splstack",
+    b"splheap",
+    b"splminheap",
+    b"splmaxheap",
+    b"splpriorityqueue",
+    b"splobjectstorage",
+    b"multipleiterator",
+    b"splfileinfo",
+    b"directoryiterator",
+    b"filesystemiterator",
+    b"recursivedirectoryiterator",
+    b"globiterator",
+    b"splfileobject",
+    b"spltempfileobject",
+    b"emptyiterator",
+    b"iteratoriterator",
+    b"recursiveiteratoriterator",
+    b"recursivetreeiterator",
+    b"filteriterator",
+    b"recursivefilteriterator",
+    b"callbackfilteriterator",
+    b"recursivecallbackfilteriterator",
+    b"parentiterator",
+    b"limititerator",
+    b"cachingiterator",
+    b"recursivecachingiterator",
+    b"norewinditerator",
+    b"appenditerator",
+    b"infiniteiterator",
+    b"regexiterator",
+    b"recursiveregexiterator",
 ];
 
 /// ce->interfaces of an interface/class known from the SPL stubs (or a core
@@ -790,7 +998,10 @@ pub fn spl_class_interfaces(class_lower: &[u8]) -> Option<Vec<&'static str>> {
 /// Whether an SPL class implements `iface_lower` (None: not an SPL class).
 pub fn spl_class_implements(class_lower: &[u8], iface_lower: &[u8]) -> Option<bool> {
     let list = spl_class_interfaces(class_lower)?;
-    Some(list.iter().any(|i| i.as_bytes().eq_ignore_ascii_case(iface_lower)))
+    Some(
+        list.iter()
+            .any(|i| i.as_bytes().eq_ignore_ascii_case(iface_lower)),
+    )
 }
 
 std::thread_local! {
@@ -824,8 +1035,13 @@ pub(crate) fn autoload_leave(class_lower: &[u8]) {
 pub fn spl_class_needs_storage(class_lower: &[u8]) -> bool {
     matches!(
         class_lower,
-        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" | b"splobjectstorage"
-            | b"spldoublylinkedlist" | b"splqueue" | b"splstack"
+        b"arrayobject"
+            | b"arrayiterator"
+            | b"recursivearrayiterator"
+            | b"splobjectstorage"
+            | b"spldoublylinkedlist"
+            | b"splqueue"
+            | b"splstack"
     )
 }
 
@@ -843,7 +1059,11 @@ pub(crate) fn skey(s: &[u8]) -> ArrayKey {
 }
 
 pub(crate) fn obj_class_lower(obj: &Rc<RefCell<PhpObject>>) -> Vec<u8> {
-    obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect()
+    obj.borrow()
+        .class_name
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect()
 }
 
 pub(crate) fn val_arr(a: PhpArray) -> Value {

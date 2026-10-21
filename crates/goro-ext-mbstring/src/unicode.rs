@@ -98,7 +98,11 @@ fn mph_lookup(code: u32, g_table: &[i16], table: &[u32]) -> u32 {
     let g_size = g_table.len() as u32;
     let table_size = (table.len() / 2) as u32;
     let g = g_table[(mph_hash(0, code) % g_size) as usize];
-    let idx = if g <= 0 { (-(g as i32)) as u32 } else { mph_hash(g as u32, code) % table_size };
+    let idx = if g <= 0 {
+        (-(g as i32)) as u32
+    } else {
+        mph_hash(g as u32, code) % table_size
+    };
     if table[(2 * idx) as usize] == code {
         return table[(2 * idx + 1) as usize];
     }
@@ -176,7 +180,11 @@ pub fn tofold_raw(code: u32, enc: &Encoding) -> u32 {
 
 #[inline]
 fn simple(code: u32) -> u32 {
-    if code > 0xffffff { _uccase_extra_table[(code & 0xffffff) as usize] } else { code }
+    if code > 0xffffff {
+        _uccase_extra_table[(code & 0xffffff) as usize]
+    } else {
+        code
+    }
 }
 
 pub fn tolower_simple(code: u32, enc: &Encoding) -> u32 {
@@ -231,7 +239,14 @@ fn scan_back_for_cased_letter(buf: &[u32; 192], begin: usize, end: Option<usize>
 }
 
 /// C: `php_unicode_convert_case`
-pub fn convert_case(mode: CaseMode, src: &[u8], src_enc: &Encoding, dst_enc: &Encoding, illegal_mode: u8, illegal_substchar: u32) -> Vec<u8> {
+pub fn convert_case(
+    mode: CaseMode,
+    src: &[u8],
+    src_enc: &Encoding,
+    dst_enc: &Encoding,
+    illegal_mode: u8,
+    illegal_substchar: u32,
+) -> Vec<u8> {
     let all = src_enc.decode(src);
     let mut buf = ConvBuf::new(src.len() + 1, illegal_substchar, illegal_mode);
     let from_wchar = match dst_enc.from_wchar {
@@ -256,19 +271,31 @@ pub fn convert_case(mode: CaseMode, src: &[u8], src_enc: &Encoding, dst_enc: &En
         match mode {
             CaseMode::UpperSimple => {
                 for &w in wchar_buf {
-                    converted[p] = if w > 0xFFFFFF { w } else { toupper_simple(w, src_enc) };
+                    converted[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        toupper_simple(w, src_enc)
+                    };
                     p += 1;
                 }
             }
             CaseMode::LowerSimple => {
                 for &w in wchar_buf {
-                    converted[p] = if w > 0xFFFFFF { w } else { tolower_simple(w, src_enc) };
+                    converted[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        tolower_simple(w, src_enc)
+                    };
                     p += 1;
                 }
             }
             CaseMode::FoldSimple => {
                 for &w in wchar_buf {
-                    converted[p] = if w > 0xFFFFFF { w } else { tofold_simple(w, src_enc) };
+                    converted[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        tofold_simple(w, src_enc)
+                    };
                     p += 1;
                 }
             }
@@ -279,7 +306,11 @@ pub fn convert_case(mode: CaseMode, src: &[u8], src_enc: &Encoding, dst_enc: &En
                         p += 1;
                         continue;
                     }
-                    converted[p] = if title_mode { tolower_simple(w, src_enc) } else { totitle_simple(w, src_enc) };
+                    converted[p] = if title_mode {
+                        tolower_simple(w, src_enc)
+                    } else {
+                        totitle_simple(w, src_enc)
+                    };
                     p += 1;
                     if !is_case_ignorable(w) {
                         title_mode = is_cased(w);
@@ -333,13 +364,21 @@ pub fn convert_case(mode: CaseMode, src: &[u8], src_enc: &Encoding, dst_enc: &En
                         while j >= 0 && is_case_ignorable(wchar_buf[j as usize]) {
                             j -= 1;
                         }
-                        let before = if j >= 0 { is_cased(wchar_buf[j as usize]) } else { scan_back_for_cased_letter(&converted, p, converted_end) };
+                        let before = if j >= 0 {
+                            is_cased(wchar_buf[j as usize])
+                        } else {
+                            scan_back_for_cased_letter(&converted, p, converted_end)
+                        };
                         if before {
                             let mut j = i + 1;
                             while j < out_len && is_case_ignorable(wchar_buf[j]) {
                                 j += 1;
                             }
-                            let after_cased = if j >= out_len { scan_ahead_for_cased_letter(&all[chunk_end..]) } else { is_cased(wchar_buf[j]) };
+                            let after_cased = if j >= out_len {
+                                scan_ahead_for_cased_letter(&all[chunk_end..])
+                            } else {
+                                is_cased(wchar_buf[j])
+                            };
                             if !after_cased {
                                 final_sigma = true;
                             }
@@ -349,7 +388,11 @@ pub fn convert_case(mode: CaseMode, src: &[u8], src_enc: &Encoding, dst_enc: &En
                         converted[p] = 0x3C2;
                         p += 1;
                     } else {
-                        let w2 = if lowering { tolower_raw(w, src_enc) } else { totitle_raw(w, src_enc) };
+                        let w2 = if lowering {
+                            tolower_raw(w, src_enc)
+                        } else {
+                            totitle_raw(w, src_enc)
+                        };
                         if w2 > 0xFFFFFF {
                             emit_special(w2, &mut converted, &mut p);
                         } else {

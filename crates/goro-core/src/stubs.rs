@@ -102,7 +102,9 @@ pub struct StubClass {
 }
 
 impl StubFunc {
-    pub fn is_static(&self) -> bool { self.flags & F_STATIC != 0 }
+    pub fn is_static(&self) -> bool {
+        self.flags & F_STATIC != 0
+    }
     pub fn visibility(&self) -> Visibility {
         if self.flags & F_PRIVATE != 0 {
             Visibility::Private
@@ -147,18 +149,26 @@ fn function_index() -> &'static HashMap<String, usize> {
 }
 
 fn lower_str(name: &[u8]) -> String {
-    let n = if name.first() == Some(&b'\\') { &name[1..] } else { name };
+    let n = if name.first() == Some(&b'\\') {
+        &name[1..]
+    } else {
+        name
+    };
     String::from_utf8_lossy(n).to_ascii_lowercase()
 }
 
 /// Look up the stub of an internal class/interface/trait/enum.
 pub fn find_class(name: &[u8]) -> Option<&'static StubClass> {
-    class_index().get(&lower_str(name)).map(|&i| &crate::stub_sigs::CLASSES[i])
+    class_index()
+        .get(&lower_str(name))
+        .map(|&i| &crate::stub_sigs::CLASSES[i])
 }
 
 /// Look up the stub of an internal function.
 pub fn find_function(name: &[u8]) -> Option<&'static StubFunc> {
-    function_index().get(&lower_str(name)).map(|&i| &crate::stub_sigs::FUNCTIONS[i])
+    function_index()
+        .get(&lower_str(name))
+        .map(|&i| &crate::stub_sigs::FUNCTIONS[i])
 }
 
 /// Look up a global constant declared in a stub.
@@ -207,7 +217,9 @@ pub fn class_methods(name: &[u8]) -> Vec<(&'static StubClass, &'static StubFunc)
 /// Find a method of an internal class (including inherited ones).
 pub fn find_method(class: &[u8], method: &[u8]) -> Option<(&'static StubClass, &'static StubFunc)> {
     let ml = lower_str(method);
-    class_methods(class).into_iter().find(|(_, m)| m.name.eq_ignore_ascii_case(&ml))
+    class_methods(class)
+        .into_iter()
+        .find(|(_, m)| m.name.eq_ignore_ascii_case(&ml))
 }
 
 /// All interfaces implemented by an internal class (transitively), in
@@ -272,17 +284,25 @@ pub fn parse_type(s: &str) -> Option<ParamType> {
     }
     parts.push(&s[start..]);
     if parts.len() > 1 {
-        return Some(ParamType::Union(parts.iter().filter_map(|p| parse_type(p)).collect()));
+        return Some(ParamType::Union(
+            parts.iter().filter_map(|p| parse_type(p)).collect(),
+        ));
     }
     let s = s.trim();
-    let s = if s.starts_with('(') && s.ends_with(')') { &s[1..s.len() - 1] } else { s };
+    let s = if s.starts_with('(') && s.ends_with(')') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    };
     if s.contains('&') {
-        return Some(ParamType::Intersection(s.split('&').filter_map(parse_type).collect()));
+        return Some(ParamType::Intersection(
+            s.split('&').filter_map(parse_type).collect(),
+        ));
     }
     let lower = s.to_ascii_lowercase();
     match lower.as_str() {
-        "int" | "float" | "string" | "bool" | "array" | "object" | "callable" | "iterable" | "mixed"
-        | "null" | "void" | "self" | "parent" | "static" | "false" | "true" | "never" => {
+        "int" | "float" | "string" | "bool" | "array" | "object" | "callable" | "iterable"
+        | "mixed" | "null" | "void" | "self" | "parent" | "static" | "false" | "true" | "never" => {
             Some(ParamType::Simple(lower.into_bytes()))
         }
         _ => Some(ParamType::Simple(s.as_bytes().to_vec())),
@@ -305,13 +325,16 @@ pub fn op_array_for(f: &'static StubFunc, scope: Option<&[u8]>, is_method: bool)
     for a in f.args {
         let cv = oa.cv_names.len() as u32;
         oa.cv_names.push(a.name.as_bytes().to_vec());
-        oa.param_types.push(parse_type(a.ty).map(|pt| ParamTypeInfo {
-            param_type: pt,
-            param_name: a.name.as_bytes().to_vec(),
-            implicitly_nullable: false,
-        }));
-        oa.by_ref_params.push(a.flags & (A_BY_REF | A_PREFER_REF) != 0);
-        oa.param_has_default.push(a.default.is_some() || a.flags & A_UNKNOWN_DEFAULT != 0);
+        oa.param_types
+            .push(parse_type(a.ty).map(|pt| ParamTypeInfo {
+                param_type: pt,
+                param_name: a.name.as_bytes().to_vec(),
+                implicitly_nullable: false,
+            }));
+        oa.by_ref_params
+            .push(a.flags & (A_BY_REF | A_PREFER_REF) != 0);
+        oa.param_has_default
+            .push(a.default.is_some() || a.flags & A_UNKNOWN_DEFAULT != 0);
         if a.flags & A_VARIADIC != 0 {
             oa.variadic_param = Some(cv);
         }
@@ -332,7 +355,11 @@ pub fn literal_value(expr: &str) -> Option<Value> {
         "null" => return Some(Value::Null),
         "true" => return Some(Value::True),
         "false" => return Some(Value::False),
-        "[]" => return Some(Value::Array(std::rc::Rc::new(RefCell::new(crate::array::PhpArray::new())))),
+        "[]" => {
+            return Some(Value::Array(std::rc::Rc::new(RefCell::new(
+                crate::array::PhpArray::new(),
+            ))));
+        }
         _ => {}
     }
     if let Ok(n) = e.parse::<i64>() {
@@ -343,10 +370,14 @@ pub fn literal_value(expr: &str) -> Option<Value> {
             return Some(Value::Double(f));
         }
     }
-    if e.len() >= 2 && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\''))) {
+    if e.len() >= 2
+        && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
+    {
         let inner = &e[1..e.len() - 1];
         if !inner.contains('\\') && !inner.contains('$') {
-            return Some(Value::String(crate::string::PhpString::from_string(inner.to_string())));
+            return Some(Value::String(crate::string::PhpString::from_string(
+                inner.to_string(),
+            )));
         }
     }
     None
@@ -371,13 +402,34 @@ pub fn class_entry(vm: &crate::vm::Vm, name: &[u8]) -> Option<&'static ClassEntr
 
 fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
     let mut ce = ClassEntry::new(c.name.as_bytes().to_vec());
-    ce.parent = c.parent.map(|p| find_class(p.as_bytes()).map(|pc| pc.name).unwrap_or(p).as_bytes().to_vec());
-    ce.interfaces = c.interfaces.iter().map(|i| find_class(i.as_bytes()).map(|ic| ic.name).unwrap_or(i).as_bytes().to_vec()).collect();
+    ce.parent = c.parent.map(|p| {
+        find_class(p.as_bytes())
+            .map(|pc| pc.name)
+            .unwrap_or(p)
+            .as_bytes()
+            .to_vec()
+    });
+    ce.interfaces = c
+        .interfaces
+        .iter()
+        .map(|i| {
+            find_class(i.as_bytes())
+                .map(|ic| ic.name)
+                .unwrap_or(i)
+                .as_bytes()
+                .to_vec()
+        })
+        .collect();
     // Internal classes declaring __toString() implicitly implement Stringable
     // (registered before the explicitly implemented interfaces).
     if c.kind != K_TRAIT
-        && c.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString"))
-        && !c.interfaces.iter().any(|i| i.eq_ignore_ascii_case("Stringable"))
+        && c.methods
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case("__toString"))
+        && !c
+            .interfaces
+            .iter()
+            .any(|i| i.eq_ignore_ascii_case("Stringable"))
         && !c.name.eq_ignore_ascii_case("Stringable")
     {
         ce.interfaces.insert(0, b"Stringable".to_vec());

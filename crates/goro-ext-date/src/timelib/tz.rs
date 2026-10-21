@@ -1,7 +1,7 @@
 //! Port of timelib parse_tz.c / parse_posix.c, reading PHP's bundled
 //! timezonedb (extracted verbatim from ext/date/lib/timezonedb.h).
 
-use super::{TimeOffset, SECS_PER_DAY};
+use super::{SECS_PER_DAY, TimeOffset};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -76,7 +76,16 @@ fn be32(b: &[u8], p: usize) -> u32 {
     u32::from_be_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]])
 }
 fn be64(b: &[u8], p: usize) -> i64 {
-    i64::from_be_bytes([b[p], b[p + 1], b[p + 2], b[p + 3], b[p + 4], b[p + 5], b[p + 6], b[p + 7]])
+    i64::from_be_bytes([
+        b[p],
+        b[p + 1],
+        b[p + 2],
+        b[p + 3],
+        b[p + 4],
+        b[p + 5],
+        b[p + 6],
+        b[p + 7],
+    ])
 }
 
 /// Binary search for a timezone id (case-insensitive), returns the canonical
@@ -181,8 +190,17 @@ fn parse_at(start: usize) -> Option<TzInfo> {
     p += timecnt;
     for i in 0..typecnt {
         let j = p + i * 6;
-        let offset = ((b[j] as u32) << 24 | (b[j + 1] as u32) << 16 | (b[j + 2] as u32) << 8 | b[j + 3] as u32) as i32;
-        tz.types.push(TtInfo { offset, isdst: b[j + 4] as i32, abbr_idx: b[j + 5] as usize, isstdcnt: 0, isgmtcnt: 0 });
+        let offset = ((b[j] as u32) << 24
+            | (b[j + 1] as u32) << 16
+            | (b[j + 2] as u32) << 8
+            | b[j + 3] as u32) as i32;
+        tz.types.push(TtInfo {
+            offset,
+            isdst: b[j + 4] as i32,
+            abbr_idx: b[j + 5] as usize,
+            isstdcnt: 0,
+            isgmtcnt: 0,
+        });
     }
     p += typecnt * 6;
     tz.timezone_abbr = b[p..p + charcnt].to_vec();
@@ -244,7 +262,9 @@ impl TzInfo {
 
     fn find_ttinfo_index(&self, offset: i64, isdst: i32, abbr: &str) -> Option<usize> {
         (0..self.typecnt).find(|&i| {
-            self.types[i].offset as i64 == offset && self.types[i].isdst == isdst && self.abbr_at(self.types[i].abbr_idx) == abbr
+            self.types[i].offset as i64 == offset
+                && self.types[i].isdst == isdst
+                && self.abbr_at(self.types[i].abbr_idx) == abbr
         })
     }
 
@@ -253,7 +273,13 @@ impl TzInfo {
         self.timezone_abbr.extend_from_slice(abbr.as_bytes());
         self.timezone_abbr.push(0);
         self.charcnt = self.timezone_abbr.len();
-        let t = TtInfo { offset: offset as i32, isdst, abbr_idx: idx, isstdcnt: 0, isgmtcnt: 0 };
+        let t = TtInfo {
+            offset: offset as i32,
+            isdst,
+            abbr_idx: idx,
+            isstdcnt: 0,
+            isgmtcnt: 0,
+        };
         if self.types.len() > self.typecnt {
             self.types[self.typecnt] = t;
         } else {
@@ -267,7 +293,9 @@ impl TzInfo {
     pub fn fetch_timezone_offset(&self, ts: i64) -> Option<(TtInfo, i64)> {
         if self.timecnt == 0 || self.trans.is_empty() {
             if self.posix_info.is_some() {
-                return self.fetch_posix_timezone_offset(ts).map(|(t, _)| (t, i64::MIN));
+                return self
+                    .fetch_posix_timezone_offset(ts)
+                    .map(|(t, _)| (t, i64::MIN));
             }
             if self.typecnt == 1 {
                 return Some((self.types[0], i64::MIN));
@@ -281,7 +309,10 @@ impl TzInfo {
             if self.posix_info.is_some() {
                 return self.fetch_posix_timezone_offset(ts);
             }
-            return Some((self.types[self.trans_idx[self.timecnt - 1] as usize], self.trans[self.timecnt - 1]));
+            return Some((
+                self.types[self.trans_idx[self.timecnt - 1] as usize],
+                self.trans[self.timecnt - 1],
+            ));
         }
         let mut left = 0usize;
         let mut right = self.timecnt - 1;
@@ -332,7 +363,8 @@ impl TzInfo {
 
     /// timelib_get_time_zone_offset_info: (offset, transition_time, is_dst)
     pub fn get_offset_info(&self, ts: i64) -> Option<(i32, i64, u32)> {
-        self.fetch_timezone_offset(ts).map(|(to, tt)| (to.offset, tt, to.isdst as u32))
+        self.fetch_timezone_offset(ts)
+            .map(|(to, tt)| (to.offset, tt, to.isdst as u32))
     }
 
     pub fn timestamp_is_in_dst(&self, ts: i64) -> i32 {
@@ -363,7 +395,11 @@ impl TzInfo {
     pub fn fetch_posix_timezone_offset(&self, ts: i64) -> Option<(TtInfo, i64)> {
         let pi = self.posix_info.as_ref()?;
         if pi.dst_end.is_none() {
-            let tt = if self.timecnt > 0 { self.trans[self.timecnt - 1] } else { i64::MIN };
+            let tt = if self.timecnt > 0 {
+                self.trans[self.timecnt - 1]
+            } else {
+                i64::MIN
+            };
             return Some((self.types[pi.type_index_std_type], tt));
         }
         let (year, _, _) = super::unixtime2tm::unixtime2date(ts);
@@ -508,7 +544,14 @@ fn read_offset(ptr: &mut PPtr) -> i64 {
 }
 
 fn read_transition_spec(ptr: &mut PPtr) -> Option<PosixTransInfo> {
-    let mut tmp = PosixTransInfo { ttype: PosixTransType::JulianFeb29, days: 0, month: 0, week: 0, dow: 0, hour: 2 * 3600 };
+    let mut tmp = PosixTransInfo {
+        ttype: PosixTransType::JulianFeb29,
+        days: 0,
+        month: 0,
+        week: 0,
+        dow: 0,
+        hour: 2 * 3600,
+    };
     if ptr.c() == b'M' {
         tmp.ttype = PosixTransType::Mwd;
         ptr.p += 1;
@@ -548,7 +591,10 @@ fn read_transition_spec(ptr: &mut PPtr) -> Option<PosixTransInfo> {
 }
 
 pub fn parse_posix_str(posix: &str) -> Option<PosixInfo> {
-    let mut ptr = PPtr { s: posix.as_bytes(), p: 0 };
+    let mut ptr = PPtr {
+        s: posix.as_bytes(),
+        p: 0,
+    };
     let std = read_description(&mut ptr)?;
     let std_offset = read_offset(&mut ptr);
     if std_offset == POSIX_UNSET {

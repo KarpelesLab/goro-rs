@@ -6755,4 +6755,3 @@ pub(crate) static DEC_HTML5: &[(&str, u32, u32)] = &[
     ("zwj", 0x0200D, 0x00000),
     ("zwnj", 0x0200C, 0x00000),
 ];
-

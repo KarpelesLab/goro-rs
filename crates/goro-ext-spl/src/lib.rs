@@ -50,9 +50,15 @@ pub fn register(vm: &mut Vm) {
         b"splfileinfo".to_vec(),
         goro_core::spl_file::spl_file_info_construct_native,
     );
-    for cls in [&b"arrayobject"[..], b"arrayiterator", b"recursivearrayiterator"] {
-        vm.object_construct_handlers
-            .insert(cls.to_vec(), goro_core::spl_array::spl_array_construct_native);
+    for cls in [
+        &b"arrayobject"[..],
+        b"arrayiterator",
+        b"recursivearrayiterator",
+    ] {
+        vm.object_construct_handlers.insert(
+            cls.to_vec(),
+            goro_core::spl_array::spl_array_construct_native,
+        );
     }
     vm.object_construct_handlers.insert(
         b"multipleiterator".to_vec(),
@@ -222,7 +228,10 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             _ => Some("unknown"),
         };
         if let Some(tn) = type_name {
-            let msg = format!("iterator_to_array(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let msg = format!(
+                "iterator_to_array(): Argument #1 ($iterator) must be of type Traversable|array, {} given",
+                tn
+            );
             let line = vm.current_line;
             let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
@@ -244,10 +253,16 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         }
         Some(val @ Value::Object(obj)) => {
             // IteratorAggregate: dispatch to getIterator()'s return value.
-            let mut is_aggregate = !vm.obj_instanceof(val, b"iterator") && vm.obj_instanceof(val, b"iteratoraggregate");
+            let mut is_aggregate = !vm.obj_instanceof(val, b"iterator")
+                && vm.obj_instanceof(val, b"iteratoraggregate");
             // Extension-provided aggregates (e.g. DatePeriod)
             if !is_aggregate {
-                let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let cls_lower: Vec<u8> = obj
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if let Some((native, _)) = vm.find_native_class_handler(&cls_lower) {
                     is_aggregate = vm.builtin_implements_interface(&native, b"iteratoraggregate");
                 }
@@ -257,17 +272,28 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 if vm.current_exception.is_some() {
                     return Ok(Value::Null);
                 }
-                return iterator_to_array_impl(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);
+                return iterator_to_array_impl(
+                    vm,
+                    &[iter_val, if use_keys { Value::True } else { Value::False }],
+                );
             }
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next
             vm.call_object_method(val, b"rewind", &[]);
             for _ in 0..100000 {
-                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
-                if !valid.is_truthy() { break; }
-                let current = vm.call_object_method(val, b"current", &[]).unwrap_or(Value::Null);
+                let valid = vm
+                    .call_object_method(val, b"valid", &[])
+                    .unwrap_or(Value::False);
+                if !valid.is_truthy() {
+                    break;
+                }
+                let current = vm
+                    .call_object_method(val, b"current", &[])
+                    .unwrap_or(Value::Null);
                 if use_keys {
-                    let key = vm.call_object_method(val, b"key", &[]).unwrap_or(Value::Null);
+                    let key = vm
+                        .call_object_method(val, b"key", &[])
+                        .unwrap_or(Value::Null);
                     match key {
                         Value::Long(n) => result.set(ArrayKey::Int(n), current),
                         Value::String(s) => result.set(ArrayKey::String(s), current),
@@ -291,7 +317,9 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             }
             for _ in 0..100000 {
                 let gen_b = gen_rc.borrow();
-                if gen_b.state == goro_core::generator::GeneratorState::Completed { break; }
+                if gen_b.state == goro_core::generator::GeneratorState::Completed {
+                    break;
+                }
                 let value = gen_b.current_value.clone();
                 let key = gen_b.current_key.clone();
                 drop(gen_b);
@@ -302,7 +330,9 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             // PHP coerces numeric strings to int keys in array
                             // context. Match the engine's behaviour.
                             let key_bytes = s.as_bytes();
-                            let trimmed = std::str::from_utf8(key_bytes).ok().and_then(|t| t.parse::<i64>().ok());
+                            let trimmed = std::str::from_utf8(key_bytes)
+                                .ok()
+                                .and_then(|t| t.parse::<i64>().ok());
                             match trimmed {
                                 Some(n) if n.to_string().as_bytes() == key_bytes => {
                                     result.set(ArrayKey::Int(n), value)
@@ -393,7 +423,10 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => Some("unknown"),
         };
         if let Some(tn) = type_name {
-            let msg = format!("iterator_count(): Argument #1 ($iterator) must be of type Traversable|array, {} given", tn);
+            let msg = format!(
+                "iterator_count(): Argument #1 ($iterator) must be of type Traversable|array, {} given",
+                tn
+            );
             let line = vm.current_line;
             let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
@@ -416,8 +449,12 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut count: i64 = 0;
             vm.call_object_method(val, b"rewind", &[]);
             for _ in 0..100000 {
-                let valid = vm.call_object_method(val, b"valid", &[]).unwrap_or(Value::False);
-                if !valid.is_truthy() { break; }
+                let valid = vm
+                    .call_object_method(val, b"valid", &[])
+                    .unwrap_or(Value::False);
+                if !valid.is_truthy() {
+                    break;
+                }
                 count += 1;
                 vm.call_object_method(val, b"next", &[]);
             }
@@ -433,7 +470,9 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             loop {
                 let gen_check = gen_rc.borrow();
-                if gen_check.state == goro_core::generator::GeneratorState::Completed { break; }
+                if gen_check.state == goro_core::generator::GeneratorState::Completed {
+                    break;
+                }
                 count += 1;
                 drop(gen_check);
                 let mut gen_bm = gen_rc.borrow_mut();
@@ -449,7 +488,10 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Arg count: max 3 user args.
     if args.len() > 3 {
-        let msg = format!("iterator_apply() expects at most 3 arguments, {} given", args.len());
+        let msg = format!(
+            "iterator_apply() expects at most 3 arguments, {} given",
+            args.len()
+        );
         let line = vm.current_line;
         let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
         vm.current_exception = Some(exc);
@@ -582,7 +624,8 @@ fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>
     if from_string {
         let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
         let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let exists = vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
+        let exists =
+            vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
         if !exists {
             if autoload {
                 vm.try_autoload_class(&class_name);
@@ -590,9 +633,14 @@ fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>
                     return Ok(None);
                 }
             }
-            let still = vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
+            let still =
+                vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
             if !still {
-                let suffix = if autoload { " and could not be loaded" } else { "" };
+                let suffix = if autoload {
+                    " and could not be loaded"
+                } else {
+                    ""
+                };
                 vm.emit_warning(&format!(
                     "{}(): Class {} does not exist{}",
                     fname,
@@ -618,7 +666,10 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(class) = vm.classes.get(&class_lower) {
         for iface in &class.interfaces {
             let iface_str = PhpString::from_vec(iface.clone());
-            result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+            result.set(
+                ArrayKey::String(iface_str.clone()),
+                Value::String(iface_str),
+            );
         }
     }
 
@@ -626,7 +677,10 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let builtins = goro_core::vm::get_builtin_interfaces(&class_lower);
     for iface in builtins {
         let iface_str = PhpString::from_vec(iface.clone());
-        result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+        result.set(
+            ArrayKey::String(iface_str.clone()),
+            Value::String(iface_str),
+        );
     }
 
     // Check for implicit Stringable (class or any parent has __tostring)
@@ -646,17 +700,24 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             None
         };
         if let Some(parent_name) = parent {
-            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let parent_lower: Vec<u8> =
+                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if let Some(parent_class) = vm.classes.get(&parent_lower) {
                 for iface in &parent_class.interfaces {
                     let iface_str = PhpString::from_vec(iface.clone());
-                    result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+                    result.set(
+                        ArrayKey::String(iface_str.clone()),
+                        Value::String(iface_str),
+                    );
                 }
             }
             let parent_builtins = goro_core::vm::get_builtin_interfaces(&parent_lower);
             for iface in parent_builtins {
                 let iface_str = PhpString::from_vec(iface.clone());
-                result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
+                result.set(
+                    ArrayKey::String(iface_str.clone()),
+                    Value::String(iface_str),
+                );
             }
             current = parent_lower;
         } else {
@@ -685,7 +746,8 @@ fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             bp.map(|p| p.to_vec())
         };
         if let Some(parent_name) = parent {
-            let parent_lower: Vec<u8> = parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let parent_lower: Vec<u8> =
+                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             let display_name = if let Some(class) = vm.classes.get(&parent_lower) {
                 class.name.clone()
             } else {
@@ -714,7 +776,10 @@ fn class_uses_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(class) = vm.classes.get(&class_lower) {
         for trait_name in &class.traits {
             let trait_str = PhpString::from_vec(trait_name.clone());
-            result.set(ArrayKey::String(trait_str.clone()), Value::String(trait_str));
+            result.set(
+                ArrayKey::String(trait_str.clone()),
+                Value::String(trait_str),
+            );
         }
     }
 

@@ -259,7 +259,10 @@ impl PhpGenerator {
             let err_msg = "Cannot resume an already running generator";
             let exc = vm.create_exception(b"Error", err_msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: 0 });
+            return Err(VmError {
+                message: format!("Uncaught Error: {}", err_msg),
+                line: 0,
+            });
         }
 
         // Track call depth to prevent stack overflow from recursive yield-from
@@ -284,7 +287,9 @@ impl PhpGenerator {
         // Format closure names for stack traces using the canonical display name.
         let func_name = if !self.op_array.display_name.is_empty() {
             String::from_utf8_lossy(&self.op_array.display_name).to_string()
-        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
+            && !raw_name.starts_with("__closure_fcc_")
+        {
             let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
             format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
         } else {
@@ -323,8 +328,12 @@ impl PhpGenerator {
         vm.call_stack.pop();
 
         // Pop class context
-        if pushed_called { vm.called_class_stack.pop(); }
-        if pushed_scope { vm.pop_class_scope(); }
+        if pushed_called {
+            vm.called_class_stack.pop();
+        }
+        if pushed_scope {
+            vm.pop_class_scope();
+        }
 
         vm.leave_generator_resume();
 
@@ -339,7 +348,9 @@ impl PhpGenerator {
         if next.opcode != OpCode::Jmp {
             return;
         }
-        let OperandType::JmpTarget(target) = next.op1 else { return };
+        let OperandType::JmpTarget(target) = next.op1 else {
+            return;
+        };
         if target == 0 || !self.exception_handlers.iter().any(|h| h.1 == target) {
             return;
         }
@@ -381,7 +392,10 @@ impl PhpGenerator {
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
-                        return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", err_msg),
+                            line: op.line,
+                        });
                     }
                     // op1 = value to yield (or Unused for bare yield)
                     // op2 = key to yield (or Unused for auto-key)
@@ -501,8 +515,7 @@ impl PhpGenerator {
                                         self.state = GeneratorState::Completed;
                                         self.ip = ip;
                                         return Err(VmError {
-                                            message: "Uncaught exception in generator"
-                                                .to_string(),
+                                            message: "Uncaught exception in generator".to_string(),
                                             line: op.line,
                                         });
                                     }
@@ -562,11 +575,21 @@ impl PhpGenerator {
                                     let exc_before = vm.current_exception.is_some();
                                     let start_outcome = inner.resume(vm);
                                     vm.generator_caller = prev_caller;
-                                    if start_outcome.is_err() && !exc_before && vm.current_exception.is_some() {
+                                    if start_outcome.is_err()
+                                        && !exc_before
+                                        && vm.current_exception.is_some()
+                                    {
                                         // Inner threw while starting - propagate.
                                         drop(inner);
-                                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
-                                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                        if let Some((catch_target, finally_target, _)) =
+                                            self.exception_handlers.pop()
+                                        {
+                                            ip = if catch_target > 0 {
+                                                catch_target
+                                            } else {
+                                                finally_target
+                                            }
+                                                as usize;
                                             continue;
                                         }
                                         self.state = GeneratorState::Completed;
@@ -583,18 +606,37 @@ impl PhpGenerator {
                             }
                             Value::Object(obj) => {
                                 // Check if the object is iterable (Iterator or IteratorAggregate)
-                                let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let is_iterator = vm.class_implements_interface(&class_lower, b"iterator");
-                                let is_iterator_aggregate = !is_iterator && vm.class_implements_interface(&class_lower, b"iteratoraggregate");
-                                let is_traversable = !is_iterator && !is_iterator_aggregate && vm.class_implements_interface(&class_lower, b"traversable");
+                                let class_lower: Vec<u8> = obj
+                                    .borrow()
+                                    .class_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect();
+                                let is_iterator =
+                                    vm.class_implements_interface(&class_lower, b"iterator");
+                                let is_iterator_aggregate = !is_iterator
+                                    && vm.class_implements_interface(
+                                        &class_lower,
+                                        b"iteratoraggregate",
+                                    );
+                                let is_traversable = !is_iterator
+                                    && !is_iterator_aggregate
+                                    && vm.class_implements_interface(&class_lower, b"traversable");
 
                                 if is_iterator {
                                     // Iterator object - convert to array for simplicity
                                     let exc_before = vm.current_exception.is_some();
                                     let arr = vm.iterator_to_array(&iterable);
                                     if !exc_before && vm.current_exception.is_some() {
-                                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
-                                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                        if let Some((catch_target, finally_target, _)) =
+                                            self.exception_handlers.pop()
+                                        {
+                                            ip = if catch_target > 0 {
+                                                catch_target
+                                            } else {
+                                                finally_target
+                                            }
+                                                as usize;
                                             continue;
                                         }
                                         self.state = GeneratorState::Completed;
@@ -604,12 +646,15 @@ impl PhpGenerator {
                                             line: op.line,
                                         });
                                     }
-                                    self.yield_from_source = Some(Value::Array(Rc::new(RefCell::new(arr))));
+                                    self.yield_from_source =
+                                        Some(Value::Array(Rc::new(RefCell::new(arr))));
                                     self.yield_from_pos = 0;
                                     ip -= 1;
                                 } else if is_iterator_aggregate || is_traversable {
                                     // Call getIterator() to get the underlying iterator
-                                    if let Some(iter_val) = vm.call_object_method(&iterable, b"getIterator", &[]) {
+                                    if let Some(iter_val) =
+                                        vm.call_object_method(&iterable, b"getIterator", &[])
+                                    {
                                         match iter_val {
                                             Value::Generator(inner_gen) => {
                                                 let mut inner = inner_gen.borrow_mut();
@@ -617,13 +662,15 @@ impl PhpGenerator {
                                                     let _ = inner.resume(vm);
                                                 }
                                                 drop(inner);
-                                                self.yield_from_source = Some(Value::Generator(inner_gen));
+                                                self.yield_from_source =
+                                                    Some(Value::Generator(inner_gen));
                                                 ip -= 1;
                                             }
                                             _ => {
                                                 // Got an iterator object - convert to array for simplicity
                                                 let arr = vm.iterator_to_array(&iter_val);
-                                                self.yield_from_source = Some(Value::Array(Rc::new(RefCell::new(arr))));
+                                                self.yield_from_source =
+                                                    Some(Value::Array(Rc::new(RefCell::new(arr))));
                                                 self.yield_from_pos = 0;
                                                 ip -= 1;
                                             }
@@ -633,11 +680,18 @@ impl PhpGenerator {
                                     }
                                 } else {
                                     // Non-iterable object - create Error exception
-                                    let msg = "Can use \"yield from\" only with arrays and Traversables";
+                                    let msg =
+                                        "Can use \"yield from\" only with arrays and Traversables";
                                     let exc = vm.create_exception(b"Error", msg, op.line);
                                     vm.current_exception = Some(exc);
-                                    if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
-                                        ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                    if let Some((catch_target, finally_target, _)) =
+                                        self.exception_handlers.pop()
+                                    {
+                                        ip = if catch_target > 0 {
+                                            catch_target
+                                        } else {
+                                            finally_target
+                                        } as usize;
                                         continue;
                                     }
                                     self.state = GeneratorState::Completed;
@@ -651,11 +705,18 @@ impl PhpGenerator {
                             }
                             _ => {
                                 // Non-iterable - create Error exception
-                                let msg = "Can use \"yield from\" only with arrays and Traversables";
+                                let msg =
+                                    "Can use \"yield from\" only with arrays and Traversables";
                                 let exc = vm.create_exception(b"Error", msg, op.line);
                                 vm.current_exception = Some(exc);
-                                if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
-                                    ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                if let Some((catch_target, finally_target, _)) =
+                                    self.exception_handlers.pop()
+                                {
+                                    ip = if catch_target > 0 {
+                                        catch_target
+                                    } else {
+                                        finally_target
+                                    } as usize;
                                     continue;
                                 }
                                 self.state = GeneratorState::Completed;
@@ -729,8 +790,12 @@ impl PhpGenerator {
                     self.write_operand(&op.result, val);
                 }
 
-                OpCode::AssignRef if matches!((op.op1, op.op2), (OperandType::Cv(_), OperandType::Tmp(_))) => {
-                    if let (OperandType::Cv(target_idx), OperandType::Tmp(tmp_idx)) = (op.op1, op.op2) {
+                OpCode::AssignRef
+                    if matches!((op.op1, op.op2), (OperandType::Cv(_), OperandType::Tmp(_))) =>
+                {
+                    if let (OperandType::Cv(target_idx), OperandType::Tmp(tmp_idx)) =
+                        (op.op1, op.op2)
+                    {
                         let ti = tmp_idx as usize;
                         if ti < self.tmps.len() && (target_idx as usize) < self.cvs.len() {
                             let r = if let Value::Reference(r) = &self.tmps[ti] {
@@ -840,7 +905,11 @@ impl PhpGenerator {
                 OpCode::BoolXor => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
-                    let result = if a.is_truthy() ^ b.is_truthy() { Value::True } else { Value::False };
+                    let result = if a.is_truthy() ^ b.is_truthy() {
+                        Value::True
+                    } else {
+                        Value::False
+                    };
                     self.write_operand(&op.result, result);
                 }
                 OpCode::BitwiseNot => {
@@ -1119,7 +1188,9 @@ impl PhpGenerator {
                     let is_hook_call = matches!(&name_val, Value::String(s)
                         if s.as_bytes().windows(14).any(|w| w.eq_ignore_ascii_case(b"::__property_g") || w.eq_ignore_ascii_case(b"::__property_s")));
                     vm.generator_init_fcall(name_val);
-                    if is_hook_call && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                    if is_hook_call
+                        && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                    {
                         let this = self.read_operand(&OperandType::Cv(0), &op_array.literals);
                         if matches!(this, Value::Object(_)) {
                             vm.generator_send_val(this);
@@ -1169,8 +1240,14 @@ impl PhpGenerator {
                             }
                             // Check for exception handling in the generator
                             if vm.current_exception.is_some() {
-                                if let Some(&(catch_target, finally_target, _)) = self.exception_handlers.last() {
-                                    let ct = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                                if let Some(&(catch_target, finally_target, _)) =
+                                    self.exception_handlers.last()
+                                {
+                                    let ct = if catch_target > 0 {
+                                        catch_target
+                                    } else {
+                                        finally_target
+                                    } as usize;
                                     self.exception_handlers.pop();
                                     ip = ct;
                                     continue;
@@ -1462,15 +1539,28 @@ impl PhpGenerator {
 
                 OpCode::CatchException => {
                     // Graceful-exit unwinding (fiber destruction) skips catch clauses.
-                    if vm.current_exception.as_ref().is_some_and(crate::vm::Vm::is_graceful_exit) {
-                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
-                            ip = if catch_target > 0 { catch_target } else { finally_target } as usize;
+                    if vm
+                        .current_exception
+                        .as_ref()
+                        .is_some_and(crate::vm::Vm::is_graceful_exit)
+                    {
+                        if let Some((catch_target, finally_target, _)) =
+                            self.exception_handlers.pop()
+                        {
+                            ip = if catch_target > 0 {
+                                catch_target
+                            } else {
+                                finally_target
+                            } as usize;
                             continue;
                         }
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
-                        return Err(VmError { message: "Graceful exit".into(), line: op.line });
+                        return Err(VmError {
+                            message: "Graceful exit".into(),
+                            line: op.line,
+                        });
                     }
                     self.pending_return = None;
                     self.pending_finally_jump = None;
@@ -1509,8 +1599,15 @@ impl PhpGenerator {
                     }
                     if let Some(val) = self.pending_return.take() {
                         // Pop exception handlers for this finally block
-                        if this_finally_start > 0 && self.exception_handlers.iter().any(|h| h.1 == this_finally_start) {
-                            while let Some(&(_catch_target, finally_target, _)) = self.exception_handlers.last() {
+                        if this_finally_start > 0
+                            && self
+                                .exception_handlers
+                                .iter()
+                                .any(|h| h.1 == this_finally_start)
+                        {
+                            while let Some(&(_catch_target, finally_target, _)) =
+                                self.exception_handlers.last()
+                            {
                                 self.exception_handlers.pop();
                                 if finally_target == this_finally_start {
                                     break;
@@ -1519,7 +1616,9 @@ impl PhpGenerator {
                         }
                         // Look for an outer finally block to chain through
                         let mut outer_finally: Option<u32> = None;
-                        while let Some(&(_catch_target, finally_target, _)) = self.exception_handlers.last() {
+                        while let Some(&(_catch_target, finally_target, _)) =
+                            self.exception_handlers.last()
+                        {
                             if finally_target > 0 {
                                 outer_finally = Some(finally_target);
                                 self.exception_handlers.pop();
@@ -1548,7 +1647,9 @@ impl PhpGenerator {
                     }
                     // If there's a pending exception, re-throw it through outer handlers
                     if vm.current_exception.is_some() {
-                        if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
+                        if let Some((catch_target, finally_target, _)) =
+                            self.exception_handlers.pop()
+                        {
                             if catch_target > 0 {
                                 ip = catch_target as usize;
                                 continue;
@@ -1561,17 +1662,25 @@ impl PhpGenerator {
                         self.state = GeneratorState::Completed;
                         self.current_value = Value::Null;
                         self.ip = ip;
-                        #[allow(clippy::unnecessary_unwrap)] // checked just above; keeps the error path flat
+                        #[allow(clippy::unnecessary_unwrap)]
+                        // checked just above; keeps the error path flat
                         let exc = vm.current_exception.as_ref().unwrap();
                         let msg = if let Value::Object(obj) = exc {
                             let obj = obj.borrow();
                             let class = String::from_utf8_lossy(&obj.class_name).to_string();
                             let message = obj.get_property(b"message");
-                            format!("Uncaught {}: {}", class, message.to_php_string().to_string_lossy())
+                            format!(
+                                "Uncaught {}: {}",
+                                class,
+                                message.to_php_string().to_string_lossy()
+                            )
                         } else {
                             "Uncaught exception in generator".to_string()
                         };
-                        return Err(VmError { message: msg, line: op.line });
+                        return Err(VmError {
+                            message: msg,
+                            line: op.line,
+                        });
                     }
                     // Otherwise continue (no pending return, jump, or exception)
                 }
@@ -1580,9 +1689,18 @@ impl PhpGenerator {
                     let exc_val = self.read_operand(&op.op1, &op_array.literals);
                     let type_name = self.read_operand(&op.op2, &op_array.literals);
                     let type_str = type_name.to_php_string();
-                    let type_lower: Vec<u8> = type_str.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let type_lower: Vec<u8> = type_str
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     let matches = if let Value::Object(obj) = &exc_val {
-                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                         class_lower == type_lower
                             || crate::vm::is_builtin_subclass(&class_lower, &type_lower)
                             || vm.class_extends(&class_lower, &type_lower)
@@ -1590,12 +1708,17 @@ impl PhpGenerator {
                     } else {
                         false
                     };
-                    self.write_operand(&op.result, if matches { Value::True } else { Value::False });
+                    self.write_operand(
+                        &op.result,
+                        if matches { Value::True } else { Value::False },
+                    );
                 }
 
                 OpCode::PropertyGet => {
                     let obj_val = self.read_operand(&op.op1, &op_array.literals);
-                    let prop_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &op_array.literals)
+                        .to_php_string();
                     let result = if let Value::Object(obj) = &obj_val {
                         obj.borrow().get_property(prop_name.as_bytes())
                     } else {
@@ -1606,16 +1729,23 @@ impl PhpGenerator {
 
                 OpCode::PropertySet => {
                     let obj_val = self.read_operand(&op.op1, &op_array.literals);
-                    let prop_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    let prop_name = self
+                        .read_operand(&op.op2, &op_array.literals)
+                        .to_php_string();
                     let val = self.read_operand(&op.result, &op_array.literals);
                     if let Value::Object(obj) = &obj_val {
-                        obj.borrow_mut().set_property(prop_name.as_bytes().to_vec(), val);
+                        obj.borrow_mut()
+                            .set_property(prop_name.as_bytes().to_vec(), val);
                     } else if let Value::Generator(_) = &obj_val {
                         let prop_str = prop_name.to_string_lossy();
-                        let msg = format!("Cannot create dynamic property Generator::${}", prop_str);
+                        let msg =
+                            format!("Cannot create dynamic property Generator::${}", prop_str);
                         let exc = vm.create_exception(b"Error", &msg, op.line);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     }
                 }
 
@@ -1639,21 +1769,38 @@ impl PhpGenerator {
                             _ => Value::False,
                         }
                     } else if let Value::Object(obj) = &arr_val {
-                        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let is_spl_array = matches!(class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" |
-                            b"splfixedarray" | b"splobjectstorage");
-                        let has_user_offset = vm.classes.get(&class_lower)
+                        let class_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let is_spl_array = matches!(
+                            class_lower.as_slice(),
+                            b"arrayobject"
+                                | b"arrayiterator"
+                                | b"recursivearrayiterator"
+                                | b"splfixedarray"
+                                | b"splobjectstorage"
+                        );
+                        let has_user_offset = vm
+                            .classes
+                            .get(&class_lower)
                             .map(|c| c.get_method(b"offsetexists").is_some())
                             .unwrap_or(false);
                         if is_spl_array || has_user_offset {
                             let args = vec![arr_val.clone(), key_val.clone()];
-                            let exists_result = vm.handle_spl_docall(&class_lower, b"offsetexists", &args)
+                            let exists_result = vm
+                                .handle_spl_docall(&class_lower, b"offsetexists", &args)
                                 .unwrap_or_else(|| {
                                     vm.call_object_method(&arr_val, b"offsetexists", &[key_val])
                                         .unwrap_or(Value::False)
                                 });
-                            if exists_result.is_truthy() { Value::True } else { Value::False }
+                            if exists_result.is_truthy() {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
                         } else {
                             Value::False
                         }
@@ -1709,7 +1856,10 @@ impl PhpGenerator {
                         Value::Object(obj) => {
                             let obj_borrow = obj.borrow();
                             let clone_id = vm.next_object_id();
-                            let mut new_obj = crate::object::PhpObject::new(obj_borrow.class_name.clone(), clone_id);
+                            let mut new_obj = crate::object::PhpObject::new(
+                                obj_borrow.class_name.clone(),
+                                clone_id,
+                            );
                             for (name, value) in &obj_borrow.properties {
                                 new_obj.set_property(name.clone(), value.clone());
                             }
@@ -1729,7 +1879,9 @@ impl PhpGenerator {
                         None
                     };
                     let source = self.read_operand(&op.op2, &op_array.literals);
-                    if let (Some(Value::Array(target)), Value::Array(source_arr)) = (target_val, source) {
+                    if let (Some(Value::Array(target)), Value::Array(source_arr)) =
+                        (target_val, source)
+                    {
                         let source_borrow = source_arr.borrow();
                         let mut target_borrow = target.borrow_mut();
                         for (key, val) in source_borrow.iter() {
@@ -1738,7 +1890,10 @@ impl PhpGenerator {
                                     target_borrow.push(val.clone());
                                 }
                                 crate::array::ArrayKey::String(s) => {
-                                    target_borrow.set(crate::array::ArrayKey::String(s.clone()), val.clone());
+                                    target_borrow.set(
+                                        crate::array::ArrayKey::String(s.clone()),
+                                        val.clone(),
+                                    );
                                 }
                             }
                         }
@@ -1748,12 +1903,25 @@ impl PhpGenerator {
                 OpCode::InitMethodCall => {
                     // Set up method call from generator context
                     let obj_val = self.read_operand(&op.op1, &op_array.literals);
-                    let method_name = self.read_operand(&op.op2, &op_array.literals).to_php_string();
+                    let method_name = self
+                        .read_operand(&op.op2, &op_array.literals)
+                        .to_php_string();
                     if let Value::Object(obj) = &obj_val {
-                        let class_name_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_name_lower: Vec<u8> = obj
+                            .borrow()
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let method_lower: Vec<u8> = method_name
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                         // Check if method exists in user classes
-                        let has_method = vm.classes.get(&class_name_lower)
+                        let has_method = vm
+                            .classes
+                            .get(&class_name_lower)
                             .map(|c| c.get_method(&method_lower).is_some())
                             .unwrap_or(false);
                         // Handle built-in Throwable methods in generator context
@@ -1776,14 +1944,18 @@ impl PhpGenerator {
                             };
                             drop(obj_borrow);
                             if let Some(result) = builtin_result {
-                                vm.generator_init_fcall(Value::String(PhpString::from_bytes(b"__builtin_return")));
+                                vm.generator_init_fcall(Value::String(PhpString::from_bytes(
+                                    b"__builtin_return",
+                                )));
                                 vm.generator_send_val(result);
                             } else {
                                 // Fall through to general handling
                                 let mut func_name = class_name_lower.clone();
                                 func_name.extend_from_slice(b"::");
                                 func_name.extend_from_slice(&method_lower);
-                                vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
+                                vm.generator_init_fcall(Value::String(PhpString::from_vec(
+                                    func_name,
+                                )));
                                 vm.generator_send_val(obj_val.clone());
                             }
                         } else
@@ -1792,26 +1964,36 @@ impl PhpGenerator {
                             match method_lower.as_slice() {
                                 b"__construct" => {
                                     // Fiber constructor - set up as fiber::__construct
-                                    vm.generator_init_fcall(Value::String(PhpString::from_bytes(b"fiber::__construct")));
+                                    vm.generator_init_fcall(Value::String(PhpString::from_bytes(
+                                        b"fiber::__construct",
+                                    )));
                                     vm.generator_send_val(obj_val.clone());
                                 }
-                                b"isstarted" | b"isrunning" | b"issuspended" | b"isterminated" | b"getreturn" => {
+                                b"isstarted" | b"isrunning" | b"issuspended" | b"isterminated"
+                                | b"getreturn" => {
                                     let mut fiber_name = b"__fiber::".to_vec();
                                     fiber_name.extend_from_slice(&method_lower);
-                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(fiber_name)));
+                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(
+                                        fiber_name,
+                                    )));
                                     vm.generator_send_val(obj_val.clone());
                                 }
                                 b"start" | b"resume" | b"throw" => {
                                     let mut fiber_name = b"__fiber::".to_vec();
                                     fiber_name.extend_from_slice(&method_lower);
-                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(fiber_name)));
+                                    vm.generator_init_fcall(Value::String(PhpString::from_vec(
+                                        fiber_name,
+                                    )));
                                     vm.generator_send_val(obj_val.clone());
                                 }
                                 _ => {
                                     self.state = GeneratorState::Completed;
                                     self.ip = ip;
                                     return Err(VmError {
-                                        message: format!("Call to undefined method Fiber::{}()", method_name.to_string_lossy()),
+                                        message: format!(
+                                            "Call to undefined method Fiber::{}()",
+                                            method_name.to_string_lossy()
+                                        ),
                                         line: op.line,
                                     });
                                 }
@@ -1830,7 +2012,8 @@ impl PhpGenerator {
                             // the trace shows the right call frame instead of falling
                             // through to a generic "undefined function" diagnostic.
                             if class_name_lower == b"stdclass" && method_lower != b"__construct" {
-                                let class_orig = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
+                                let class_orig =
+                                    String::from_utf8_lossy(&obj.borrow().class_name).to_string();
                                 let msg = format!(
                                     "Call to undefined method {}::{}()",
                                     class_orig,
@@ -1866,13 +2049,24 @@ impl PhpGenerator {
                         }
                     } else if let Value::Generator(inner_gen_rc) = &obj_val {
                         // Calling a method on another generator from within this generator
-                        let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let method_lower: Vec<u8> = method_name
+                            .as_bytes()
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                         // Check if the inner generator is already running (to prevent
                         // "Cannot resume an already running generator" crash/panic).
                         // If try_borrow() fails, the RefCell is mutably borrowed = generator is running.
                         // If it succeeds, check the is_running flag for nested resume detection.
-                        let already_running = inner_gen_rc.try_borrow().map(|b| b.is_running).unwrap_or(true);
-                        if already_running && (method_lower == b"next" || method_lower == b"send" || method_lower == b"rewind") {
+                        let already_running = inner_gen_rc
+                            .try_borrow()
+                            .map(|b| b.is_running)
+                            .unwrap_or(true);
+                        if already_running
+                            && (method_lower == b"next"
+                                || method_lower == b"send"
+                                || method_lower == b"rewind")
+                        {
                             // Push a Generator->X frame so the exception's recorded
                             // backtrace includes the inner call site (matches PHP's
                             // output for "Cannot resume an already running generator"),
@@ -1944,8 +2138,14 @@ impl PhpGenerator {
                                     if inner.state == GeneratorState::Created {
                                         let _ = inner.resume(vm);
                                     }
-                                    if inner.state == GeneratorState::Completed { Value::False } else { Value::True }
-                                } else { Value::False }
+                                    if inner.state == GeneratorState::Completed {
+                                        Value::False
+                                    } else {
+                                        Value::True
+                                    }
+                                } else {
+                                    Value::False
+                                }
                             }
                             b"current" => {
                                 if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
@@ -1953,7 +2153,9 @@ impl PhpGenerator {
                                         let _ = inner.resume(vm);
                                     }
                                     inner.current_value.clone()
-                                } else { Value::Null }
+                                } else {
+                                    Value::Null
+                                }
                             }
                             b"key" => {
                                 if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
@@ -1961,7 +2163,9 @@ impl PhpGenerator {
                                         let _ = inner.resume(vm);
                                     }
                                     inner.current_key.clone()
-                                } else { Value::Null }
+                                } else {
+                                    Value::Null
+                                }
                             }
                             b"next" => {
                                 if let Ok(mut inner) = inner_gen_rc.try_borrow_mut() {
@@ -1978,7 +2182,9 @@ impl PhpGenerator {
                             b"send" => {
                                 // send() will be handled via __generator_send in DoFCall
                                 // Set up a pending call with the generator as first arg
-                                vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__generator_send")));
+                                vm.generator_init_fcall(Value::String(
+                                    crate::string::PhpString::from_bytes(b"__generator_send"),
+                                ));
                                 vm.generator_send_val(obj_val.clone());
                                 // The actual argument(s) will be added by subsequent SendVal opcodes
                                 // Don't push __builtin_return here; let DoFCall handle it
@@ -1989,13 +2195,19 @@ impl PhpGenerator {
                         if push_inner_frame {
                             vm.call_stack.pop();
                         }
-                        vm.generator_init_fcall(Value::String(crate::string::PhpString::from_bytes(b"__builtin_return")));
+                        vm.generator_init_fcall(Value::String(
+                            crate::string::PhpString::from_bytes(b"__builtin_return"),
+                        ));
                         vm.generator_send_val(result);
                     } else {
                         self.state = GeneratorState::Completed;
                         self.ip = ip;
                         return Err(VmError {
-                            message: format!("Call to a member function {}() on {}", method_name.to_string_lossy(), Vm::value_type_name(&obj_val)),
+                            message: format!(
+                                "Call to a member function {}() on {}",
+                                method_name.to_string_lossy(),
+                                Vm::value_type_name(&obj_val)
+                            ),
                             line: op.line,
                         });
                     }
@@ -2003,8 +2215,14 @@ impl PhpGenerator {
 
                 OpCode::NewObject => {
                     // Create new object from generator context
-                    let class_name = self.read_operand(&op.op1, &op_array.literals).to_php_string();
-                    let class_lower: Vec<u8> = class_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let class_name = self
+                        .read_operand(&op.op1, &op_array.literals)
+                        .to_php_string();
+                    let class_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     let canonical = vm.builtin_canonical_name(&class_lower);
                     let mut obj = crate::object::PhpObject::new(
                         if let Some(cls) = vm.classes.get(&class_lower) {
@@ -2024,7 +2242,10 @@ impl PhpGenerator {
                     if is_throwable {
                         obj.set_property(b"message".to_vec(), Value::String(PhpString::empty()));
                         obj.set_property(b"code".to_vec(), Value::Long(0));
-                        obj.set_property(b"file".to_vec(), Value::String(PhpString::from_string(vm.current_file.clone())));
+                        obj.set_property(
+                            b"file".to_vec(),
+                            Value::String(PhpString::from_string(vm.current_file.clone())),
+                        );
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                         // Capture the current stack trace (includes generator and caller frames)
                         let trace = vm.build_exception_trace();
@@ -2033,7 +2254,9 @@ impl PhpGenerator {
                     }
                     // Initialize properties from class definition
                     if let Some(class) = vm.classes.get(&class_lower) {
-                        let props: Vec<_> = class.properties.iter()
+                        let props: Vec<_> = class
+                            .properties
+                            .iter()
                             .filter(|p| !p.is_static)
                             .map(|p| (p.name.clone(), p.default.clone()))
                             .collect();
@@ -2194,7 +2417,9 @@ impl PhpGenerator {
         let raw_name = String::from_utf8_lossy(&self.op_array.name).to_string();
         let func_name = if !self.op_array.display_name.is_empty() {
             String::from_utf8_lossy(&self.op_array.display_name).to_string()
-        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_")) && !raw_name.starts_with("__closure_fcc_") {
+        } else if (raw_name.starts_with("__closure_") || raw_name.starts_with("__arrow_"))
+            && !raw_name.starts_with("__closure_fcc_")
+        {
             let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
             format!("{{closure:{}:{}}}", file, self.op_array.decl_line)
         } else {
@@ -2213,7 +2438,9 @@ impl PhpGenerator {
         ));
 
         // Try to find an exception handler in the generator
-        let had_handler = if let Some((catch_target, finally_target, _)) = self.exception_handlers.last().copied() {
+        let had_handler = if let Some((catch_target, finally_target, _)) =
+            self.exception_handlers.last().copied()
+        {
             self.exception_handlers.pop();
             if catch_target > 0 {
                 self.ip = catch_target as usize;
@@ -2233,8 +2460,12 @@ impl PhpGenerator {
             self.state = GeneratorState::Completed;
             self.current_value = Value::Null;
             vm.call_stack.pop();
-            if pushed_called { vm.called_class_stack.pop(); }
-            if pushed_scope { vm.pop_class_scope(); }
+            if pushed_called {
+                vm.called_class_stack.pop();
+            }
+            if pushed_scope {
+                vm.pop_class_scope();
+            }
             vm.leave_generator_resume();
             return Err(VmError {
                 message: "Uncaught exception in generator".to_string(),
@@ -2247,8 +2478,12 @@ impl PhpGenerator {
         self.is_running = false;
 
         vm.call_stack.pop();
-        if pushed_called { vm.called_class_stack.pop(); }
-        if pushed_scope { vm.pop_class_scope(); }
+        if pushed_called {
+            vm.called_class_stack.pop();
+        }
+        if pushed_scope {
+            vm.pop_class_scope();
+        }
 
         vm.leave_generator_resume();
 

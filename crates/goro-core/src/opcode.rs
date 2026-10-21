@@ -518,7 +518,9 @@ impl OpArray {
     pub fn patch_jump(&mut self, op_index: u32, target: u32) {
         let op = &mut self.ops[op_index as usize];
         match op.opcode {
-            OpCode::Jmp | OpCode::SaveJump | OpCode::JmpIfArgByRef => op.op1 = OperandType::JmpTarget(target),
+            OpCode::Jmp | OpCode::SaveJump | OpCode::JmpIfArgByRef => {
+                op.op1 = OperandType::JmpTarget(target)
+            }
             OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext | OpCode::ForeachNextRef => {
                 op.op2 = OperandType::JmpTarget(target);
             }

@@ -15,8 +15,7 @@ use std::rc::Rc;
 
 use rsa::pkcs1v15::{Signature as PkcsSig, SigningKey, VerifyingKey};
 use rsa::pss::{
-    BlindedSigningKey as PssBlindedSigningKey, Signature as PssSig,
-    VerifyingKey as PssVerifyingKey,
+    BlindedSigningKey as PssBlindedSigningKey, Signature as PssSig, VerifyingKey as PssVerifyingKey,
 };
 use rsa::signature::{RandomizedSigner, SignatureEncoding, Signer, Verifier};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
@@ -288,16 +287,18 @@ pub fn openssl_pkey_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             // Look for private_key_bits
-            if let Some(b) = arr.get(&ArrayKey::String(PhpString::from_bytes(b"private_key_bits"))) {
+            if let Some(b) = arr.get(&ArrayKey::String(PhpString::from_bytes(
+                b"private_key_bits",
+            ))) {
                 let b = b.to_long();
                 if b > 0 {
                     bits = b as usize;
                 }
             }
             // private_key_type defaults to RSA - we only support RSA so warn for others
-            if let Some(t) =
-                arr.get(&ArrayKey::String(PhpString::from_bytes(b"private_key_type")))
-            {
+            if let Some(t) = arr.get(&ArrayKey::String(PhpString::from_bytes(
+                b"private_key_type",
+            ))) {
                 let t = t.to_long();
                 if t != OPENSSL_KEYTYPE_RSA {
                     vm.emit_warning(&format!(
@@ -333,15 +334,11 @@ pub fn openssl_pkey_new(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Sanity: minimum bits. PHP does not emit a php-level warning here,
     // it only pushes an entry into the openssl error queue.
     if bits < 512 {
-        push_openssl_error(
-            "error:0200006C:rsa routines:rsa_builtin_keygen:key size too small",
-        );
+        push_openssl_error("error:0200006C:rsa routines:rsa_builtin_keygen:key size too small");
         return Ok(Value::False);
     }
     if bits > 16384 {
-        push_openssl_error(
-            "error:0200006D:rsa routines:rsa_builtin_keygen:key size too large",
-        );
+        push_openssl_error("error:0200006D:rsa routines:rsa_builtin_keygen:key size too large");
         return Ok(Value::False);
     }
 
@@ -371,9 +368,7 @@ pub fn openssl_pkey_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let priv_key = match resolve_private_key(&key_arg, pw) {
         Some(k) => k,
         None => {
-            vm.emit_warning(
-                "openssl_pkey_export(): Cannot get key from parameter 1",
-            );
+            vm.emit_warning("openssl_pkey_export(): Cannot get key from parameter 1");
             return Ok(Value::False);
         }
     };
@@ -410,7 +405,10 @@ pub fn openssl_pkey_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 /// openssl_pkey_export_to_file(key, filename, ?passphrase = null, ?config = null): bool
 pub fn openssl_pkey_export_to_file(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let key_arg = args.first().cloned().unwrap_or(Value::Null);
-    let filename = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let filename = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
     let passphrase = args.get(2).map(|v| {
         let v = match v {
             Value::Reference(r) => r.borrow().clone(),
@@ -587,9 +585,7 @@ pub fn openssl_pkey_get_details(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     );
 
     // key: PEM-encoded SubjectPublicKeyInfo (BEGIN PUBLIC KEY)
-    let pub_pem = pubkey
-        .to_public_key_pem(LineEnding::LF)
-        .unwrap_or_default();
+    let pub_pem = pubkey.to_public_key_pem(LineEnding::LF).unwrap_or_default();
     result.set(
         ArrayKey::String(PhpString::from_bytes(b"key")),
         Value::String(PhpString::from_string(pub_pem)),
@@ -707,8 +703,14 @@ pub fn openssl_pkey_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 pub fn openssl_sign(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let key_arg = args.get(2).cloned().unwrap_or(Value::Null);
-    let algo = args.get(3).map(|v| v.to_long()).unwrap_or(OPENSSL_ALGO_SHA1);
-    let padding = args.get(4).map(|v| v.to_long()).unwrap_or(OPENSSL_PKCS1_PADDING);
+    let algo = args
+        .get(3)
+        .map(|v| v.to_long())
+        .unwrap_or(OPENSSL_ALGO_SHA1);
+    let padding = args
+        .get(4)
+        .map(|v| v.to_long())
+        .unwrap_or(OPENSSL_PKCS1_PADDING);
 
     let priv_key = match resolve_private_key(&key_arg, None) {
         Some(k) => k,
@@ -790,8 +792,14 @@ pub fn openssl_verify(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
     let signature = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let key_arg = args.get(2).cloned().unwrap_or(Value::Null);
-    let algo = args.get(3).map(|v| v.to_long()).unwrap_or(OPENSSL_ALGO_SHA1);
-    let padding = args.get(4).map(|v| v.to_long()).unwrap_or(OPENSSL_PKCS1_PADDING);
+    let algo = args
+        .get(3)
+        .map(|v| v.to_long())
+        .unwrap_or(OPENSSL_ALGO_SHA1);
+    let padding = args
+        .get(4)
+        .map(|v| v.to_long())
+        .unwrap_or(OPENSSL_PKCS1_PADDING);
 
     let pub_key = match resolve_public_key(&key_arg, /* allow_private_data */ false) {
         Some(k) => k,

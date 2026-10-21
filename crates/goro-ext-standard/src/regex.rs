@@ -63,9 +63,7 @@ enum RegexNode {
         node: Box<RegexNode>,
     },
     /// Non-capturing group `(?:...)`
-    NonCapturingGroup {
-        node: Box<RegexNode>,
-    },
+    NonCapturingGroup { node: Box<RegexNode> },
     /// Lookahead `(?=...)` or `(?!...)`
     Lookahead {
         node: Box<RegexNode>,
@@ -90,19 +88,19 @@ enum CharRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnicodeClassKind {
     // Unicode property \p{...}
-    Letter,              // L
-    Mark,                // M
-    Number,              // N
-    NumberDecimal,       // Nd
-    Punctuation,         // P
-    Symbol,              // S
-    Separator,           // Z
-    Other,               // C
-    LowercaseLetter,     // Ll
-    UppercaseLetter,     // Lu
-    TitlecaseLetter,     // Lt
-    ModifierLetter,      // Lm
-    OtherLetter,         // Lo
+    Letter,          // L
+    Mark,            // M
+    Number,          // N
+    NumberDecimal,   // Nd
+    Punctuation,     // P
+    Symbol,          // S
+    Separator,       // Z
+    Other,           // C
+    LowercaseLetter, // Ll
+    UppercaseLetter, // Lu
+    TitlecaseLetter, // Lt
+    ModifierLetter,  // Lm
+    OtherLetter,     // Lo
     // Scripts
     ScriptCyrillic,
     ScriptGreek,
@@ -113,9 +111,9 @@ enum UnicodeClassKind {
     ScriptHiragana,
     ScriptKatakana,
     // Unicode-aware shorthand
-    UniWord,      // \w with unicode semantics
-    UniDigit,     // \d with unicode semantics
-    UniSpace,     // \s with unicode semantics
+    UniWord,  // \w with unicode semantics
+    UniDigit, // \d with unicode semantics
+    UniSpace, // \s with unicode semantics
     // POSIX classes (byte-level)
     PosixAlpha,
     PosixUpper,
@@ -361,11 +359,7 @@ impl<'a> RegexParser<'a> {
                 break;
             }
         }
-        if found {
-            Some(n)
-        } else {
-            None
-        }
+        if found { Some(n) } else { None }
     }
 
     fn parse_atom(&mut self) -> Result<RegexNode, String> {
@@ -537,8 +531,8 @@ impl<'a> RegexParser<'a> {
                 }
             }
             Some(b'A') if !in_class => Ok(RegexNode::StartAnchor), // \A = start of subject
-            Some(b'Z') if !in_class => Ok(RegexNode::EndAnchor),   // \Z = end of subject (or before final \n)
-            Some(b'z') if !in_class => Ok(RegexNode::EndAnchor),   // \z = absolute end of subject
+            Some(b'Z') if !in_class => Ok(RegexNode::EndAnchor), // \Z = end of subject (or before final \n)
+            Some(b'z') if !in_class => Ok(RegexNode::EndAnchor), // \z = absolute end of subject
             Some(b'K') if !in_class => Ok(RegexNode::ResetMatchStart),
             Some(b'p') => self.parse_unicode_prop(false),
             Some(b'P') if !in_class => self.parse_unicode_prop(true),
@@ -776,7 +770,9 @@ impl<'a> RegexParser<'a> {
                             // Validate name doesn't start with a digit
                             if let Some(first) = self.peek() {
                                 if first.is_ascii_digit() {
-                                    return Err("subpattern name must start with a non-digit".into());
+                                    return Err(
+                                        "subpattern name must start with a non-digit".into()
+                                    );
                                 }
                             }
                             let mut name = Vec::new();
@@ -961,7 +957,12 @@ impl<'a> RegexParser<'a> {
                 // paired classes (anti) with a marker. For now, use a dedicated encoding: push
                 // each anti class as a CharClass wrapped into a special literal range structure —
                 // easier approach: store anti_classes alongside classes and check on match.
-                return Ok(RegexNode::CharClass { ranges, classes, anti_classes, negated });
+                return Ok(RegexNode::CharClass {
+                    ranges,
+                    classes,
+                    anti_classes,
+                    negated,
+                });
             }
 
             if ch == b'[' && self.peek_ahead(1) == Some(b':') {
@@ -1059,7 +1060,7 @@ impl<'a> RegexParser<'a> {
                         if self.flags.utf8 {
                             anti_classes.push(UnicodeClassKind::UniWord);
                         } else {
-                            ranges.push(CharRange::Range(0, b'/' as u32));  // before 0
+                            ranges.push(CharRange::Range(0, b'/' as u32)); // before 0
                             ranges.push(CharRange::Range(b':' as u32, b'@' as u32));
                             ranges.push(CharRange::Range(b'[' as u32, b'^' as u32));
                             ranges.push(CharRange::Single(b'`' as u32));
@@ -1140,7 +1141,12 @@ impl<'a> RegexParser<'a> {
                     Some(b'p') => {
                         self.advance();
                         let node = self.parse_unicode_prop(false)?;
-                        if let RegexNode::CharClass { classes: mut sub, negated: n, .. } = node {
+                        if let RegexNode::CharClass {
+                            classes: mut sub,
+                            negated: n,
+                            ..
+                        } = node
+                        {
                             if n {
                                 anti_classes.append(&mut sub);
                             } else {
@@ -1151,7 +1157,12 @@ impl<'a> RegexParser<'a> {
                     Some(b'P') => {
                         self.advance();
                         let node = self.parse_unicode_prop(true)?;
-                        if let RegexNode::CharClass { classes: mut sub, negated: n, .. } = node {
+                        if let RegexNode::CharClass {
+                            classes: mut sub,
+                            negated: n,
+                            ..
+                        } = node
+                        {
                             if n {
                                 anti_classes.append(&mut sub);
                             } else {
@@ -1187,17 +1198,25 @@ impl<'a> RegexParser<'a> {
                                         if c.is_ascii_hexdigit() {
                                             self.advance();
                                             val = val.saturating_mul(16) + hex_val(c) as u32;
-                                        } else { break; }
+                                        } else {
+                                            break;
+                                        }
                                     }
-                                    if self.peek() == Some(b'}') { self.advance(); }
+                                    if self.peek() == Some(b'}') {
+                                        self.advance();
+                                    }
                                 } else {
                                     for _ in 0..2 {
                                         if let Some(c) = self.peek() {
                                             if c.is_ascii_hexdigit() {
                                                 self.advance();
                                                 val = val * 16 + hex_val(c) as u32;
-                                            } else { break; }
-                                        } else { break; }
+                                            } else {
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
                                     }
                                 }
                                 val
@@ -1232,7 +1251,10 @@ impl<'a> RegexParser<'a> {
             }
         }
 
-        Err(format!("missing terminating ] for character class at offset {}", self.pos))
+        Err(format!(
+            "missing terminating ] for character class at offset {}",
+            self.pos
+        ))
     }
 
     fn peek_ahead(&self, n: usize) -> Option<u8> {
@@ -1368,7 +1390,10 @@ impl<'a> MatchState<'a> {
                 } else if self.flags.multiline && pos < self.input.len() && self.input[pos] == b'\n'
                 {
                     Some(pos)
-                } else if !self.flags.dollar_end_only && pos == self.input.len() - 1 && self.input[pos] == b'\n' {
+                } else if !self.flags.dollar_end_only
+                    && pos == self.input.len() - 1
+                    && self.input[pos] == b'\n'
+                {
                     // $ matches before trailing newline (unless /D modifier)
                     Some(pos)
                 } else {
@@ -1399,14 +1424,25 @@ impl<'a> MatchState<'a> {
                 }
             }
 
-            RegexNode::CharClass { ranges, classes, anti_classes, negated } => {
+            RegexNode::CharClass {
+                ranges,
+                classes,
+                anti_classes,
+                negated,
+            } => {
                 if pos < self.input.len() {
                     let (cp, len) = if self.flags.utf8 {
                         decode_utf8_at(self.input, pos)
                     } else {
                         (self.input[pos] as u32, 1)
                     };
-                    let matches = char_matches_class(cp, ranges, classes, anti_classes, self.flags.case_insensitive);
+                    let matches = char_matches_class(
+                        cp,
+                        ranges,
+                        classes,
+                        anti_classes,
+                        self.flags.case_insensitive,
+                    );
                     if matches != *negated {
                         Some(pos + len.max(1))
                     } else {
@@ -1489,11 +1525,7 @@ impl<'a> MatchState<'a> {
                         return None;
                     }
                 }
-                if found == *positive {
-                    Some(pos)
-                } else {
-                    None
-                }
+                if found == *positive { Some(pos) } else { None }
             }
 
             RegexNode::Backreference(group_num) => {
@@ -1510,11 +1542,7 @@ impl<'a> MatchState<'a> {
                         } else {
                             slice == captured
                         };
-                        if matches {
-                            Some(pos + len)
-                        } else {
-                            None
-                        }
+                        if matches { Some(pos + len) } else { None }
                     } else {
                         None
                     }
@@ -1741,13 +1769,15 @@ fn check_class(cp: u32, kind: UnicodeClassKind) -> bool {
                     || (cp >= b'0' as u32 && cp <= b'9' as u32)
                     || cp == b'_' as u32
             } else {
-                (cp >= b'a' as u32 && cp <= b'z' as u32)
-                    || (cp >= b'A' as u32 && cp <= b'Z' as u32)
+                (cp >= b'a' as u32 && cp <= b'z' as u32) || (cp >= b'A' as u32 && cp <= b'Z' as u32)
             }
         }
         UniWord => {
             // word char: letter, digit, mark, or connector punctuation (roughly _)
-            is_unicode_letter(cp) || is_unicode_mark(cp) || is_unicode_decimal_digit(cp) || cp == b'_' as u32
+            is_unicode_letter(cp)
+                || is_unicode_mark(cp)
+                || is_unicode_decimal_digit(cp)
+                || cp == b'_' as u32
         }
         UniDigit => is_unicode_decimal_digit(cp),
         UniSpace => is_unicode_space(cp),
@@ -1763,7 +1793,11 @@ fn check_class(cp: u32, kind: UnicodeClassKind) -> bool {
         UppercaseLetter => is_unicode_uppercase_letter(cp),
         TitlecaseLetter => false, // rare, skip
         ModifierLetter => false,
-        OtherLetter => is_unicode_letter(cp) && !is_unicode_lowercase_letter(cp) && !is_unicode_uppercase_letter(cp),
+        OtherLetter => {
+            is_unicode_letter(cp)
+                && !is_unicode_lowercase_letter(cp)
+                && !is_unicode_uppercase_letter(cp)
+        }
         ScriptCyrillic => is_cyrillic(cp),
         ScriptGreek => is_greek(cp),
         ScriptLatin => is_latin(cp),
@@ -1776,12 +1810,20 @@ fn check_class(cp: u32, kind: UnicodeClassKind) -> bool {
         PosixUpper => cp >= b'A' as u32 && cp <= b'Z' as u32,
         PosixLower => cp >= b'a' as u32 && cp <= b'z' as u32,
         PosixDigit => cp >= b'0' as u32 && cp <= b'9' as u32,
-        PosixXDigit => (cp >= b'0' as u32 && cp <= b'9' as u32)
-            || (cp >= b'a' as u32 && cp <= b'f' as u32)
-            || (cp >= b'A' as u32 && cp <= b'F' as u32),
+        PosixXDigit => {
+            (cp >= b'0' as u32 && cp <= b'9' as u32)
+                || (cp >= b'a' as u32 && cp <= b'f' as u32)
+                || (cp >= b'A' as u32 && cp <= b'F' as u32)
+        }
         PosixAlnum => cp < 0x80 && (cp as u8).is_ascii_alphanumeric(),
-        PosixSpace => cp == b' ' as u32 || cp == b'\t' as u32 || cp == b'\n' as u32
-            || cp == b'\r' as u32 || cp == 0x0B || cp == 0x0C,
+        PosixSpace => {
+            cp == b' ' as u32
+                || cp == b'\t' as u32
+                || cp == b'\n' as u32
+                || cp == b'\r' as u32
+                || cp == 0x0B
+                || cp == 0x0C
+        }
         PosixBlank => cp == b' ' as u32 || cp == b'\t' as u32,
         PosixCntrl => cp < 0x20 || cp == 0x7F,
         PosixGraph => (0x21..=0x7E).contains(&cp),
@@ -1802,8 +1844,15 @@ fn is_unicode_letter(cp: u32) -> bool {
         // Latin Extended-A/B, IPA Extensions
         0x100..=0x2AF => true,
         // Greek
-        0x370..=0x373 | 0x376..=0x377 | 0x37A..=0x37D | 0x37F
-            | 0x386 | 0x388..=0x38A | 0x38C | 0x38E..=0x3A1 | 0x3A3..=0x3FF => true,
+        0x370..=0x373
+        | 0x376..=0x377
+        | 0x37A..=0x37D
+        | 0x37F
+        | 0x386
+        | 0x388..=0x38A
+        | 0x38C
+        | 0x38E..=0x3A1
+        | 0x3A3..=0x3FF => true,
         // Cyrillic
         0x400..=0x481 | 0x48A..=0x4FF | 0x500..=0x52F => true,
         // Armenian
@@ -1811,8 +1860,14 @@ fn is_unicode_letter(cp: u32) -> bool {
         // Hebrew letters
         0x5D0..=0x5EA | 0x5EF..=0x5F2 => true,
         // Arabic letters
-        0x620..=0x64A | 0x66E..=0x66F | 0x671..=0x6D3 | 0x6D5 | 0x6E5..=0x6E6
-            | 0x6EE..=0x6EF | 0x6FA..=0x6FC | 0x6FF => true,
+        0x620..=0x64A
+        | 0x66E..=0x66F
+        | 0x671..=0x6D3
+        | 0x6D5
+        | 0x6E5..=0x6E6
+        | 0x6EE..=0x6EF
+        | 0x6FA..=0x6FC
+        | 0x6FF => true,
         // Devanagari
         0x904..=0x939 => true,
         // Thai
@@ -1838,12 +1893,21 @@ fn is_unicode_letter(cp: u32) -> bool {
 fn is_unicode_mark(cp: u32) -> bool {
     match cp {
         // Combining diacriticals
-        0x300..=0x36F | 0x483..=0x487 | 0x591..=0x5BD | 0x5BF | 0x5C1..=0x5C2
-            | 0x5C4..=0x5C5 | 0x5C7
-            | 0x610..=0x61A | 0x64B..=0x65F | 0x670 | 0x6D6..=0x6DC
-            | 0x6DF..=0x6E4 | 0x6E7..=0x6E8 | 0x6EA..=0x6ED => true,
-        0x900..=0x903 | 0x93A..=0x93C | 0x93E..=0x94F | 0x951..=0x957
-            | 0x962..=0x963 => true,
+        0x300..=0x36F
+        | 0x483..=0x487
+        | 0x591..=0x5BD
+        | 0x5BF
+        | 0x5C1..=0x5C2
+        | 0x5C4..=0x5C5
+        | 0x5C7
+        | 0x610..=0x61A
+        | 0x64B..=0x65F
+        | 0x670
+        | 0x6D6..=0x6DC
+        | 0x6DF..=0x6E4
+        | 0x6E7..=0x6E8
+        | 0x6EA..=0x6ED => true,
+        0x900..=0x903 | 0x93A..=0x93C | 0x93E..=0x94F | 0x951..=0x957 | 0x962..=0x963 => true,
         0xDCA..=0xDDF | 0xDF2..=0xDF3 => true,
         0x20D0..=0x20FF => true,
         _ => false,
@@ -1851,28 +1915,27 @@ fn is_unicode_mark(cp: u32) -> bool {
 }
 
 fn is_unicode_number(cp: u32) -> bool {
-    is_unicode_decimal_digit(cp)
-        || matches!(cp, 0xB2..=0xB3 | 0xB9 | 0xBC..=0xBE | 0x2070..=0x2189)
+    is_unicode_decimal_digit(cp) || matches!(cp, 0xB2..=0xB3 | 0xB9 | 0xBC..=0xBE | 0x2070..=0x2189)
 }
 
 fn is_unicode_decimal_digit(cp: u32) -> bool {
     match cp {
-        0x30..=0x39 => true, // ASCII digits
-        0x660..=0x669 => true, // Arabic-Indic
-        0x6F0..=0x6F9 => true, // Extended Arabic-Indic
-        0x7C0..=0x7C9 => true, // NKo
-        0x966..=0x96F => true, // Devanagari
-        0x9E6..=0x9EF => true, // Bengali
-        0xA66..=0xA6F => true, // Gurmukhi
-        0xAE6..=0xAEF => true, // Gujarati
-        0xB66..=0xB6F => true, // Oriya
-        0xBE6..=0xBEF => true, // Tamil
-        0xC66..=0xC6F => true, // Telugu
-        0xCE6..=0xCEF => true, // Kannada
-        0xD66..=0xD6F => true, // Malayalam
-        0xE50..=0xE59 => true, // Thai
-        0xED0..=0xED9 => true, // Lao
-        0xF20..=0xF29 => true, // Tibetan
+        0x30..=0x39 => true,     // ASCII digits
+        0x660..=0x669 => true,   // Arabic-Indic
+        0x6F0..=0x6F9 => true,   // Extended Arabic-Indic
+        0x7C0..=0x7C9 => true,   // NKo
+        0x966..=0x96F => true,   // Devanagari
+        0x9E6..=0x9EF => true,   // Bengali
+        0xA66..=0xA6F => true,   // Gurmukhi
+        0xAE6..=0xAEF => true,   // Gujarati
+        0xB66..=0xB6F => true,   // Oriya
+        0xBE6..=0xBEF => true,   // Tamil
+        0xC66..=0xC6F => true,   // Telugu
+        0xCE6..=0xCEF => true,   // Kannada
+        0xD66..=0xD6F => true,   // Malayalam
+        0xE50..=0xE59 => true,   // Thai
+        0xED0..=0xED9 => true,   // Lao
+        0xF20..=0xF29 => true,   // Tibetan
         0xFF10..=0xFF19 => true, // Fullwidth
         _ => false,
     }
@@ -2007,7 +2070,10 @@ fn utf8_cp_start_before(input: &[u8], pos: usize) -> usize {
 
 fn is_cp_word_char(cp: u32, utf8: bool) -> bool {
     if utf8 {
-        is_unicode_letter(cp) || is_unicode_decimal_digit(cp) || is_unicode_mark(cp) || cp == b'_' as u32
+        is_unicode_letter(cp)
+            || is_unicode_decimal_digit(cp)
+            || is_unicode_mark(cp)
+            || cp == b'_' as u32
     } else {
         (cp as u8).is_ascii_alphanumeric() || cp == b'_' as u32
     }
@@ -2233,9 +2299,7 @@ fn match_sequence_backtrack(
                         if *index < sub_state.captures.len() {
                             sub_state.captures[*index] = Some((pos, try_pos));
                         }
-                        if let Some(end) =
-                            match_sequence_backtrack(rest, &mut sub_state, try_pos)
-                        {
+                        if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, try_pos) {
                             state.captures = sub_state.captures;
                             state.step_count = sub_state.step_count;
                             return Some(end);
@@ -2264,8 +2328,7 @@ fn match_sequence_backtrack(
                         if *index < sub_state.captures.len() {
                             sub_state.captures[*index] = Some((pos, group_end));
                         }
-                        if let Some(end) =
-                            match_sequence_backtrack(rest, &mut sub_state, group_end)
+                        if let Some(end) = match_sequence_backtrack(rest, &mut sub_state, group_end)
                         {
                             state.captures = sub_state.captures;
                             state.step_count = sub_state.step_count;
@@ -2385,7 +2448,13 @@ pub struct CompiledRegex {
 /// Format a PCRE error message following PHP conventions.
 /// Delimiter/modifier errors are reported directly, other errors use "Compilation failed:" prefix.
 fn format_preg_error(func_name: &str, error: &str) -> String {
-    if error.starts_with("Delimiter must") || error.starts_with("No ending delimiter") || error.starts_with("No ending matching delimiter") || error.starts_with("Unknown modifier") || error.starts_with("Empty regular expression") || error.starts_with("NUL byte is not") {
+    if error.starts_with("Delimiter must")
+        || error.starts_with("No ending delimiter")
+        || error.starts_with("No ending matching delimiter")
+        || error.starts_with("Unknown modifier")
+        || error.starts_with("Empty regular expression")
+        || error.starts_with("NUL byte is not")
+    {
         format!("{}: {}", func_name, error)
     } else if error.contains(" at offset ") {
         format!("{}: Compilation failed: {}", func_name, error)
@@ -2437,7 +2506,10 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
 
     let end_pos = end_pos.ok_or_else(|| {
         if closing_delimiter != delimiter {
-            format!("No ending matching delimiter '{}' found", char::from(closing_delimiter))
+            format!(
+                "No ending matching delimiter '{}' found",
+                char::from(closing_delimiter)
+            )
         } else {
             format!("No ending delimiter '{}' found", char::from(delimiter))
         }
@@ -2464,7 +2536,7 @@ pub fn parse_php_regex(pattern: &[u8]) -> Result<CompiledRegex, String> {
             b'X' => {} // Extra — ignore
             b'J' => {} // Allow duplicate names — ignore
             b'n' => flags.no_auto_capture = true,
-            b'r' => {} // Caseless restrict — ignore
+            b'r' => {}                 // Caseless restrict — ignore
             b'\r' | b'\n' | b' ' => {} // trailing whitespace
             _ => {
                 return Err(format!("Unknown modifier '{}'", char::from(flag_byte)));
@@ -2627,17 +2699,29 @@ impl CompiledRegex {
 fn ensure_string_pattern(vm: &mut Vm, val: &Value, func: &str) -> Result<PhpString, VmError> {
     match val {
         Value::Array(_) => {
-            let msg = format!("{}(): Argument #1 ($pattern) must be of type string, array given", func);
+            let msg = format!(
+                "{}(): Argument #1 ($pattern) must be of type string, array given",
+                func
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 })
+            Err(VmError {
+                message: "Uncaught TypeError".to_string(),
+                line: 0,
+            })
         }
         Value::Object(obj) => {
             let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            let msg = format!("{}(): Argument #1 ($pattern) must be of type string, {} given", func, class_name);
+            let msg = format!(
+                "{}(): Argument #1 ($pattern) must be of type string, {} given",
+                func, class_name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 })
+            Err(VmError {
+                message: "Uncaught TypeError".to_string(),
+                line: 0,
+            })
         }
         _ => Ok(val.to_php_string()),
     }
@@ -2689,7 +2773,10 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if o == i64::MIN {
                     let exc = vm.create_exception(b"ValueError", &format!("preg_match(): Argument #5 ($offset) must be greater than or equal to {}", -(subject.len() as i64)), 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                    return Err(VmError {
+                        message: "Uncaught ValueError".to_string(),
+                        line: 0,
+                    });
                 }
                 0
             } else {
@@ -2743,7 +2830,10 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Validate UTF-8 from `offset` onwards when /u modifier is used. PCRE only
     // checks the portion being matched, so a bad byte before `offset` is fine.
-    if compiled.flags.utf8 && offset <= input.len() && std::str::from_utf8(&input[offset..]).is_err() {
+    if compiled.flags.utf8
+        && offset <= input.len()
+        && std::str::from_utf8(&input[offset..]).is_err()
+    {
         vm.preg_last_error = 4; // PREG_BAD_UTF8_ERROR
         if let Some(matches_ref) = args.get(2) {
             if let Value::Reference(r) = matches_ref {
@@ -2762,7 +2852,8 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Pre-compute, for each name, the preferred group index:
             // - if any duplicate-named group matched, use the lowest matched index
             // - otherwise, the first occurrence
-            let mut preferred: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+            let mut preferred: std::collections::HashMap<Vec<u8>, usize> =
+                std::collections::HashMap::new();
             for (idx, name) in &compiled.group_names {
                 if !preferred.contains_key(name) {
                     preferred.insert(name.clone(), *idx);
@@ -2787,7 +2878,9 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 last_matched
             };
             for (i, capture) in m.groups.iter().enumerate() {
-                if i >= effective_len { break; }
+                if i >= effective_len {
+                    break;
+                }
                 let val = if let Some((start, end)) = capture {
                     let matched_text = &input[*start..*end];
                     if offset_capture {
@@ -2800,7 +2893,11 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 } else if offset_capture {
                     let mut pair = PhpArray::new();
-                    pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                    pair.push(if unmatched_as_null {
+                        Value::Null
+                    } else {
+                        Value::String(PhpString::empty())
+                    });
                     pair.push(Value::Long(-1));
                     Value::Array(Rc::new(RefCell::new(pair)))
                 } else if unmatched_as_null {
@@ -2812,7 +2909,10 @@ pub fn preg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // if this index is the preferred one for its name.
                 if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == i) {
                     if preferred.get(name).copied() == Some(i) {
-                        arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                        arr.set(
+                            ArrayKey::String(PhpString::from_vec(name.clone())),
+                            val.clone(),
+                        );
                     }
                 }
                 arr.set(ArrayKey::Int(i as i64), val);
@@ -2870,9 +2970,16 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PREG_PATTERN_ORDER=1, PREG_SET_ORDER=2, PREG_OFFSET_CAPTURE=256, PREG_UNMATCHED_AS_NULL=512
     const VALID_PMA_FLAGS: i64 = 1 | 2 | 256 | 512;
     if flags & !VALID_PMA_FLAGS != 0 {
-        let exc = vm.create_exception(b"ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", 0);
+        let exc = vm.create_exception(
+            b"ValueError",
+            "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant",
+            0,
+        );
         vm.current_exception = Some(exc);
-        return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+        return Err(VmError {
+            message: "Uncaught ValueError".to_string(),
+            line: 0,
+        });
     }
     let set_order = (flags & 2) != 0; // PREG_SET_ORDER
     let offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
@@ -2886,7 +2993,10 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if o == i64::MIN {
                     let exc = vm.create_exception(b"ValueError", &format!("preg_match_all(): Argument #5 ($offset) must be greater than or equal to {}", -(subject.len() as i64)), 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                    return Err(VmError {
+                        message: "Uncaught ValueError".to_string(),
+                        line: 0,
+                    });
                 }
                 0
             } else {
@@ -2979,7 +3089,11 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     } else if offset_capture {
                         let mut pair = PhpArray::new();
-                        pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                        pair.push(if unmatched_as_null {
+                            Value::Null
+                        } else {
+                            Value::String(PhpString::empty())
+                        });
                         pair.push(Value::Long(-1));
                         Value::Array(Rc::new(RefCell::new(pair)))
                     } else if unmatched_as_null {
@@ -2988,8 +3102,15 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         Value::String(PhpString::empty())
                     };
                     // Add named group entry before numeric
-                    if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == group_idx) {
-                        match_arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    if let Some((_, name)) = compiled
+                        .group_names
+                        .iter()
+                        .find(|(idx, _)| *idx == group_idx)
+                    {
+                        match_arr.set(
+                            ArrayKey::String(PhpString::from_vec(name.clone())),
+                            val.clone(),
+                        );
                     }
                     match_arr.set(ArrayKey::Int(group_idx as i64), val);
                 }
@@ -3009,11 +3130,16 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             pair.push(Value::Long(*start as i64));
                             group_arr.push(Value::Array(Rc::new(RefCell::new(pair))));
                         } else {
-                            group_arr.push(Value::String(PhpString::from_bytes(&input[*start..*end])));
+                            group_arr
+                                .push(Value::String(PhpString::from_bytes(&input[*start..*end])));
                         }
                     } else if offset_capture {
                         let mut pair = PhpArray::new();
-                        pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                        pair.push(if unmatched_as_null {
+                            Value::Null
+                        } else {
+                            Value::String(PhpString::empty())
+                        });
                         pair.push(Value::Long(-1));
                         group_arr.push(Value::Array(Rc::new(RefCell::new(pair))));
                     } else if unmatched_as_null {
@@ -3024,8 +3150,15 @@ pub fn preg_match_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 // Add named group entry before numeric
                 let val = Value::Array(Rc::new(RefCell::new(group_arr.clone())));
-                if let Some((_, name)) = compiled.group_names.iter().find(|(idx, _)| *idx == group_idx) {
-                    pattern_arr.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                if let Some((_, name)) = compiled
+                    .group_names
+                    .iter()
+                    .find(|(idx, _)| *idx == group_idx)
+                {
+                    pattern_arr.set(
+                        ArrayKey::String(PhpString::from_vec(name.clone())),
+                        val.clone(),
+                    );
                 }
                 pattern_arr.set(ArrayKey::Int(group_idx as i64), val);
             }
@@ -3049,10 +3182,16 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => {
             if let Value::Object(obj) = v {
                 let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                let msg = format!("preg_replace(): Argument #1 ($pattern) must be of type array|string, {} given", class_name);
+                let msg = format!(
+                    "preg_replace(): Argument #1 ($pattern) must be of type array|string, {} given",
+                    class_name
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+                return Err(VmError {
+                    message: "Uncaught TypeError".to_string(),
+                    line: 0,
+                });
             }
             v.clone()
         }
@@ -3062,17 +3201,26 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => {
             if let Value::Object(obj) = v {
                 let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                let msg = format!("preg_replace(): Argument #2 ($replacement) must be of type array|string, {} given", class_name);
+                let msg = format!(
+                    "preg_replace(): Argument #2 ($replacement) must be of type array|string, {} given",
+                    class_name
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+                return Err(VmError {
+                    message: "Uncaught TypeError".to_string(),
+                    line: 0,
+                });
             }
             // If replacement is array but pattern is not, TypeError
             if matches!(v, Value::Array(_)) && !matches!(&pattern_val, Value::Array(_)) {
                 let msg = "preg_replace(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given".to_string();
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+                return Err(VmError {
+                    message: "Uncaught TypeError".to_string(),
+                    line: 0,
+                });
             }
             v.clone()
         }
@@ -3082,16 +3230,17 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.clone(),
         None => return Ok(Value::Null),
     };
-    let limit = args
-        .get(3)
-        .map(|v| v.to_long())
-        .unwrap_or(-1);
+    let limit = args.get(3).map(|v| v.to_long()).unwrap_or(-1);
 
     let mut total_count = 0i64;
 
     // Handle array pattern + array replacement
     if let Value::Array(patterns_arr) = &pattern_val {
-        let patterns: Vec<Value> = patterns_arr.borrow().iter().map(|(_, v)| v.clone()).collect();
+        let patterns: Vec<Value> = patterns_arr
+            .borrow()
+            .iter()
+            .map(|(_, v)| v.clone())
+            .collect();
         let replacements: Vec<Value> = if let Value::Array(repl_arr) = &replacement_val {
             repl_arr.borrow().iter().map(|(_, v)| v.clone()).collect()
         } else {
@@ -3107,13 +3256,25 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let mut current = subject_str.as_bytes().to_vec();
                 let mut had_error = false;
                 for (i, pat) in patterns.iter().enumerate() {
-                    let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                    match do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit) {
+                    let repl = replacements
+                        .get(i)
+                        .unwrap_or(&Value::String(PhpString::empty()))
+                        .to_php_string();
+                    match do_preg_replace(
+                        vm,
+                        pat.to_php_string().as_bytes(),
+                        repl.as_bytes(),
+                        &current,
+                        limit,
+                    ) {
                         Some((replaced, cnt)) => {
                             current = replaced;
                             total_count += cnt;
                         }
-                        None => { had_error = true; break; }
+                        None => {
+                            had_error = true;
+                            break;
+                        }
                     }
                 }
                 if had_error {
@@ -3133,8 +3294,17 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let subject_str = subject_val.to_php_string();
             let mut current = subject_str.as_bytes().to_vec();
             for (i, pat) in patterns.iter().enumerate() {
-                let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-                match do_preg_replace(vm, pat.to_php_string().as_bytes(), repl.as_bytes(), &current, limit) {
+                let repl = replacements
+                    .get(i)
+                    .unwrap_or(&Value::String(PhpString::empty()))
+                    .to_php_string();
+                match do_preg_replace(
+                    vm,
+                    pat.to_php_string().as_bytes(),
+                    repl.as_bytes(),
+                    &current,
+                    limit,
+                ) {
                     Some((replaced, cnt)) => {
                         current = replaced;
                         total_count += cnt;
@@ -3203,7 +3373,13 @@ pub fn preg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(replaced)))
 }
 
-fn do_preg_replace(vm: &mut Vm, pattern: &[u8], replacement: &[u8], subject: &[u8], limit: i64) -> Option<(Vec<u8>, i64)> {
+fn do_preg_replace(
+    vm: &mut Vm,
+    pattern: &[u8],
+    replacement: &[u8],
+    subject: &[u8],
+    limit: i64,
+) -> Option<(Vec<u8>, i64)> {
     let compiled = match parse_php_regex(pattern) {
         Ok(c) => c,
         Err(_e) => {
@@ -3370,16 +3546,17 @@ pub fn preg_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let effective_limit = if limit <= 0 { i64::MAX } else { limit };
 
     // Helper to push a value, optionally with offset capture
-    let push_value = |result: &mut PhpArray, text: &[u8], text_offset: usize, offset_capture: bool| {
-        if offset_capture {
-            let mut pair = PhpArray::new();
-            pair.push(Value::String(PhpString::from_bytes(text)));
-            pair.push(Value::Long(text_offset as i64));
-            result.push(Value::Array(Rc::new(RefCell::new(pair))));
-        } else {
-            result.push(Value::String(PhpString::from_bytes(text)));
-        }
-    };
+    let push_value =
+        |result: &mut PhpArray, text: &[u8], text_offset: usize, offset_capture: bool| {
+            if offset_capture {
+                let mut pair = PhpArray::new();
+                pair.push(Value::String(PhpString::from_bytes(text)));
+                pair.push(Value::Long(text_offset as i64));
+                result.push(Value::Array(Rc::new(RefCell::new(pair))));
+            } else {
+                result.push(Value::String(PhpString::from_bytes(text)));
+            }
+        };
 
     // last_split_pos: position where the current piece started (beginning of next piece after last split)
     // search_offset: position to search for next match from
@@ -3470,8 +3647,8 @@ pub fn preg_quote(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 result.push(b'0');
                 result.push(b'0');
             }
-            b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'$' | b'(' | b')' | b'{'
-            | b'}' | b'=' | b'!' | b'<' | b'>' | b'|' | b':' | b'-' | b'.' | b'#' => {
+            b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'$' | b'(' | b')' | b'{' | b'}'
+            | b'=' | b'!' | b'<' | b'>' | b'|' | b':' | b'-' | b'.' | b'#' => {
                 result.push(b'\\');
                 result.push(ch);
             }
@@ -3563,7 +3740,8 @@ fn call_callback(vm: &mut Vm, callback: &Value, call_args: &[Value]) -> Result<V
             if has_invoke {
                 let mut func_name = class_name_orig;
                 func_name.extend_from_slice(b"::__invoke");
-                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let func_lower: Vec<u8> =
+                    func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
                     let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                     // First CV is $this
@@ -3634,7 +3812,11 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 
     // Handle array pattern
     let patterns: Vec<Vec<u8>> = if let Value::Array(patterns_arr) = &pattern_val {
-        patterns_arr.borrow().iter().map(|(_, v)| v.to_php_string().as_bytes().to_vec()).collect()
+        patterns_arr
+            .borrow()
+            .iter()
+            .map(|(_, v)| v.to_php_string().as_bytes().to_vec())
+            .collect()
     } else {
         vec![pattern_val.to_php_string().as_bytes().to_vec()]
     };
@@ -3644,7 +3826,11 @@ pub fn preg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         let mut result = PhpArray::new();
         let mut total_count = 0i64;
         // Collect entries first to avoid borrow overlap when emitting warnings
-        let entries: Vec<(ArrayKey, Value)> = subjects_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = subjects_arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (key, subject) in entries {
             if matches!(subject, Value::Array(_)) {
                 vm.emit_warning("Array to string conversion");
@@ -3703,7 +3889,15 @@ fn do_preg_replace_callback(
     limit: i64,
     flags: i64,
 ) -> Result<Option<(Vec<u8>, i64)>, VmError> {
-    do_preg_replace_callback_fn(vm, pattern, callback, subject, limit, flags, "preg_replace_callback")
+    do_preg_replace_callback_fn(
+        vm,
+        pattern,
+        callback,
+        subject,
+        limit,
+        flags,
+        "preg_replace_callback",
+    )
 }
 
 fn do_preg_replace_callback_fn(
@@ -3764,7 +3958,11 @@ fn do_preg_replace_callback_fn(
                     }
                 } else if offset_capture {
                     let mut pair = PhpArray::new();
-                    pair.push(if unmatched_as_null { Value::Null } else { Value::String(PhpString::empty()) });
+                    pair.push(if unmatched_as_null {
+                        Value::Null
+                    } else {
+                        Value::String(PhpString::empty())
+                    });
                     pair.push(Value::Long(-1));
                     Value::Array(Rc::new(RefCell::new(pair)))
                 } else if unmatched_as_null {
@@ -3844,7 +4042,10 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
             let msg = "preg_replace_callback_array(): Argument #1 ($pattern) must contain only string patterns as keys".to_string();
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+            return Err(VmError {
+                message: "Uncaught TypeError".to_string(),
+                line: 0,
+            });
         }
     }
 
@@ -3852,7 +4053,11 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
     if let Value::Array(subjects_arr) = &subject_val {
         let mut result = PhpArray::new();
         let mut total_count = 0i64;
-        let subj_entries: Vec<(ArrayKey, Value)> = subjects_arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let subj_entries: Vec<(ArrayKey, Value)> = subjects_arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (key, subject) in subj_entries {
             if matches!(subject, Value::Array(_)) {
                 vm.emit_warning("Array to string conversion");
@@ -3864,7 +4069,15 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
                     ArrayKey::String(s) => s.as_bytes().to_vec(),
                     ArrayKey::Int(_) => continue,
                 };
-                match do_preg_replace_callback_fn(vm, &pat_str, cb, &current, limit, flags, "preg_replace_callback_array")? {
+                match do_preg_replace_callback_fn(
+                    vm,
+                    &pat_str,
+                    cb,
+                    &current,
+                    limit,
+                    flags,
+                    "preg_replace_callback_array",
+                )? {
                     Some((replaced, count)) => {
                         current = replaced;
                         total_count += count;
@@ -3891,7 +4104,15 @@ pub fn preg_replace_callback_array(vm: &mut Vm, args: &[Value]) -> Result<Value,
             ArrayKey::String(s) => s.as_bytes().to_vec(),
             ArrayKey::Int(_) => continue,
         };
-        match do_preg_replace_callback_fn(vm, &pat_str, cb, &current, limit, flags, "preg_replace_callback_array")? {
+        match do_preg_replace_callback_fn(
+            vm,
+            &pat_str,
+            cb,
+            &current,
+            limit,
+            flags,
+            "preg_replace_callback_array",
+        )? {
             Some((replaced, count)) => {
                 current = replaced;
                 total_count += count;
@@ -3935,7 +4156,11 @@ pub fn preg_grep(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let mut result = PhpArray::new();
     // Collect entries first to avoid borrow overlap when emitting warnings
-    let entries: Vec<(ArrayKey, Value)> = array.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = array
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (key, value) in entries {
         if matches!(value, Value::Array(_)) {
             vm.emit_warning("Array to string conversion");
@@ -3982,10 +4207,21 @@ pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             vec![replacement_val.clone(); pat_arr.borrow().len()]
         };
-        pat_arr.borrow().iter().enumerate().map(|(i, (_, v))| {
-            let repl = replacements.get(i).unwrap_or(&Value::String(PhpString::empty())).to_php_string();
-            (v.to_php_string().as_bytes().to_vec(), repl.as_bytes().to_vec())
-        }).collect()
+        pat_arr
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(i, (_, v))| {
+                let repl = replacements
+                    .get(i)
+                    .unwrap_or(&Value::String(PhpString::empty()))
+                    .to_php_string();
+                (
+                    v.to_php_string().as_bytes().to_vec(),
+                    repl.as_bytes().to_vec(),
+                )
+            })
+            .collect()
     } else {
         vec![(
             pattern_val.to_php_string().as_bytes().to_vec(),
@@ -4006,7 +4242,8 @@ pub fn preg_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
                 if compiled.find(&current, 0).is_some() {
                     had_match = true;
-                    if let Some((replaced, _cnt)) = do_preg_replace(vm, pat, repl, &current, limit) {
+                    if let Some((replaced, _cnt)) = do_preg_replace(vm, pat, repl, &current, limit)
+                    {
                         current = replaced;
                     }
                 }

@@ -287,11 +287,7 @@ fn decrypt_cbc(
 }
 
 /// CTR encryption/decryption (same operation)
-fn encrypt_ctr(
-    aes_key: &AesKey,
-    data: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, &'static str> {
+fn encrypt_ctr(aes_key: &AesKey, data: &[u8], iv: &[u8]) -> Result<Vec<u8>, &'static str> {
     let mut counter = [0u8; BLOCK_SIZE];
     counter.copy_from_slice(&iv[..BLOCK_SIZE]);
 

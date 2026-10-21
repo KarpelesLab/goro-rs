@@ -9,8 +9,13 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
-use crate::mbfl::{self, EncNo, Encoding, MBFL_BAD_INPUT, MBFL_ENCTYPE_SBCS, MBFL_ENCTYPE_WCS2, MBFL_ENCTYPE_WCS4};
-use crate::mbfl::{MBFL_OUTPUTFILTER_ILLEGAL_MODE_ENTITY, MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG, MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE};
+use crate::mbfl::{
+    self, EncNo, Encoding, MBFL_BAD_INPUT, MBFL_ENCTYPE_SBCS, MBFL_ENCTYPE_WCS2, MBFL_ENCTYPE_WCS4,
+};
+use crate::mbfl::{
+    MBFL_OUTPUTFILTER_ILLEGAL_MODE_ENTITY, MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG,
+    MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE,
+};
 use crate::state::{self, MbState};
 use crate::zpp::*;
 
@@ -52,36 +57,68 @@ pub fn cstr(b: &[u8]) -> &[u8] {
 }
 
 pub fn is_utf8_family(no: EncNo) -> bool {
-    matches!(no, EncNo::Utf8 | EncNo::Utf8Docomo | EncNo::Utf8KddiA | EncNo::Utf8KddiB | EncNo::Utf8Sb)
+    matches!(
+        no,
+        EncNo::Utf8 | EncNo::Utf8Docomo | EncNo::Utf8KddiA | EncNo::Utf8KddiB | EncNo::Utf8Sb
+    )
 }
 
 /// True for the pseudo-encodings Base64/UUencode/HTML-ENTITIES/QPrint
 /// (C: `no_encoding <= mbfl_no_encoding_qprint`)
 fn is_transfer_pseudo(no: EncNo) -> bool {
-    matches!(no, EncNo::Pass | EncNo::Wchar | EncNo::Base64 | EncNo::Uuencode | EncNo::HtmlEnt | EncNo::Qprint)
+    matches!(
+        no,
+        EncNo::Pass
+            | EncNo::Wchar
+            | EncNo::Base64
+            | EncNo::Uuencode
+            | EncNo::HtmlEnt
+            | EncNo::Qprint
+    )
 }
 
 /// C: `no_encoding <= mbfl_no_encoding_charset_min`
 fn is_non_text_encoding(no: EncNo) -> bool {
     matches!(
         no,
-        EncNo::Pass | EncNo::Wchar | EncNo::Base64 | EncNo::Uuencode | EncNo::HtmlEnt | EncNo::Qprint | EncNo::SevenBit | EncNo::EightBit
+        EncNo::Pass
+            | EncNo::Wchar
+            | EncNo::Base64
+            | EncNo::Uuencode
+            | EncNo::HtmlEnt
+            | EncNo::Qprint
+            | EncNo::SevenBit
+            | EncNo::EightBit
     )
 }
 
 fn emit_transfer_deprecation(vm: &mut Vm, func: &str, enc: &Encoding) {
     let msg = match enc.no {
-        EncNo::Base64 => "Handling Base64 via mbstring is deprecated; use base64_encode/base64_decode instead",
-        EncNo::Qprint => "Handling QPrint via mbstring is deprecated; use quoted_printable_encode/quoted_printable_decode instead",
-        EncNo::HtmlEnt => "Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead",
-        EncNo::Uuencode => "Handling Uuencode via mbstring is deprecated; use convert_uuencode/convert_uudecode instead",
+        EncNo::Base64 => {
+            "Handling Base64 via mbstring is deprecated; use base64_encode/base64_decode instead"
+        }
+        EncNo::Qprint => {
+            "Handling QPrint via mbstring is deprecated; use quoted_printable_encode/quoted_printable_decode instead"
+        }
+        EncNo::HtmlEnt => {
+            "Handling HTML entities via mbstring is deprecated; use htmlspecialchars, htmlentities, or mb_encode_numericentity/mb_decode_numericentity instead"
+        }
+        EncNo::Uuencode => {
+            "Handling Uuencode via mbstring is deprecated; use convert_uuencode/convert_uudecode instead"
+        }
         _ => return,
     };
     vm.emit_deprecated(&format!("{}(): {}", func, msg));
 }
 
 /// C: `php_mb_get_encoding`. `name` None => current internal encoding.
-pub fn get_encoding(vm: &mut Vm, func: &str, name: Option<&[u8]>, arg_num: usize, pname: &str) -> Result<&'static Encoding, VmError> {
+pub fn get_encoding(
+    vm: &mut Vm,
+    func: &str,
+    name: Option<&[u8]>,
+    arg_num: usize,
+    pname: &str,
+) -> Result<&'static Encoding, VmError> {
     state::sync(vm);
     let name = name.map(cstr);
     match name {
@@ -94,36 +131,51 @@ pub fn get_encoding(vm: &mut Vm, func: &str, name: Option<&[u8]>, arg_num: usize
                 return Ok(e);
             }
             match mbfl::name2encoding(n) {
-            None => Err(arg_value_error(
-                vm,
-                func,
-                arg_num,
-                pname,
-                &format!("must be a valid encoding, \"{}\" given", String::from_utf8_lossy(n)),
-            )),
-            Some(e) => {
-                if is_transfer_pseudo(e.no) {
-                    emit_transfer_deprecation(vm, func, e);
+                None => Err(arg_value_error(
+                    vm,
+                    func,
+                    arg_num,
+                    pname,
+                    &format!(
+                        "must be a valid encoding, \"{}\" given",
+                        String::from_utf8_lossy(n)
+                    ),
+                )),
+                Some(e) => {
+                    if is_transfer_pseudo(e.no) {
+                        emit_transfer_deprecation(vm, func, e);
+                    }
+                    state::with(|s| {
+                        s.last_used_encoding_name = Some(n.to_vec());
+                        s.last_used_encoding = Some(e);
+                    });
+                    Ok(e)
                 }
-                state::with(|s| {
-                    s.last_used_encoding_name = Some(n.to_vec());
-                    s.last_used_encoding = Some(e);
-                });
-                Ok(e)
-            }
             }
         }
     }
 }
 
 /// Encoding argument at position `idx` (0-based), nullable.
-pub fn encoding_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<&'static Encoding, VmError> {
+pub fn encoding_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<&'static Encoding, VmError> {
     let name = str_or_null_arg(vm, func, args, idx, pname)?;
     get_encoding(vm, func, name.as_deref(), idx + 1, pname)
 }
 
 /// C: `php_mb_parse_encoding_list` in function context
-pub fn parse_encoding_list_arg(vm: &mut Vm, func: &str, value: &[u8], arg_num: usize, pname: &str) -> Result<Vec<&'static Encoding>, VmError> {
+pub fn parse_encoding_list_arg(
+    vm: &mut Vm,
+    func: &str,
+    value: &[u8],
+    arg_num: usize,
+    pname: &str,
+) -> Result<Vec<&'static Encoding>, VmError> {
     let res = state::with(|st| state::parse_encoding_list(st, value));
     match res {
         Ok(l) => Ok(l),
@@ -132,13 +184,22 @@ pub fn parse_encoding_list_arg(vm: &mut Vm, func: &str, value: &[u8], arg_num: u
             func,
             arg_num,
             pname,
-            &format!("contains invalid encoding \"{}\"", String::from_utf8_lossy(&bad)),
+            &format!(
+                "contains invalid encoding \"{}\"",
+                String::from_utf8_lossy(&bad)
+            ),
         )),
     }
 }
 
 /// C: `php_mb_parse_encoding_array`
-pub fn parse_encoding_array(vm: &mut Vm, func: &str, arr: &Rc<RefCell<PhpArray>>, arg_num: usize, pname: &str) -> Result<Vec<&'static Encoding>, VmError> {
+pub fn parse_encoding_array(
+    vm: &mut Vm,
+    func: &str,
+    arr: &Rc<RefCell<PhpArray>>,
+    arg_num: usize,
+    pname: &str,
+) -> Result<Vec<&'static Encoding>, VmError> {
     let vals: Vec<Value> = arr.borrow().values().cloned().collect();
     let mut list = Vec::new();
     let mut included_auto = false;
@@ -173,8 +234,11 @@ pub fn parse_encoding_array(vm: &mut Vm, func: &str, arr: &Rc<RefCell<PhpArray>>
                         func,
                         arg_num,
                         pname,
-                        &format!("contains invalid encoding \"{}\"", String::from_utf8_lossy(&s)),
-                    ))
+                        &format!(
+                            "contains invalid encoding \"{}\"",
+                            String::from_utf8_lossy(&s)
+                        ),
+                    ));
                 }
             }
         }
@@ -205,7 +269,14 @@ pub fn convert_ex(input: &[u8], to: &Encoding, from: &Encoding) -> Vec<u8> {
 
 /// Convert to UTF-8 using 0xFF as the error marker (for searching)
 pub fn to_utf8_badmarker(input: &[u8], from: &Encoding) -> Vec<u8> {
-    mbfl::fast_convert(input, from, &mbfl::basic::ENC_UTF8, 0, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8).0
+    mbfl::fast_convert(
+        input,
+        from,
+        &mbfl::basic::ENC_UTF8,
+        0,
+        mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8,
+    )
+    .0
 }
 
 fn new_array(arr: PhpArray) -> Value {
@@ -238,7 +309,10 @@ fn mb_language(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     "mb_language",
                     1,
                     "language",
-                    &format!("must be a valid language, \"{}\" given", String::from_utf8_lossy(&n)),
+                    &format!(
+                        "must be a valid language, \"{}\" given",
+                        String::from_utf8_lossy(&n)
+                    ),
                 ))
             }
             Some(_) => {
@@ -263,7 +337,10 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "mb_internal_encoding",
                 1,
                 "encoding",
-                &format!("must be a valid encoding, \"{}\" given", String::from_utf8_lossy(&n)),
+                &format!(
+                    "must be a valid encoding, \"{}\" given",
+                    String::from_utf8_lossy(&n)
+                ),
             )),
             Some(e) => {
                 state::with(|s| {
@@ -317,12 +394,15 @@ fn mb_http_output(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     state::sync(vm);
     let name = str_or_null_arg(vm, "mb_http_output", args, 0, "encoding")?;
     match name {
-        None => Ok(pstr(state::with(|s| s.current_http_output_encoding.name).as_bytes())),
+        None => Ok(pstr(
+            state::with(|s| s.current_http_output_encoding.name).as_bytes(),
+        )),
         Some(n) => {
             if n.contains(&0) {
                 return Err(type_error(
                     vm,
-                    "mb_http_output(): Argument #1 ($encoding) must not contain any null bytes".to_string(),
+                    "mb_http_output(): Argument #1 ($encoding) must not contain any null bytes"
+                        .to_string(),
                 ));
             }
             match state::get_encoding_or_pass(&n) {
@@ -331,7 +411,10 @@ fn mb_http_output(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     "mb_http_output",
                     1,
                     "encoding",
-                    &format!("must be a valid encoding, \"{}\" given", String::from_utf8_lossy(&n)),
+                    &format!(
+                        "must be a valid encoding, \"{}\" given",
+                        String::from_utf8_lossy(&n)
+                    ),
                 )),
                 Some(e) => {
                     state::with(|s| {
@@ -360,7 +443,13 @@ fn mb_detect_order(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
     if list.is_empty() {
-        return Err(arg_value_error(vm, "mb_detect_order", 1, "encoding", "must specify at least one encoding"));
+        return Err(arg_value_error(
+            vm,
+            "mb_detect_order",
+            1,
+            "encoding",
+            "must specify at least one encoding",
+        ));
     }
     state::with(|s| s.current_detect_order_list = list);
     Ok(Value::True)
@@ -380,7 +469,9 @@ fn mb_substitute_character(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             })
         }
         Some(Value::Long(cp)) => set_subst_codepoint(vm, cp),
-        Some(Value::Double(f)) if f.is_finite() && f.fract() == 0.0 => set_subst_codepoint(vm, f as i64),
+        Some(Value::Double(f)) if f.is_finite() && f.fract() == 0.0 => {
+            set_subst_codepoint(vm, f as i64)
+        }
         Some(Value::True) => set_subst_codepoint(vm, 1),
         Some(Value::False) => set_subst_codepoint(vm, 0),
         Some(v @ Value::String(_)) => {
@@ -426,7 +517,13 @@ fn mb_substitute_character(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 
 fn set_subst_codepoint(vm: &mut Vm, cp: i64) -> Result<Value, VmError> {
     if !(0..0x110000).contains(&cp) || (0xd800..=0xdfff).contains(&cp) {
-        return Err(arg_value_error(vm, "mb_substitute_character", 1, "substitute_character", "is not a valid codepoint"));
+        return Err(arg_value_error(
+            vm,
+            "mb_substitute_character",
+            1,
+            "substitute_character",
+            "is not a valid codepoint",
+        ));
     }
     state::with(|s| {
         s.current_filter_illegal_mode = mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR;
@@ -444,7 +541,10 @@ fn mb_preferred_mime_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             "mb_preferred_mime_name",
             1,
             "encoding",
-            &format!("must be a valid encoding, \"{}\" given", String::from_utf8_lossy(&name)),
+            &format!(
+                "must be a valid encoding, \"{}\" given",
+                String::from_utf8_lossy(&name)
+            ),
         )),
         Some(e) => match mbfl::preferred_mime_name(e) {
             Some(m) => Ok(pstr(m.as_bytes())),
@@ -487,7 +587,13 @@ fn mb_strlen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /* ===== mb_convert_encoding ===== */
 
 /// C: `php_mb_convert_encoding`
-pub fn convert_encoding(vm: &mut Vm, func: &str, input: &[u8], to: &'static Encoding, from_list: &[&'static Encoding]) -> Option<Vec<u8>> {
+pub fn convert_encoding(
+    vm: &mut Vm,
+    func: &str,
+    input: &[u8],
+    to: &'static Encoding,
+    from_list: &[&'static Encoding],
+) -> Option<Vec<u8>> {
     let from = if from_list.len() == 1 {
         from_list[0]
     } else {
@@ -514,23 +620,33 @@ fn convert_encoding_recursive(
         vm.emit_warning("mb_convert_encoding(): Cannot convert recursively referenced values");
         return None;
     }
-    let entries: Vec<(ArrayKey, Value)> = input.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = input
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut out = PhpArray::new();
     for (k, v) in entries {
         let key = match k {
-            ArrayKey::String(s) => match convert_encoding(vm, "mb_convert_encoding", s.as_bytes(), to, from_list) {
-                Some(c) => ArrayKey::String(PhpString::from_vec(c)),
-                None => continue,
-            },
+            ArrayKey::String(s) => {
+                match convert_encoding(vm, "mb_convert_encoding", s.as_bytes(), to, from_list) {
+                    Some(c) => ArrayKey::String(PhpString::from_vec(c)),
+                    None => continue,
+                }
+            }
             other => other,
         };
         let v = v.deref();
         let nv = match &v {
-            Value::String(s) => match convert_encoding(vm, "mb_convert_encoding", s.as_bytes(), to, from_list) {
-                Some(c) => pstring(c),
-                None => continue,
-            },
-            Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_) => v.clone(),
+            Value::String(s) => {
+                match convert_encoding(vm, "mb_convert_encoding", s.as_bytes(), to, from_list) {
+                    Some(c) => pstring(c),
+                    None => continue,
+                }
+            }
+            Value::Null | Value::True | Value::False | Value::Long(_) | Value::Double(_) => {
+                v.clone()
+            }
             Value::Array(a) => match convert_encoding_recursive(vm, a, to, from_list, depth + 1) {
                 Some(c) => new_array(c),
                 None => new_array(PhpArray::new()),
@@ -554,12 +670,20 @@ fn mb_convert_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let input_arr = match &input {
         Value::Array(a) => Some(a.clone()),
-        Value::String(_) | Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => None,
+        Value::String(_)
+        | Value::Long(_)
+        | Value::Double(_)
+        | Value::True
+        | Value::False
+        | Value::Null => None,
         other => {
             return Err(type_error(
                 vm,
-                format!("mb_convert_encoding(): Argument #1 ($string) must be of type array|string, {} given", type_name(other)),
-            ))
+                format!(
+                    "mb_convert_encoding(): Argument #1 ($string) must be of type array|string, {} given",
+                    type_name(other)
+                ),
+            ));
         }
     };
     let to_name = str_arg(vm, f, args, 1, "to_encoding")?;
@@ -576,7 +700,13 @@ fn mb_convert_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         remove_non_encodings(&mut from_list);
     }
     if from_list.is_empty() {
-        return Err(arg_value_error(vm, f, 3, "from_encoding", "must specify at least one encoding"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            3,
+            "from_encoding",
+            "must specify at least one encoding",
+        ));
     }
     match input_arr {
         Some(a) => {
@@ -629,7 +759,12 @@ struct Candidate {
 }
 
 /// C: `mb_guess_encoding_for_strings`
-pub fn guess_encoding(strings: &[&[u8]], elist: &[&'static Encoding], strict: bool, order_significant: bool) -> Option<&'static Encoding> {
+pub fn guess_encoding(
+    strings: &[&[u8]],
+    elist: &[&'static Encoding],
+    strict: bool,
+    order_significant: bool,
+) -> Option<&'static Encoding> {
     if elist.is_empty() {
         return None;
     }
@@ -661,8 +796,16 @@ pub fn guess_encoding(strings: &[&[u8]], elist: &[&'static Encoding], strict: bo
                 }
             }
         }
-        let multiplier = if order_significant { (1.0 + ((0.3 * i as f64) / length as f64)) as f32 } else { 1.0f32 };
-        array.push(Candidate { enc, demerits, multiplier });
+        let multiplier = if order_significant {
+            (1.0 + ((0.3 * i as f64) / length as f64)) as f32
+        } else {
+            1.0f32
+        };
+        array.push(Candidate {
+            enc,
+            demerits,
+            multiplier,
+        });
     }
     // Strings are processed last to first, as in C
     for s in strings.iter().rev() {
@@ -676,9 +819,15 @@ pub fn guess_encoding(strings: &[&[u8]], elist: &[&'static Encoding], strict: bo
                 let mut input: &[u8] = s;
                 // Skip byte order mark for UTF-8, UTF-16BE, or UTF-16LE
                 match enc.no {
-                    EncNo::Utf8 if input.len() >= 3 && input[..3] == [0xEF, 0xBB, 0xBF] => input = &input[3..],
-                    EncNo::Utf16be if input.len() >= 2 && input[..2] == [0xFE, 0xFF] => input = &input[2..],
-                    EncNo::Utf16le if input.len() >= 2 && input[..2] == [0xFF, 0xFE] => input = &input[2..],
+                    EncNo::Utf8 if input.len() >= 3 && input[..3] == [0xEF, 0xBB, 0xBF] => {
+                        input = &input[3..]
+                    }
+                    EncNo::Utf16be if input.len() >= 2 && input[..2] == [0xFE, 0xFF] => {
+                        input = &input[2..]
+                    }
+                    EncNo::Utf16le if input.len() >= 2 && input[..2] == [0xFF, 0xFE] => {
+                        input = &input[2..]
+                    }
                     _ => {}
                 }
                 if input.is_empty() {
@@ -707,7 +856,11 @@ pub fn guess_encoding(strings: &[&[u8]], elist: &[&'static Encoding], strict: bo
         }
         for c in array.iter_mut() {
             let demerits = c.demerits as f64 * c.multiplier as f64;
-            c.demerits = if demerits < u64::MAX as f64 { demerits as u64 } else { u64::MAX };
+            c.demerits = if demerits < u64::MAX as f64 {
+                demerits as u64
+            } else {
+                u64::MAX
+            };
         }
         if array.is_empty() {
             return None;
@@ -727,7 +880,12 @@ thread_local! {
 }
 
 pub fn is_all_encodings_list(a: &Rc<RefCell<PhpArray>>) -> bool {
-    ALL_ENCODINGS_LIST.with(|l| l.borrow().as_ref().map(|x| Rc::ptr_eq(x, a)).unwrap_or(false))
+    ALL_ENCODINGS_LIST.with(|l| {
+        l.borrow()
+            .as_ref()
+            .map(|x| Rc::ptr_eq(x, a))
+            .unwrap_or(false)
+    })
 }
 
 fn mb_detect_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -738,7 +896,12 @@ fn mb_detect_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut elist = match args.get(1).map(|v| v.deref()) {
         None | Some(Value::Null) => state::with(|st| st.current_detect_order_list.clone()),
         Some(Value::Array(a)) => {
-            let is_all = ALL_ENCODINGS_LIST.with(|l| l.borrow().as_ref().map(|x| Rc::ptr_eq(x, &a)).unwrap_or(false));
+            let is_all = ALL_ENCODINGS_LIST.with(|l| {
+                l.borrow()
+                    .as_ref()
+                    .map(|x| Rc::ptr_eq(x, &a))
+                    .unwrap_or(false)
+            });
             if is_all {
                 order_significant = false;
             }
@@ -750,13 +913,23 @@ fn mb_detect_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
     if elist.is_empty() {
-        return Err(arg_value_error(vm, f, 2, "encodings", "must specify at least one encoding"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            2,
+            "encodings",
+            "must specify at least one encoding",
+        ));
     }
     remove_non_encodings(&mut elist);
     if elist.is_empty() {
         return Ok(Value::False);
     }
-    let strict = if args.len() < 3 { state::with(|st| st.strict_detection) } else { bool_arg(args, 2) };
+    let strict = if args.len() < 3 {
+        state::with(|st| st.strict_detection)
+    } else {
+        bool_arg(args, 2)
+    };
     let ret = if elist.len() == 1 && elist[0].no == EncNo::Utf8 && std::str::from_utf8(&s).is_ok() {
         Some(elist[0])
     } else {
@@ -796,12 +969,21 @@ fn mb_encoding_aliases(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /* ===== mb_check_encoding ===== */
 
-fn check_encoding_recursive(vm: &mut Vm, arr: &Rc<RefCell<PhpArray>>, enc: &Encoding, depth: usize) -> bool {
+fn check_encoding_recursive(
+    vm: &mut Vm,
+    arr: &Rc<RefCell<PhpArray>>,
+    enc: &Encoding,
+    depth: usize,
+) -> bool {
     if depth > 256 {
         vm.emit_warning("mb_check_encoding(): Cannot not handle circular references");
         return false;
     }
-    let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (k, v) in entries {
         if let ArrayKey::String(s) = &k {
             if !check_encoding(s.as_bytes(), enc) {
@@ -830,11 +1012,23 @@ fn mb_check_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_check_encoding";
     let input = args.first().map(|v| v.deref());
     if let Some(v) = &input {
-        if !matches!(v, Value::Null | Value::Array(_) | Value::String(_) | Value::Long(_) | Value::Double(_) | Value::True | Value::False) {
+        if !matches!(
+            v,
+            Value::Null
+                | Value::Array(_)
+                | Value::String(_)
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::True
+                | Value::False
+        ) {
             if !matches!(v, Value::Object(_)) {
                 return Err(type_error(
                     vm,
-                    format!("mb_check_encoding(): Argument #1 ($value) must be of type array|string|null, {} given", type_name(v)),
+                    format!(
+                        "mb_check_encoding(): Argument #1 ($value) must be of type array|string|null, {} given",
+                        type_name(v)
+                    ),
                 ));
             }
         }
@@ -843,7 +1037,9 @@ fn mb_check_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match input {
         Some(Value::Array(a)) => Ok(vbool(check_encoding_recursive(vm, &a, enc, 0))),
         None | Some(Value::Null) => {
-            vm.emit_deprecated("mb_check_encoding(): Calling mb_check_encoding() without argument is deprecated");
+            vm.emit_deprecated(
+                "mb_check_encoding(): Calling mb_check_encoding() without argument is deprecated",
+            );
             Ok(vbool(state::with(|s| s.illegalchars == 0)))
         }
         Some(_) => {
@@ -874,7 +1070,10 @@ fn mb_get_info(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => None,
         Some(_) => Some(str_arg(vm, "mb_get_info", args, 0, "type")?),
     };
-    let conv_mimetypes = match vm.constants.get(b"mbstring.http_output_conv_mimetypes".as_ref()) {
+    let conv_mimetypes = match vm
+        .constants
+        .get(b"mbstring.http_output_conv_mimetypes".as_ref())
+    {
         Some(v) if !v.to_php_string().is_empty() => v.to_php_string().as_bytes().to_vec(),
         _ => b"^(text/|application/xhtml\\+xml)".to_vec(),
     };
@@ -885,32 +1084,55 @@ fn mb_get_info(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match t.as_deref() {
             None | Some(b"all") => {
                 let mut arr = PhpArray::new();
-                let mut set = |k: &str, v: Value| arr.set(ArrayKey::String(PhpString::from_bytes(k.as_bytes())), v);
-                set("internal_encoding", pstr(st.current_internal_encoding.name.as_bytes()));
+                let mut set = |k: &str, v: Value| {
+                    arr.set(ArrayKey::String(PhpString::from_bytes(k.as_bytes())), v)
+                };
+                set(
+                    "internal_encoding",
+                    pstr(st.current_internal_encoding.name.as_bytes()),
+                );
                 if let Some(e) = st.http_input_identify {
                     set("http_input", pstr(e.name.as_bytes()));
                 }
-                set("http_output", pstr(st.current_http_output_encoding.name.as_bytes()));
+                set(
+                    "http_output",
+                    pstr(st.current_http_output_encoding.name.as_bytes()),
+                );
                 set("http_output_conv_mimetypes", pstr(&conv_mimetypes));
                 set("mail_charset", pstr(enc_name(lang.mail_charset).as_bytes()));
-                set("mail_header_encoding", pstr(enc_name(lang.mail_header_encoding).as_bytes()));
-                set("mail_body_encoding", pstr(enc_name(lang.mail_body_encoding).as_bytes()));
+                set(
+                    "mail_header_encoding",
+                    pstr(enc_name(lang.mail_header_encoding).as_bytes()),
+                );
+                set(
+                    "mail_body_encoding",
+                    pstr(enc_name(lang.mail_body_encoding).as_bytes()),
+                );
                 set("illegal_chars", Value::Long(st.illegalchars as i64));
                 set("encoding_translation", onoff(st.encoding_translation));
                 set("language", pstr(lang.name.as_bytes()));
                 if !st.current_detect_order_list.is_empty() {
-                    set("detect_order", str_list_array(&st.current_detect_order_list));
+                    set(
+                        "detect_order",
+                        str_list_array(&st.current_detect_order_list),
+                    );
                 }
                 set("substitute_character", subst_char_value(st));
                 set("strict_detection", onoff(st.strict_detection));
                 Some(new_array(arr))
             }
             Some(b"internal_encoding") => Some(pstr(st.current_internal_encoding.name.as_bytes())),
-            Some(b"http_input") => Some(st.http_input_identify.map(|e| pstr(e.name.as_bytes())).unwrap_or(Value::Null)),
+            Some(b"http_input") => Some(
+                st.http_input_identify
+                    .map(|e| pstr(e.name.as_bytes()))
+                    .unwrap_or(Value::Null),
+            ),
             Some(b"http_output") => Some(pstr(st.current_http_output_encoding.name.as_bytes())),
             Some(b"http_output_conv_mimetypes") => Some(pstr(&conv_mimetypes)),
             Some(b"mail_charset") => Some(pstr(enc_name(lang.mail_charset).as_bytes())),
-            Some(b"mail_header_encoding") => Some(pstr(enc_name(lang.mail_header_encoding).as_bytes())),
+            Some(b"mail_header_encoding") => {
+                Some(pstr(enc_name(lang.mail_header_encoding).as_bytes()))
+            }
             Some(b"mail_body_encoding") => Some(pstr(enc_name(lang.mail_body_encoding).as_bytes())),
             Some(b"illegal_chars") => Some(Value::Long(st.illegalchars as i64)),
             Some(b"encoding_translation") => Some(onoff(st.encoding_translation)),

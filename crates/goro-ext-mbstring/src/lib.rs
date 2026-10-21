@@ -25,15 +25,26 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(b"mbstring");
     mbstring::register(vm);
 
-    vm.constants.insert(b"MB_CASE_UPPER".to_vec(), Value::Long(0));
-    vm.constants.insert(b"MB_CASE_LOWER".to_vec(), Value::Long(1));
-    vm.constants.insert(b"MB_CASE_TITLE".to_vec(), Value::Long(2));
-    vm.constants.insert(b"MB_CASE_FOLD".to_vec(), Value::Long(3));
-    vm.constants.insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(4));
-    vm.constants.insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(5));
-    vm.constants.insert(b"MB_CASE_TITLE_SIMPLE".to_vec(), Value::Long(6));
-    vm.constants.insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(7));
-    vm.constants.insert(b"MB_ONIGURUMA_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"6.9.10")));
+    vm.constants
+        .insert(b"MB_CASE_UPPER".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"MB_CASE_LOWER".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"MB_CASE_TITLE".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"MB_CASE_FOLD".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"MB_CASE_UPPER_SIMPLE".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"MB_CASE_LOWER_SIMPLE".to_vec(), Value::Long(5));
+    vm.constants
+        .insert(b"MB_CASE_TITLE_SIMPLE".to_vec(), Value::Long(6));
+    vm.constants
+        .insert(b"MB_CASE_FOLD_SIMPLE".to_vec(), Value::Long(7));
+    vm.constants.insert(
+        b"MB_ONIGURUMA_VERSION".to_vec(),
+        Value::String(PhpString::from_bytes(b"6.9.10")),
+    );
 
     // Default mbstring.* INI keys to empty strings so ini_get() returns "".
     // Only set if not already configured.
@@ -52,7 +63,8 @@ pub fn register(vm: &mut Vm) {
         "mbstring.http_output_conv_mimetypes",
     ] {
         if !vm.constants.contains_key(key.as_bytes()) {
-            vm.constants.insert(key.as_bytes().to_vec(), Value::String(PhpString::empty()));
+            vm.constants
+                .insert(key.as_bytes().to_vec(), Value::String(PhpString::empty()));
         }
     }
 }

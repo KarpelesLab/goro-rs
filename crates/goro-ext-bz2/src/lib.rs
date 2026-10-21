@@ -27,16 +27,36 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"bzerror", php_bzerror);
     vm.register_function(b"bzerrstr", php_bzerrstr);
 
-    vm.builtin_param_names.insert(b"bzcompress".to_vec(), vec![b"data".to_vec(), b"block_size".to_vec(), b"work_factor".to_vec()]);
-    vm.builtin_param_names.insert(b"bzdecompress".to_vec(), vec![b"data".to_vec(), b"use_less_memory".to_vec()]);
-    vm.builtin_param_names.insert(b"bzopen".to_vec(), vec![b"file".to_vec(), b"mode".to_vec()]);
-    vm.builtin_param_names.insert(b"bzread".to_vec(), vec![b"bz".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"bzwrite".to_vec(), vec![b"bz".to_vec(), b"data".to_vec(), b"length".to_vec()]);
-    vm.builtin_param_names.insert(b"bzclose".to_vec(), vec![b"bz".to_vec()]);
-    vm.builtin_param_names.insert(b"bzflush".to_vec(), vec![b"bz".to_vec()]);
-    vm.builtin_param_names.insert(b"bzerrno".to_vec(), vec![b"bz".to_vec()]);
-    vm.builtin_param_names.insert(b"bzerror".to_vec(), vec![b"bz".to_vec()]);
-    vm.builtin_param_names.insert(b"bzerrstr".to_vec(), vec![b"bz".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"bzcompress".to_vec(),
+        vec![
+            b"data".to_vec(),
+            b"block_size".to_vec(),
+            b"work_factor".to_vec(),
+        ],
+    );
+    vm.builtin_param_names.insert(
+        b"bzdecompress".to_vec(),
+        vec![b"data".to_vec(), b"use_less_memory".to_vec()],
+    );
+    vm.builtin_param_names
+        .insert(b"bzopen".to_vec(), vec![b"file".to_vec(), b"mode".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"bzread".to_vec(), vec![b"bz".to_vec(), b"length".to_vec()]);
+    vm.builtin_param_names.insert(
+        b"bzwrite".to_vec(),
+        vec![b"bz".to_vec(), b"data".to_vec(), b"length".to_vec()],
+    );
+    vm.builtin_param_names
+        .insert(b"bzclose".to_vec(), vec![b"bz".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"bzflush".to_vec(), vec![b"bz".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"bzerrno".to_vec(), vec![b"bz".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"bzerror".to_vec(), vec![b"bz".to_vec()]);
+    vm.builtin_param_names
+        .insert(b"bzerrstr".to_vec(), vec![b"bz".to_vec()]);
 }
 
 enum BzHandle {
@@ -89,10 +109,16 @@ fn alloc_bz_id() -> i64 {
 
 fn require_open_bz(vm: &mut Vm, gid: i64, fname: &str) -> Result<bool, VmError> {
     if !goro_core::value::is_open_resource(gid) {
-        let msg = format!("{}(): Argument #1 ($bz) must be an open stream resource", fname);
+        let msg = format!(
+            "{}(): Argument #1 ($bz) must be an open stream resource",
+            fname
+        );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(true)
 }
@@ -119,17 +145,26 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "bzcompress() expects at least 1 argument";
             let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.to_string(),
+                line: vm.current_line,
+            });
         }
     };
 
     // libbz2 takes the input length as a 32-bit unsigned int, so reject any
     // string whose length cannot be expressed.
     if data.as_bytes().len() > u32::MAX as usize {
-        let msg = format!("bzcompress(): Argument #1 ($data) must have a length less than or equal to {}", u32::MAX);
+        let msg = format!(
+            "bzcompress(): Argument #1 ($data) must have a length less than or equal to {}",
+            u32::MAX
+        );
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     let block_size = match args.get(1) {
@@ -140,7 +175,10 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "bzcompress(): Argument #2 ($block_size) must be between 1 and 9";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
             bs as u32
         }
@@ -154,7 +192,10 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "bzcompress(): Argument #3 ($work_factor) must be between 0 and 250";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -211,14 +252,20 @@ fn php_bzdecompress(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let file_arg = args.first().unwrap_or(&Value::Null);
-    let mode_arg = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let mode_arg = args
+        .get(1)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
 
     // Validate mode first
     if mode_arg != "r" && mode_arg != "w" {
         let msg = "bzopen(): Argument #2 ($mode) must be either \"r\" or \"w\"";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
 
     // file arg can be a string (filename) or a resource (file handle)
@@ -229,24 +276,30 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let bid = alloc_bz_id();
             if mode_arg == "r" {
                 BZ_HANDLES.with(|handles| {
-                    handles.borrow_mut().insert(bid, BzHandle::Reader {
-                        decompressed: Vec::new(),
-                        pos: 0,
-                        errno: 0,
-                        errstr: "OK".to_string(),
-                        deferred_errno: 0,
-                        deferred_errstr: "OK".to_string(),
-                    });
+                    handles.borrow_mut().insert(
+                        bid,
+                        BzHandle::Reader {
+                            decompressed: Vec::new(),
+                            pos: 0,
+                            errno: 0,
+                            errstr: "OK".to_string(),
+                            deferred_errno: 0,
+                            deferred_errstr: "OK".to_string(),
+                        },
+                    );
                 });
             } else {
                 BZ_HANDLES.with(|handles| {
-                    handles.borrow_mut().insert(bid, BzHandle::Writer {
-                        path: String::new(),
-                        buffer: Vec::new(),
-                        block_size: 4,
-                        errno: 0,
-                        errstr: "OK".to_string(),
-                    });
+                    handles.borrow_mut().insert(
+                        bid,
+                        BzHandle::Writer {
+                            path: String::new(),
+                            buffer: Vec::new(),
+                            block_size: 4,
+                            errno: 0,
+                            errstr: "OK".to_string(),
+                        },
+                    );
                 });
             }
             goro_core::value::register_resource(bid, b"stream");
@@ -258,14 +311,20 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let msg = "bzopen(): Argument #1 ($file) must not contain null bytes";
                 let exc = vm.create_exception(b"TypeError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
             let filename = s.to_string_lossy();
             if filename.is_empty() {
                 let msg = "bzopen(): Argument #1 ($file) must not be empty";
                 let exc = vm.create_exception(b"ValueError", msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
             if mode_arg == "r" {
                 match std::fs::read(&filename) {
@@ -273,32 +332,39 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         // Decompress upfront, but defer error reporting until bzread is called.
                         let mut decoder = BzDecoder::new(data.as_slice());
                         let mut decompressed = Vec::new();
-                        let (decompressed, deferred_errno, deferred_errstr) = match decoder.read_to_end(&mut decompressed) {
-                            Ok(_) => (decompressed, 0, "OK".to_string()),
-                            Err(_) => {
-                                if data.len() < 4 || &data[..3] != b"BZh" {
-                                    (Vec::new(), -5, "DATA_ERROR_MAGIC".to_string())
-                                } else {
-                                    (Vec::new(), -4, "DATA_ERROR".to_string())
+                        let (decompressed, deferred_errno, deferred_errstr) =
+                            match decoder.read_to_end(&mut decompressed) {
+                                Ok(_) => (decompressed, 0, "OK".to_string()),
+                                Err(_) => {
+                                    if data.len() < 4 || &data[..3] != b"BZh" {
+                                        (Vec::new(), -5, "DATA_ERROR_MAGIC".to_string())
+                                    } else {
+                                        (Vec::new(), -4, "DATA_ERROR".to_string())
+                                    }
                                 }
-                            }
-                        };
+                            };
                         let bid = alloc_bz_id();
                         BZ_HANDLES.with(|handles| {
-                            handles.borrow_mut().insert(bid, BzHandle::Reader {
-                                decompressed,
-                                pos: 0,
-                                errno: 0,
-                                errstr: "OK".to_string(),
-                                deferred_errno,
-                                deferred_errstr,
-                            });
+                            handles.borrow_mut().insert(
+                                bid,
+                                BzHandle::Reader {
+                                    decompressed,
+                                    pos: 0,
+                                    errno: 0,
+                                    errstr: "OK".to_string(),
+                                    deferred_errno,
+                                    deferred_errstr,
+                                },
+                            );
                         });
                         goro_core::value::register_resource(bid, b"stream");
                         Ok(Value::Resource(bid))
                     }
                     Err(_) => {
-                        vm.emit_warning(&format!("bzopen({}): Failed to open stream: No such file or directory", filename));
+                        vm.emit_warning(&format!(
+                            "bzopen({}): Failed to open stream: No such file or directory",
+                            filename
+                        ));
                         Ok(Value::False)
                     }
                 }
@@ -306,19 +372,25 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // Write mode - check that parent dir exists
                 if let Some(parent) = std::path::Path::new(&filename).parent() {
                     if !parent.as_os_str().is_empty() && !parent.exists() {
-                        vm.emit_warning(&format!("bzopen({}): Failed to open stream: No such file or directory", filename));
+                        vm.emit_warning(&format!(
+                            "bzopen({}): Failed to open stream: No such file or directory",
+                            filename
+                        ));
                         return Ok(Value::False);
                     }
                 }
                 let bid = alloc_bz_id();
                 BZ_HANDLES.with(|handles| {
-                    handles.borrow_mut().insert(bid, BzHandle::Writer {
-                        path: filename.to_string(),
-                        buffer: Vec::new(),
-                        block_size: 4,
-                        errno: 0,
-                        errstr: "OK".to_string(),
-                    });
+                    handles.borrow_mut().insert(
+                        bid,
+                        BzHandle::Writer {
+                            path: filename.to_string(),
+                            buffer: Vec::new(),
+                            block_size: 4,
+                            errno: 0,
+                            errstr: "OK".to_string(),
+                        },
+                    );
                 });
                 goro_core::value::register_resource(bid, b"stream");
                 Ok(Value::Resource(bid))
@@ -328,7 +400,10 @@ fn php_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "bzopen(): Argument #1 ($file) must be of type string or file-resource";
             let exc = vm.create_exception(b"TypeError", msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg.to_string(), line: vm.current_line })
+            Err(VmError {
+                message: msg.to_string(),
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -342,7 +417,10 @@ fn php_bzread(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "bzread(): Argument #2 ($length) must be greater than or equal to 0";
             let exc = vm.create_exception(b"ValueError", msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.to_string(),
+                line: vm.current_line,
+            });
         }
         l as usize
     } else {
@@ -357,7 +435,14 @@ fn php_bzread(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(handle) = handles.get_mut(&bid) {
             match handle {
-                BzHandle::Reader { decompressed, pos, errno, errstr, deferred_errno, deferred_errstr } => {
+                BzHandle::Reader {
+                    decompressed,
+                    pos,
+                    errno,
+                    errstr,
+                    deferred_errno,
+                    deferred_errstr,
+                } => {
                     // Surface any deferred error to current errno
                     if *deferred_errno != 0 {
                         *errno = *deferred_errno;
@@ -421,7 +506,13 @@ fn php_bzclose(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bid = args.first().unwrap_or(&Value::Null).to_long();
     let handle = BZ_HANDLES.with(|handles| handles.borrow_mut().remove(&bid));
     if let Some(handle) = handle {
-        if let BzHandle::Writer { path, buffer, block_size, .. } = handle {
+        if let BzHandle::Writer {
+            path,
+            buffer,
+            block_size,
+            ..
+        } = handle
+        {
             let level = Compression::new(block_size);
             let mut encoder = BzEncoder::new(Vec::new(), level);
             let _ = encoder.write_all(&buffer);
@@ -446,17 +537,25 @@ fn bzerr_type_error(vm: &mut Vm, fname: &str) -> VmError {
     let msg = format!("{}(): Argument #1 ($bz) must be a bz2 stream", fname);
     let exc = vm.create_exception(b"TypeError", &msg, 0);
     vm.current_exception = Some(exc);
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 fn php_bzerrno(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bid = args.first().unwrap_or(&Value::Null).to_long();
     // If resource is closed, give "open stream resource" error (matches test 004 expectation)
-    if !goro_core::value::is_registered_resource(bid) || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid) {
+    if !goro_core::value::is_registered_resource(bid)
+        || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid)
+    {
         let msg = "bzerrno(): Argument #1 ($bz) must be an open stream resource";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     if require_bz2_stream(vm, bid, "bzerrno").is_err() {
         return Err(bzerr_type_error(vm, "bzerrno"));
@@ -473,11 +572,16 @@ fn php_bzerrno(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn php_bzerrstr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bid = args.first().unwrap_or(&Value::Null).to_long();
-    if !goro_core::value::is_registered_resource(bid) || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid) {
+    if !goro_core::value::is_registered_resource(bid)
+        || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid)
+    {
         let msg = "bzerrstr(): Argument #1 ($bz) must be an open stream resource";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     if require_bz2_stream(vm, bid, "bzerrstr").is_err() {
         return Err(bzerr_type_error(vm, "bzerrstr"));
@@ -485,7 +589,9 @@ fn php_bzerrstr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     BZ_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(handle) = handles.get(&bid) {
-            Ok(Value::String(PhpString::from_bytes(handle.errstr().as_bytes())))
+            Ok(Value::String(PhpString::from_bytes(
+                handle.errstr().as_bytes(),
+            )))
         } else {
             Ok(Value::False)
         }
@@ -494,11 +600,16 @@ fn php_bzerrstr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn php_bzerror(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let bid = args.first().unwrap_or(&Value::Null).to_long();
-    if !goro_core::value::is_registered_resource(bid) || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid) {
+    if !goro_core::value::is_registered_resource(bid)
+        || goro_core::value::is_registered_resource(bid) && !goro_core::value::is_open_resource(bid)
+    {
         let msg = "bzerror(): Argument #1 ($bz) must be an open stream resource";
         let exc = vm.create_exception(b"TypeError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     if require_bz2_stream(vm, bid, "bzerror").is_err() {
         return Err(bzerr_type_error(vm, "bzerror"));
@@ -507,8 +618,14 @@ fn php_bzerror(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let handles = handles.borrow();
         if let Some(handle) = handles.get(&bid) {
             let mut arr = PhpArray::new();
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"errno")), Value::Long(handle.errno() as i64));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"errstr")), Value::String(PhpString::from_bytes(handle.errstr().as_bytes())));
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"errno")),
+                Value::Long(handle.errno() as i64),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"errstr")),
+                Value::String(PhpString::from_bytes(handle.errstr().as_bytes())),
+            );
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         } else {
             Ok(Value::False)

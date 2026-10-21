@@ -1,7 +1,7 @@
 //! Port of timelib astro.c
 
-use super::tm2unixtime::update_ts;
 use super::Time;
+use super::tm2unixtime::update_ts;
 use std::f64::consts::PI;
 
 const RADEG: f64 = 180.0 / PI;
@@ -82,7 +82,13 @@ pub struct RiseSet {
 }
 
 /// timelib_astro_rise_set_altitude
-pub fn rise_set_altitude(t_loc: &mut Time, lon: f64, lat: f64, altit_in: f64, upper_limb: bool) -> RiseSet {
+pub fn rise_set_altitude(
+    t_loc: &mut Time,
+    lon: f64,
+    lat: f64,
+    altit_in: f64,
+    upper_limb: bool,
+) -> RiseSet {
     let mut altit = altit_in;
     let old_sse = t_loc.sse;
     t_loc.h = 12;
@@ -108,7 +114,14 @@ pub fn rise_set_altitude(t_loc: &mut Time, lon: f64, lat: f64, altit_in: f64, up
     if upper_limb {
         altit -= sradius;
     }
-    let mut res = RiseSet { rc: 0, h_rise: 0.0, h_set: 0.0, ts_rise: 0, ts_set: 0, ts_transit: 0 };
+    let mut res = RiseSet {
+        rc: 0,
+        h_rise: 0.0,
+        h_set: 0.0,
+        ts_rise: 0,
+        ts_set: 0,
+        ts_transit: 0,
+    };
     let cost = (sind(altit) - sind(lat) * sind(sdec)) / (cosd(lat) * cosd(sdec));
     res.ts_transit = (t_utc.sse as f64 + tsouth * 3600.0) as i64;
     if cost >= 1.0 {

@@ -6,7 +6,10 @@ use goro_core::value::Value;
 use goro_core::vm::Vm;
 
 use crate::mbfl::{self, EncNo, Encoding};
-use crate::mbfl::{MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR, MBFL_OUTPUTFILTER_ILLEGAL_MODE_ENTITY, MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG, MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE};
+use crate::mbfl::{
+    MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR, MBFL_OUTPUTFILTER_ILLEGAL_MODE_ENTITY,
+    MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG, MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LangNo {
@@ -35,26 +38,132 @@ pub struct Language {
 }
 
 pub static LANGUAGES: &[Language] = &[
-    Language { no: LangNo::Uni, name: "uni", short_name: "uni", aliases: &["universal"], mail_charset: EncNo::Utf8, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::Base64 },
-    Language { no: LangNo::Japanese, name: "Japanese", short_name: "ja", aliases: &[], mail_charset: EncNo::Iso2022jp, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::SevenBit },
-    Language { no: LangNo::Korean, name: "Korean", short_name: "ko", aliases: &[], mail_charset: EncNo::Iso2022kr, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::SevenBit },
-    Language { no: LangNo::SimplifiedChinese, name: "Simplified Chinese", short_name: "zh-cn", aliases: &[], mail_charset: EncNo::Hz, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::SevenBit },
-    Language { no: LangNo::TraditionalChinese, name: "Traditional Chinese", short_name: "zh-tw", aliases: &[], mail_charset: EncNo::Big5, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::English, name: "English", short_name: "en", aliases: &[], mail_charset: EncNo::Iso8859_1, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::German, name: "German", short_name: "de", aliases: &["Deutsch"], mail_charset: EncNo::Iso8859_15, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::Russian, name: "Russian", short_name: "ru", aliases: &[], mail_charset: EncNo::Koi8r, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::Ukrainian, name: "Ukrainian", short_name: "ua", aliases: &[], mail_charset: EncNo::Koi8u, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::Armenian, name: "Armenian", short_name: "hy", aliases: &[], mail_charset: EncNo::Armscii8, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::Turkish, name: "Turkish", short_name: "tr", aliases: &[], mail_charset: EncNo::Iso8859_9, mail_header_encoding: EncNo::Qprint, mail_body_encoding: EncNo::EightBit },
-    Language { no: LangNo::Neutral, name: "neutral", short_name: "neutral", aliases: &[], mail_charset: EncNo::Utf8, mail_header_encoding: EncNo::Base64, mail_body_encoding: EncNo::Base64 },
+    Language {
+        no: LangNo::Uni,
+        name: "uni",
+        short_name: "uni",
+        aliases: &["universal"],
+        mail_charset: EncNo::Utf8,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::Base64,
+    },
+    Language {
+        no: LangNo::Japanese,
+        name: "Japanese",
+        short_name: "ja",
+        aliases: &[],
+        mail_charset: EncNo::Iso2022jp,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::SevenBit,
+    },
+    Language {
+        no: LangNo::Korean,
+        name: "Korean",
+        short_name: "ko",
+        aliases: &[],
+        mail_charset: EncNo::Iso2022kr,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::SevenBit,
+    },
+    Language {
+        no: LangNo::SimplifiedChinese,
+        name: "Simplified Chinese",
+        short_name: "zh-cn",
+        aliases: &[],
+        mail_charset: EncNo::Hz,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::SevenBit,
+    },
+    Language {
+        no: LangNo::TraditionalChinese,
+        name: "Traditional Chinese",
+        short_name: "zh-tw",
+        aliases: &[],
+        mail_charset: EncNo::Big5,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::English,
+        name: "English",
+        short_name: "en",
+        aliases: &[],
+        mail_charset: EncNo::Iso8859_1,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::German,
+        name: "German",
+        short_name: "de",
+        aliases: &["Deutsch"],
+        mail_charset: EncNo::Iso8859_15,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::Russian,
+        name: "Russian",
+        short_name: "ru",
+        aliases: &[],
+        mail_charset: EncNo::Koi8r,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::Ukrainian,
+        name: "Ukrainian",
+        short_name: "ua",
+        aliases: &[],
+        mail_charset: EncNo::Koi8u,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::Armenian,
+        name: "Armenian",
+        short_name: "hy",
+        aliases: &[],
+        mail_charset: EncNo::Armscii8,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::Turkish,
+        name: "Turkish",
+        short_name: "tr",
+        aliases: &[],
+        mail_charset: EncNo::Iso8859_9,
+        mail_header_encoding: EncNo::Qprint,
+        mail_body_encoding: EncNo::EightBit,
+    },
+    Language {
+        no: LangNo::Neutral,
+        name: "neutral",
+        short_name: "neutral",
+        aliases: &[],
+        mail_charset: EncNo::Utf8,
+        mail_header_encoding: EncNo::Base64,
+        mail_body_encoding: EncNo::Base64,
+    },
 ];
 
 pub fn name2language(name: &[u8]) -> Option<&'static Language> {
     LANGUAGES
         .iter()
         .find(|l| l.name.as_bytes().eq_ignore_ascii_case(name))
-        .or_else(|| LANGUAGES.iter().find(|l| l.short_name.as_bytes().eq_ignore_ascii_case(name)))
-        .or_else(|| LANGUAGES.iter().find(|l| l.aliases.iter().any(|a| a.as_bytes().eq_ignore_ascii_case(name))))
+        .or_else(|| {
+            LANGUAGES
+                .iter()
+                .find(|l| l.short_name.as_bytes().eq_ignore_ascii_case(name))
+        })
+        .or_else(|| {
+            LANGUAGES.iter().find(|l| {
+                l.aliases
+                    .iter()
+                    .any(|a| a.as_bytes().eq_ignore_ascii_case(name))
+            })
+        })
 }
 
 pub fn no2language(no: LangNo) -> &'static Language {
@@ -63,11 +172,23 @@ pub fn no2language(no: LangNo) -> &'static Language {
 
 fn default_detect_order(lang: LangNo) -> &'static [EncNo] {
     match lang {
-        LangNo::Japanese => &[EncNo::Ascii, EncNo::Jis, EncNo::Utf8, EncNo::EucJp, EncNo::Sjis],
+        LangNo::Japanese => &[
+            EncNo::Ascii,
+            EncNo::Jis,
+            EncNo::Utf8,
+            EncNo::EucJp,
+            EncNo::Sjis,
+        ],
         LangNo::Korean => &[EncNo::Ascii, EncNo::Utf8, EncNo::EucKr, EncNo::Uhc],
         LangNo::TraditionalChinese => &[EncNo::Ascii, EncNo::Utf8, EncNo::EucTw, EncNo::Big5],
         LangNo::SimplifiedChinese => &[EncNo::Ascii, EncNo::Utf8, EncNo::EucCn, EncNo::Cp936],
-        LangNo::Russian => &[EncNo::Ascii, EncNo::Utf8, EncNo::Koi8r, EncNo::Cp1251, EncNo::Cp866],
+        LangNo::Russian => &[
+            EncNo::Ascii,
+            EncNo::Utf8,
+            EncNo::Koi8r,
+            EncNo::Cp1251,
+            EncNo::Cp866,
+        ],
         LangNo::Armenian => &[EncNo::Ascii, EncNo::Utf8, EncNo::Armscii8],
         LangNo::Turkish => &[EncNo::Ascii, EncNo::Utf8, EncNo::Cp1254, EncNo::Iso8859_9],
         LangNo::Ukrainian => &[EncNo::Ascii, EncNo::Utf8, EncNo::Koi8u],
@@ -158,7 +279,9 @@ fn ini_warning(vm: &mut Vm, msg: &str) {
     match MSG_CTX.with(|c| c.get()) {
         1 => {
             if vm.error_reporting & 2 != 0 {
-                vm.write_output(format!("\nWarning: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
+                vm.write_output(
+                    format!("\nWarning: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
+                );
             }
         }
         2 => vm.emit_warning(&format!("ini_set(): {}", msg)),
@@ -170,7 +293,9 @@ fn ini_deprecated(vm: &mut Vm, msg: &str) {
     match MSG_CTX.with(|c| c.get()) {
         1 => {
             if vm.error_reporting & 8192 != 0 {
-                vm.write_output(format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes());
+                vm.write_output(
+                    format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
+                );
             }
         }
         2 => vm.emit_deprecated(&format!("ini_set(): {}", msg)),
@@ -247,7 +372,8 @@ fn get_output_encoding_name(vm: &Vm) -> Vec<u8> {
 
 fn is_truthy_ini(v: &[u8]) -> bool {
     let s = String::from_utf8_lossy(v).to_ascii_lowercase();
-    matches!(s.trim(), "1" | "on" | "yes" | "true") || s.trim().parse::<i64>().map(|n| n != 0).unwrap_or(false)
+    matches!(s.trim(), "1" | "on" | "yes" | "true")
+        || s.trim().parse::<i64>().map(|n| n != 0).unwrap_or(false)
 }
 
 /// C: `php_mb_get_encoding_or_pass`
@@ -261,11 +387,21 @@ pub fn get_encoding_or_pass(name: &[u8]) -> Option<&'static Encoding> {
 
 /// php_mb_parse_encoding_list in INI context (arg_num == 0): warnings
 /// instead of exceptions. Returns None on failure.
-pub fn parse_encoding_list_ini(vm: &mut Vm, st: &MbState, value: &[u8]) -> Option<Vec<&'static Encoding>> {
+pub fn parse_encoding_list_ini(
+    vm: &mut Vm,
+    st: &MbState,
+    value: &[u8],
+) -> Option<Vec<&'static Encoding>> {
     match parse_encoding_list(st, value) {
         Ok(l) => Some(l),
         Err(bad) => {
-            ini_warning(vm, &format!("INI setting contains invalid encoding \"{}\"", String::from_utf8_lossy(&bad)));
+            ini_warning(
+                vm,
+                &format!(
+                    "INI setting contains invalid encoding \"{}\"",
+                    String::from_utf8_lossy(&bad)
+                ),
+            );
             None
         }
     }
@@ -320,11 +456,21 @@ pub fn parse_encoding_list(st: &MbState, value: &[u8]) -> Result<Vec<&'static En
 
 fn set_internal_encoding_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) {
     crate::mbregex::on_internal_encoding_ini(name);
-    let enc = if name.is_empty() { None } else { mbfl::name2encoding(name) };
+    let enc = if name.is_empty() {
+        None
+    } else {
+        mbfl::name2encoding(name)
+    };
     let enc = match enc {
         Some(e) => e,
         None => {
-            ini_warning(vm, &format!("Unknown encoding \"{}\" in ini setting", String::from_utf8_lossy(name)));
+            ini_warning(
+                vm,
+                &format!(
+                    "Unknown encoding \"{}\" in ini setting",
+                    String::from_utf8_lossy(name)
+                ),
+            );
             &mbfl::basic::ENC_UTF8
         }
     };
@@ -357,7 +503,13 @@ fn set_http_input_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) -> bool {
     }
 }
 
-fn apply_ini(vm: &mut Vm, st: &mut MbState, key: &str, value: Option<&[u8]>, startup: bool) -> bool {
+fn apply_ini(
+    vm: &mut Vm,
+    st: &mut MbState,
+    key: &str,
+    value: Option<&[u8]>,
+    startup: bool,
+) -> bool {
     match key {
         "mbstring.language" => {
             let v = value.unwrap_or(b"neutral");
@@ -506,7 +658,10 @@ pub fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     };
     // Core settings are stored before PHP runs the change hook
     let old = vm.constants.get(key).cloned();
-    if matches!(key_s, "internal_encoding" | "input_encoding" | "output_encoding" | "default_charset") {
+    if matches!(
+        key_s,
+        "internal_encoding" | "input_encoding" | "output_encoding" | "default_charset"
+    ) {
         vm.constants.insert(key.to_vec(), value.clone());
     }
     let mut st = MBSTRG.with(|s| std::mem::replace(&mut *s.borrow_mut(), MbState::new()));
@@ -566,7 +721,13 @@ pub fn sync(vm: &mut Vm) {
         st.initialized = true;
         // MINIT: register INI entries in order (with their default values)
         let lang = ini_raw(vm, "mbstring.language").filter(|v| !v.is_empty());
-        let _ = apply_ini(vm, &mut st, "mbstring.language", Some(lang.as_deref().unwrap_or(b"neutral")), true);
+        let _ = apply_ini(
+            vm,
+            &mut st,
+            "mbstring.language",
+            Some(lang.as_deref().unwrap_or(b"neutral")),
+            true,
+        );
         for key in [
             "mbstring.detect_order",
             "mbstring.http_input",
@@ -634,13 +795,22 @@ pub fn populate_current_detect_order_list(st: &mut MbState) {
     if !st.detect_order_list.is_empty() {
         st.current_detect_order_list = st.detect_order_list.clone();
     } else {
-        st.current_detect_order_list = st.default_detect_order_list.iter().filter_map(|no| mbfl::no2encoding(*no)).collect();
+        st.current_detect_order_list = st
+            .default_detect_order_list
+            .iter()
+            .filter_map(|no| mbfl::no2encoding(*no))
+            .collect();
     }
 }
 
 /// Helper: (replacement char, error mode) currently in effect
 pub fn illegal_settings() -> (u32, u8) {
-    with(|s| (s.current_filter_illegal_substchar, s.current_filter_illegal_mode))
+    with(|s| {
+        (
+            s.current_filter_illegal_substchar,
+            s.current_filter_illegal_mode,
+        )
+    })
 }
 
 pub fn current_internal_encoding() -> &'static Encoding {

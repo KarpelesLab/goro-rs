@@ -41,12 +41,23 @@ fn deep_clone_value_depth(val: &Value, depth: usize) -> Value {
 
 /// Validate that an argument is an array and throw TypeError if not.
 /// Returns Ok(()) if valid array (or reference to array), Err with VmError if not.
-fn require_array_arg(vm: &mut Vm, val: &Value, func_name: &str, param_name: &str, param_num: u32) -> Result<(), VmError> {
+fn require_array_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_name: &str,
+    param_num: u32,
+) -> Result<(), VmError> {
     require_array_arg_inner(vm, val, func_name, Some(param_name), param_num)
 }
 
 /// Like require_array_arg but without parameter name in error message (for variadic args)
-fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_num: u32) -> Result<(), VmError> {
+fn require_array_arg_variadic(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_num: u32,
+) -> Result<(), VmError> {
     require_array_arg_inner(vm, val, func_name, None, param_num)
 }
 
@@ -56,7 +67,9 @@ fn require_array_arg_variadic(vm: &mut Vm, val: &Value, func_name: &str, param_n
 /// would falsely classify integer literals 1, 2, 3 as resources.
 fn arg_type_name(val: &Value) -> String {
     match val {
-        Value::Long(n) if *n > 3 && goro_core::value::is_registered_resource(*n) => "resource".to_string(),
+        Value::Long(n) if *n > 3 && goro_core::value::is_registered_resource(*n) => {
+            "resource".to_string()
+        }
         Value::Reference(r) => arg_type_name(&r.borrow()),
         _ => Vm::value_type_name(val),
     }
@@ -71,12 +84,24 @@ fn php_value_string_eq(a: &Value, b: &Value) -> bool {
     a.to_php_string().as_bytes() == b.to_php_string().as_bytes()
 }
 
-fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name: Option<&str>, param_num: u32) -> Result<(), VmError> {
+fn require_array_arg_inner(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_name: Option<&str>,
+    param_num: u32,
+) -> Result<(), VmError> {
     let make_msg = |type_name: &str| -> String {
         if let Some(name) = param_name {
-            format!("{}(): Argument #{} (${}) must be of type array, {} given", func_name, param_num, name, type_name)
+            format!(
+                "{}(): Argument #{} (${}) must be of type array, {} given",
+                func_name, param_num, name, type_name
+            )
         } else {
-            format!("{}(): Argument #{} must be of type array, {} given", func_name, param_num, type_name)
+            format!(
+                "{}(): Argument #{} must be of type array, {} given",
+                func_name, param_num, type_name
+            )
         }
     };
     match val {
@@ -90,7 +115,10 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
                 let msg = make_msg(&type_name);
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                Err(VmError { message: msg, line: vm.current_line })
+                Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                })
             }
         }
         _ => {
@@ -98,7 +126,10 @@ fn require_array_arg_inner(vm: &mut Vm, val: &Value, func_name: &str, param_name
             let msg = make_msg(&type_name);
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -179,7 +210,8 @@ pub fn register(vm: &mut Vm) {
     {
         let mut cls = ClassEntry::new(b"RequestParseBodyException".to_vec());
         cls.parent = Some(b"Exception".to_vec());
-        vm.classes.insert(b"requestparsebodyexception".to_vec(), cls);
+        vm.classes
+            .insert(b"requestparsebodyexception".to_vec(), cls);
     }
     // Error handling
     vm.register_function(b"error_reporting", error_reporting);
@@ -540,21 +572,54 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_filter_register", stream_filter_register_fn);
     vm.register_function(b"stream_filter_remove", stream_filter_remove_fn);
     // Bucket brigade helpers used by user filters.
-    vm.register_function(b"stream_bucket_make_writeable", crate::stream_filters::stream_bucket_make_writeable);
-    vm.register_function(b"stream_bucket_append", crate::stream_filters::stream_bucket_append);
-    vm.register_function(b"stream_bucket_prepend", crate::stream_filters::stream_bucket_prepend);
-    vm.register_function(b"stream_bucket_new", crate::stream_filters::stream_bucket_new);
+    vm.register_function(
+        b"stream_bucket_make_writeable",
+        crate::stream_filters::stream_bucket_make_writeable,
+    );
+    vm.register_function(
+        b"stream_bucket_append",
+        crate::stream_filters::stream_bucket_append,
+    );
+    vm.register_function(
+        b"stream_bucket_prepend",
+        crate::stream_filters::stream_bucket_prepend,
+    );
+    vm.register_function(
+        b"stream_bucket_new",
+        crate::stream_filters::stream_bucket_new,
+    );
     // Filter direction constants.
-    vm.constants.insert(b"STREAM_FILTER_READ".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_READ));
-    vm.constants.insert(b"STREAM_FILTER_WRITE".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_WRITE));
-    vm.constants.insert(b"STREAM_FILTER_ALL".to_vec(), Value::Long(crate::stream_filters::STREAM_FILTER_ALL));
+    vm.constants.insert(
+        b"STREAM_FILTER_READ".to_vec(),
+        Value::Long(crate::stream_filters::STREAM_FILTER_READ),
+    );
+    vm.constants.insert(
+        b"STREAM_FILTER_WRITE".to_vec(),
+        Value::Long(crate::stream_filters::STREAM_FILTER_WRITE),
+    );
+    vm.constants.insert(
+        b"STREAM_FILTER_ALL".to_vec(),
+        Value::Long(crate::stream_filters::STREAM_FILTER_ALL),
+    );
     // User filter return code constants.
-    vm.constants.insert(b"PSFS_PASS_ON".to_vec(), Value::Long(crate::stream_filters::PSFS_PASS_ON));
-    vm.constants.insert(b"PSFS_FEED_ME".to_vec(), Value::Long(crate::stream_filters::PSFS_FEED_ME));
-    vm.constants.insert(b"PSFS_ERR_FATAL".to_vec(), Value::Long(crate::stream_filters::PSFS_ERR_FATAL));
-    vm.constants.insert(b"PSFS_FLAG_NORMAL".to_vec(), Value::Long(0));
-    vm.constants.insert(b"PSFS_FLAG_FLUSH_INC".to_vec(), Value::Long(1));
-    vm.constants.insert(b"PSFS_FLAG_FLUSH_CLOSE".to_vec(), Value::Long(2));
+    vm.constants.insert(
+        b"PSFS_PASS_ON".to_vec(),
+        Value::Long(crate::stream_filters::PSFS_PASS_ON),
+    );
+    vm.constants.insert(
+        b"PSFS_FEED_ME".to_vec(),
+        Value::Long(crate::stream_filters::PSFS_FEED_ME),
+    );
+    vm.constants.insert(
+        b"PSFS_ERR_FATAL".to_vec(),
+        Value::Long(crate::stream_filters::PSFS_ERR_FATAL),
+    );
+    vm.constants
+        .insert(b"PSFS_FLAG_NORMAL".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"PSFS_FLAG_FLUSH_INC".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"PSFS_FLAG_FLUSH_CLOSE".to_vec(), Value::Long(2));
     vm.register_function(b"stream_context_create", stream_context_create_fn);
     vm.register_function(b"stream_context_set_option", stream_context_set_option_fn);
     vm.register_function(b"stream_context_set_options", stream_context_set_option_fn);
@@ -582,7 +647,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"stream_socket_recvfrom", stream_socket_recvfrom_fn);
     vm.register_function(b"stream_socket_sendto", stream_socket_sendto_fn);
     vm.register_function(b"stream_socket_shutdown", stream_socket_shutdown_fn);
-    vm.register_function(b"stream_socket_enable_crypto", stream_socket_enable_crypto_fn);
+    vm.register_function(
+        b"stream_socket_enable_crypto",
+        stream_socket_enable_crypto_fn,
+    );
     vm.register_function(b"headers_list", headers_list_fn);
     vm.register_function(b"dir", dir_fn);
     vm.register_function(b"popen", popen_fn);
@@ -634,7 +702,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"time_sleep_until", time_sleep_until_fn);
     vm.register_function(b"socket_get_status", stream_get_meta_data_fn); // alias
     vm.register_function(b"set_file_buffer", set_file_buffer_fn);
-    vm.register_function(b"stream_resolve_include_path", stream_resolve_include_path_fn);
+    vm.register_function(
+        b"stream_resolve_include_path",
+        stream_resolve_include_path_fn,
+    );
     vm.register_function(b"stream_supports_lock", stream_supports_lock_fn);
     vm.register_function(b"stream_bucket_new", stream_bucket_new_fn);
 
@@ -674,7 +745,10 @@ fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             if let Some(err) = validate_exception_handler_callback(vm, handler) {
                 let exc = vm.throw_type_error(err.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: err, line: vm.current_line });
+                return Err(VmError {
+                    message: err,
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -691,37 +765,59 @@ fn set_exception_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 /// Validate a callback argument for set_exception_handler. Returns Some(error message)
 /// if the callback is invalid (PHP throws TypeError); None if it looks OK.
 fn validate_exception_handler_callback(vm: &Vm, callback: &Value) -> Option<String> {
-    let base = "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, ";
+    let base =
+        "set_exception_handler(): Argument #1 ($callback) must be a valid callback or null, ";
     match callback {
         Value::String(s) => {
             let name = s.as_bytes();
             if name.is_empty() {
-                return Some(format!("{}function \"\" not found or invalid function name", base));
+                return Some(format!(
+                    "{}function \"\" not found or invalid function name",
+                    base
+                ));
             }
             // Class::method form
             if let Some(pos) = name.windows(2).position(|w| w == b"::") {
                 let class_part = &name[..pos];
                 let method_part = &name[pos + 2..];
-                let class_lower: Vec<u8> = class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let method_lower: Vec<u8> = method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let class_lower: Vec<u8> =
+                    class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let method_lower: Vec<u8> =
+                    method_part.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some(class) = vm.classes.get(&class_lower) {
                     if class.get_method(&method_lower).is_some() {
                         return None;
                     }
-                    return Some(format!("{}class {} does not have a method \"{}\"",
-                        base, String::from_utf8_lossy(class_part), String::from_utf8_lossy(method_part)));
+                    return Some(format!(
+                        "{}class {} does not have a method \"{}\"",
+                        base,
+                        String::from_utf8_lossy(class_part),
+                        String::from_utf8_lossy(method_part)
+                    ));
                 }
-                return Some(format!("{}class \"{}\" not found",
-                    base, String::from_utf8_lossy(class_part)));
+                return Some(format!(
+                    "{}class \"{}\" not found",
+                    base,
+                    String::from_utf8_lossy(class_part)
+                ));
             }
             let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") || name_lower.starts_with(b"__bound_closure_") || name_lower.starts_with(b"__closure_fcc_") {
+            if name_lower.starts_with(b"__closure_")
+                || name_lower.starts_with(b"__arrow_")
+                || name_lower.starts_with(b"__bound_closure_")
+                || name_lower.starts_with(b"__closure_fcc_")
+            {
                 return None;
             }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
+            {
                 return None;
             }
-            Some(format!("{}function \"{}\" not found or invalid function name", base, String::from_utf8_lossy(name)))
+            Some(format!(
+                "{}function \"{}\" not found or invalid function name",
+                base,
+                String::from_utf8_lossy(name)
+            ))
         }
         Value::Array(arr) => {
             let arr_borrow = arr.borrow();
@@ -733,42 +829,74 @@ fn validate_exception_handler_callback(vm: &Vm, callback: &Value) -> Option<Stri
             // First member: object or class name
             let class_lower = match &vals[0] {
                 Value::Object(o) => {
-                    let cn: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let cn: Vec<u8> = o
+                        .borrow()
+                        .class_name
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     cn
                 }
                 Value::String(s) => {
-                    let cn: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let cn: Vec<u8> = s
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     if cn.is_empty() {
                         return Some(format!("{}class \"\" not found", base));
                     }
                     if !vm.classes.contains_key(&cn) {
-                        return Some(format!("{}class \"{}\" not found", base, s.to_string_lossy()));
+                        return Some(format!(
+                            "{}class \"{}\" not found",
+                            base,
+                            s.to_string_lossy()
+                        ));
                     }
                     cn
                 }
-                _ => return Some(format!("{}first array member is not a valid class name or object", base)),
+                _ => {
+                    return Some(format!(
+                        "{}first array member is not a valid class name or object",
+                        base
+                    ));
+                }
             };
             // Second member: method name
             match &vals[1] {
                 Value::String(s) => {
-                    let method_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let method_lower: Vec<u8> = s
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     if let Some(cd) = vm.classes.get(&class_lower) {
                         if cd.get_method(&method_lower).is_some() {
                             return None;
                         }
                         // __call/__callStatic act as catch-alls — method is callable.
-                        if cd.get_method(b"__call").is_some() || cd.get_method(b"__callstatic").is_some() {
+                        if cd.get_method(b"__call").is_some()
+                            || cd.get_method(b"__callstatic").is_some()
+                        {
                             return None;
                         }
                     }
-                    Some(format!("{}class {} does not have a method \"{}\"",
-                        base, String::from_utf8_lossy(&class_lower), s.to_string_lossy()))
+                    Some(format!(
+                        "{}class {} does not have a method \"{}\"",
+                        base,
+                        String::from_utf8_lossy(&class_lower),
+                        s.to_string_lossy()
+                    ))
                 }
                 _ => Some(format!("{}second array member is not a valid method", base)),
             }
         }
         Value::Object(_) => None, // closures and __invoke objects are callable
-        _ => Some(format!("{}must be of type ?callable, {} given", base, Vm::value_type_name(callback))),
+        _ => Some(format!(
+            "{}must be of type ?callable, {} given",
+            base,
+            Vm::value_type_name(callback)
+        )),
     }
 }
 
@@ -834,9 +962,7 @@ fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 vm.record_last_error(1024, &message, call_line);
                 let notice = format!(
                     "\nNotice: {} in {} on line {}\n",
-                    message,
-                    vm.current_file,
-                    call_line
+                    message, vm.current_file, call_line
                 );
                 vm.write_output(notice.as_bytes());
             }
@@ -870,10 +996,16 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 _ => "unknown",
             };
-            let msg = format!("define(): Argument #1 ($constant_name) must be of type string, {} given", type_name);
+            let msg = format!(
+                "define(): Argument #1 ($constant_name) must be of type string, {} given",
+                type_name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => {}
     }
@@ -886,13 +1018,19 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "define(): Argument #1 ($constant_name) cannot be a class constant";
         let exc = vm.create_exception(b"ValueError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
     let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
     if name_upper == b"TRUE" || name_upper == b"FALSE" || name_upper == b"NULL" {
         let name_str = name.to_string_lossy();
-        vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
+        vm.emit_warning(&format!(
+            "Constant {} already defined, this will be an error in PHP 9",
+            name_str
+        ));
         return Ok(Value::False);
     }
     // Normalize namespace part (lowercase) while keeping constant name case-sensitive
@@ -900,7 +1038,10 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check if constant is already defined
     if vm.constants.contains_key(&normalized) {
         let name_str = name.to_string_lossy();
-        vm.emit_warning(&format!("Constant {} already defined, this will be an error in PHP 9", name_str));
+        vm.emit_warning(&format!(
+            "Constant {} already defined, this will be an error in PHP 9",
+            name_str
+        ));
         return Ok(Value::False);
     }
     vm.constants.insert(normalized, value);
@@ -913,13 +1054,20 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check for class constants (Class::CONST)
     if let Some(pos) = name_str.find("::") {
         let class_name = &name_str[..pos];
-        let const_name = &name_str[pos+2..];
+        let const_name = &name_str[pos + 2..];
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
-        let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        let class_lower: Vec<u8> = class_name_stripped
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
             vm.try_autoload_class(class_name_stripped.as_bytes());
             if vm.current_exception.is_some() {
-                return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                return Err(VmError {
+                    message: "Uncaught exception".into(),
+                    line: vm.current_line,
+                });
             }
             if !vm.classes.contains_key(&class_lower) {
                 let msg = format!("Class \"{}\" not found", class_name_stripped);
@@ -936,7 +1084,8 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
                 use goro_core::object::Visibility;
                 if meta.visibility != Visibility::Public {
-                    let caller_lower: Option<Vec<u8>> = vm.current_class_scope()
+                    let caller_lower: Option<Vec<u8>> = vm
+                        .current_class_scope()
                         .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
                     let target_lower = class_lower.clone();
                     let accessible = match (&meta.visibility, &caller_lower) {
@@ -949,7 +1098,11 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         _ => false,
                     };
                     if !accessible {
-                        let vis_str = if meta.visibility == Visibility::Private { "private" } else { "protected" };
+                        let vis_str = if meta.visibility == Visibility::Private {
+                            "private"
+                        } else {
+                            "protected"
+                        };
                         let class_display = String::from_utf8_lossy(&class.name).to_string();
                         let msg = format!(
                             "Cannot access {} constant {}::{}",
@@ -968,7 +1121,8 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !meta.attributes.is_empty() {
                         // GH-17711: guard self-referential deprecation messages.
                         // Canonicalize through class.name so aliases share a key.
-                        let canonical_class_lower: Vec<u8> = class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let canonical_class_lower: Vec<u8> =
+                            class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                         let mut guard_key = canonical_class_lower;
                         guard_key.extend_from_slice(b"::");
                         guard_key.extend_from_slice(const_name.as_bytes());
@@ -977,7 +1131,8 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             let dep_result = vm.get_deprecated_message(&meta.attributes);
                             vm.deprecation_in_progress.remove(&guard_key);
                             if let Some(custom_msg) = dep_result {
-                                let class_display = String::from_utf8_lossy(&class.name).to_string();
+                                let class_display =
+                                    String::from_utf8_lossy(&class.name).to_string();
                                 let prefix = format!("Constant {}::{}", class_display, const_name);
                                 let msg = vm.format_deprecated_message(&prefix, &custom_msg);
                                 vm.emit_user_deprecated_at(&msg, vm.current_line);
@@ -1035,7 +1190,10 @@ fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         let msg = "func_num_args() must be called from a function context";
         let exc = vm.create_exception(b"Error", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg.to_string(), line: vm.current_line })
+        Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        })
     }
 }
 fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -1051,24 +1209,34 @@ fn func_get_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         let msg = "func_get_args() cannot be called from the global scope";
         let exc = vm.create_exception(b"Error", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg.to_string(), line: vm.current_line })
+        Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        })
     }
 }
 fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let index = args.first().unwrap_or(&Value::Null).to_long();
     // PHP 8.0+: validate argument before checking call stack
     if index < 0 {
-        let msg = "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0".to_string();
+        let msg = "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0"
+            .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     if let Some((_name, _file, _line, caller_args, _is_method)) = vm.call_stack.last() {
         if index as usize >= caller_args.len() {
             let msg = "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         } else {
             Ok(caller_args[index as usize].clone())
         }
@@ -1077,18 +1245,22 @@ fn func_get_arg(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "func_get_arg() cannot be called from the global scope";
         let exc = vm.create_exception(b"Error", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg.to_string(), line: vm.current_line })
+        Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        })
     }
 }
 fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let raw = name.as_bytes();
     // Strip leading backslash for namespace resolution
-    let stripped = if raw.first() == Some(&b'\\') { &raw[1..] } else { raw };
-    let name_lower: Vec<u8> = stripped
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+    let stripped = if raw.first() == Some(&b'\\') {
+        &raw[1..]
+    } else {
+        raw
+    };
+    let name_lower: Vec<u8> = stripped.iter().map(|b| b.to_ascii_lowercase()).collect();
     // "Class::method" is not a function
     if name_lower.contains(&b':') {
         return Ok(Value::False);
@@ -1100,7 +1272,10 @@ fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 fn is_closure_bytes(b: &[u8]) -> bool {
-    b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_")
+    b.starts_with(b"__closure_")
+        || b.starts_with(b"__arrow_")
+        || b.starts_with(b"__bound_closure_")
+        || b.starts_with(b"__closure_fcc_")
 }
 
 /// Resolve a class name for a callable (zend_is_callable_check_class):
@@ -1109,19 +1284,37 @@ fn callable_check_class(vm: &mut Vm, name: &[u8]) -> Result<Vec<u8>, String> {
     let lower = lower_bytes(name);
     let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
     match lower.as_slice() {
-        b"self" => return scope.ok_or_else(|| "cannot access \"self\" when no class scope is active".to_string()),
+        b"self" => {
+            return scope
+                .ok_or_else(|| "cannot access \"self\" when no class scope is active".to_string());
+        }
         b"parent" => {
-            let sc = scope.ok_or_else(|| "cannot access \"parent\" when no class scope is active".to_string())?;
-            return vm.classes.get(&sc).and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
-                .ok_or_else(|| "cannot access \"parent\" when current class scope has no parent".to_string());
+            let sc = scope.ok_or_else(|| {
+                "cannot access \"parent\" when no class scope is active".to_string()
+            })?;
+            return vm
+                .classes
+                .get(&sc)
+                .and_then(|c| c.parent.as_ref().map(|p| lower_bytes(p)))
+                .ok_or_else(|| {
+                    "cannot access \"parent\" when current class scope has no parent".to_string()
+                });
         }
         b"static" => {
-            return vm.called_class_stack.last().map(|c| lower_bytes(c))
-                .ok_or_else(|| "cannot access \"static\" when no class scope is active".to_string());
+            return vm
+                .called_class_stack
+                .last()
+                .map(|c| lower_bytes(c))
+                .ok_or_else(|| {
+                    "cannot access \"static\" when no class scope is active".to_string()
+                });
         }
         _ => {}
     }
-    let stripped = lower.strip_prefix(b"\\").map(|s| s.to_vec()).unwrap_or(lower);
+    let stripped = lower
+        .strip_prefix(b"\\")
+        .map(|s| s.to_vec())
+        .unwrap_or(lower);
     if vm.classes.contains_key(&stripped) || vm.is_known_builtin_class(&stripped) {
         return Ok(stripped);
     }
@@ -1129,21 +1322,44 @@ fn callable_check_class(vm: &mut Vm, name: &[u8]) -> Result<Vec<u8>, String> {
     if vm.classes.contains_key(&stripped) {
         return Ok(stripped);
     }
-    Err(format!("class \"{}\" not found", String::from_utf8_lossy(name)))
+    Err(format!(
+        "class \"{}\" not found",
+        String::from_utf8_lossy(name)
+    ))
 }
 
 /// Check a method of `class_lower` for callability (zend_is_callable_check_func).
-fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_object: bool) -> Result<(), String> {
+fn callable_check_method(
+    vm: &mut Vm,
+    class_lower: &[u8],
+    method: &[u8],
+    has_object: bool,
+) -> Result<(), String> {
     let mlower = lower_bytes(method);
-    let display = vm.classes.get(class_lower).map(|c| c.name.clone())
+    let display = vm
+        .classes
+        .get(class_lower)
+        .map(|c| c.name.clone())
         .unwrap_or_else(|| vm.builtin_canonical_name(class_lower).into_bytes());
     let disp = goro_core::value::display_class_name(&display);
     let mname = String::from_utf8_lossy(method).to_string();
     let scope = vm.current_class_scope().map(|s| lower_bytes(&s));
-    let info = vm.classes.get(class_lower).and_then(|c| c.get_method(&mlower).map(|m| {
-        (m.visibility, lower_bytes(&m.declaring_class), m.is_static, m.is_abstract)
-    }));
-    let has_magic = |vm: &Vm, name: &[u8]| vm.classes.get(class_lower).map(|c| c.get_method(name).is_some()).unwrap_or(false);
+    let info = vm.classes.get(class_lower).and_then(|c| {
+        c.get_method(&mlower).map(|m| {
+            (
+                m.visibility,
+                lower_bytes(&m.declaring_class),
+                m.is_static,
+                m.is_abstract,
+            )
+        })
+    });
+    let has_magic = |vm: &Vm, name: &[u8]| {
+        vm.classes
+            .get(class_lower)
+            .map(|c| c.get_method(name).is_some())
+            .unwrap_or(false)
+    };
     match info {
         Some((vis, decl, is_static, is_abstract)) => {
             let accessible = match vis {
@@ -1151,7 +1367,14 @@ fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_obj
                 Visibility::Private => scope.as_ref() == Some(&decl),
                 Visibility::Protected => {
                     let root = vm.find_root_declaring_class_for_method(&decl, &mlower);
-                    scope.as_ref().map(|sc| *sc == root || vm.class_extends(sc, &root) || vm.class_extends(&root, sc)).unwrap_or(false)
+                    scope
+                        .as_ref()
+                        .map(|sc| {
+                            *sc == root
+                                || vm.class_extends(sc, &root)
+                                || vm.class_extends(&root, sc)
+                        })
+                        .unwrap_or(false)
                 }
             };
             if !accessible {
@@ -1161,7 +1384,11 @@ fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_obj
                 if !has_object && has_magic(vm, b"__callstatic") {
                     return Ok(());
                 }
-                let v = if vis == Visibility::Private { "private" } else { "protected" };
+                let v = if vis == Visibility::Private {
+                    "private"
+                } else {
+                    "protected"
+                };
                 return Err(format!("cannot access {} method {}::{}()", v, disp, mname));
             }
             if is_abstract {
@@ -1169,9 +1396,15 @@ fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_obj
             }
             if !is_static && !has_object {
                 // Allowed only with a compatible $this in the calling scope.
-                let compatible = scope.as_ref().map(|sc| sc.as_slice() == class_lower || vm.class_extends(sc, class_lower)).unwrap_or(false);
+                let compatible = scope
+                    .as_ref()
+                    .map(|sc| sc.as_slice() == class_lower || vm.class_extends(sc, class_lower))
+                    .unwrap_or(false);
                 if !compatible {
-                    return Err(format!("non-static method {}::{}() cannot be called statically", disp, mname));
+                    return Err(format!(
+                        "non-static method {}::{}() cannot be called statically",
+                        disp, mname
+                    ));
                 }
             }
             Ok(())
@@ -1179,14 +1412,25 @@ fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_obj
         None => {
             if !vm.classes.contains_key(class_lower) {
                 // Builtin class: consult the builtin method table.
-                let exists = method_exists(vm, &[Value::String(PhpString::from_vec(display.clone())), Value::String(PhpString::from_bytes(method))])
-                    .map(|v| v.is_truthy()).unwrap_or(false);
+                let exists = method_exists(
+                    vm,
+                    &[
+                        Value::String(PhpString::from_vec(display.clone())),
+                        Value::String(PhpString::from_bytes(method)),
+                    ],
+                )
+                .map(|v| v.is_truthy())
+                .unwrap_or(false);
                 if exists {
-                    let throwable = class_lower == b"exception" || class_lower == b"error"
+                    let throwable = class_lower == b"exception"
+                        || class_lower == b"error"
                         || goro_core::vm::is_builtin_subclass(class_lower, b"exception")
                         || goro_core::vm::is_builtin_subclass(class_lower, b"error");
                     if !has_object && throwable {
-                        return Err(format!("non-static method {}::{}() cannot be called statically", disp, mname));
+                        return Err(format!(
+                            "non-static method {}::{}() cannot be called statically",
+                            disp, mname
+                        ));
                     }
                     return Ok(());
                 }
@@ -1197,13 +1441,20 @@ fn callable_check_method(vm: &mut Vm, class_lower: &[u8], method: &[u8], has_obj
             if has_magic(vm, b"__callstatic") {
                 return Ok(());
             }
-            Err(format!("class {} does not have a method \"{}\"", disp, mname))
+            Err(format!(
+                "class {} does not have a method \"{}\"",
+                disp, mname
+            ))
         }
     }
 }
 
 /// zend_is_callable_ex(): returns (callable, callable_name, error).
-pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bool, Vec<u8>, Option<String>) {
+pub(crate) fn check_callable(
+    vm: &mut Vm,
+    val: &Value,
+    syntax_only: bool,
+) -> (bool, Vec<u8>, Option<String>) {
     let val = val.deref();
     match &val {
         Value::String(s) => {
@@ -1214,10 +1465,14 @@ pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bo
             if syntax_only {
                 return (true, raw, None);
             }
-            let stripped: Vec<u8> = raw.strip_prefix(b"\\").map(|r| r.to_vec()).unwrap_or_else(|| raw.clone());
+            let stripped: Vec<u8> = raw
+                .strip_prefix(b"\\")
+                .map(|r| r.to_vec())
+                .unwrap_or_else(|| raw.clone());
             if let Some(pos) = stripped.windows(2).position(|w| w == b"::") {
                 let (cls, m) = (&stripped[..pos], &stripped[pos + 2..]);
-                let res = callable_check_class(vm, cls).and_then(|cl| callable_check_method(vm, &cl, m, false));
+                let res = callable_check_class(vm, cls)
+                    .and_then(|cl| callable_check_method(vm, &cl, m, false));
                 return match res {
                     Ok(()) => (true, raw, None),
                     Err(e) => (false, raw, Some(e)),
@@ -1227,14 +1482,21 @@ pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bo
             if vm.functions.contains_key(&lower) || vm.user_functions.contains_key(&lower) {
                 (true, raw, None)
             } else {
-                let e = format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(&raw));
+                let e = format!(
+                    "function \"{}\" not found or invalid function name",
+                    String::from_utf8_lossy(&raw)
+                );
                 (false, raw, Some(e))
             }
         }
         Value::Array(arr) => {
             let (first, second, len) = {
                 let a = arr.borrow();
-                (a.get(&ArrayKey::Int(0)).map(|v| v.deref()), a.get(&ArrayKey::Int(1)).map(|v| v.deref()), a.len())
+                (
+                    a.get(&ArrayKey::Int(0)).map(|v| v.deref()),
+                    a.get(&ArrayKey::Int(1)).map(|v| v.deref()),
+                    a.len(),
+                )
             };
             // Closure-with-captures representation.
             if let Some(Value::String(f)) = arr.borrow().values().next().map(|v| v.deref()) {
@@ -1243,26 +1505,52 @@ pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bo
                 }
             }
             if len != 2 {
-                return (false, b"Array".to_vec(), Some("array callback must have exactly two members".to_string()));
+                return (
+                    false,
+                    b"Array".to_vec(),
+                    Some("array callback must have exactly two members".to_string()),
+                );
             }
             let (Some(first), Some(second)) = (first, second) else {
-                return (false, b"Array".to_vec(), Some("array callback has to contain indices 0 and 1".to_string()));
+                return (
+                    false,
+                    b"Array".to_vec(),
+                    Some("array callback has to contain indices 0 and 1".to_string()),
+                );
             };
             let method = match &second {
                 Value::String(m) => m.as_bytes().to_vec(),
                 _ => {
                     let name = match &first {
-                        Value::Object(o) => { let mut n = o.borrow().class_name.clone(); n.extend_from_slice(b"::"); n }
-                        Value::String(c) => { let mut n = c.as_bytes().to_vec(); n.extend_from_slice(b"::"); n }
+                        Value::Object(o) => {
+                            let mut n = o.borrow().class_name.clone();
+                            n.extend_from_slice(b"::");
+                            n
+                        }
+                        Value::String(c) => {
+                            let mut n = c.as_bytes().to_vec();
+                            n.extend_from_slice(b"::");
+                            n
+                        }
                         _ => b"Array".to_vec(),
                     };
-                    return (false, name, Some("second array member is not a valid method".to_string()));
+                    return (
+                        false,
+                        name,
+                        Some("second array member is not a valid method".to_string()),
+                    );
                 }
             };
             let (class_bytes, has_object) = match &first {
                 Value::Object(o) => (o.borrow().class_name.clone(), true),
                 Value::String(c) => (c.as_bytes().to_vec(), false),
-                _ => return (false, b"Array".to_vec(), Some("first array member is not a valid class name or object".to_string())),
+                _ => {
+                    return (
+                        false,
+                        b"Array".to_vec(),
+                        Some("first array member is not a valid class name or object".to_string()),
+                    );
+                }
             };
             let mut name = goro_core::value::display_class_name(&class_bytes).into_bytes();
             if has_object {
@@ -1298,7 +1586,11 @@ pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bo
             if cl == b"closure" {
                 return (true, b"Closure::__invoke".to_vec(), None);
             }
-            let has_invoke = vm.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false);
+            let has_invoke = vm
+                .classes
+                .get(&cl)
+                .map(|c| c.get_method(b"__invoke").is_some())
+                .unwrap_or(false);
             if has_invoke || syntax_only && false {
                 (true, name, None)
             } else {
@@ -1319,15 +1611,23 @@ pub(crate) fn check_callable(vm: &mut Vm, val: &Value, syntax_only: bool) -> (bo
 fn validate_callback_arg(vm: &mut Vm, func: &str, cb: &Value) -> Result<(), VmError> {
     let (ok, _, err) = check_callable(vm, cb, false);
     if vm.current_exception.is_some() {
-        return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+        return Err(VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        });
     }
     if !ok {
         if let Some(e) = err {
-            let definite = e.starts_with("class \"") || e.starts_with("first array member")
-                || e.starts_with("second array member") || e.starts_with("function \"")
+            let definite = e.starts_with("class \"")
+                || e.starts_with("first array member")
+                || e.starts_with("second array member")
+                || e.starts_with("function \"")
                 || e.starts_with("array callback");
             if definite {
-                let msg = format!("{}(): Argument #1 ($callback) must be a valid callback, {}", func, e);
+                let msg = format!(
+                    "{}(): Argument #1 ($callback) must be a valid callback, {}",
+                    func, e
+                );
                 return Err(throw_type_error_msg(vm, msg));
             }
         }
@@ -1354,12 +1654,25 @@ fn is_callable(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let syntax_only = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let (ok, name, _) = check_callable(vm, &val, syntax_only);
     if vm.current_exception.is_some() {
-        return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+        return Err(VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        });
     }
-    set_callable_name_and_return(vm, args, Some(name), if ok { Value::True } else { Value::False })
+    set_callable_name_and_return(
+        vm,
+        args,
+        Some(name),
+        if ok { Value::True } else { Value::False },
+    )
 }
 
-fn set_callable_name_and_return(_vm: &mut Vm, args: &[Value], callable_name: Option<Vec<u8>>, result: Value) -> Result<Value, VmError> {
+fn set_callable_name_and_return(
+    _vm: &mut Vm,
+    args: &[Value],
+    callable_name: Option<Vec<u8>>,
+    result: Value,
+) -> Result<Value, VmError> {
     // Set the callable name in the third argument if provided (pass by reference)
     if let Some(name_bytes) = callable_name {
         if let Some(name_ref) = args.get(2) {
@@ -1380,7 +1693,10 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         if let Some(msg) = Vm::forbidden_dynamic_call(s.as_bytes()) {
             let exc = vm.create_exception(b"Error", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: format!("Uncaught Error: {}", msg), line: vm.current_line });
+            return Err(VmError {
+                message: format!("Uncaught Error: {}", msg),
+                line: vm.current_line,
+            });
         }
     }
     let call_args: Vec<Value> = args[1..].to_vec();
@@ -1395,16 +1711,23 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         drop(arr_borrow);
         if vals.len() >= 2 {
             let method_name = vals[1].to_php_string();
-            let method_lower: Vec<u8> = method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            let method_lower: Vec<u8> = method_name
+                .as_bytes()
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
 
             // Check if first element is a class name (string) or object
             match &vals[0] {
                 Value::String(class_name) => {
                     let class_bytes = class_name.as_bytes();
                     // Check if this is a closure with captures (not a class::method call)
-                    if !class_bytes.starts_with(b"__closure_") && !class_bytes.starts_with(b"__arrow_") {
+                    if !class_bytes.starts_with(b"__closure_")
+                        && !class_bytes.starts_with(b"__arrow_")
+                    {
                         // Static method call: ['ClassName', 'method']
-                        let class_lower: Vec<u8> = class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let class_lower: Vec<u8> =
+                            class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
                         // Check for "Class::method" in the class name itself
                         if let Some(pos) = class_lower.iter().position(|&b| b == b':') {
                             if pos + 1 < class_lower.len() && class_lower[pos + 1] == b':' {
@@ -1413,17 +1736,28 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 if let Some(class) = vm.classes.get(real_class).cloned() {
                                     if let Some(method) = class.methods.get(real_method) {
                                         let mut op = method.op_array.clone();
-                                        if op.attributes.is_empty() && !method.attributes.is_empty() {
+                                        if op.attributes.is_empty() && !method.attributes.is_empty()
+                                        {
                                             op.attributes = method.attributes.clone();
                                         }
-                                        let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                        let display_fallback = format!(
+                                            "{}::{}",
+                                            String::from_utf8_lossy(&class.name),
+                                            String::from_utf8_lossy(&method.name)
+                                        );
                                         let line = vm.current_line;
-                                        vm.check_user_function_deprecation(&op, &display_fallback, line);
+                                        vm.check_user_function_deprecation(
+                                            &op,
+                                            &display_fallback,
+                                            line,
+                                        );
                                         let declaring = method.declaring_class.clone();
                                         let class_name_orig = class.name.clone();
                                         vm.called_class_stack.push(class_name_orig);
                                         vm.push_class_scope(declaring);
-                                        let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                        let result = vm.execute_fn_with_named_args(
+                                            &op, call_args, named_args, None,
+                                        );
                                         vm.pop_class_scope();
                                         vm.called_class_stack.pop();
                                         return result;
@@ -1436,14 +1770,25 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         // Check for forwarding calls (parent::, self:: in array syntax)
                         let is_forwarding = class_lower == b"parent" || class_lower == b"self";
                         let resolved_class_lower = if class_lower == b"parent" {
-                            vm.get_current_class_name().as_ref()
+                            vm.get_current_class_name()
+                                .as_ref()
                                 .and_then(|scope| vm.classes.get(scope))
                                 .and_then(|c| c.parent.clone())
-                                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                                .map(|p| {
+                                    p.iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect::<Vec<u8>>()
+                                })
                                 .unwrap_or(class_lower.clone())
                         } else if class_lower == b"self" {
-                            vm.get_current_class_name().as_ref().cloned()
-                                .or_else(|| vm.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()))
+                            vm.get_current_class_name()
+                                .as_ref()
+                                .cloned()
+                                .or_else(|| {
+                                    vm.called_class_stack
+                                        .last()
+                                        .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                })
                                 .unwrap_or(class_lower.clone())
                         } else {
                             class_lower.clone()
@@ -1454,16 +1799,32 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 // Check visibility
                                 let accessible = match method.visibility {
                                     goro_core::object::Visibility::Public => true,
-                                    goro_core::object::Visibility::Protected | goro_core::object::Visibility::Private => {
+                                    goro_core::object::Visibility::Protected
+                                    | goro_core::object::Visibility::Private => {
                                         if let Some(caller) = vm.current_class_scope() {
-                                            let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            if method.visibility == goro_core::object::Visibility::Private {
+                                            let caller_lower: Vec<u8> = caller
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            let declaring_lower: Vec<u8> = method
+                                                .declaring_class
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            if method.visibility
+                                                == goro_core::object::Visibility::Private
+                                            {
                                                 caller_lower == declaring_lower
                                             } else {
                                                 caller_lower == declaring_lower
-                                                    || vm.class_extends(&caller_lower, &declaring_lower)
-                                                    || vm.class_extends(&declaring_lower, &caller_lower)
+                                                    || vm.class_extends(
+                                                        &caller_lower,
+                                                        &declaring_lower,
+                                                    )
+                                                    || vm.class_extends(
+                                                        &declaring_lower,
+                                                        &caller_lower,
+                                                    )
                                             }
                                         } else {
                                             false
@@ -1475,9 +1836,17 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                     if op.attributes.is_empty() && !method.attributes.is_empty() {
                                         op.attributes = method.attributes.clone();
                                     }
-                                    let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                    let display_fallback = format!(
+                                        "{}::{}",
+                                        String::from_utf8_lossy(&class.name),
+                                        String::from_utf8_lossy(&method.name)
+                                    );
                                     let line = vm.current_line;
-                                    vm.check_user_function_deprecation(&op, &display_fallback, line);
+                                    vm.check_user_function_deprecation(
+                                        &op,
+                                        &display_fallback,
+                                        line,
+                                    );
                                     let declaring = method.declaring_class.clone();
                                     if is_forwarding {
                                         // Forward: keep current called_class
@@ -1485,7 +1854,9 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                         vm.called_class_stack.push(class.name.clone());
                                     }
                                     vm.push_class_scope(declaring);
-                                    let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                                    let result = vm.execute_fn_with_named_args(
+                                        &op, call_args, named_args, None,
+                                    );
                                     vm.pop_class_scope();
                                     if !is_forwarding {
                                         vm.called_class_stack.pop();
@@ -1502,18 +1873,36 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                     args_array.push(arg.clone());
                                 }
                                 let magic_args = vec![
-                                    Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
-                                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
+                                    Value::String(PhpString::from_vec(
+                                        method_name.as_bytes().to_vec(),
+                                    )),
+                                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                                        args_array,
+                                    ))),
                                 ];
-                                return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
+                                return vm.execute_fn_with_named_args(
+                                    &op,
+                                    magic_args,
+                                    vec![],
+                                    None,
+                                );
                             }
                             return Ok(Value::Null);
                         }
                         // Extension-provided static methods of built-in classes.
-                        if let Some((native, h)) = vm.find_native_class_handler(&resolved_class_lower) {
+                        if let Some((native, h)) =
+                            vm.find_native_class_handler(&resolved_class_lower)
+                        {
                             if (h.has_method)(&native, &method_lower, true) {
                                 let called = class_bytes.to_vec();
-                                return Ok((h.call)(vm, &native, &method_lower, &called, None, &call_args));
+                                return Ok((h.call)(
+                                    vm,
+                                    &native,
+                                    &method_lower,
+                                    &called,
+                                    None,
+                                    &call_args,
+                                ));
                             }
                         }
                         // Not a closure, not a class - fall through to closure path below
@@ -1525,19 +1914,31 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     let class_lower: Vec<u8>;
                     {
                         let obj_borrow = obj.borrow();
-                        class_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        class_lower = obj_borrow
+                            .class_name
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
                     }
                     if let Some(class) = vm.classes.get(&class_lower).cloned() {
                         if let Some(method) = class.methods.get(&method_lower) {
                             // Check visibility before executing
                             let accessible = match method.visibility {
                                 goro_core::object::Visibility::Public => true,
-                                goro_core::object::Visibility::Protected | goro_core::object::Visibility::Private => {
+                                goro_core::object::Visibility::Protected
+                                | goro_core::object::Visibility::Private => {
                                     // Check if caller scope has access
                                     if let Some(caller) = vm.current_class_scope() {
-                                        let caller_lower: Vec<u8> = caller.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        let declaring_lower: Vec<u8> = method.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        if method.visibility == goro_core::object::Visibility::Private {
+                                        let caller_lower: Vec<u8> =
+                                            caller.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        let declaring_lower: Vec<u8> = method
+                                            .declaring_class
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        if method.visibility
+                                            == goro_core::object::Visibility::Private
+                                        {
                                             caller_lower == declaring_lower
                                         } else {
                                             // Protected: caller must be same or related class
@@ -1555,12 +1956,21 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 if op.attributes.is_empty() && !method.attributes.is_empty() {
                                     op.attributes = method.attributes.clone();
                                 }
-                                let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                                let display_fallback = format!(
+                                    "{}::{}",
+                                    String::from_utf8_lossy(&class.name),
+                                    String::from_utf8_lossy(&method.name)
+                                );
                                 let line = vm.current_line;
                                 vm.check_user_function_deprecation(&op, &display_fallback, line);
                                 // Static methods called through an object get no $this.
-                                let this = if method.is_static { None } else { Some(Value::Object(obj.clone())) };
-                                return vm.execute_fn_with_named_args(&op, call_args, named_args, this);
+                                let this = if method.is_static {
+                                    None
+                                } else {
+                                    Some(Value::Object(obj.clone()))
+                                };
+                                return vm
+                                    .execute_fn_with_named_args(&op, call_args, named_args, this);
                             }
                             // Method exists but not accessible - fall through to __call
                         }
@@ -1576,11 +1986,20 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
                                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
                             ];
-                            return vm.execute_fn_with_named_args(&op, magic_args, vec![], Some(Value::Object(obj.clone())));
+                            return vm.execute_fn_with_named_args(
+                                &op,
+                                magic_args,
+                                vec![],
+                                Some(Value::Object(obj.clone())),
+                            );
                         }
                     }
                     // Built-in class methods (SPL, ext-provided native classes).
-                    if let Some(r) = vm.call_object_method(&Value::Object(obj.clone()), method_name.as_bytes(), &call_args) {
+                    if let Some(r) = vm.call_object_method(
+                        &Value::Object(obj.clone()),
+                        method_name.as_bytes(),
+                        &call_args,
+                    ) {
                         return Ok(r);
                     }
                     return Ok(Value::Null);
@@ -1611,7 +2030,11 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         let class_lower: Vec<u8>;
         {
             let obj_borrow = obj.borrow();
-            class_lower = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            class_lower = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
         }
         if let Some(class) = vm.classes.get(&class_lower).cloned() {
             if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
@@ -1619,10 +2042,16 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                 if op.attributes.is_empty() && !method.attributes.is_empty() {
                     op.attributes = method.attributes.clone();
                 }
-                let display_fallback = format!("{}::__invoke", String::from_utf8_lossy(&class.name));
+                let display_fallback =
+                    format!("{}::__invoke", String::from_utf8_lossy(&class.name));
                 let line = vm.current_line;
                 vm.check_user_function_deprecation(&op, &display_fallback, line);
-                return vm.execute_fn_with_named_args(&op, call_args, named_args, Some(Value::Object(obj.clone())));
+                return vm.execute_fn_with_named_args(
+                    &op,
+                    call_args,
+                    named_args,
+                    Some(Value::Object(obj.clone())),
+                );
             }
         }
         return Ok(Value::Null);
@@ -1664,14 +2093,25 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 
                 // Resolve parent/self to actual class names
                 let resolved_class_lower = if class_part_lower == b"parent" {
-                    vm.get_current_class_name().as_ref()
+                    vm.get_current_class_name()
+                        .as_ref()
                         .and_then(|scope| vm.classes.get(scope))
                         .and_then(|c| c.parent.clone())
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                        .map(|p| {
+                            p.iter()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect::<Vec<u8>>()
+                        })
                         .unwrap_or(class_part_lower.clone())
                 } else if class_part_lower == b"self" {
-                    vm.get_current_class_name().as_ref().cloned()
-                        .or_else(|| vm.called_class_stack.last().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect()))
+                    vm.get_current_class_name()
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| {
+                            vm.called_class_stack
+                                .last()
+                                .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect())
+                        })
                         .unwrap_or(class_part_lower.clone())
                 } else {
                     class_part_lower.clone()
@@ -1694,7 +2134,11 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         if op.attributes.is_empty() && !method.attributes.is_empty() {
                             op.attributes = method.attributes.clone();
                         }
-                        let display_fallback = format!("{}::{}", String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&method.name));
+                        let display_fallback = format!(
+                            "{}::{}",
+                            String::from_utf8_lossy(&class.name),
+                            String::from_utf8_lossy(&method.name)
+                        );
                         let line = vm.current_line;
                         vm.check_user_function_deprecation(&op, &display_fallback, line);
                         let declaring = method.declaring_class.clone();
@@ -1708,7 +2152,8 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                             vm.called_class_stack.push(class_name_orig);
                         }
                         vm.push_class_scope(declaring);
-                        let result = vm.execute_fn_with_named_args(&op, call_args, named_args, None);
+                        let result =
+                            vm.execute_fn_with_named_args(&op, call_args, named_args, None);
                         vm.pop_class_scope();
                         if !is_forwarding {
                             vm.called_class_stack.pop();
@@ -1729,9 +2174,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                         ];
                         return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
                     }
-                } else if !is_forwarding
-                    && !vm.is_known_builtin_class(&resolved_class_lower)
-                {
+                } else if !is_forwarding && !vm.is_known_builtin_class(&resolved_class_lower) {
                     // Class still not found after autoload: PHP throws a TypeError.
                     let class_orig = &func_name[..pos];
                     let class_display = goro_core::value::display_class_name(class_orig);
@@ -1741,7 +2184,10 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     );
                     let exc = vm.create_exception(b"TypeError", &msg, 0);
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
         }
@@ -1769,10 +2215,15 @@ fn call_user_func_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     goro_core::array::ArrayKey::Int(_) => {
                         if had_named {
                             // Cannot use positional argument after named argument
-                            let exc = vm.create_exception(b"Error", "Cannot use positional argument after named argument", 0);
+                            let exc = vm.create_exception(
+                                b"Error",
+                                "Cannot use positional argument after named argument",
+                                0,
+                            );
                             vm.current_exception = Some(exc);
                             return Err(VmError {
-                                message: "Cannot use positional argument after named argument".into(),
+                                message: "Cannot use positional argument after named argument"
+                                    .into(),
                                 line: 0,
                             });
                         }
@@ -1876,7 +2327,10 @@ fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let new_values: Vec<Value> = args[1..].iter().map(deep_clone_value).collect();
 
         let mut arr_mut = arr.borrow_mut();
-        let existing: Vec<_> = arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let existing: Vec<_> = arr_mut
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let mut new_arr = PhpArray::new();
         // Prepended values always get sequential integer keys
@@ -1959,7 +2413,12 @@ fn merge_copy_entry(v: &Value) -> Value {
 }
 
 /// php_array_merge_wrapper()
-fn php_array_merge_wrapper(vm: &mut Vm, args: &[Value], fname: &str, recursive: bool) -> Result<Value, VmError> {
+fn php_array_merge_wrapper(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    recursive: bool,
+) -> Result<Value, VmError> {
     let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
     let mut count: u64 = 0;
     for (i, arg) in args.iter().enumerate() {
@@ -1978,10 +2437,16 @@ fn php_array_merge_wrapper(vm: &mut Vm, args: &[Value], fname: &str, recursive: 
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
     if count >= 0x40000000 {
-        let msg = format!("The total number of elements must be lower than {}", 0x40000000u32);
+        let msg = format!(
+            "The total number of elements must be lower than {}",
+            0x40000000u32
+        );
         let exc = vm.create_exception(b"Error", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let mut dest = PhpArray::new();
     for (k, v) in arrays[0].borrow().iter() {
@@ -1999,7 +2464,11 @@ fn php_array_merge_wrapper(vm: &mut Vm, args: &[Value], fname: &str, recursive: 
                 return Ok(Value::Null);
             }
         } else {
-            let entries: Vec<(ArrayKey, Value)> = src.borrow().iter().map(|(k, v)| (k.clone(), merge_copy_entry(v))).collect();
+            let entries: Vec<(ArrayKey, Value)> = src
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), merge_copy_entry(v)))
+                .collect();
             let mut d = dest.borrow_mut();
             for (k, v) in entries {
                 match k {
@@ -2009,7 +2478,9 @@ fn php_array_merge_wrapper(vm: &mut Vm, args: &[Value], fname: &str, recursive: 
             }
         }
     }
-    let out = Rc::try_unwrap(dest).map(|c| c.into_inner()).unwrap_or_else(|rc| rc.borrow().clone());
+    let out = Rc::try_unwrap(dest)
+        .map(|c| c.into_inner())
+        .unwrap_or_else(|rc| rc.borrow().clone());
     Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
@@ -2020,7 +2491,10 @@ fn merge_to_array(v: &Value) -> PhpArray {
         Value::Object(o) => {
             let mut arr = PhpArray::new();
             for (k, val) in o.borrow().properties.iter() {
-                arr.set(Vm::value_to_array_key(Value::String(PhpString::from_vec(k.clone()))), val.clone());
+                arr.set(
+                    Vm::value_to_array_key(Value::String(PhpString::from_vec(k.clone()))),
+                    val.clone(),
+                );
             }
             arr
         }
@@ -2033,8 +2507,17 @@ fn merge_to_array(v: &Value) -> PhpArray {
 }
 
 /// php_array_merge_recursive()
-fn php_array_merge_recursive(vm: &mut Vm, dest: &Rc<RefCell<PhpArray>>, src: &Rc<RefCell<PhpArray>>, stack: &mut Vec<usize>) -> bool {
-    let entries: Vec<(ArrayKey, Value)> = src.borrow().iter().map(|(k, v)| (k.clone(), merge_copy_entry(v))).collect();
+fn php_array_merge_recursive(
+    vm: &mut Vm,
+    dest: &Rc<RefCell<PhpArray>>,
+    src: &Rc<RefCell<PhpArray>>,
+    stack: &mut Vec<usize>,
+) -> bool {
+    let entries: Vec<(ArrayKey, Value)> = src
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), merge_copy_entry(v)))
+        .collect();
     for (k, src_entry) in entries {
         match &k {
             ArrayKey::String(_) => {
@@ -2050,12 +2533,20 @@ fn php_array_merge_recursive(vm: &mut Vm, dest: &Rc<RefCell<PhpArray>>, src: &Rc
                         let dval = de.deref();
                         if let Value::Array(t) = &dval {
                             if stack.contains(&(Rc::as_ptr(t) as usize)) {
-                                let exc = vm.create_exception(b"Error", "Recursion detected", vm.current_line);
+                                let exc = vm.create_exception(
+                                    b"Error",
+                                    "Recursion detected",
+                                    vm.current_line,
+                                );
                                 vm.current_exception = Some(exc);
                                 return false;
                             }
                         }
-                        let thash_ptr = if let Value::Array(t) = &dval { Some(Rc::as_ptr(t) as usize) } else { None };
+                        let thash_ptr = if let Value::Array(t) = &dval {
+                            Some(Rc::as_ptr(t) as usize)
+                        } else {
+                            None
+                        };
                         let mut darr = if matches!(dval, Value::Null | Value::Undef) {
                             let mut a = PhpArray::new();
                             a.push(Value::Null);
@@ -2080,13 +2571,17 @@ fn php_array_merge_recursive(vm: &mut Vm, dest: &Rc<RefCell<PhpArray>>, src: &Rc
                             if !ok {
                                 return false;
                             }
-                            darr = Rc::try_unwrap(drc).map(|c| c.into_inner()).unwrap_or_else(|rc| rc.borrow().clone());
+                            darr = Rc::try_unwrap(drc)
+                                .map(|c| c.into_inner())
+                                .unwrap_or_else(|rc| rc.borrow().clone());
                         } else {
                             darr.push(src_val.clone());
                         }
                         let newv = Value::Array(Rc::new(RefCell::new(darr)));
                         match dref {
-                            Some(r) => { *r.borrow_mut() = newv; }
+                            Some(r) => {
+                                *r.borrow_mut() = newv;
+                            }
                             None => dest.borrow_mut().set(k.clone(), newv),
                         }
                     }
@@ -2121,7 +2616,9 @@ fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             } else {
                 match key {
                     goro_core::array::ArrayKey::Int(_) => result.push(val),
-                    goro_core::array::ArrayKey::String(s) => result.set(goro_core::array::ArrayKey::String(s), val),
+                    goro_core::array::ArrayKey::String(s) => {
+                        result.set(goro_core::array::ArrayKey::String(s), val)
+                    }
                 }
             }
         }
@@ -2154,7 +2651,9 @@ fn array_flip(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 _ => {
-                    vm.emit_warning("array_flip(): Can only flip string and integer values, entry skipped");
+                    vm.emit_warning(
+                        "array_flip(): Can only flip string and integer values, entry skipped",
+                    );
                     continue;
                 }
             };
@@ -2230,7 +2729,10 @@ fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -2283,7 +2785,10 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     let arr_opt = match first {
         Value::Array(a) => Some(a.clone()),
-        Value::Reference(r) => match &*r.borrow() { Value::Array(a) => Some(a.clone()), _ => None },
+        Value::Reference(r) => match &*r.borrow() {
+            Value::Array(a) => Some(a.clone()),
+            _ => None,
+        },
         _ => None,
     };
     if let Some(arr) = arr_opt {
@@ -2301,8 +2806,10 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let replacement = replacement_converted.as_ref().or_else(|| args.get(3));
 
         let mut arr_mut = arr.borrow_mut();
-        let entries: Vec<(goro_core::array::ArrayKey, Value)> =
-            arr_mut.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(goro_core::array::ArrayKey, Value)> = arr_mut
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let total = entries.len() as i64;
 
         let start = if offset < 0 {
@@ -2387,10 +2894,16 @@ fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Throw TypeError for non-array haystack
     let type_name = Vm::value_type_name(&haystack);
-    let msg = format!("array_search(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let msg = format!(
+        "array_search(): Argument #2 ($haystack) must be of type array, {} given",
+        type_name
+    );
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2416,47 +2929,79 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Throw TypeError for non-array haystack
     let type_name = Vm::value_type_name(&haystack);
-    let msg = format!("in_array(): Argument #2 ($haystack) must be of type array, {} given", type_name);
+    let msg = format!(
+        "in_array(): Argument #2 ($haystack) must be of type array, {} given",
+        type_name
+    );
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
-fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_label: &str) -> Result<(), VmError> {
+fn validate_callback_generic(
+    vm: &mut Vm,
+    callback: &Value,
+    fn_name: &str,
+    arg_label: &str,
+) -> Result<(), VmError> {
     match callback {
         Value::Null => Ok(()), // null is valid (identity/zip)
         Value::String(s) => {
             let name = s.as_bytes();
             if name.is_empty() {
-                let msg = format!("{}(): {} must be a valid callback or null, function \"\" not found or invalid function name", fn_name, arg_label);
+                let msg = format!(
+                    "{}(): {} must be a valid callback or null, function \"\" not found or invalid function name",
+                    fn_name, arg_label
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             // Check for "Class::method" syntax
             if let Some(pos) = name.iter().position(|&b| b == b':') {
                 if pos + 1 < name.len() && name[pos + 1] == b':' {
                     let class_name = &name[..pos];
                     let method_name = &name[pos + 2..];
-                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let method_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let class_lower: Vec<u8> =
+                        class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let method_lower: Vec<u8> =
+                        method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                     if let Some(class) = vm.classes.get(&class_lower) {
                         if class.get_method(&method_lower).is_some() {
                             return Ok(());
                         }
-                        let msg = format!("{}(): {} must be a valid callback or null, class '{}' does not have a method '{}'",
-                            fn_name, arg_label,
-                            String::from_utf8_lossy(class_name), String::from_utf8_lossy(method_name));
+                        let msg = format!(
+                            "{}(): {} must be a valid callback or null, class '{}' does not have a method '{}'",
+                            fn_name,
+                            arg_label,
+                            String::from_utf8_lossy(class_name),
+                            String::from_utf8_lossy(method_name)
+                        );
                         let exc = vm.throw_type_error(msg.clone());
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg, line: vm.current_line });
+                        return Err(VmError {
+                            message: msg,
+                            line: vm.current_line,
+                        });
                     }
-                    let msg = format!("{}(): {} must be a valid callback or null, class \"{}\" not found",
-                        fn_name, arg_label,
-                        String::from_utf8_lossy(class_name));
+                    let msg = format!(
+                        "{}(): {} must be a valid callback or null, class \"{}\" not found",
+                        fn_name,
+                        arg_label,
+                        String::from_utf8_lossy(class_name)
+                    );
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
             let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -2466,79 +3011,144 @@ fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_l
             }
             // PHP language constructs cannot be used as callbacks
             const LANG_CONSTRUCTS: &[&[u8]] = &[
-                b"echo", b"print", b"isset", b"unset", b"empty",
-                b"include", b"include_once", b"require", b"require_once",
-                b"eval", b"exit", b"die", b"list", b"array",
+                b"echo",
+                b"print",
+                b"isset",
+                b"unset",
+                b"empty",
+                b"include",
+                b"include_once",
+                b"require",
+                b"require_once",
+                b"eval",
+                b"exit",
+                b"die",
+                b"list",
+                b"array",
             ];
             if LANG_CONSTRUCTS.contains(&name_lower.as_slice()) {
-                let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
-                    fn_name, arg_label,
-                    String::from_utf8_lossy(name));
+                let msg = format!(
+                    "{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                    fn_name,
+                    arg_label,
+                    String::from_utf8_lossy(name)
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
+            {
                 return Ok(());
             }
-            let msg = format!("{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
-                fn_name, arg_label,
-                String::from_utf8_lossy(name));
+            let msg = format!(
+                "{}(): {} must be a valid callback or null, function \"{}\" not found or invalid function name",
+                fn_name,
+                arg_label,
+                String::from_utf8_lossy(name)
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
         Value::Array(arr) => {
             let arr_borrow = arr.borrow();
             let len = arr_borrow.len();
             if len != 2 {
-                let msg = format!("{}(): {} must be a valid callback or null, array callback must have exactly two members", fn_name, arg_label);
+                let msg = format!(
+                    "{}(): {} must be a valid callback or null, array callback must have exactly two members",
+                    fn_name, arg_label
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             let vals: Vec<Value> = arr_borrow.values().cloned().collect();
             drop(arr_borrow);
             match &vals[0] {
                 Value::String(s) => {
-                    let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if class_lower.starts_with(b"__closure_") || class_lower.starts_with(b"__arrow_") {
+                    let class_lower: Vec<u8> = s
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    if class_lower.starts_with(b"__closure_")
+                        || class_lower.starts_with(b"__arrow_")
+                    {
                         return Ok(());
                     }
                     if vm.classes.contains_key(&class_lower) {
                         return Ok(());
                     }
-                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
+                    let msg = format!(
+                        "{}(): {} must be a valid callback or null, first array member is not a valid class name or object",
+                        fn_name, arg_label
+                    );
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    Err(VmError { message: msg, line: vm.current_line })
+                    Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    })
                 }
                 Value::Object(_) => Ok(()),
                 _ => {
-                    let msg = format!("{}(): {} must be a valid callback or null, first array member is not a valid class name or object", fn_name, arg_label);
+                    let msg = format!(
+                        "{}(): {} must be a valid callback or null, first array member is not a valid class name or object",
+                        fn_name, arg_label
+                    );
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    Err(VmError { message: msg, line: vm.current_line })
+                    Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    })
                 }
             }
         }
         Value::Object(obj) => {
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if let Some(class) = vm.classes.get(&class_lower) {
                 if class.get_method(b"__invoke").is_some() {
                     return Ok(());
                 }
             }
-            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
+            let msg = format!(
+                "{}(): {} must be a valid callback or null, no array or string given",
+                fn_name, arg_label
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
         _ => {
-            let msg = format!("{}(): {} must be a valid callback or null, no array or string given", fn_name, arg_label);
+            let msg = format!(
+                "{}(): {} must be a valid callback or null, no array or string given",
+                fn_name, arg_label
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -2546,19 +3156,35 @@ fn validate_callback_generic(vm: &mut Vm, callback: &Value, fn_name: &str, arg_l
 /// PHP_FUNCTION(array_map)
 fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
-        let msg = format!("array_map() expects at least 2 arguments, {} given", args.len());
+        let msg = format!(
+            "array_map() expects at least 2 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let callback = args[0].deref();
-    let callback = if matches!(callback, Value::Undef) { Value::Null } else { callback };
+    let callback = if matches!(callback, Value::Undef) {
+        Value::Null
+    } else {
+        callback
+    };
     if !matches!(callback, Value::Null) {
         if let Some(reason) = callable_error(vm, &callback) {
-            let msg = format!("array_map(): Argument #1 ($callback) must be a valid callback or null, {}", reason);
+            let msg = format!(
+                "array_map(): Argument #1 ($callback) must be a valid callback or null, {}",
+                reason
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
@@ -2569,17 +3195,29 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let tn = match &other {
                     Value::True => "true".to_string(),
                     Value::False => "false".to_string(),
-                    Value::Object(o) => goro_core::value::display_class_name(&o.borrow().class_name),
+                    Value::Object(o) => {
+                        goro_core::value::display_class_name(&o.borrow().class_name)
+                    }
                     _ => Vm::value_type_name(&other).to_string(),
                 };
                 let msg = if i == 1 {
-                    format!("array_map(): Argument #2 ($array) must be of type array, {} given", tn)
+                    format!(
+                        "array_map(): Argument #2 ($array) must be of type array, {} given",
+                        tn
+                    )
                 } else {
-                    format!("array_map(): Argument #{} must be of type array, {} given", i + 1, tn)
+                    format!(
+                        "array_map(): Argument #{} must be of type array, {} given",
+                        i + 1,
+                        tn
+                    )
                 };
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -2589,7 +3227,11 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let copy = arr.borrow().clone();
             return Ok(Value::Array(Rc::new(RefCell::new(copy))));
         }
-        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let mut result = PhpArray::new();
         for (k, v) in entries {
             let r = call_user_func(vm, &[callback.clone(), v])?;
@@ -2600,11 +3242,17 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
-    let lists: Vec<Vec<Value>> = arrays.iter().map(|a| a.borrow().values().cloned().collect()).collect();
+    let lists: Vec<Vec<Value>> = arrays
+        .iter()
+        .map(|a| a.borrow().values().cloned().collect())
+        .collect();
     let maxlen = lists.iter().map(|l| l.len()).max().unwrap_or(0);
     let mut result = PhpArray::new();
     for i in 0..maxlen {
-        let row: Vec<Value> = lists.iter().map(|l| l.get(i).cloned().unwrap_or(Value::Null)).collect();
+        let row: Vec<Value> = lists
+            .iter()
+            .map(|l| l.get(i).cloned().unwrap_or(Value::Null))
+            .collect();
         if matches!(callback, Value::Null) {
             let mut sub = PhpArray::new();
             for v in row {
@@ -2628,7 +3276,11 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, "array_filter", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
-        let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let arr_data: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let callback = args.get(1);
         let mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
         // mode: 0 = default (pass value)
@@ -2654,11 +3306,13 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let n_args: u32 = if mode == 1 { 2 } else { 1 };
             if let Value::String(s) = &cb {
                 let func_name = s.as_bytes().to_vec();
-                let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let func_lower: Vec<u8> =
+                    func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
                     let required = user_fn.required_param_count;
                     if n_args < required {
-                        let display_name = String::from_utf8_lossy(user_fn.effective_name()).into_owned();
+                        let display_name =
+                            String::from_utf8_lossy(user_fn.effective_name()).into_owned();
                         let total_params = user_fn.param_count;
                         let has_optional = total_params > required;
                         let qualifier = if has_optional { "at least" } else { "exactly" };
@@ -2668,7 +3322,10 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         );
                         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+                        return Err(VmError {
+                            message: format!("Uncaught ArgumentCountError: {}", msg),
+                            line: vm.current_line,
+                        });
                     }
                 }
             }
@@ -2715,62 +3372,124 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// otherwise the reason PHP reports after "must be a valid callback, ".
 pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
     let cb = cb.deref();
-    let check_method = |vm: &Vm, class_lower: &[u8], method: &[u8], is_static_call: bool| -> Option<String> {
-        let class = match vm.classes.get(class_lower) {
-            Some(c) => c,
-            None => return Some(format!("class \"{}\" not found", String::from_utf8_lossy(class_lower))),
+    let check_method =
+        |vm: &Vm, class_lower: &[u8], method: &[u8], is_static_call: bool| -> Option<String> {
+            let class = match vm.classes.get(class_lower) {
+                Some(c) => c,
+                None => {
+                    return Some(format!(
+                        "class \"{}\" not found",
+                        String::from_utf8_lossy(class_lower)
+                    ));
+                }
+            };
+            let cname = String::from_utf8_lossy(&class.name).to_string();
+            let mlower = method.to_ascii_lowercase();
+            match class.get_method(&mlower) {
+                Some(m) => {
+                    let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
+                    let ok = match m.visibility {
+                        goro_core::object::Visibility::Public => true,
+                        goro_core::object::Visibility::Private => {
+                            scope.as_deref() == Some(m.declaring_class.as_slice())
+                        }
+                        goro_core::object::Visibility::Protected => scope
+                            .as_ref()
+                            .map(|sc| {
+                                sc.as_slice() == class_lower
+                                    || vm.class_extends(sc, class_lower)
+                                    || vm.class_extends(class_lower, sc)
+                                    || sc.as_slice() == m.declaring_class.as_slice()
+                                    || vm.class_extends(sc, &m.declaring_class)
+                            })
+                            .unwrap_or(false),
+                    };
+                    if !ok {
+                        let vis = if matches!(m.visibility, goro_core::object::Visibility::Private)
+                        {
+                            "private"
+                        } else {
+                            "protected"
+                        };
+                        return Some(format!(
+                            "cannot access {} method {}::{}()",
+                            vis,
+                            cname,
+                            String::from_utf8_lossy(&m.name)
+                        ));
+                    }
+                    if is_static_call && !m.is_static {
+                        return Some(format!(
+                            "non-static method {}::{}() cannot be called statically",
+                            cname,
+                            String::from_utf8_lossy(&m.name)
+                        ));
+                    }
+                    None
+                }
+                None => {
+                    if class.get_method(b"__call").is_some()
+                        || (is_static_call && class.get_method(b"__callstatic").is_some())
+                    {
+                        return None;
+                    }
+                    Some(format!(
+                        "class {} does not have a method \"{}\"",
+                        cname,
+                        String::from_utf8_lossy(method)
+                    ))
+                }
+            }
         };
-        let cname = String::from_utf8_lossy(&class.name).to_string();
-        let mlower = method.to_ascii_lowercase();
-        match class.get_method(&mlower) {
-            Some(m) => {
-                let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
-                let ok = match m.visibility {
-                    goro_core::object::Visibility::Public => true,
-                    goro_core::object::Visibility::Private => scope.as_deref() == Some(m.declaring_class.as_slice()),
-                    goro_core::object::Visibility::Protected => scope.as_ref().map(|sc| {
-                        sc.as_slice() == class_lower || vm.class_extends(sc, class_lower) || vm.class_extends(class_lower, sc)
-                            || sc.as_slice() == m.declaring_class.as_slice() || vm.class_extends(sc, &m.declaring_class)
-                    }).unwrap_or(false),
-                };
-                if !ok {
-                    let vis = if matches!(m.visibility, goro_core::object::Visibility::Private) { "private" } else { "protected" };
-                    return Some(format!("cannot access {} method {}::{}()", vis, cname, String::from_utf8_lossy(&m.name)));
-                }
-                if is_static_call && !m.is_static {
-                    return Some(format!("non-static method {}::{}() cannot be called statically", cname, String::from_utf8_lossy(&m.name)));
-                }
-                None
-            }
-            None => {
-                if class.get_method(b"__call").is_some() || (is_static_call && class.get_method(b"__callstatic").is_some()) {
-                    return None;
-                }
-                Some(format!("class {} does not have a method \"{}\"", cname, String::from_utf8_lossy(method)))
-            }
-        }
-    };
     match &cb {
         Value::String(s) => {
             let name = s.as_bytes();
             let lower = name.to_ascii_lowercase();
-            if lower.starts_with(b"__closure_") || lower.starts_with(b"__arrow_") || lower.starts_with(b"__bound_closure_") {
+            if lower.starts_with(b"__closure_")
+                || lower.starts_with(b"__arrow_")
+                || lower.starts_with(b"__bound_closure_")
+            {
                 return None;
             }
             if let Some(pos) = name.windows(2).position(|w| w == b"::") {
                 let class_lower = name[..pos].to_ascii_lowercase();
-                let class_lower = class_lower.strip_prefix(b"\\").map(|c| c.to_vec()).unwrap_or(class_lower);
+                let class_lower = class_lower
+                    .strip_prefix(b"\\")
+                    .map(|c| c.to_vec())
+                    .unwrap_or(class_lower);
                 if !vm.classes.contains_key(&class_lower) {
-                    return Some(format!("class \"{}\" not found", String::from_utf8_lossy(&name[..pos])));
+                    return Some(format!(
+                        "class \"{}\" not found",
+                        String::from_utf8_lossy(&name[..pos])
+                    ));
                 }
                 return check_method(vm, &class_lower, &name[pos + 2..], true);
             }
             let l = lower.strip_prefix(b"\\").unwrap_or(&lower);
-            let construct = matches!(l, b"isset" | b"empty" | b"eval" | b"exit" | b"die" | b"echo" | b"print" | b"unset" | b"list" | b"array" | b"include" | b"include_once" | b"require" | b"require_once");
+            let construct = matches!(
+                l,
+                b"isset"
+                    | b"empty"
+                    | b"eval"
+                    | b"exit"
+                    | b"die"
+                    | b"echo"
+                    | b"print"
+                    | b"unset"
+                    | b"list"
+                    | b"array"
+                    | b"include"
+                    | b"include_once"
+                    | b"require"
+                    | b"require_once"
+            );
             if !construct && (vm.functions.contains_key(l) || vm.user_functions.contains_key(l)) {
                 return None;
             }
-            Some(format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(name)))
+            Some(format!(
+                "function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(name)
+            ))
         }
         Value::Array(arr) => {
             let a = arr.borrow();
@@ -2799,7 +3518,9 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
                         return None;
                     }
                     let method = match method.windows(2).position(|w| w == b"::") {
-                        Some(p) if method[..p].eq_ignore_ascii_case(b"parent") => method[p + 2..].to_vec(),
+                        Some(p) if method[..p].eq_ignore_ascii_case(b"parent") => {
+                            method[p + 2..].to_vec()
+                        }
                         _ => method,
                     };
                     check_method(vm, &cl, &method, false)
@@ -2817,7 +3538,13 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
         }
         Value::Object(o) => {
             let cl = o.borrow().class_name.to_ascii_lowercase();
-            if cl == b"closure" || vm.classes.get(&cl).map(|c| c.get_method(b"__invoke").is_some()).unwrap_or(false) {
+            if cl == b"closure"
+                || vm
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__invoke").is_some())
+                    .unwrap_or(false)
+            {
                 None
             } else {
                 Some("no array or string given".to_string())
@@ -2828,7 +3555,10 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
 }
 
 fn walk_key_value(k: &ArrayKey) -> Value {
-    match k { ArrayKey::Int(n) => Value::Long(*n), ArrayKey::String(s) => Value::String(s.clone()) }
+    match k {
+        ArrayKey::Int(n) => Value::Long(*n),
+        ArrayKey::String(s) => Value::String(s.clone()),
+    }
 }
 
 /// php_array_walk() for arrays: each element is made a reference (so by-ref
@@ -2860,12 +3590,17 @@ fn php_array_walk_arr(
             Value::Reference(r) => r.clone(),
             other => {
                 let r = Rc::new(RefCell::new(other.clone()));
-                arr.borrow_mut().set(key.clone(), Value::Reference(r.clone()));
+                arr.borrow_mut()
+                    .set(key.clone(), Value::Reference(r.clone()));
                 r
             }
         };
         let inner_arr = if recursive {
-            if let Value::Array(sub) = &*r.borrow() { Some(sub.clone()) } else { None }
+            if let Value::Array(sub) = &*r.borrow() {
+                Some(sub.clone())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -2876,7 +3611,11 @@ fn php_array_walk_arr(
             }
             php_array_walk_arr(vm, &sub, cb, userdata, true, depth + 1)?;
         } else {
-            let mut cargs = vec![cb.clone(), Value::Reference(r.clone()), walk_key_value(&key)];
+            let mut cargs = vec![
+                cb.clone(),
+                Value::Reference(r.clone()),
+                walk_key_value(&key),
+            ];
             if let Some(u) = userdata {
                 cargs.push(u.clone());
             }
@@ -2911,10 +3650,16 @@ fn php_array_walk_arr(
 
 fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() > 3 {
-        let msg = format!("array_walk() expects at most 3 arguments, {} given", args.len());
+        let msg = format!(
+            "array_walk() expects at most 3 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let first = args.first().unwrap_or(&Value::Null);
 
@@ -2934,10 +3679,16 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => return Ok(Value::True),
     };
     if let Some(reason) = callable_error(vm, callback) {
-        let msg = format!("array_walk(): Argument #2 ($callback) must be a valid callback, {}", reason);
+        let msg = format!(
+            "array_walk(): Argument #2 ($callback) must be a valid callback, {}",
+            reason
+        );
         let exc = vm.throw_type_error(msg.clone());
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     // For objects, convert properties to entries with PHP-style mangled names
@@ -2960,38 +3711,60 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let obj = vm.proxy_redirect(&outer);
         let entries: Vec<(ArrayKey, Vec<u8>, Value)> = {
             let obj_borrow = obj.borrow();
-            let class_name_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_name_lower: Vec<u8> = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             // Map property name -> (visibility, declaring_class_original_case)
-            let prop_info: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> =
-                if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                    class_def.properties.iter()
-                        .map(|p| {
-                            let decl_lower = &p.declaring_class;
-                            let decl_display = vm.get_class_def(decl_lower)
-                                .map(|c| c.name.clone())
-                                .unwrap_or_else(|| p.declaring_class.clone());
-                            (p.name.clone(), (p.visibility, decl_display))
-                        })
-                        .collect()
-                } else {
-                    std::collections::HashMap::new()
-                };
-            obj_borrow.properties.iter()
+            let prop_info: std::collections::HashMap<
+                Vec<u8>,
+                (goro_core::object::Visibility, Vec<u8>),
+            > = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+                class_def
+                    .properties
+                    .iter()
+                    .map(|p| {
+                        let decl_lower = &p.declaring_class;
+                        let decl_display = vm
+                            .get_class_def(decl_lower)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| p.declaring_class.clone());
+                        (p.name.clone(), (p.visibility, decl_display))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+            obj_borrow
+                .properties
+                .iter()
                 .filter(|(k, v)| {
-                    !k.starts_with(b"__spl_") && !k.starts_with(b"__reflection_")
-                    && !k.starts_with(b"__enum_") && !k.starts_with(b"__ctor_")
-                    && !k.starts_with(b"__clone_") && !k.starts_with(b"__destructed")
-                    && !k.starts_with(b"__fiber_") && !k.starts_with(b"__timestamp")
-                    && !k.starts_with(b"__lazy_") && !k.starts_with(b"__uri_")
-                    && !matches!(v, Value::Undef)
+                    !k.starts_with(b"__spl_")
+                        && !k.starts_with(b"__reflection_")
+                        && !k.starts_with(b"__enum_")
+                        && !k.starts_with(b"__ctor_")
+                        && !k.starts_with(b"__clone_")
+                        && !k.starts_with(b"__destructed")
+                        && !k.starts_with(b"__fiber_")
+                        && !k.starts_with(b"__timestamp")
+                        && !k.starts_with(b"__lazy_")
+                        && !k.starts_with(b"__uri_")
+                        && !matches!(v, Value::Undef)
                 })
                 .map(|(k, v)| {
-                    let (vis, declaring_class) = prop_info.get(k)
+                    let (vis, declaring_class) = prop_info
+                        .get(k)
                         .map(|(v, dc)| (Some(*v), dc.as_slice()))
                         .unwrap_or((None, &[]));
                     let mangled_key = mangle_property_name(k, declaring_class, vis);
-                    (ArrayKey::String(PhpString::from_vec(mangled_key)), k.clone(), v.clone())
-                }).collect()
+                    (
+                        ArrayKey::String(PhpString::from_vec(mangled_key)),
+                        k.clone(),
+                        v.clone(),
+                    )
+                })
+                .collect()
         };
         let extra_data = args.get(2);
         return array_walk_object_entries(vm, callback, &entries, extra_data, &obj);
@@ -3066,28 +3839,42 @@ fn array_walk_object_entries(
             // value is incompatible, throw a TypeError (matches PHP's
             // reference-held-by-typed-property behaviour).
             let new_val = val_ref.borrow().clone();
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter()
-                .map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             let type_check_failed: Option<String> = {
                 if let Some(class_def) = vm.get_class_def(&class_lower) {
-                    if let Some(p) = class_def.properties.iter()
+                    if let Some(p) = class_def
+                        .properties
+                        .iter()
                         .find(|p| !p.is_static && p.name == *prop_name)
                     {
                         if let Some(t) = &p.property_type {
                             if !vm.value_matches_type(&new_val, t) {
                                 let type_name = vm.param_type_name(t);
                                 let val_type = value_type_for_error(&new_val);
-                                let class_display = goro_core::value::display_class_name(
-                                    &obj.borrow().class_name);
+                                let class_display =
+                                    goro_core::value::display_class_name(&obj.borrow().class_name);
                                 let prop_display = String::from_utf8_lossy(prop_name);
                                 Some(format!(
                                     "Cannot assign {} to reference held by property {}::${} of type {}",
                                     val_type, class_display, prop_display, type_name
                                 ))
-                            } else { None }
-                        } else { None }
-                    } else { None }
-                } else { None }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
             if let Some(msg) = type_check_failed {
                 let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
@@ -3137,7 +3924,10 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let mut result = PhpArray::new();
     let keys_vec: Vec<_> = keys.values().cloned().collect();
@@ -3173,7 +3963,10 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 obj.borrow_mut().class_name = b"ValueError".to_vec();
             }
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         let size = size as usize;
         let preserve_keys = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
@@ -3211,7 +4004,10 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
 
     if let Value::Array(arr) = input {
@@ -3238,16 +4034,24 @@ fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             for (k, v) in arr.iter() {
                 match k {
-                    ArrayKey::Int(_) => { result.push(v.clone()); }
-                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                    ArrayKey::Int(_) => {
+                        result.push(v.clone());
+                    }
+                    ArrayKey::String(_) => {
+                        result.set(k.clone(), v.clone());
+                    }
                 }
             }
         } else {
             // Pad at the end: input first with string keys preserved, then pad values
             for (k, v) in arr.iter() {
                 match k {
-                    ArrayKey::Int(_) => { result.push(v.clone()); }
-                    ArrayKey::String(_) => { result.set(k.clone(), v.clone()); }
+                    ArrayKey::Int(_) => {
+                        result.push(v.clone());
+                    }
+                    ArrayKey::String(_) => {
+                        result.set(k.clone(), v.clone());
+                    }
                 }
             }
             for _ in 0..pad_count {
@@ -3265,13 +4069,17 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let start = args.first().map(|v| v.to_long()).unwrap_or(0);
     let num = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if num < 0 {
-        let msg = "array_fill(): Argument #2 ($count) must be greater than or equal to 0".to_string();
+        let msg =
+            "array_fill(): Argument #2 ($count) must be greater than or equal to 0".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     if num > 10_000_000 {
         let msg = "array_fill(): Argument #2 ($count) is too large".to_string();
@@ -3280,7 +4088,10 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let val = args.get(2).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
@@ -3308,7 +4119,9 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let k = match &val {
                 Value::Long(n) => ArrayKey::Int(*n),
                 // Resources become "Resource id #N" strings.
-                Value::Resource(n) => ArrayKey::String(PhpString::from_vec(format!("Resource id #{}", n).into_bytes())),
+                Value::Resource(n) => ArrayKey::String(PhpString::from_vec(
+                    format!("Resource id #{}", n).into_bytes(),
+                )),
                 Value::Double(_) => ArrayKey::String(val.to_php_string()),
                 Value::String(s) => {
                     // Try to parse as integer (PHP normalizes numeric string keys)
@@ -3356,13 +4169,23 @@ fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !matches!(arg, Value::Array(_)) {
             let type_name = arg_type_name(arg);
             let msg = if i == 0 {
-                format!("array_diff(): Argument #1 ($array) must be of type array, {} given", type_name)
+                format!(
+                    "array_diff(): Argument #1 ($array) must be of type array, {} given",
+                    type_name
+                )
             } else {
-                format!("array_diff(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!(
+                    "array_diff(): Argument #{} must be of type array, {} given",
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     if args.len() < 2 {
@@ -3420,12 +4243,17 @@ fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
     // Collect string representations of values from all other arrays
-    let other_val_sets: Vec<Vec<Vec<u8>>> = args[1..].iter().map(|arg| {
-        match arg {
-            Value::Array(arr) => arr.borrow().values().map(|v| v.to_php_string().as_bytes().to_vec()).collect(),
+    let other_val_sets: Vec<Vec<Vec<u8>>> = args[1..]
+        .iter()
+        .map(|arg| match arg {
+            Value::Array(arr) => arr
+                .borrow()
+                .values()
+                .map(|v| v.to_php_string().as_bytes().to_vec())
+                .collect(),
             _ => Vec::new(),
-        }
-    }).collect();
+        })
+        .collect();
     let mut result = PhpArray::new();
     for (key, val) in first.iter() {
         let s = val.to_php_string().as_bytes().to_vec();
@@ -3473,20 +4301,39 @@ fn sort_cmp_double(vm: &mut Vm, v: &Value) -> f64 {
     match &v {
         Value::Object(o) => {
             let cn = goro_core::value::display_class_name(&o.borrow().class_name);
-            vm.emit_warning(&format!("Object of class {} could not be converted to float", cn));
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to float",
+                cn
+            ));
             1.0
         }
-        Value::Array(a) => if !a.borrow().is_empty() { 1.0 } else { 0.0 },
+        Value::Array(a) => {
+            if !a.borrow().is_empty() {
+                1.0
+            } else {
+                0.0
+            }
+        }
         _ => v.to_double(),
     }
 }
 
 fn three_way<T: PartialOrd>(a: T, b: T) -> i32 {
-    if a < b { -1 } else if a > b { 1 } else { 0 }
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        0
+    }
 }
 
 fn bytes_cmp(a: &[u8], b: &[u8]) -> i32 {
-    match a.cmp(b) { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Greater => 1, _ => 0 }
+    match a.cmp(b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        _ => 0,
+    }
 }
 
 /// zend_compare() including operator-overloading objects (GMP).
@@ -3496,7 +4343,11 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
     if let (Some(cmp_fn), Some(is_type)) = (vm.object_compare, vm.object_is_operator_type) {
         if is_type(&a) || is_type(&b) {
             if let Some(ord) = cmp_fn(&a, &b) {
-                return match ord { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 };
+                return match ord {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
             }
         }
     }
@@ -3531,17 +4382,29 @@ fn php_data_cmp(vm: &mut Vm, a: &Value, b: &Value, flags: i64) -> i32 {
         }
         _ => {
             let r = sort_regular_cmp(vm, a, b);
-            if r < 0 { -1 } else if r > 0 { 1 } else { 0 }
+            if r < 0 {
+                -1
+            } else if r > 0 {
+                1
+            } else {
+                0
+            }
         }
     }
 }
 
 pub(crate) fn key_to_bytes(k: &ArrayKey) -> Vec<u8> {
-    match k { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() }
+    match k {
+        ArrayKey::Int(n) => n.to_string().into_bytes(),
+        ArrayKey::String(s) => s.as_bytes().to_vec(),
+    }
 }
 
 pub(crate) fn key_to_value(k: &ArrayKey) -> Value {
-    match k { ArrayKey::Int(n) => Value::Long(*n), ArrayKey::String(s) => Value::String(s.clone()) }
+    match k {
+        ArrayKey::Int(n) => Value::Long(*n),
+        ArrayKey::String(s) => Value::String(s.clone()),
+    }
 }
 
 /// php_get_key_compare_func(): unstable key comparison for the given flags.
@@ -3555,7 +4418,9 @@ fn php_key_cmp(vm: &mut Vm, a: &ArrayKey, b: &ArrayKey, flags: i64) -> i32 {
             }
             let d = |k: &ArrayKey| match k {
                 ArrayKey::Int(n) => *n as f64,
-                ArrayKey::String(s) => goro_core::value::parse_leading_numeric_string(s.as_bytes()).map(|(v, _)| v).unwrap_or(0.0),
+                ArrayKey::String(s) => goro_core::value::parse_leading_numeric_string(s.as_bytes())
+                    .map(|(v, _)| v)
+                    .unwrap_or(0.0),
             };
             three_way(d(a), d(b))
         }
@@ -3576,18 +4441,35 @@ fn php_key_cmp(vm: &mut Vm, a: &ArrayKey, b: &ArrayKey, flags: i64) -> i32 {
                 return if x > y { 1 } else { -1 };
             }
             let r = sort_regular_cmp(vm, &key_to_value(a), &key_to_value(b));
-            if r < 0 { -1 } else if r > 0 { 1 } else { 0 }
+            if r < 0 {
+                -1
+            } else if r > 0 {
+                1
+            } else {
+                0
+            }
         }
     }
 }
 
 /// Shared driver for sort/rsort/asort/arsort/ksort/krsort.
-fn php_builtin_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, reverse: bool, renumber: bool) -> Result<Value, VmError> {
+fn php_builtin_sort(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    by_key: bool,
+    reverse: bool,
+    renumber: bool,
+) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, fname, "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if entries.len() <= 1 && !(renumber && !entries.is_empty()) {
             return Ok(Value::True);
         }
@@ -3601,7 +4483,11 @@ fn php_builtin_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, reve
         });
         let mut new_arr = PhpArray::new();
         for (k, v) in sorted {
-            if renumber { new_arr.push(v); } else { new_arr.set(k, v); }
+            if renumber {
+                new_arr.push(v);
+            } else {
+                new_arr.set(k, v);
+            }
         }
         *arr.borrow_mut() = new_arr;
     }
@@ -3697,12 +4583,18 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     fn verr(vm: &mut Vm, msg: String) -> Result<Value, VmError> {
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg, line: vm.current_line })
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
     }
     fn terr(vm: &mut Vm, msg: String) -> Result<Value, VmError> {
         let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg, line: vm.current_line })
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
     }
     let strict = vm.caller_strict_types;
     // Z_PARAM_NUMBER_OR_STR
@@ -3716,12 +4608,31 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 Ok(Value::Long(matches!(v, Value::True) as i64))
             }
-            Value::Object(o) if !strict && vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false) => {
+            Value::Object(o)
+                if !strict
+                    && vm
+                        .get_class_def(&o.borrow().class_name.to_ascii_lowercase())
+                        .map(|c| c.get_method(b"__tostring").is_some())
+                        .unwrap_or(false) =>
+            {
                 Ok(Value::String(vm.value_to_string(&v)))
             }
             _ => {
-                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
-                terr(vm, format!("range(): Argument #{} (${}) must be of type string|int|float, {} given", idx + 1, name, tn)).map(|_| Value::Null)
+                let tn = match &v {
+                    Value::True => "true".to_string(),
+                    Value::False => "false".to_string(),
+                    _ => Vm::value_type_name(&v).to_string(),
+                };
+                terr(
+                    vm,
+                    format!(
+                        "range(): Argument #{} (${}) must be of type string|int|float, {} given",
+                        idx + 1,
+                        name,
+                        tn
+                    ),
+                )
+                .map(|_| Value::Null)
             }
         }
     };
@@ -3736,11 +4647,19 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let v = sv.deref();
         let v = match &v {
             Value::Long(_) | Value::Double(_) => v.clone(),
-            Value::String(s) if !strict => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
-                Some((goro_core::value::NumStr::Long(l), _)) => Value::Long(l),
-                Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
-                None => return terr(vm, "range(): Argument #3 ($step) must be of type int|float, string given".to_string()),
-            },
+            Value::String(s) if !strict => {
+                match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+                    Some((goro_core::value::NumStr::Long(l), _)) => Value::Long(l),
+                    Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
+                    None => {
+                        return terr(
+                            vm,
+                            "range(): Argument #3 ($step) must be of type int|float, string given"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
             Value::Null | Value::Undef | Value::False | Value::True if !strict => {
                 if matches!(v, Value::Null | Value::Undef) {
                     vm.emit_deprecated("range(): Passing null to parameter #3 ($step) of type int|float is deprecated");
@@ -3748,24 +4667,44 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Long(matches!(v, Value::True) as i64)
             }
             _ => {
-                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
-                return terr(vm, format!("range(): Argument #3 ($step) must be of type int|float, {} given", tn));
+                let tn = match &v {
+                    Value::True => "true".to_string(),
+                    Value::False => "false".to_string(),
+                    _ => Vm::value_type_name(&v).to_string(),
+                };
+                return terr(
+                    vm,
+                    format!(
+                        "range(): Argument #3 ($step) must be of type int|float, {} given",
+                        tn
+                    ),
+                );
             }
         };
         match v {
             Value::Double(d) => {
                 step_double = d;
                 if d.is_infinite() {
-                    return verr(vm, "range(): Argument #3 ($step) must be a finite number, INF provided".into());
+                    return verr(
+                        vm,
+                        "range(): Argument #3 ($step) must be a finite number, INF provided".into(),
+                    );
                 }
                 if d.is_nan() {
-                    return verr(vm, "range(): Argument #3 ($step) must be a finite number, NAN provided".into());
+                    return verr(
+                        vm,
+                        "range(): Argument #3 ($step) must be a finite number, NAN provided".into(),
+                    );
                 }
                 if step_double < 0.0 {
                     is_step_negative = true;
                     step_double = -step_double;
                 }
-                step = if (-9223372036854775808.0..9223372036854775808.0).contains(&step_double) { step_double as i64 } else { 0 };
+                step = if (-9223372036854775808.0..9223372036854775808.0).contains(&step_double) {
+                    step_double as i64
+                } else {
+                    0
+                };
                 if step as f64 != step_double {
                     is_step_double = true;
                 }
@@ -3774,7 +4713,10 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 step = l;
                 if step < 0 {
                     if step == i64::MIN {
-                        return verr(vm, format!("range(): Argument #3 ($step) must be greater than {}", step));
+                        return verr(
+                            vm,
+                            format!("range(): Argument #3 ($step) must be greater than {}", step),
+                        );
                     }
                     is_step_negative = true;
                     step = -step;
@@ -3788,22 +4730,43 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     // php_range_process_input
-    let process = |vm: &mut Vm, input: &Value, arg_num: usize, name: &str| -> Result<(u8, i64, f64), VmError> {
+    let process = |vm: &mut Vm,
+                   input: &Value,
+                   arg_num: usize,
+                   name: &str|
+     -> Result<(u8, i64, f64), VmError> {
         match input {
             Value::Long(l) => Ok((T_LONG, *l, *l as f64)),
             Value::Double(d) => {
                 if d.is_infinite() {
-                    return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, INF provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                    return verr(
+                        vm,
+                        format!(
+                            "range(): Argument #{} (${}) must be a finite number, INF provided",
+                            arg_num, name
+                        ),
+                    )
+                    .map(|_| (0, 0, 0.0));
                 }
                 if d.is_nan() {
-                    return verr(vm, format!("range(): Argument #{} (${}) must be a finite number, NAN provided", arg_num, name)).map(|_| (0, 0, 0.0));
+                    return verr(
+                        vm,
+                        format!(
+                            "range(): Argument #{} (${}) must be a finite number, NAN provided",
+                            arg_num, name
+                        ),
+                    )
+                    .map(|_| (0, 0, 0.0));
                 }
                 Ok((T_DOUBLE, 0, *d))
             }
             Value::String(s) => {
                 let b = s.as_bytes();
                 if b.is_empty() {
-                    vm.emit_warning(&format!("range(): Argument #{} (${}) must not be empty, casted to 0", arg_num, name));
+                    vm.emit_warning(&format!(
+                        "range(): Argument #{} (${}) must not be empty, casted to 0",
+                        arg_num, name
+                    ));
                     return Ok((T_LONG, 0, 0.0));
                 }
                 match goro_core::value::parse_numeric_str(b, false) {
@@ -3860,11 +4823,29 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     // Inputs "converted to 0" keep their zeroed numeric values.
-    let (start_long, start_double) = if start_type == T_LONG && matches!(user_start, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none()) { (0, 0.0) } else { (start_long, start_double) };
-    let (end_long, end_double) = if end_type == T_LONG && matches!(user_end, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none()) { (0, 0.0) } else { (end_long, end_double) };
+    let (start_long, start_double) = if start_type == T_LONG
+        && matches!(user_start, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none())
+    {
+        (0, 0.0)
+    } else {
+        (start_long, start_double)
+    };
+    let (end_long, end_double) = if end_type == T_LONG
+        && matches!(user_end, Value::String(ref s) if goro_core::value::parse_numeric_str(s.as_bytes(), false).is_none())
+    {
+        (0, 0.0)
+    } else {
+        (end_long, end_double)
+    };
     if chars {
-        let mut low = match &user_start { Value::String(s) => s.as_bytes()[0] as i64, _ => 0 };
-        let high = match &user_end { Value::String(s) => s.as_bytes()[0] as i64, _ => 0 };
+        let mut low = match &user_start {
+            Value::String(s) => s.as_bytes()[0] as i64,
+            _ => 0,
+        };
+        let high = match &user_end {
+            Value::String(s) => s.as_bytes()[0] as i64,
+            _ => 0,
+        };
         if low > high {
             if low - high < step {
                 return verr(vm, boundary.into());
@@ -3897,7 +4878,11 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let fmt1 = |f: f64| format!("{:.1}", f);
     if start_type == T_DOUBLE || end_type == T_DOUBLE || is_step_double {
-        let (hi, lo, dec) = if start_double > end_double { (start_double, end_double, true) } else { (end_double, start_double, false) };
+        let (hi, lo, dec) = if start_double > end_double {
+            (start_double, end_double, true)
+        } else {
+            (end_double, start_double, false)
+        };
         if start_double == end_double {
             result.push(Value::Double(start_double));
         } else {
@@ -3909,13 +4894,26 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             let calc = ((hi - lo) / step_double) + 1.0;
             if calc >= HT_MAX_SIZE as f64 {
-                return verr(vm, format!("The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Max size: {:.0}",
-                    fmt1(calc - HT_MAX_SIZE as f64), fmt1(lo), fmt1(hi), fmt1(step_double), HT_MAX_SIZE as f64));
+                return verr(
+                    vm,
+                    format!(
+                        "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Max size: {:.0}",
+                        fmt1(calc - HT_MAX_SIZE as f64),
+                        fmt1(lo),
+                        fmt1(hi),
+                        fmt1(step_double),
+                        HT_MAX_SIZE as f64
+                    ),
+                );
             }
             let size = crate::math::php_math_round(calc, 0, 1) as u64;
             let mut i = 0u64;
             loop {
-                let element = if dec { start_double - (i as f64 * step_double) } else { start_double + (i as f64 * step_double) };
+                let element = if dec {
+                    start_double - (i as f64 * step_double)
+                } else {
+                    start_double + (i as f64 * step_double)
+                };
                 if i >= size || (dec && element < end_double) || (!dec && element > end_double) {
                     break;
                 }
@@ -3932,19 +4930,41 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !dec && is_step_negative {
                 return verr(vm, negative.into());
             }
-            let span = if dec { (start_long as u64).wrapping_sub(end_long as u64) } else { (end_long as u64).wrapping_sub(start_long as u64) };
+            let span = if dec {
+                (start_long as u64).wrapping_sub(end_long as u64)
+            } else {
+                (end_long as u64).wrapping_sub(start_long as u64)
+            };
             if span < ustep {
                 return verr(vm, boundary.into());
             }
             let calc = span / ustep;
             if calc >= HT_MAX_SIZE - 1 {
-                let (a, b) = if dec { (start_long, end_long) } else { (end_long, start_long) };
-                return verr(vm, format!("The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Calculated size: {}. Maximum size: {}.",
-                    calc - (HT_MAX_SIZE - 1), b, a, ustep, calc, HT_MAX_SIZE));
+                let (a, b) = if dec {
+                    (start_long, end_long)
+                } else {
+                    (end_long, start_long)
+                };
+                return verr(
+                    vm,
+                    format!(
+                        "The supplied range exceeds the maximum array size by {} elements: start={}, end={}, step={}. Calculated size: {}. Maximum size: {}.",
+                        calc - (HT_MAX_SIZE - 1),
+                        b,
+                        a,
+                        ustep,
+                        calc,
+                        HT_MAX_SIZE
+                    ),
+                );
             }
             for i in 0..=calc {
                 let off = i.wrapping_mul(ustep);
-                let v = if dec { (start_long as u64).wrapping_sub(off) as i64 } else { (start_long as u64).wrapping_add(off) as i64 };
+                let v = if dec {
+                    (start_long as u64).wrapping_sub(off) as i64
+                } else {
+                    (start_long as u64).wrapping_add(off) as i64
+                };
                 result.push(Value::Long(v));
             }
         }
@@ -3956,7 +4976,10 @@ fn compact(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let msg = "Cannot call compact() dynamically";
     let exc = vm.create_exception(b"Error", msg, vm.current_line);
     vm.current_exception = Some(exc);
-    Err(VmError { message: format!("Uncaught Error: {}", msg), line: vm.current_line })
+    Err(VmError {
+        message: format!("Uncaught Error: {}", msg),
+        line: vm.current_line,
+    })
 }
 
 fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4062,12 +5085,22 @@ fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let value = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
-    if matches!(value, Value::Array(_) | Value::Object(_) | Value::Resource(_)) {
-        return Err(throw_type_error_msg(vm, "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null".to_string()));
+    if matches!(
+        value,
+        Value::Array(_) | Value::Object(_) | Value::Resource(_)
+    ) {
+        return Err(throw_type_error_msg(
+            vm,
+            "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null"
+                .to_string(),
+        ));
     }
     let key = name.as_bytes().to_vec();
     // ini_set() returns the old value as a string.
-    let old = vm.constants.get(&key).map(|v| Value::String(v.to_php_string()));
+    let old = vm
+        .constants
+        .get(&key)
+        .map(|v| Value::String(v.to_php_string()));
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
         let new_bytes = value.to_php_string().as_bytes().to_vec();
@@ -4114,7 +5147,10 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(e) = err {
             vm.emit_warning(&e);
         }
-        let max_s = vm.constants.get(b"max_memory_limit".as_ref()).map(|m| m.to_php_string());
+        let max_s = vm
+            .constants
+            .get(b"max_memory_limit".as_ref())
+            .map(|m| m.to_php_string());
         if let Some(max_s) = max_s {
             let (max, _) = goro_core::ini_quantity::parse_quantity(max_s.as_bytes(), false);
             if v > max {
@@ -4137,7 +5173,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::Long(n) => *n,
             Value::String(s) => {
                 let s_str = s.to_string_lossy();
-                if let Ok(n) = s_str.parse::<i64>() { n } else { vm.error_reporting }
+                if let Ok(n) = s_str.parse::<i64>() {
+                    n
+                } else {
+                    vm.error_reporting
+                }
             }
             _ => value.to_long(),
         };
@@ -4161,11 +5201,15 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::String(s) => s.to_string_lossy().parse::<i64>().unwrap_or(0),
             _ => value.to_long(),
         };
-        let cur_val = vm.constants.get(b"zend.assertions".as_ref())
+        let cur_val = vm
+            .constants
+            .get(b"zend.assertions".as_ref())
             .map(|v| v.to_long())
             .unwrap_or(1);
         if new_val == -1 || cur_val == -1 {
-            vm.emit_warning("zend.assertions may be completely enabled or disabled only in php.ini");
+            vm.emit_warning(
+                "zend.assertions may be completely enabled or disabled only in php.ini",
+            );
             // When zend.assertions is -1 (set in php.ini), don't allow runtime changes.
             // Keep the value as -1 so subsequent ini_set calls also warn.
             if cur_val == -1 {
@@ -4188,7 +5232,9 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             v => v.clone(),
         };
         vm.constants.insert(key, sv);
-        return Ok(old.map(|v| Value::String(v.to_php_string())).unwrap_or(Value::False));
+        return Ok(old
+            .map(|v| Value::String(v.to_php_string()))
+            .unwrap_or(Value::False));
     }
     // Actually update the value
     vm.constants.insert(key, value);
@@ -4225,10 +5271,16 @@ fn ini_parse_bool(v: &Value) -> bool {
         other => {
             let s = other.to_php_string().to_string_lossy();
             let t = s.trim();
-            if t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") || t.eq_ignore_ascii_case("on") {
+            if t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+            {
                 true
             } else {
-                let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
+                let digits: String = t
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+')
+                    .collect();
                 digits.parse::<i64>().map(|n| n != 0).unwrap_or(false)
             }
         }
@@ -4249,11 +5301,19 @@ pub fn assert_ini_deprecation(key: &[u8], value: &Value) -> Option<String> {
         b"assert.callback" => !value.to_php_string().as_bytes().is_empty(),
         _ => false,
     };
-    if deprecated { Some(format!("{} INI setting is deprecated", name)) } else { None }
+    if deprecated {
+        Some(format!("{} INI setting is deprecated", name))
+    } else {
+        None
+    }
 }
 
 fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let zend_assertions = vm.constants.get(b"zend.assertions".as_ref()).map(|v| v.to_long()).unwrap_or(1);
+    let zend_assertions = vm
+        .constants
+        .get(b"zend.assertions".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(1);
     if !assert_ini_bool(vm, b"assert.active", true) || zend_assertions <= 0 {
         return Ok(Value::True);
     }
@@ -4263,10 +5323,16 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match d {
             Value::Null | Value::String(_) | Value::Object(_) => {}
             other => {
-                let msg = format!("assert(): Argument #2 ($description) must be of type Throwable|string|null, {} given", Vm::value_type_name(other));
+                let msg = format!(
+                    "assert(): Argument #2 ($description) must be of type Throwable|string|null, {} given",
+                    Vm::value_type_name(other)
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: vm.current_line });
+                return Err(VmError {
+                    message: format!("Uncaught TypeError: {}", msg),
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -4275,7 +5341,10 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     if let Some(Value::Object(obj)) = &description {
         vm.current_exception = Some(Value::Object(obj.clone()));
-        return Err(VmError { message: "assert() failed".into(), line: vm.current_line });
+        return Err(VmError {
+            message: "assert() failed".into(),
+            line: vm.current_line,
+        });
     }
     let desc_str: Option<PhpString> = match &description {
         Some(Value::String(s)) => Some(s.clone()),
@@ -4317,27 +5386,50 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let _ = call_user_func(vm, &full);
         vm.current_line = line;
         if vm.current_exception.is_some() {
-            return Err(VmError { message: "Uncaught exception".into(), line });
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line,
+            });
         }
     }
     if assert_ini_bool(vm, b"assert.exception", true) {
-        let msg = desc_str.as_ref().map(|d| d.to_string_lossy()).unwrap_or_default();
+        let msg = desc_str
+            .as_ref()
+            .map(|d| d.to_string_lossy())
+            .unwrap_or_default();
         // The dispatcher may already have pushed our frame.
-        let pushed = vm.call_stack.last().map(|f| f.0 != "assert").unwrap_or(true);
+        let pushed = vm
+            .call_stack
+            .last()
+            .map(|f| f.0 != "assert")
+            .unwrap_or(true);
         if pushed {
-            vm.call_stack.push(("assert".to_string(), vm.current_file.clone(), line, args.to_vec(), false));
+            vm.call_stack.push((
+                "assert".to_string(),
+                vm.current_file.clone(),
+                line,
+                args.to_vec(),
+                false,
+            ));
         }
         let exc = vm.create_exception(b"AssertionError", &msg, line);
         if pushed {
             vm.call_stack.pop();
         }
         if let Value::Object(o) = &exc {
-            o.borrow_mut().set_property(b"code".to_vec(), Value::Long(1));
+            o.borrow_mut()
+                .set_property(b"code".to_vec(), Value::Long(1));
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: format!("Uncaught AssertionError: {}", msg), line });
+        return Err(VmError {
+            message: format!("Uncaught AssertionError: {}", msg),
+            line,
+        });
     } else if assert_ini_bool(vm, b"assert.warning", true) {
-        let d = desc_str.as_ref().map(|d| d.to_string_lossy()).unwrap_or_else(|| "Assertion".to_string());
+        let d = desc_str
+            .as_ref()
+            .map(|d| d.to_string_lossy())
+            .unwrap_or_else(|| "Assertion".to_string());
         vm.emit_warning_at(&format!("assert(): {} failed", d), line);
     }
     Ok(Value::False)
@@ -4346,11 +5438,12 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     // Strip leading backslash for fully qualified names
     let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
-    let name_lower: Vec<u8> = name_bytes
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+    let name_bytes = if raw_bytes.starts_with(b"\\") {
+        &raw_bytes[1..]
+    } else {
+        raw_bytes
+    };
+    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
     // Check built-in classes
     let is_builtin = matches!(
         name_lower.as_slice(),
@@ -4416,30 +5509,38 @@ fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match &derefed {
         Value::Object(obj) => {
             let obj_ref = obj.borrow();
-            Ok(Value::String(PhpString::from_vec(obj_ref.class_name.clone())))
+            Ok(Value::String(PhpString::from_vec(
+                obj_ref.class_name.clone(),
+            )))
         }
-        Value::Generator(_) => {
-            Ok(Value::String(PhpString::from_bytes(b"Generator")))
-        }
+        Value::Generator(_) => Ok(Value::String(PhpString::from_bytes(b"Generator"))),
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+                || b.starts_with(b"__closure_fcc_")
+            {
                 Ok(Value::String(PhpString::from_bytes(b"Closure")))
             } else {
                 let type_name = Vm::value_type_name(val);
-                let msg = format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name);
+                let msg = format!(
+                    "get_class(): Argument #1 ($object) must be of type object, {} given",
+                    type_name
+                );
                 let line = vm.current_line;
                 let exc = vm.create_exception(b"TypeError", &msg, line);
                 vm.current_exception = Some(exc);
                 Err(VmError { message: msg, line })
             }
         }
-        Value::Null | Value::Undef => {
-            Ok(Value::False)
-        }
+        Value::Null | Value::Undef => Ok(Value::False),
         _ => {
             let type_name = Vm::value_type_name(val);
-            let msg = format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name);
+            let msg = format!(
+                "get_class(): Argument #1 ($object) must be of type object, {} given",
+                type_name
+            );
             let line = vm.current_line;
             let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
@@ -4483,9 +5584,15 @@ fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
         if let Some(ce) = vm.classes.get(class_lower) {
             for prop in &ce.properties {
-                if prop.name != pname { continue; }
+                if prop.name != pname {
+                    continue;
+                }
                 // Inherited private props are not visible on subclasses.
-                let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let decl_lower: Vec<u8> = prop
+                    .declaring_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if prop.visibility == Visibility::Private && decl_lower != class_lower {
                     continue;
                 }
@@ -4497,16 +5604,24 @@ fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match class_or_obj {
         Value::Object(obj) => {
             let ob = obj.borrow();
-            let class_lower: Vec<u8> = ob.class_name.iter().map(|c| c.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = ob
+                .class_name
+                .iter()
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
             // Declared property check (filters out inherited private).
             let declared = class_has_visible_prop(vm, &class_lower, prop_name.as_bytes());
-            if declared { return Ok(Value::True); }
+            if declared {
+                return Ok(Value::True);
+            }
             // Otherwise check whether this is a dynamic instance property
             // (a key on the object that is not declared anywhere on the class
             // hierarchy).
             let on_inst = ob.has_property(prop_name.as_bytes());
             drop(ob);
-            if !on_inst { return Ok(Value::False); }
+            if !on_inst {
+                return Ok(Value::False);
+            }
             let mut declared_anywhere = false;
             let mut current = Some(class_lower);
             while let Some(cl) = current {
@@ -4515,10 +5630,19 @@ fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         declared_anywhere = true;
                         break;
                     }
-                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                } else { break; }
+                    current = ce
+                        .parent
+                        .as_ref()
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                } else {
+                    break;
+                }
             }
-            Ok(if !declared_anywhere { Value::True } else { Value::False })
+            Ok(if !declared_anywhere {
+                Value::True
+            } else {
+                Value::False
+            })
         }
         Value::String(s) => {
             let class_lower: Vec<u8> = s
@@ -4526,11 +5650,20 @@ fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
                 .collect();
-            Ok(if class_has_visible_prop(vm, &class_lower, prop_name.as_bytes()) { Value::True } else { Value::False })
+            Ok(
+                if class_has_visible_prop(vm, &class_lower, prop_name.as_bytes()) {
+                    Value::True
+                } else {
+                    Value::False
+                },
+            )
         }
         _ => {
             let type_name = Vm::value_type_name(class_or_obj);
-            let msg = format!("property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", type_name);
+            let msg = format!(
+                "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
+                type_name
+            );
             let line = vm.current_line;
             let exc = vm.create_exception(b"TypeError", &msg, line);
             vm.current_exception = Some(exc);
@@ -4551,7 +5684,11 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Object(obj) => {
             let obj = obj.borrow();
             // Closures have __invoke method
-            let cn_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let cn_lower: Vec<u8> = obj
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if cn_lower.starts_with(b"__closure") || cn_lower == b"closure" {
                 if method_lower == b"__invoke" {
                     return Ok(Value::True);
@@ -4568,7 +5705,8 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if s.as_bytes().starts_with(b"__closure") && method_lower == b"__invoke" {
                 return Ok(Value::True);
             }
-            let lower: Vec<u8> = s.as_bytes()
+            let lower: Vec<u8> = s
+                .as_bytes()
                 .iter()
                 .map(|c| c.to_ascii_lowercase())
                 .collect();
@@ -4576,7 +5714,10 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let name = s.as_bytes().to_vec();
                 vm.try_autoload_class(&name);
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: "Uncaught exception".into(),
+                        line: vm.current_line,
+                    });
                 }
             }
             lower
@@ -4588,7 +5729,13 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return method_exists(vm, &a);
         }
         other => {
-            return Err(throw_type_error_msg(vm, format!("method_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", Vm::value_type_name(other))));
+            return Err(throw_type_error_msg(
+                vm,
+                format!(
+                    "method_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
+                    Vm::value_type_name(other)
+                ),
+            ));
         }
     };
     let is_object = matches!(class_or_obj, Value::Object(_));
@@ -4601,7 +5748,11 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // Ignores visibility, except inherited private methods looked up by class name.
                 let private_inherited = m.visibility == Visibility::Private
                     && lower_bytes(&m.declaring_class) != class_lower;
-                return Ok(if is_object || !private_inherited { Value::True } else { Value::False });
+                return Ok(if is_object || !private_inherited {
+                    Value::True
+                } else {
+                    Value::False
+                });
             }
             if let Some(ref parent) = class.parent {
                 current = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -4617,7 +5768,8 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some((native, h)) = vm.find_native_class_handler(&class_lower) {
         if (h.has_method)(&native, &method_lower, false)
             || (h.has_method)(&native, &method_lower, true)
-            || (method_lower == b"__construct" && vm.object_construct_handlers.contains_key(&native))
+            || (method_lower == b"__construct"
+                && vm.object_construct_handlers.contains_key(&native))
         {
             return Ok(Value::True);
         }
@@ -4625,40 +5777,113 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Check built-in class methods
     let has_builtin_method = match class_lower.as_slice() {
-        b"closure" => matches!(method_lower.as_slice(),
+        b"closure" => matches!(
+            method_lower.as_slice(),
             b"__invoke" | b"call" | b"bind" | b"bindto" | b"fromcallable"
         ),
-        b"exception" | b"error" | b"runtimeexception" | b"logicexception"
-        | b"typeerror" | b"valueerror" | b"argumentcounterror" | b"rangeerror"
-        | b"arithmeticerror" | b"divisionbyzeroerror" | b"invalidargumentexception"
-        | b"badmethodcallexception" | b"overflowexception" | b"underflowexception"
-        | b"domainexception" | b"unexpectedvalueexception" | b"lengthexception"
-        | b"outofrangeexception" | b"outofboundsexception" | b"errorexception"
-        | b"assertionerror" | b"unhandledmatcherror" | b"closedgeneratorexception" => matches!(method_lower.as_slice(),
-            b"getmessage" | b"getcode" | b"getfile" | b"getline" | b"gettrace"
-            | b"gettraceAsstring" | b"gettraceasstring" | b"getprevious" | b"__tostring" | b"__construct"
+        b"exception"
+        | b"error"
+        | b"runtimeexception"
+        | b"logicexception"
+        | b"typeerror"
+        | b"valueerror"
+        | b"argumentcounterror"
+        | b"rangeerror"
+        | b"arithmeticerror"
+        | b"divisionbyzeroerror"
+        | b"invalidargumentexception"
+        | b"badmethodcallexception"
+        | b"overflowexception"
+        | b"underflowexception"
+        | b"domainexception"
+        | b"unexpectedvalueexception"
+        | b"lengthexception"
+        | b"outofrangeexception"
+        | b"outofboundsexception"
+        | b"errorexception"
+        | b"assertionerror"
+        | b"unhandledmatcherror"
+        | b"closedgeneratorexception" => matches!(
+            method_lower.as_slice(),
+            b"getmessage"
+                | b"getcode"
+                | b"getfile"
+                | b"getline"
+                | b"gettrace"
+                | b"gettraceAsstring"
+                | b"gettraceasstring"
+                | b"getprevious"
+                | b"__tostring"
+                | b"__construct"
         ),
-        b"generator" => matches!(method_lower.as_slice(),
-            b"current" | b"key" | b"next" | b"rewind" | b"send" | b"throw"
-            | b"valid" | b"getreturn"
+        b"generator" => matches!(
+            method_lower.as_slice(),
+            b"current"
+                | b"key"
+                | b"next"
+                | b"rewind"
+                | b"send"
+                | b"throw"
+                | b"valid"
+                | b"getreturn"
         ),
         b"stdclass" => method_lower == b"__construct",
-        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(method_lower.as_slice(),
-            b"__construct" | b"offsetexists" | b"offsetget" | b"offsetset" | b"offsetunset"
-            | b"count" | b"getiterator" | b"append" | b"getarraycopy" | b"getflags" | b"setflags"
+        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
+            method_lower.as_slice(),
+            b"__construct"
+                | b"offsetexists"
+                | b"offsetget"
+                | b"offsetset"
+                | b"offsetunset"
+                | b"count"
+                | b"getiterator"
+                | b"append"
+                | b"getarraycopy"
+                | b"getflags"
+                | b"setflags"
         ),
-        b"splfixedarray" => matches!(method_lower.as_slice(),
-            b"__construct" | b"count" | b"offsetexists" | b"offsetget" | b"offsetset"
-            | b"offsetunset" | b"fromarray" | b"toarray" | b"getsize" | b"setsize"
+        b"splfixedarray" => matches!(
+            method_lower.as_slice(),
+            b"__construct"
+                | b"count"
+                | b"offsetexists"
+                | b"offsetget"
+                | b"offsetset"
+                | b"offsetunset"
+                | b"fromarray"
+                | b"toarray"
+                | b"getsize"
+                | b"setsize"
         ),
-        b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(method_lower.as_slice(),
-            b"__construct" | b"count" | b"push" | b"pop" | b"shift" | b"unshift"
-            | b"top" | b"bottom" | b"isempty" | b"current" | b"key" | b"next" | b"prev"
-            | b"rewind" | b"valid" | b"offsetexists" | b"offsetget" | b"offsetset" | b"offsetunset"
+        b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
+            method_lower.as_slice(),
+            b"__construct"
+                | b"count"
+                | b"push"
+                | b"pop"
+                | b"shift"
+                | b"unshift"
+                | b"top"
+                | b"bottom"
+                | b"isempty"
+                | b"current"
+                | b"key"
+                | b"next"
+                | b"prev"
+                | b"rewind"
+                | b"valid"
+                | b"offsetexists"
+                | b"offsetget"
+                | b"offsetset"
+                | b"offsetunset"
         ),
         _ => false,
     };
-    Ok(if has_builtin_method { Value::True } else { Value::False })
+    Ok(if has_builtin_method {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
@@ -4666,7 +5891,11 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Object(_) | Value::Generator(_) => Value::True,
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+            if b.starts_with(b"__closure_")
+                || b.starts_with(b"__arrow_")
+                || b.starts_with(b"__bound_closure_")
+                || b.starts_with(b"__closure_fcc_")
+            {
                 Value::True
             } else {
                 Value::False
@@ -4677,7 +5906,11 @@ fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Some(first) = arr.values().next() {
                 if let Value::String(s) = first {
                     let b = s.as_bytes();
-                    if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                    if b.starts_with(b"__closure_")
+                        || b.starts_with(b"__arrow_")
+                        || b.starts_with(b"__bound_closure_")
+                        || b.starts_with(b"__closure_fcc_")
+                    {
                         return Ok(Value::True);
                     }
                 }
@@ -4717,16 +5950,29 @@ fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> 
             let pname: Vec<u8> = name.to_php_string().as_bytes().to_vec();
             let class_lower = o.borrow().class_name.to_ascii_lowercase();
             let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
-            let (accessible, declared) = match vm.get_class_def(&class_lower)
-                .and_then(|c| c.properties.iter().find(|p| p.name == pname && !p.is_static).map(|p| (p.visibility, p.declaring_class.clone())))
-            {
-                Some((vis, decl)) => (match vis {
-                    goro_core::object::Visibility::Public => true,
-                    goro_core::object::Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
-                    goro_core::object::Visibility::Protected => scope.as_ref().map(|sc| {
-                        sc.as_slice() == decl.as_slice() || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
-                    }).unwrap_or(false),
-                }, true),
+            let (accessible, declared) = match vm.get_class_def(&class_lower).and_then(|c| {
+                c.properties
+                    .iter()
+                    .find(|p| p.name == pname && !p.is_static)
+                    .map(|p| (p.visibility, p.declaring_class.clone()))
+            }) {
+                Some((vis, decl)) => (
+                    match vis {
+                        goro_core::object::Visibility::Public => true,
+                        goro_core::object::Visibility::Private => {
+                            scope.as_deref() == Some(decl.as_slice())
+                        }
+                        goro_core::object::Visibility::Protected => scope
+                            .as_ref()
+                            .map(|sc| {
+                                sc.as_slice() == decl.as_slice()
+                                    || vm.class_extends(sc, &decl)
+                                    || vm.class_extends(&decl, sc)
+                            })
+                            .unwrap_or(false),
+                    },
+                    true,
+                ),
                 None => (true, false),
             };
             let present = {
@@ -4737,18 +5983,27 @@ fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> 
                 return Some(o.borrow().get_property(&pname).deref());
             }
             let _ = declared;
-            let has_isset = vm.get_class_def(&class_lower).map(|c| c.get_method(b"__isset").is_some()).unwrap_or(false);
+            let has_isset = vm
+                .get_class_def(&class_lower)
+                .map(|c| c.get_method(b"__isset").is_some())
+                .unwrap_or(false);
             if !has_isset {
                 return None;
             }
             let pv = Value::String(PhpString::from_vec(pname.clone()));
-            let isset = vm.call_object_method(data, b"__isset", std::slice::from_ref(&pv)).unwrap_or(Value::False);
+            let isset = vm
+                .call_object_method(data, b"__isset", std::slice::from_ref(&pv))
+                .unwrap_or(Value::False);
             if !isset.is_truthy() {
                 return None;
             }
-            let has_get = vm.get_class_def(&class_lower).map(|c| c.get_method(b"__get").is_some()).unwrap_or(false);
+            let has_get = vm
+                .get_class_def(&class_lower)
+                .map(|c| c.get_method(b"__get").is_some())
+                .unwrap_or(false);
             if has_get {
-                vm.call_object_method(data, b"__get", &[pv]).map(|v| v.deref())
+                vm.call_object_method(data, b"__get", &[pv])
+                    .map(|v| v.deref())
             } else if present {
                 Some(o.borrow().get_property(&pname).deref())
             } else {
@@ -4775,26 +6030,52 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     // Z_PARAM_STR_OR_LONG_OR_NULL
     let key_param = |vm: &mut Vm, idx: usize, pname: &str| -> Result<Option<Value>, VmError> {
-        let v = match args.get(idx) { Some(v) => v.deref(), None => return Ok(None) };
+        let v = match args.get(idx) {
+            Some(v) => v.deref(),
+            None => return Ok(None),
+        };
         match &v {
             Value::Null | Value::Undef => Ok(None),
             Value::Long(_) | Value::String(_) => Ok(Some(v.clone())),
             Value::Double(f) if !vm.caller_strict_types => {
                 if f.is_finite() && f.fract() != 0.0 {
-                    vm.emit_deprecated(&format!("Implicit conversion from float {} to int loses precision", goro_core::value::format_php_float(*f)));
+                    vm.emit_deprecated(&format!(
+                        "Implicit conversion from float {} to int loses precision",
+                        goro_core::value::format_php_float(*f)
+                    ));
                 }
                 Ok(Some(Value::Long(*f as i64)))
             }
-            Value::True | Value::False if !vm.caller_strict_types => Ok(Some(Value::Long(matches!(v, Value::True) as i64))),
-            Value::Object(o) if !vm.caller_strict_types && vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false) => {
+            Value::True | Value::False if !vm.caller_strict_types => {
+                Ok(Some(Value::Long(matches!(v, Value::True) as i64)))
+            }
+            Value::Object(o)
+                if !vm.caller_strict_types
+                    && vm
+                        .get_class_def(&o.borrow().class_name.to_ascii_lowercase())
+                        .map(|c| c.get_method(b"__tostring").is_some())
+                        .unwrap_or(false) =>
+            {
                 Ok(Some(Value::String(vm.value_to_string(&v))))
             }
             _ => {
-                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
-                let msg = format!("array_column(): Argument #{} (${}) must be of type string|int|null, {} given", idx + 1, pname, tn);
+                let tn = match &v {
+                    Value::True => "true".to_string(),
+                    Value::False => "false".to_string(),
+                    _ => Vm::value_type_name(&v).to_string(),
+                };
+                let msg = format!(
+                    "array_column(): Argument #{} (${}) must be of type string|int|null, {} given",
+                    idx + 1,
+                    pname,
+                    tn
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                Err(VmError { message: msg, line: vm.current_line })
+                Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                })
             }
         }
     };
@@ -4818,7 +6099,11 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     let line = vm.current_line;
                     match &kv {
                         Value::Array(_) | Value::Object(_) => {
-                            let tn = if let Value::Object(o) = &kv { goro_core::value::display_class_name(&o.borrow().class_name) } else { "array".to_string() };
+                            let tn = if let Value::Object(o) = &kv {
+                                goro_core::value::display_class_name(&o.borrow().class_name)
+                            } else {
+                                "array".to_string()
+                            };
                             let msg = format!("Cannot access offset of type {} on array", tn);
                             let exc = vm.throw_type_error(msg.clone());
                             vm.current_exception = Some(exc);
@@ -4897,7 +6182,10 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
+        return Err(VmError {
+            message: format!("Uncaught ValueError: {}", msg),
+            line: vm.current_line,
+        });
     }
     if num < 1 || num as usize > len {
         let msg = "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)".to_string();
@@ -4906,7 +6194,10 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
+        return Err(VmError {
+            message: format!("Uncaught ValueError: {}", msg),
+            line: vm.current_line,
+        });
     }
     let keys: Vec<goro_core::array::ArrayKey> = arr_borrow.iter().map(|(k, _)| k.clone()).collect();
     drop(arr_borrow);
@@ -4960,7 +6251,10 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "str_split(): Argument #2 ($length) must be greater than 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let len = len as usize;
     let bytes = s.as_bytes();
@@ -4994,7 +6288,10 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if num.is_infinite() {
             let prefix = if num < 0.0 { "-" } else { "" };
-            return Ok(Value::String(PhpString::from_string(format!("{}INF", prefix))));
+            return Ok(Value::String(PhpString::from_string(format!(
+                "{}INF",
+                prefix
+            ))));
         }
         let places = decimals_raw.checked_neg().unwrap_or(i64::MAX).min(100) as u32;
         let factor = 10f64.powi(places as i32);
@@ -5017,7 +6314,9 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             with_sep.push(b as char);
         }
         let mut result = String::new();
-        if neg { result.push('-'); }
+        if neg {
+            result.push('-');
+        }
         result.push_str(&with_sep);
         return Ok(Value::String(PhpString::from_string(result)));
     }
@@ -5027,7 +6326,11 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // For integer values, format without going through float to preserve precision
     let (formatted, is_negative) = if let Value::Long(n) = val {
         let neg = *n < 0;
-        let abs_str = if neg { format!("{}", -(*n as i128)) } else { format!("{}", n) };
+        let abs_str = if neg {
+            format!("{}", -(*n as i128))
+        } else {
+            format!("{}", n)
+        };
         let formatted = if decimals > 0 {
             format!("{}.{}", abs_str, "0".repeat(decimals))
         } else {
@@ -5041,7 +6344,10 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         if num.is_infinite() {
             let prefix = if num < 0.0 { "-" } else { "" };
-            return Ok(Value::String(PhpString::from_string(format!("{}INF", prefix))));
+            return Ok(Value::String(PhpString::from_string(format!(
+                "{}INF",
+                prefix
+            ))));
         }
         let neg = num < 0.0;
         // Use PHP's rounding approach: floor(f + 0.5) to handle edge cases
@@ -5163,7 +6469,10 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let content_len = filtered.iter().filter(|&&b| b != b'=').count();
         let pad_len = filtered.iter().filter(|&&b| b == b'=').count();
         // Check padding position (must be at end)
-        let first_pad = filtered.iter().position(|&b| b == b'=').unwrap_or(filtered.len());
+        let first_pad = filtered
+            .iter()
+            .position(|&b| b == b'=')
+            .unwrap_or(filtered.len());
         if first_pad + pad_len != filtered.len() {
             return Ok(Value::False);
         }
@@ -5174,17 +6483,27 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match content_len % 4 {
             0 => {
                 // Full groups: padding must be 0
-                if pad_len != 0 { return Ok(Value::False); }
+                if pad_len != 0 {
+                    return Ok(Value::False);
+                }
             }
             2 => {
                 // 2 extra chars: accepts 0 or 2 padding chars
-                if pad_len != 0 && pad_len != 2 { return Ok(Value::False); }
-                if pad_len != 0 && total % 4 != 0 { return Ok(Value::False); }
+                if pad_len != 0 && pad_len != 2 {
+                    return Ok(Value::False);
+                }
+                if pad_len != 0 && total % 4 != 0 {
+                    return Ok(Value::False);
+                }
             }
             3 => {
                 // 3 extra chars: accepts 0 or 1 padding char
-                if pad_len != 0 && pad_len != 1 { return Ok(Value::False); }
-                if pad_len != 0 && total % 4 != 0 { return Ok(Value::False); }
+                if pad_len != 0 && pad_len != 1 {
+                    return Ok(Value::False);
+                }
+                if pad_len != 0 && total % 4 != 0 {
+                    return Ok(Value::False);
+                }
             }
             1 => {
                 // 1 extra char can't decode to anything valid
@@ -5199,7 +6518,10 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let vals: Vec<u8> = filtered.iter().filter_map(|&b| b64_val(b)).collect();
     let mut i = 0;
     while i + 3 < vals.len() {
-        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12) | ((vals[i+2] as u32) << 6) | (vals[i+3] as u32);
+        let n = ((vals[i] as u32) << 18)
+            | ((vals[i + 1] as u32) << 12)
+            | ((vals[i + 2] as u32) << 6)
+            | (vals[i + 3] as u32);
         result.push((n >> 16) as u8);
         result.push((n >> 8) as u8);
         result.push(n as u8);
@@ -5207,11 +6529,12 @@ fn base64_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let remaining = vals.len() - i;
     if remaining == 3 {
-        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12) | ((vals[i+2] as u32) << 6);
+        let n =
+            ((vals[i] as u32) << 18) | ((vals[i + 1] as u32) << 12) | ((vals[i + 2] as u32) << 6);
         result.push((n >> 16) as u8);
         result.push((n >> 8) as u8);
     } else if remaining == 2 {
-        let n = ((vals[i] as u32) << 18) | ((vals[i+1] as u32) << 12);
+        let n = ((vals[i] as u32) << 18) | ((vals[i + 1] as u32) << 12);
         result.push((n >> 16) as u8);
     }
     Ok(Value::String(PhpString::from_vec(result)))
@@ -5325,26 +6648,40 @@ fn validate_fmt_arg2(vm: &mut Vm, func_name: &str, format_arg: &Value) -> Result
             // Object with __toString is OK.
             let class_name = obj.borrow().class_name.clone();
             let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let has_tostring = vm.classes.get(&class_lower)
+            let has_tostring = vm
+                .classes
+                .get(&class_lower)
                 .map(|c| c.get_method(b"__tostring").is_some())
                 .unwrap_or(false);
             if has_tostring {
                 None
             } else {
                 let class_display = String::from_utf8_lossy(&class_name).to_string();
-                let msg = format!("{}(): Argument #2 ($format) must be of type string, {} given", func_name, class_display);
+                let msg = format!(
+                    "{}(): Argument #2 ($format) must be of type string, {} given",
+                    func_name, class_display
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
         _ => None,
     };
     if let Some(t) = type_str {
-        let msg = format!("{}(): Argument #2 ($format) must be of type string, {} given", func_name, t);
+        let msg = format!(
+            "{}(): Argument #2 ($format) must be of type string, {} given",
+            func_name, t
+        );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(())
 }
@@ -5364,17 +6701,29 @@ fn validate_values_arg3(vm: &mut Vm, func_name: &str, values_arg: &Value) -> Res
         Value::Resource(_) => "resource",
         Value::Object(obj) => {
             let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            let msg = format!("{}(): Argument #3 ($values) must be of type array, {} given", func_name, name);
+            let msg = format!(
+                "{}(): Argument #3 ($values) must be of type array, {} given",
+                func_name, name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => "unknown",
     };
-    let msg = format!("{}(): Argument #3 ($values) must be of type array, {} given", func_name, type_name);
+    let msg = format!(
+        "{}(): Argument #3 ($values) must be of type array, {} given",
+        func_name, type_name
+    );
     let exc = vm.create_exception(b"TypeError", &msg, 0);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 /// Validate that arg #1 is a resource (or an int treated as one). Returns the
@@ -5391,26 +6740,44 @@ fn validate_stream_arg1(vm: &mut Vm, func_name: &str, stream_arg: &Value) -> Res
         Value::Array(_) => "array",
         Value::Object(obj) => {
             let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            let msg = format!("{}(): Argument #1 ($stream) must be of type resource, {} given", func_name, name);
+            let msg = format!(
+                "{}(): Argument #1 ($stream) must be of type resource, {} given",
+                func_name, name
+            );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => "unknown",
     };
-    let msg = format!("{}(): Argument #1 ($stream) must be of type resource, {} given", func_name, type_name);
+    let msg = format!(
+        "{}(): Argument #1 ($stream) must be of type resource, {} given",
+        func_name, type_name
+    );
     let exc = vm.create_exception(b"TypeError", &msg, 0);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // fprintf($handle, $format, ...$args) - write formatted to file handle
     if args.len() < 2 {
-        let msg = format!("fprintf() expects at least 2 arguments, {} given", args.len());
+        let msg = format!(
+            "fprintf() expects at least 2 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     validate_stream_arg1(vm, "fprintf", &args[0])?;
     validate_fmt_arg2(vm, "fprintf", &args[1])?;
@@ -5440,10 +6807,16 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // vfprintf($handle, $format, $args_array)
     if args.len() != 3 {
-        let msg = format!("vfprintf() expects exactly 3 arguments, {} given", args.len());
+        let msg = format!(
+            "vfprintf() expects exactly 3 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     validate_stream_arg1(vm, "vfprintf", &args[0])?;
     validate_fmt_arg2(vm, "vfprintf", &args[1])?;
@@ -5484,14 +6857,23 @@ fn throw_value_error_msg(vm: &mut Vm, msg: &str) -> VmError {
 /// Throw a ValueError with the builtin's own frame in the stack trace.
 fn throw_value_error_in(vm: &mut Vm, func: &str, args: &[Value], msg: &str) -> VmError {
     if !func.is_empty() {
-        vm.call_stack.push((func.to_string(), vm.current_file.clone(), vm.current_line, args.to_vec(), false));
+        vm.call_stack.push((
+            func.to_string(),
+            vm.current_file.clone(),
+            vm.current_line,
+            args.to_vec(),
+            false,
+        ));
     }
     let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
     if !func.is_empty() {
         vm.call_stack.pop();
     }
     vm.current_exception = Some(exc);
-    VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line }
+    VmError {
+        message: format!("Uncaught ValueError: {}", msg),
+        line: vm.current_line,
+    }
 }
 
 /// sysconf(_SC_ARG_MAX) on Linux.
@@ -5500,10 +6882,21 @@ const SHELL_CMD_MAX_LEN: usize = 2097152;
 fn escapeshellarg_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     if s.as_bytes().contains(&0) {
-        return Err(throw_value_error_in(vm, "escapeshellarg", args, "escapeshellarg(): Argument #1 ($arg) must not contain any null bytes"));
+        return Err(throw_value_error_in(
+            vm,
+            "escapeshellarg",
+            args,
+            "escapeshellarg(): Argument #1 ($arg) must not contain any null bytes",
+        ));
     }
     if s.len() > SHELL_CMD_MAX_LEN - 3 {
-        return Err(throw_value_error_msg(vm, &format!("Argument exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
+        return Err(throw_value_error_msg(
+            vm,
+            &format!(
+                "Argument exceeds the allowed length of {} bytes",
+                SHELL_CMD_MAX_LEN
+            ),
+        ));
     }
     let mut result = Vec::new();
     result.push(b'\'');
@@ -5522,10 +6915,21 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let str = s.as_bytes();
     if str.contains(&0) {
-        return Err(throw_value_error_in(vm, "escapeshellcmd", args, "escapeshellcmd(): Argument #1 ($command) must not contain any null bytes"));
+        return Err(throw_value_error_in(
+            vm,
+            "escapeshellcmd",
+            args,
+            "escapeshellcmd(): Argument #1 ($command) must not contain any null bytes",
+        ));
     }
     if str.len() > SHELL_CMD_MAX_LEN - 3 {
-        return Err(throw_value_error_msg(vm, &format!("Command exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
+        return Err(throw_value_error_msg(
+            vm,
+            &format!(
+                "Command exceeds the allowed length of {} bytes",
+                SHELL_CMD_MAX_LEN
+            ),
+        ));
     }
     let mut result = Vec::new();
     // Quotes are only escaped when unpaired (php_escape_shell_cmd).
@@ -5546,8 +6950,8 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 result.push(byte);
             }
-            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^'
-            | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b'\x0A' | b'\xFF' => {
+            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^' | b'('
+            | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b'\x0A' | b'\xFF' => {
                 result.push(b'\\');
                 result.push(byte);
             }
@@ -5555,7 +6959,13 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     if result.len() > SHELL_CMD_MAX_LEN + 1 {
-        return Err(throw_value_error_msg(vm, &format!("Escaped command exceeds the allowed length of {} bytes", SHELL_CMD_MAX_LEN)));
+        return Err(throw_value_error_msg(
+            vm,
+            &format!(
+                "Escaped command exceeds the allowed length of {} bytes",
+                SHELL_CMD_MAX_LEN
+            ),
+        ));
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
@@ -5563,10 +6973,16 @@ fn escapeshellcmd_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// PHP_FUNCTION(parse_str)
 fn parse_str_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() < 2 {
-        let msg = format!("parse_str() expects exactly 2 arguments, {} given", args.len());
+        let msg = format!(
+            "parse_str() expects exactly 2 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let s = crate::strings::zpp_str(vm, args, 0, "parse_str", "string")?;
     let arr = Rc::new(RefCell::new(PhpArray::new()));
@@ -5595,7 +7011,9 @@ struct PhpUrl {
 /// php_url_parse_ex2() (ext/standard/url.c)
 fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
     fn ctl(v: &[u8]) -> Vec<u8> {
-        v.iter().map(|&c| if c < 0x20 || c == 0x7f { b'_' } else { c }).collect()
+        v.iter()
+            .map(|&c| if c < 0x20 || c == 0x7f { b'_' } else { c })
+            .collect()
     }
     fn memchr(b: &[u8], from: usize, to: usize, c: u8) -> Option<usize> {
         b[from..to].iter().position(|&x| x == c).map(|p| p + from)
@@ -5626,10 +7044,18 @@ fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
                 break;
             }
         }
-        if any && (0..=65535).contains(&v) { Some(v as u16) } else { None }
+        if any && (0..=65535).contains(&v) {
+            Some(v as u16)
+        } else {
+            None
+        }
     }
     #[derive(PartialEq)]
-    enum L { ParsePort, ParseHost, JustPath }
+    enum L {
+        ParsePort,
+        ParseHost,
+        JustPath,
+    }
     let mut ret = PhpUrl::default();
     let ue = b.len();
     let mut s = 0usize;
@@ -5641,7 +7067,12 @@ fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
             let mut p = s;
             while p < e {
                 let c = b[p];
-                if !c.is_ascii_alphabetic() && !c.is_ascii_digit() && c != b'+' && c != b'.' && c != b'-' {
+                if !c.is_ascii_alphabetic()
+                    && !c.is_ascii_digit()
+                    && c != b'+'
+                    && c != b'.'
+                    && c != b'-'
+                {
                     if e + 1 < ue && e < strcspn(b, s, ue, b"?#") {
                         label = L::ParsePort;
                     } else if s + 1 < ue && b[s] == b'/' && b[s + 1] == b'/' {
@@ -5676,8 +7107,13 @@ fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
                 ret.scheme = Some(ctl(&b[s..e]));
                 if e + 2 < ue && b[e + 2] == b'/' {
                     s = e + 3;
-                    if ret.scheme.as_deref().map(|x| x.eq_ignore_ascii_case(b"file")).unwrap_or(false)
-                        && e + 3 < ue && b[e + 3] == b'/'
+                    if ret
+                        .scheme
+                        .as_deref()
+                        .map(|x| x.eq_ignore_ascii_case(b"file"))
+                        .unwrap_or(false)
+                        && e + 3 < ue
+                        && b[e + 3] == b'/'
                     {
                         if e + 5 < ue && b[e + 5] == b':' {
                             s = e + 4;
@@ -5796,35 +7232,67 @@ fn parse_url_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(r) => r,
         None => return Ok(Value::False),
     };
-    let sv = |v: &Option<Vec<u8>>| v.as_ref().map(|x| Value::String(PhpString::from_vec(x.clone()))).unwrap_or(Value::Null);
+    let sv = |v: &Option<Vec<u8>>| {
+        v.as_ref()
+            .map(|x| Value::String(PhpString::from_vec(x.clone())))
+            .unwrap_or(Value::Null)
+    };
     if key > -1 {
         return Ok(match key {
             0 => sv(&res.scheme),
             1 => sv(&res.host),
-            2 => if res.has_port { Value::Long(res.port as i64) } else { Value::Null },
+            2 => {
+                if res.has_port {
+                    Value::Long(res.port as i64)
+                } else {
+                    Value::Null
+                }
+            }
             3 => sv(&res.user),
             4 => sv(&res.pass),
             5 => sv(&res.path),
             6 => sv(&res.query),
             7 => sv(&res.fragment),
             _ => {
-                let msg = format!("parse_url(): Argument #2 ($component) must be a valid URL component identifier, {} given", key);
+                let msg = format!(
+                    "parse_url(): Argument #2 ($component) must be a valid URL component identifier, {} given",
+                    key
+                );
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         });
     }
     let mut out = PhpArray::new();
     let mut put = |k: &[u8], v: Value| out.set(ArrayKey::String(PhpString::from_bytes(k)), v);
-    if res.scheme.is_some() { put(b"scheme", sv(&res.scheme)); }
-    if res.host.is_some() { put(b"host", sv(&res.host)); }
-    if res.has_port { put(b"port", Value::Long(res.port as i64)); }
-    if res.user.is_some() { put(b"user", sv(&res.user)); }
-    if res.pass.is_some() { put(b"pass", sv(&res.pass)); }
-    if res.path.is_some() { put(b"path", sv(&res.path)); }
-    if res.query.is_some() { put(b"query", sv(&res.query)); }
-    if res.fragment.is_some() { put(b"fragment", sv(&res.fragment)); }
+    if res.scheme.is_some() {
+        put(b"scheme", sv(&res.scheme));
+    }
+    if res.host.is_some() {
+        put(b"host", sv(&res.host));
+    }
+    if res.has_port {
+        put(b"port", Value::Long(res.port as i64));
+    }
+    if res.user.is_some() {
+        put(b"user", sv(&res.user));
+    }
+    if res.pass.is_some() {
+        put(b"pass", sv(&res.pass));
+    }
+    if res.path.is_some() {
+        put(b"path", sv(&res.path));
+    }
+    if res.query.is_some() {
+        put(b"query", sv(&res.query));
+    }
+    if res.fragment.is_some() {
+        put(b"fragment", sv(&res.fragment));
+    }
     Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
@@ -5833,26 +7301,43 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null);
     // Top-level enum: throw TypeError.
     if let Value::Object(obj) = data {
-        let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let cls_lower: Vec<u8> = obj
+            .borrow()
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         if let Some(ce) = vm.classes.get(&cls_lower) {
             if ce.is_enum {
                 let name = obj.borrow().class_name.clone();
-                let msg = format!("http_build_query(): Argument #1 ($data) must not be an enum, {} given", String::from_utf8_lossy(&name));
+                let msg = format!(
+                    "http_build_query(): Argument #1 ($data) must not be an enum, {} given",
+                    String::from_utf8_lossy(&name)
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: "Uncaught TypeError".to_string(), line: 0 });
+                return Err(VmError {
+                    message: "Uncaught TypeError".to_string(),
+                    line: 0,
+                });
             }
         }
     }
     let _numeric_prefix = args.get(1).and_then(|v| {
-        if matches!(v, Value::Null | Value::Undef) { None }
-        else { Some(v.to_php_string().to_string_lossy()) }
+        if matches!(v, Value::Null | Value::Undef) {
+            None
+        } else {
+            Some(v.to_php_string().to_string_lossy())
+        }
     });
     let separator = args
         .get(2)
         .and_then(|v| {
-            if matches!(v, Value::Null | Value::Undef) { None }
-            else { Some(v.to_php_string().to_string_lossy()) }
+            if matches!(v, Value::Null | Value::Undef) {
+                None
+            } else {
+                Some(v.to_php_string().to_string_lossy())
+            }
         })
         .unwrap_or_else(|| "&".to_string());
     let enc_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // PHP_QUERY_RFC1738 = 1
@@ -5897,7 +7382,11 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         match val {
             Value::Array(arr) => {
-                let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 for (key, v) in pairs {
                     let k = match &key {
                         goro_core::array::ArrayKey::Int(n) => {
@@ -5918,15 +7407,31 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     } else {
                         format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
                     };
-                    build_query_recursive(vm, parts, &new_prefix, &v, separator, enc_type, numeric_prefix, depth + 1);
+                    build_query_recursive(
+                        vm,
+                        parts,
+                        &new_prefix,
+                        &v,
+                        separator,
+                        enc_type,
+                        numeric_prefix,
+                        depth + 1,
+                    );
                 }
             }
             Value::Object(obj) => {
                 // Handle enums specially:
                 //   - backed enum case → use its backing value
                 //   - unbacked enum   → ValueError
-                let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let (is_enum, has_backing, class_name) = vm.classes.get(&class_lower)
+                let class_lower: Vec<u8> = obj
+                    .borrow()
+                    .class_name
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let (is_enum, has_backing, class_name) = vm
+                    .classes
+                    .get(&class_lower)
                     .map(|ce| (ce.is_enum, ce.enum_backing_type.is_some(), ce.name.clone()))
                     .unwrap_or((false, false, Vec::new()));
                 if is_enum {
@@ -5935,7 +7440,10 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let v = url_encode(&val.to_php_string().to_string_lossy(), enc_type);
                         parts.push(format!("{}={}", prefix, v));
                     } else {
-                        let msg = format!("Unbacked enum {} cannot be converted to a string", String::from_utf8_lossy(&class_name));
+                        let msg = format!(
+                            "Unbacked enum {} cannot be converted to a string",
+                            String::from_utf8_lossy(&class_name)
+                        );
                         let exc = vm.create_exception(b"ValueError", &msg, 0);
                         vm.current_exception = Some(exc);
                     }
@@ -5943,17 +7451,25 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 // Treat objects like arrays: iterate accessible properties.
                 let obj_b = obj.borrow();
-                let scope_class: Option<Vec<u8>> = vm.current_class_scope()
+                let scope_class: Option<Vec<u8>> = vm
+                    .current_class_scope()
                     .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                let mut visibility_map: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> = std::collections::HashMap::new();
+                let mut visibility_map: std::collections::HashMap<
+                    Vec<u8>,
+                    (goro_core::object::Visibility, Vec<u8>),
+                > = std::collections::HashMap::new();
                 let mut walk_class = Some(class_lower.clone());
                 while let Some(c) = walk_class {
                     if let Some(ce) = vm.classes.get(&c) {
                         for p in &ce.properties {
-                            visibility_map.entry(p.name.clone())
+                            visibility_map
+                                .entry(p.name.clone())
                                 .or_insert((p.visibility, p.declaring_class.clone()));
                         }
-                        walk_class = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                        walk_class = ce
+                            .parent
+                            .as_ref()
+                            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
                     } else {
                         walk_class = None;
                     }
@@ -5966,22 +7482,43 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             goro_core::object::Visibility::Public => true,
                             goro_core::object::Visibility::Protected => {
                                 if let Some(ref s) = scope_class {
-                                    s == &class_lower || vm.class_extends(s, &class_lower) || vm.class_extends(&class_lower, s)
-                                } else { false }
+                                    s == &class_lower
+                                        || vm.class_extends(s, &class_lower)
+                                        || vm.class_extends(&class_lower, s)
+                                } else {
+                                    false
+                                }
                             }
                             goro_core::object::Visibility::Private => {
-                                if let Some(ref s) = scope_class { s == decl } else { false }
+                                if let Some(ref s) = scope_class {
+                                    s == decl
+                                } else {
+                                    false
+                                }
                             }
                         }
-                    } else { true };
-                    if !visible { continue; }
+                    } else {
+                        true
+                    };
+                    if !visible {
+                        continue;
+                    }
                     let k = String::from_utf8_lossy(&prop_name).to_string();
                     let new_prefix = if prefix.is_empty() {
                         url_encode(&k, enc_type)
                     } else {
                         format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
                     };
-                    build_query_recursive(vm, parts, &new_prefix, &prop_val, separator, enc_type, numeric_prefix, depth + 1);
+                    build_query_recursive(
+                        vm,
+                        parts,
+                        &new_prefix,
+                        &prop_val,
+                        separator,
+                        enc_type,
+                        numeric_prefix,
+                        depth + 1,
+                    );
                 }
             }
             Value::Null | Value::Undef => {
@@ -6007,7 +7544,16 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // For arrays/objects this iterates entries; scalar top-level args would
     // produce a TypeError in PHP — we silently no-op for unsupported types.
     if matches!(data, Value::Array(_) | Value::Object(_)) {
-        build_query_recursive(vm, &mut parts, "", data, &separator, enc_type, &_numeric_prefix, 0);
+        build_query_recursive(
+            vm,
+            &mut parts,
+            "",
+            data,
+            &separator,
+            enc_type,
+            &_numeric_prefix,
+            0,
+        );
     }
     Ok(Value::String(PhpString::from_string(
         parts.join(&separator),
@@ -6075,11 +7621,13 @@ fn is_readable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
-        Ok(if check_access_bit(&path.to_string_lossy(), 0o400, 0o040, 0o004) {
-            Value::True
-        } else {
-            Value::False
-        })
+        Ok(
+            if check_access_bit(&path.to_string_lossy(), 0o400, 0o040, 0o004) {
+                Value::True
+            } else {
+                Value::False
+            },
+        )
     }
     #[cfg(not(unix))]
     {
@@ -6094,11 +7642,13 @@ fn is_writable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
-        Ok(if check_access_bit(&path.to_string_lossy(), 0o200, 0o020, 0o002) {
-            Value::True
-        } else {
-            Value::False
-        })
+        Ok(
+            if check_access_bit(&path.to_string_lossy(), 0o200, 0o020, 0o002) {
+                Value::True
+            } else {
+                Value::False
+            },
+        )
     }
     #[cfg(not(unix))]
     {
@@ -6154,7 +7704,7 @@ pub(crate) fn normalize_path_lexical(p: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         match seg {
-            "" => {} // skip empty parts (caused by //)
+            "" => {}  // skip empty parts (caused by //)
             "." => {} // skip current
             ".." => {
                 if let Some(last) = out.last() {
@@ -6223,7 +7773,10 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "Path must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let _context = args.get(2);
@@ -6246,10 +7799,14 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Validate length parameter
     if let Some(len) = length {
         if len < 0 {
-            let msg = "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0";
+            let msg =
+                "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0";
             let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg.to_string(), line: vm.current_line });
+            return Err(VmError {
+                message: msg.to_string(),
+                line: vm.current_line,
+            });
         }
     }
 
@@ -6258,19 +7815,35 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // base64-decoding, urldecoding, etc.) to avoid duplicating the logic.
     // Reject datafoo: and similar malformed schemes.
     if (path_str.starts_with("data:") || path_str.starts_with("data://"))
-        && (path_str.starts_with("data:,") || path_str.starts_with("data:;")
-            || path_str.starts_with("data:text") || path_str.starts_with("data:application")
-            || path_str.starts_with("data:image") || path_str.starts_with("data:audio")
-            || path_str.starts_with("data:video") || path_str.starts_with("data:font")
-            || path_str.starts_with("data:model") || path_str.starts_with("data:message")
-            || path_str.starts_with("data:multipart") || path_str.starts_with("data:base64,")
+        && (path_str.starts_with("data:,")
+            || path_str.starts_with("data:;")
+            || path_str.starts_with("data:text")
+            || path_str.starts_with("data:application")
+            || path_str.starts_with("data:image")
+            || path_str.starts_with("data:audio")
+            || path_str.starts_with("data:video")
+            || path_str.starts_with("data:font")
+            || path_str.starts_with("data:model")
+            || path_str.starts_with("data:message")
+            || path_str.starts_with("data:multipart")
+            || path_str.starts_with("data:base64,")
             || path_str.starts_with("data://"))
     {
-        let inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r"))];
+        let inner_args = vec![
+            Value::String(PhpString::from_string(path_str.to_string())),
+            Value::String(PhpString::from_bytes(b"r")),
+        ];
         let fp = fopen_fn(vm, &inner_args)?;
-        let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
+        let fid = match fp {
+            Value::Resource(n) => n,
+            _ => return Ok(Value::False),
+        };
         let get_args = if let Some(length) = length {
-            vec![Value::Resource(fid), Value::Long(length), Value::Long(offset)]
+            vec![
+                Value::Resource(fid),
+                Value::Long(length),
+                Value::Long(offset),
+            ]
         } else {
             vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
         };
@@ -6282,18 +7855,34 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // (Dispatch through the registered functions: the inner resource may be
     // served by a userspace stream wrapper.)
     if path_str.starts_with("php://filter/") {
-        let mut inner_args = vec![Value::String(PhpString::from_string(path_str.to_string())), Value::String(PhpString::from_bytes(b"r")), Value::False];
+        let mut inner_args = vec![
+            Value::String(PhpString::from_string(path_str.to_string())),
+            Value::String(PhpString::from_bytes(b"r")),
+            Value::False,
+        ];
         if let Some(ctx) = args.get(2) {
             inner_args.push(ctx.clone());
         }
         let fp = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
-        let fid = match fp { Value::Resource(n) => n, _ => return Ok(Value::False), };
+        let fid = match fp {
+            Value::Resource(n) => n,
+            _ => return Ok(Value::False),
+        };
         let get_args = if let Some(length) = length {
-            vec![Value::Resource(fid), Value::Long(length), Value::Long(offset)]
+            vec![
+                Value::Resource(fid),
+                Value::Long(length),
+                Value::Long(offset),
+            ]
         } else {
             vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
         };
-        let res = call_registered(vm, b"stream_get_contents", stream_get_contents_fn, &get_args)?;
+        let res = call_registered(
+            vm,
+            b"stream_get_contents",
+            stream_get_contents_fn,
+            &get_args,
+        )?;
         let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::Resource(fid)]);
         return Ok(res);
     }
@@ -6304,8 +7893,11 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // php://stdin / php://stdout / php://stderr / php://memory / php://temp:
     // file_get_contents on these should return false (no warning) or empty.
-    if path_str == "php://stdin" || path_str == "php://stdout" || path_str == "php://stderr"
-        || path_str == "php://memory" || path_str.starts_with("php://temp")
+    if path_str == "php://stdin"
+        || path_str == "php://stdout"
+        || path_str == "php://stderr"
+        || path_str == "php://memory"
+        || path_str.starts_with("php://temp")
     {
         return Ok(Value::False);
     }
@@ -6315,7 +7907,11 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut req_headers: Vec<(String, String)> = Vec::new();
         let mut req_body: Vec<u8> = Vec::new();
         if let Some(Value::Array(ctx)) = context {
-            if let Some(Value::Array(http)) = ctx.borrow().get(&ArrayKey::String(PhpString::from_bytes(b"http"))).cloned() {
+            if let Some(Value::Array(http)) = ctx
+                .borrow()
+                .get(&ArrayKey::String(PhpString::from_bytes(b"http")))
+                .cloned()
+            {
                 let http = http.borrow();
                 if let Some(m) = http.get(&ArrayKey::String(PhpString::from_bytes(b"method"))) {
                     method = m.to_php_string().to_string_lossy();
@@ -6326,7 +7922,10 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             for (_, v) in harr.borrow().iter() {
                                 let s = v.to_php_string().to_string_lossy();
                                 if let Some(colon) = s.find(':') {
-                                    req_headers.push((s[..colon].trim().to_string(), s[colon + 1..].trim().to_string()));
+                                    req_headers.push((
+                                        s[..colon].trim().to_string(),
+                                        s[colon + 1..].trim().to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -6334,7 +7933,10 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             let s = h.to_php_string().to_string_lossy();
                             for line in s.replace("\r\n", "\n").split('\n') {
                                 if let Some(colon) = line.find(':') {
-                                    req_headers.push((line[..colon].trim().to_string(), line[colon + 1..].trim().to_string()));
+                                    req_headers.push((
+                                        line[..colon].trim().to_string(),
+                                        line[colon + 1..].trim().to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -6345,9 +7947,19 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
-        return Ok(http_fetch_ctx(&path_str, vm, &method, &req_headers, &req_body));
+        return Ok(http_fetch_ctx(
+            &path_str,
+            vm,
+            &method,
+            &req_headers,
+            &req_body,
+        ));
     }
-    if !path_str.starts_with("php://") && !path_str.starts_with("data://") && !path_str.starts_with("compress.zlib://") && !path_str.starts_with("compress.bzip2://") {
+    if !path_str.starts_with("php://")
+        && !path_str.starts_with("data://")
+        && !path_str.starts_with("compress.zlib://")
+        && !path_str.starts_with("compress.bzip2://")
+    {
         if !vm.check_open_basedir("file_get_contents", &path_str) {
             return Ok(Value::False);
         }
@@ -6383,20 +7995,30 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::String(PhpString::from_vec(result.to_vec())))
         }
         Err(_) => {
-            vm.emit_warning(&format!("file_get_contents({}): Failed to open stream: No such file or directory", path_str));
+            vm.emit_warning(&format!(
+                "file_get_contents({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
             Ok(Value::False)
         }
     }
 }
 
-fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, String)], body: &[u8]) -> Value {
+fn http_fetch_ctx(
+    url: &str,
+    vm: &mut Vm,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Value {
     // Follow up to 20 redirects (PHP default is 20).
     let mut cur_url = url.to_string();
     let mut cur_method = method.to_string();
     let mut cur_headers: Vec<(String, String)> = headers.to_vec();
     let mut cur_body: Vec<u8> = body.to_vec();
     for _ in 0..20 {
-        let (status, location, response_body) = http_fetch_once(&cur_url, vm, &cur_method, &cur_headers, &cur_body);
+        let (status, location, response_body) =
+            http_fetch_once(&cur_url, vm, &cur_method, &cur_headers, &cur_body);
         if response_body.is_none() {
             return Value::False;
         }
@@ -6407,11 +8029,26 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
         {
             let next_url = if loc.starts_with("http://") || loc.starts_with("https://") {
                 loc
-            } else if let Some(slash) = cur_url.find("://").and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p)) {
+            } else if let Some(slash) = cur_url
+                .find("://")
+                .and_then(|s| cur_url[s + 3..].find('/').map(|p| s + 3 + p))
+            {
                 let base = &cur_url[..slash];
-                if loc.starts_with('/') { format!("{}{}", base, loc) } else { format!("{}/{}", base, loc) }
+                if loc.starts_with('/') {
+                    format!("{}{}", base, loc)
+                } else {
+                    format!("{}/{}", base, loc)
+                }
             } else {
-                format!("{}{}", cur_url.trim_end_matches('/'), if loc.starts_with('/') { loc.clone() } else { format!("/{}", loc) })
+                format!(
+                    "{}{}",
+                    cur_url.trim_end_matches('/'),
+                    if loc.starts_with('/') {
+                        loc.clone()
+                    } else {
+                        format!("/{}", loc)
+                    }
+                )
             };
             // For 301/302/303 -> downgrade to GET (PHP behaviour with default
             // follow_location); for 307/308 keep method+body.
@@ -6420,7 +8057,8 @@ fn http_fetch_ctx(url: &str, vm: &mut Vm, method: &str, headers: &[(String, Stri
                 cur_body.clear();
                 // Strip Content-Length / Content-Type since body is gone
                 cur_headers.retain(|(k, _)| {
-                    !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("content-type")
+                    !k.eq_ignore_ascii_case("content-length")
+                        && !k.eq_ignore_ascii_case("content-type")
                 });
             }
             cur_url = next_url;
@@ -6485,16 +8123,17 @@ fn http_fetch_once(
             return (0, None, None);
         }
     };
-    let mut stream = match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10)) {
-        Ok(s) => s,
-        Err(_) => {
-            vm.emit_warning(&format!(
-                "file_get_contents({}): Failed to open stream: HTTP request failed!",
-                url
-            ));
-            return (0, None, None);
-        }
-    };
+    let mut stream =
+        match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10)) {
+            Ok(s) => s,
+            Err(_) => {
+                vm.emit_warning(&format!(
+                    "file_get_contents({}): Failed to open stream: HTTP request failed!",
+                    url
+                ));
+                return (0, None, None);
+            }
+        };
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
@@ -6506,14 +8145,26 @@ fn http_fetch_once(
     let mut has_cl = false;
     let mut has_ct = false;
     for (k, v) in headers {
-        if k.eq_ignore_ascii_case("host") { has_host = true; }
-        if k.eq_ignore_ascii_case("user-agent") { has_ua = true; }
-        if k.eq_ignore_ascii_case("content-length") { has_cl = true; }
-        if k.eq_ignore_ascii_case("content-type") { has_ct = true; }
+        if k.eq_ignore_ascii_case("host") {
+            has_host = true;
+        }
+        if k.eq_ignore_ascii_case("user-agent") {
+            has_ua = true;
+        }
+        if k.eq_ignore_ascii_case("content-length") {
+            has_cl = true;
+        }
+        if k.eq_ignore_ascii_case("content-type") {
+            has_ct = true;
+        }
         req.push_str(&format!("{}: {}\r\n", k, v));
     }
-    if !has_host { req.push_str(&format!("Host: {}\r\n", host_port)); }
-    if !has_ua { req.push_str("User-Agent: goro/0.1\r\n"); }
+    if !has_host {
+        req.push_str(&format!("Host: {}\r\n", host_port));
+    }
+    if !has_ua {
+        req.push_str("User-Agent: goro/0.1\r\n");
+    }
     req.push_str("Connection: close\r\n");
     if !body.is_empty() {
         if !has_cl {
@@ -6602,20 +8253,29 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let rtype = goro_core::value::resource_type_of(*rid);
         let is_stream = is_open_stream || rtype.as_deref() == Some(b"stream".as_ref());
         if !is_stream {
-            let msg = "file_put_contents(): supplied resource is not a valid stream resource".to_string();
+            let msg =
+                "file_put_contents(): supplied resource is not a valid stream resource".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     // If $context (arg 3) is a resource, it should be a valid Stream-Context.
     if let Some(Value::Resource(rid)) = args.get(3) {
         let bytes = goro_core::value::resource_type_of(*rid);
         if bytes.as_deref() != Some(b"stream-context".as_ref()) {
-            let msg = "file_put_contents(): supplied resource is not a valid Stream-Context resource".to_string();
+            let msg =
+                "file_put_contents(): supplied resource is not a valid Stream-Context resource"
+                    .to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -6626,14 +8286,18 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::Array(arr) => {
             let arr = arr.borrow();
             let mut buf = Vec::new();
-            for (_, v) in arr.iter() { buf.extend_from_slice(v.to_php_string().as_bytes()); }
+            for (_, v) in arr.iter() {
+                buf.extend_from_slice(v.to_php_string().as_bytes());
+            }
             buf
         }
         Value::Object(obj) => {
             // PHP attempts __toString. If absent, emit warning and return false.
             let class_name = obj.borrow().class_name.clone();
             let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let has_tostring = vm.classes.get(&class_lower)
+            let has_tostring = vm
+                .classes
+                .get(&class_lower)
                 .map(|c| c.get_method(b"__tostring").is_some())
                 .unwrap_or(false);
             if !has_tostring {
@@ -6663,7 +8327,10 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(compressed) => match std::fs::write(real_path, &compressed) {
                 Ok(_) => return Ok(Value::Long(data_bytes.len() as i64)),
                 Err(e) => {
-                    vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: {}", path_str, e));
+                    vm.emit_warning(&format!(
+                        "file_put_contents({}): Failed to open stream: {}",
+                        path_str, e
+                    ));
                     return Ok(Value::False);
                 }
             },
@@ -6674,21 +8341,34 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let p = std::path::Path::new(&*path_str);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
-            vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: No such file or directory", path_str));
+            vm.emit_warning(&format!(
+                "file_put_contents({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
             return Ok(Value::False);
         }
     }
     let result = {
         use std::io::Write;
         let file_result = if append {
-            std::fs::OpenOptions::new().append(true).create(true).open(&*path_str)
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&*path_str)
         } else {
-            std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&*path_str)
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&*path_str)
         };
         file_result.and_then(|mut f| {
             if lock_ex {
                 #[cfg(unix)]
-                { use std::os::unix::io::AsRawFd; unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) }; }
+                {
+                    use std::os::unix::io::AsRawFd;
+                    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+                }
             }
             f.write_all(&data_bytes).map(|_| data_bytes.len())
         })
@@ -6696,7 +8376,10 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match result {
         Ok(len) => Ok(Value::Long(len as i64)),
         Err(e) => {
-            vm.emit_warning(&format!("file_put_contents({}): Failed to open stream: {}", path_str, e));
+            vm.emit_warning(&format!(
+                "file_put_contents({}): Failed to open stream: {}",
+                path_str, e
+            ));
             Ok(Value::False)
         }
     }
@@ -6762,11 +8445,19 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     // PHP 8+: when $atime is an integer but $mtime is null, throw ValueError.
-    if args.len() >= 3 && matches!(args.get(1), Some(Value::Null)) && !matches!(args.get(2), Some(Value::Null)) {
-        let msg = "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer".to_string();
+    if args.len() >= 3
+        && matches!(args.get(1), Some(Value::Null))
+        && !matches!(args.get(2), Some(Value::Null))
+    {
+        let msg =
+            "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer"
+                .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // Empty path: silently return false (matches PHP behavior)
     if path_str.is_empty() {
@@ -6779,13 +8470,19 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !p.exists() {
         if let Some(parent) = p.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                vm.emit_warning(&format!("touch(): Unable to create file {} because No such file or directory", path_str));
+                vm.emit_warning(&format!(
+                    "touch(): Unable to create file {} because No such file or directory",
+                    path_str
+                ));
                 return Ok(Value::False);
             }
         }
         if let Err(e) = std::fs::write(p, b"") {
             let msg = strip_os_error(&e.to_string());
-            vm.emit_warning(&format!("touch(): Unable to create file {} because {}", path_str, msg));
+            vm.emit_warning(&format!(
+                "touch(): Unable to create file {} because {}",
+                path_str, msg
+            ));
             return Ok(Value::False);
         }
     }
@@ -6806,8 +8503,14 @@ fn touch_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => return Ok(Value::True),
     };
     let times = [
-        libc::timeval { tv_sec: atime, tv_usec: 0 },
-        libc::timeval { tv_sec: mtime, tv_usec: 0 },
+        libc::timeval {
+            tv_sec: atime,
+            tv_usec: 0,
+        },
+        libc::timeval {
+            tv_sec: mtime,
+            tv_usec: 0,
+        },
     ];
     let _ = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
     Ok(Value::True)
@@ -6870,7 +8573,10 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
             result.set(ArrayKey::Int(*idx), Value::Long(*val));
         }
         for (_idx, name, val) in &fields {
-            result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(name)),
+                Value::Long(*val),
+            );
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     }
@@ -6881,17 +8587,29 @@ fn stat_path(path_str: &str, is_lstat: bool) -> Result<Value, VmError> {
                 let mut result = PhpArray::new();
                 let size = m.len() as i64;
                 let fields: [(i64, &[u8], i64); 13] = [
-                    (0, b"dev", 0), (1, b"ino", 0), (2, b"mode", 0), (3, b"nlink", 0),
-                    (4, b"uid", 0), (5, b"gid", 0), (6, b"rdev", 0), (7, b"size", size),
-                    (8, b"atime", 0), (9, b"mtime", 0), (10, b"ctime", 0),
-                    (11, b"blksize", -1), (12, b"blocks", -1),
+                    (0, b"dev", 0),
+                    (1, b"ino", 0),
+                    (2, b"mode", 0),
+                    (3, b"nlink", 0),
+                    (4, b"uid", 0),
+                    (5, b"gid", 0),
+                    (6, b"rdev", 0),
+                    (7, b"size", size),
+                    (8, b"atime", 0),
+                    (9, b"mtime", 0),
+                    (10, b"ctime", 0),
+                    (11, b"blksize", -1),
+                    (12, b"blocks", -1),
                 ];
                 // PHP stat returns all numeric keys first (0-12), then all string keys
                 for (idx, _name, val) in &fields {
                     result.set(ArrayKey::Int(*idx), Value::Long(*val));
                 }
                 for (_idx, name, val) in &fields {
-                    result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                    result.set(
+                        ArrayKey::String(PhpString::from_bytes(name)),
+                        Value::Long(*val),
+                    );
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(result))))
             }
@@ -6904,13 +8622,22 @@ fn is_numeric_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "is_numeric() expects exactly 1 argument, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.into(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
     }
     if args.len() > 1 {
-        let msg = format!("is_numeric() expects exactly 1 argument, {} given", args.len());
+        let msg = format!(
+            "is_numeric() expects exactly 1 argument, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let val = &args[0];
     Ok(match val {
@@ -6991,7 +8718,10 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             obj.borrow_mut().class_name = b"ValueError".to_vec();
         }
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let levels = levels_raw as usize;
     let mut result = s.to_string();
@@ -7019,7 +8749,9 @@ fn dirname_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 while result.len() > 1 && result.ends_with('/') {
                     result.pop();
                 }
-                if result.is_empty() { result = "/".to_string(); }
+                if result.is_empty() {
+                    result = "/".to_string();
+                }
             }
         } else {
             result = ".".to_string();
@@ -7063,7 +8795,9 @@ fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
     let mut end = bytes.len() - 1;
     // Strip trailing slashes
     loop {
-        if bytes[end] != b'/' { break; }
+        if bytes[end] != b'/' {
+            break;
+        }
         if end == 0 {
             return vec![b'/'];
         }
@@ -7071,7 +8805,9 @@ fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
     }
     // Strip filename (non-slash chars)
     loop {
-        if bytes[end] == b'/' { break; }
+        if bytes[end] == b'/' {
+            break;
+        }
         if end == 0 {
             return vec![b'.'];
         }
@@ -7079,7 +8815,9 @@ fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
     }
     // Strip slashes that came before the filename
     loop {
-        if bytes[end] != b'/' { break; }
+        if bytes[end] != b'/' {
+            break;
+        }
         if end == 0 {
             return vec![b'/'];
         }
@@ -7129,7 +8867,10 @@ fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let basename_bytes = php_basename_bytes(bytes);
 
     let extension_bytes: Option<Vec<u8>> = if want_extension {
-        basename_bytes.iter().rposition(|&c| c == b'.').map(|p| basename_bytes[p + 1..].to_vec())
+        basename_bytes
+            .iter()
+            .rposition(|&c| c == b'.')
+            .map(|p| basename_bytes[p + 1..].to_vec())
     } else {
         None
     };
@@ -7148,15 +8889,27 @@ fn pathinfo_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // dirname only added when non-empty.
         if let Some(d) = dirname_bytes.as_ref() {
             if !d.is_empty() {
-                result.set(ArrayKey::String(PhpString::from_bytes(b"dirname")), Value::String(PhpString::from_bytes(d)));
+                result.set(
+                    ArrayKey::String(PhpString::from_bytes(b"dirname")),
+                    Value::String(PhpString::from_bytes(d)),
+                );
             }
         }
-        result.set(ArrayKey::String(PhpString::from_bytes(b"basename")), Value::String(PhpString::from_bytes(&basename_bytes)));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"basename")),
+            Value::String(PhpString::from_bytes(&basename_bytes)),
+        );
         // Extension only present when basename contains '.'.
         if let Some(e) = extension_bytes.as_ref() {
-            result.set(ArrayKey::String(PhpString::from_bytes(b"extension")), Value::String(PhpString::from_bytes(e)));
+            result.set(
+                ArrayKey::String(PhpString::from_bytes(b"extension")),
+                Value::String(PhpString::from_bytes(e)),
+            );
         }
-        result.set(ArrayKey::String(PhpString::from_bytes(b"filename")), Value::String(PhpString::from_bytes(&filename_bytes)));
+        result.set(
+            ArrayKey::String(PhpString::from_bytes(b"filename")),
+            Value::String(PhpString::from_bytes(&filename_bytes)),
+        );
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
 
@@ -7203,11 +8956,12 @@ fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     // Strip leading backslash for fully qualified names
     let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
-    let name_lower: Vec<u8> = name_bytes
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+    let name_bytes = if raw_bytes.starts_with(b"\\") {
+        &raw_bytes[1..]
+    } else {
+        raw_bytes
+    };
+    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
     // Check both user-defined and built-in interfaces
     let is_builtin = matches!(
         name_lower.as_slice(),
@@ -7233,7 +8987,12 @@ fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
-        if vm.classes.get(&name_lower).map(|c| c.is_interface).unwrap_or(false) {
+        if vm
+            .classes
+            .get(&name_lower)
+            .map(|c| c.is_interface)
+            .unwrap_or(false)
+        {
             return Ok(Value::True);
         }
     }
@@ -7242,19 +9001,30 @@ fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
-    let name_lower: Vec<u8> = name_bytes
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
-    if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
+    let name_bytes = if raw_bytes.starts_with(b"\\") {
+        &raw_bytes[1..]
+    } else {
+        raw_bytes
+    };
+    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if vm
+        .classes
+        .get(&name_lower)
+        .map(|c| c.is_trait)
+        .unwrap_or(false)
+    {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
     let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
-        if vm.classes.get(&name_lower).map(|c| c.is_trait).unwrap_or(false) {
+        if vm
+            .classes
+            .get(&name_lower)
+            .map(|c| c.is_trait)
+            .unwrap_or(false)
+        {
             return Ok(Value::True);
         }
     }
@@ -7263,19 +9033,30 @@ fn trait_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let raw_bytes = name.as_bytes();
-    let name_bytes = if raw_bytes.starts_with(b"\\") { &raw_bytes[1..] } else { raw_bytes };
-    let name_lower: Vec<u8> = name_bytes
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
-    if vm.classes.get(&name_lower).map(|c| c.is_enum).unwrap_or(false) {
+    let name_bytes = if raw_bytes.starts_with(b"\\") {
+        &raw_bytes[1..]
+    } else {
+        raw_bytes
+    };
+    let name_lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if vm
+        .classes
+        .get(&name_lower)
+        .map(|c| c.is_enum)
+        .unwrap_or(false)
+    {
         return Ok(Value::True);
     }
     // Try autoload if second arg is true (default)
     let autoload = args.get(1).is_none_or(|v| v.to_bool());
     if autoload {
         vm.try_autoload_class(name_bytes);
-        if vm.classes.get(&name_lower).map(|c| c.is_enum).unwrap_or(false) {
+        if vm
+            .classes
+            .get(&name_lower)
+            .map(|c| c.is_enum)
+            .unwrap_or(false)
+        {
             return Ok(Value::True);
         }
     }
@@ -7307,21 +9088,32 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Trigger lazy init first so properties are visible.
         vm.maybe_run_lazy_init(outer);
         if vm.current_exception.is_some() {
-            return Err(VmError { message: "Uncaught exception".to_string(), line: vm.current_line });
+            return Err(VmError {
+                message: "Uncaught exception".to_string(),
+                line: vm.current_line,
+            });
         }
         // Redirect lazy proxy to real backing object.
         let obj_rc = vm.proxy_redirect(outer);
         let mut obj = obj_rc.borrow();
-        let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let class_name_lower: Vec<u8> = obj
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
 
         // Get the calling class context to determine visibility
         let calling_class = vm.get_current_class_name();
-        let calling_class_lower: Option<Vec<u8>> = calling_class.as_ref().map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
+        let calling_class_lower: Option<Vec<u8>> = calling_class
+            .as_ref()
+            .map(|c| c.iter().map(|b| b.to_ascii_lowercase()).collect());
 
         // Build a map of property visibility from the class definition
         let _prop_visibility: std::collections::HashMap<Vec<u8>, goro_core::object::Visibility> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def.properties.iter()
+                class_def
+                    .properties
+                    .iter()
                     .map(|p| (p.name.clone(), p.visibility))
                     .collect()
             } else {
@@ -7331,7 +9123,9 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Build a set of typed properties to skip when uninitialized
         let _typed_props: std::collections::HashSet<Vec<u8>> =
             if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def.properties.iter()
+                class_def
+                    .properties
+                    .iter()
                     .filter(|p| p.property_type.is_some())
                     .map(|p| p.name.clone())
                     .collect()
@@ -7342,26 +9136,57 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Iterate properties in declaration order from class def. For backed props,
         // read the value from the instance's property bag; for hooked (virtual) props,
         // dispatch through the get hook.
-        let class_props_order: Vec<(Vec<u8>, goro_core::object::Visibility, bool, bool, bool, Vec<u8>)> =
-            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def.properties.iter()
-                    .map(|p| (p.name.clone(), p.visibility, p.is_virtual, p.has_get_hook, p.is_static,
-                        p.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect()))
-                    .collect()
-            } else { Vec::new() };
+        let class_props_order: Vec<(
+            Vec<u8>,
+            goro_core::object::Visibility,
+            bool,
+            bool,
+            bool,
+            Vec<u8>,
+        )> = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+            class_def
+                .properties
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.visibility,
+                        p.is_virtual,
+                        p.has_get_hook,
+                        p.is_static,
+                        p.declaring_class
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect(),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut arr = PhpArray::new();
         for (name, vis, is_virtual, has_get_hook, is_static, decl_lower) in &class_props_order {
-            if *is_static { continue; }
+            if *is_static {
+                continue;
+            }
             // Skip internal properties (none normally collide, but just in case)
-            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
-                || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
-                || name.starts_with(b"__pkey_id") {
+            if name.starts_with(b"__spl_")
+                || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__timestamp")
+                || name.starts_with(b"__enum_")
+                || name.starts_with(b"__fiber_")
+                || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_")
+                || name.starts_with(b"__destructed")
+                || name.starts_with(b"__weak_ref_id")
+                || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__lazy_")
+                || name.starts_with(b"__uri_")
+                || name.starts_with(b"__hash_")
+                || name.starts_with(b"__hmac_")
+                || name.starts_with(b"__pkey_id")
+            {
                 continue;
             }
             // Visibility check
@@ -7369,17 +9194,29 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 goro_core::object::Visibility::Public => true,
                 goro_core::object::Visibility::Protected => {
                     if let Some(ref cc) = calling_class_lower {
-                        cc == &class_name_lower || vm.is_subclass_of(cc, &class_name_lower) || vm.is_subclass_of(&class_name_lower, cc)
-                    } else { false }
+                        cc == &class_name_lower
+                            || vm.is_subclass_of(cc, &class_name_lower)
+                            || vm.is_subclass_of(&class_name_lower, cc)
+                    } else {
+                        false
+                    }
                 }
                 goro_core::object::Visibility::Private => {
                     if let Some(ref cc) = calling_class_lower {
                         // Hooked private properties: visible from their declaring class.
-                        if *has_get_hook { cc == decl_lower } else { cc == &class_name_lower }
-                    } else { false }
+                        if *has_get_hook {
+                            cc == decl_lower
+                        } else {
+                            cc == &class_name_lower
+                        }
+                    } else {
+                        false
+                    }
                 }
             };
-            if !accessible { continue; }
+            if !accessible {
+                continue;
+            }
             if *has_get_hook {
                 // Get hooks are called (zend_std_get_properties_for with hooks).
                 // Drop borrow before calling into VM.
@@ -7424,16 +9261,26 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Also include dynamic properties not declared on the class (e.g. AllowDynamicProperties)
         for (name, val) in &obj.properties {
-            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-                || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
-                || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
-                || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_") {
+            if name.starts_with(b"__spl_")
+                || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__timestamp")
+                || name.starts_with(b"__enum_")
+                || name.starts_with(b"__fiber_")
+                || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_")
+                || name.starts_with(b"__destructed")
+                || name.starts_with(b"__weak_ref_id")
+                || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__lazy_")
+                || name.starts_with(b"__uri_")
+                || name.starts_with(b"__hash_")
+                || name.starts_with(b"__hmac_")
+            {
                 continue;
             }
-            if matches!(val, Value::Undef) { continue; }
+            if matches!(val, Value::Undef) {
+                continue;
+            }
             // Mangled private/protected storage keys (\0Class\0name) hold
             // redeclared private slots that the declared-property loop above
             // could not read by bare name. Demangle and apply scope visibility,
@@ -7447,14 +9294,17 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             cc == &class_name_lower
                                 || vm.is_subclass_of(cc, &class_name_lower)
                                 || vm.is_subclass_of(&class_name_lower, cc)
-                        } else { false }
+                        } else {
+                            false
+                        }
                     } else {
                         let decl_lower: Vec<u8> =
                             decl.iter().map(|b| b.to_ascii_lowercase()).collect();
                         calling_class_lower.as_deref() == Some(decl_lower.as_slice())
                     };
                     if accessible {
-                        let key = goro_core::array::ArrayKey::String(PhpString::from_vec(bare.to_vec()));
+                        let key =
+                            goro_core::array::ArrayKey::String(PhpString::from_vec(bare.to_vec()));
                         if !arr.contains_key(&key) {
                             arr.set(key, val.clone());
                         }
@@ -7462,14 +9312,18 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     continue;
                 }
             }
-            if class_props_order.iter().any(|(n, _, _, _, _, _)| n == name) { continue; }
+            if class_props_order.iter().any(|(n, _, _, _, _, _)| n == name) {
+                continue;
+            }
             let key = goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone()));
             if !arr.contains_key(&key) {
                 arr.set(key, val.clone());
             }
         }
         // zend_symtable: numeric property names become integer keys.
-        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(RefCell::new(arr)))))
+        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(
+            RefCell::new(arr),
+        ))))
     } else {
         Ok(Value::False)
     }
@@ -7484,7 +9338,9 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(scope) = _vm.current_class_scope() {
             // Find the original-case class name
             let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let class_name = _vm.classes.get(&scope_lower)
+            let class_name = _vm
+                .classes
+                .get(&scope_lower)
                 .map(|c| c.name.clone())
                 .unwrap_or(scope);
             return Ok(Value::String(PhpString::from_vec(class_name)));
@@ -7501,30 +9357,56 @@ fn get_class_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::String(PhpString::from_bytes(b"Generator")))
     } else if let Value::String(s) = val {
         let b = s.as_bytes();
-        if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+        if b.starts_with(b"__closure_")
+            || b.starts_with(b"__arrow_")
+            || b.starts_with(b"__bound_closure_")
+            || b.starts_with(b"__closure_fcc_")
+        {
             Ok(Value::String(PhpString::from_bytes(b"Closure")))
         } else {
             // PHP 8: TypeError for non-object
             let type_name = Vm::value_type_name(val);
-            Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
+            Err(throw_type_error_msg(
+                _vm,
+                format!(
+                    "get_class(): Argument #1 ($object) must be of type object, {} given",
+                    type_name
+                ),
+            ))
         }
     } else if let Value::Array(arr) = val {
         let arr = arr.borrow();
         if let Some(first) = arr.values().next() {
             if let Value::String(s) = first {
                 let b = s.as_bytes();
-                if b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") || b.starts_with(b"__closure_fcc_") {
+                if b.starts_with(b"__closure_")
+                    || b.starts_with(b"__arrow_")
+                    || b.starts_with(b"__bound_closure_")
+                    || b.starts_with(b"__closure_fcc_")
+                {
                     return Ok(Value::String(PhpString::from_bytes(b"Closure")));
                 }
             }
         }
         // PHP 8: TypeError for non-object
         let type_name = Vm::value_type_name(val);
-        Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
+        Err(throw_type_error_msg(
+            _vm,
+            format!(
+                "get_class(): Argument #1 ($object) must be of type object, {} given",
+                type_name
+            ),
+        ))
     } else {
         // PHP 8: TypeError for non-object
         let type_name = Vm::value_type_name(val);
-        Err(throw_type_error_msg(_vm, format!("get_class(): Argument #1 ($object) must be of type object, {} given", type_name)))
+        Err(throw_type_error_msg(
+            _vm,
+            format!(
+                "get_class(): Argument #1 ($object) must be of type object, {} given",
+                type_name
+            ),
+        ))
     }
 }
 fn memory_get_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -7541,7 +9423,12 @@ fn memory_reset_peak_usage_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
 fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let secs = args.first().unwrap_or(&Value::Null).to_long();
     if secs < 0 {
-        return Err(throw_value_error_in(_vm, "sleep", args, "sleep(): Argument #1 ($seconds) must be greater than or equal to 0"));
+        return Err(throw_value_error_in(
+            _vm,
+            "sleep",
+            args,
+            "sleep(): Argument #1 ($seconds) must be greater than or equal to 0",
+        ));
     }
     // Actually sleep up to 2 seconds to support tests that compare timestamps
     // before/after sleep(1). Cap at 2s to keep tests reasonably fast.
@@ -7554,7 +9441,12 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let usecs = args.first().unwrap_or(&Value::Null).to_long();
     if usecs < 0 {
-        return Err(throw_value_error_in(_vm, "usleep", args, "usleep(): Argument #1 ($microseconds) must be greater than or equal to 0"));
+        return Err(throw_value_error_in(
+            _vm,
+            "usleep",
+            args,
+            "usleep(): Argument #1 ($microseconds) must be greater than or equal to 0",
+        ));
     }
     if usecs > 0 {
         // Sleep the actual duration, capped at 2s (like sleep()).
@@ -7565,7 +9457,10 @@ fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::time::SystemTime;
-    let prefix = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
+    let prefix = args
+        .first()
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
     let more_entropy = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let t = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -7581,7 +9476,10 @@ fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // e.g. "0.12345678" making total length = prefix_len + 13 + 10 = prefix_len + 23
         let random_part: u32 = (t.subsec_nanos() ^ 0xDEADBEEF) % 100_000_000;
         let random_val = random_part as f64 / 100_000_000.0;
-        Ok(Value::String(PhpString::from_string(format!("{}{:.8}", base, random_val))))
+        Ok(Value::String(PhpString::from_string(format!(
+            "{}{:.8}",
+            base, random_val
+        ))))
     } else {
         Ok(Value::String(PhpString::from_string(base)))
     }
@@ -7610,7 +9508,10 @@ fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(name) => {
             let name = name.to_php_string();
             let key = std::ffi::OsStr::from_bytes(name.as_bytes());
-            if name.as_bytes().is_empty() || name.as_bytes().contains(&b'=') || name.as_bytes().contains(&0) {
+            if name.as_bytes().is_empty()
+                || name.as_bytes().contains(&b'=')
+                || name.as_bytes().contains(&0)
+            {
                 return Ok(Value::False);
             }
             match std::env::var_os(key) {
@@ -7625,20 +9526,32 @@ fn putenv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let setting = args.first().unwrap_or(&Value::Null).to_php_string();
     let b = setting.as_bytes();
     if b.is_empty() || b[0] == b'=' {
-        return Err(throw_value_error_in(vm, "putenv", args, "putenv(): Argument #1 ($assignment) must have a valid syntax"));
+        return Err(throw_value_error_in(
+            vm,
+            "putenv",
+            args,
+            "putenv(): Argument #1 ($assignment) must have a valid syntax",
+        ));
     }
     if b.contains(&0) {
-        return Err(throw_value_error_in(vm, "putenv", args, "putenv(): Argument #1 ($assignment) must not contain any null bytes"));
+        return Err(throw_value_error_in(
+            vm,
+            "putenv",
+            args,
+            "putenv(): Argument #1 ($assignment) must not contain any null bytes",
+        ));
     }
     match b.iter().position(|&c| c == b'=') {
         Some(eq) => {
             let key = std::ffi::OsStr::from_bytes(&b[..eq]);
             let value = std::ffi::OsStr::from_bytes(&b[eq + 1..]);
-            unsafe { std::env::set_var(key, value); }
+            unsafe {
+                std::env::set_var(key, value);
+            }
         }
-        None => {
-            unsafe { std::env::remove_var(std::ffi::OsStr::from_bytes(b)); }
-        }
+        None => unsafe {
+            std::env::remove_var(std::ffi::OsStr::from_bytes(b));
+        },
     }
     Ok(Value::True)
 }
@@ -7647,8 +9560,16 @@ fn putenv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let original = args.first().unwrap_or(&Value::Null).to_php_string();
     let alias = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let original_lower: Vec<u8> = original.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-    let alias_lower: Vec<u8> = alias.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let original_lower: Vec<u8> = original
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    let alias_lower: Vec<u8> = alias
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
     // Single-underscore alias was deprecated in 8.4.
     if alias.as_bytes() == b"_" {
         vm.emit_deprecated("Using \"_\" as a class alias is deprecated since 8.4");
@@ -7656,16 +9577,24 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Reserved class names (e.g. "array", "callable", "bool") cannot be used as aliases.
     if goro_core::compiler::is_reserved_class_name(alias.as_bytes()) {
         let line = vm.current_line;
-        let msg = format!("Cannot use \"{}\" as a class alias as it is reserved",
-            std::str::from_utf8(alias.as_bytes()).unwrap_or(""));
+        let msg = format!(
+            "Cannot use \"{}\" as a class alias as it is reserved",
+            std::str::from_utf8(alias.as_bytes()).unwrap_or("")
+        );
         return Err(VmError { message: msg, line });
     }
     let autoload = args.get(2).map(|v| v.is_truthy()).unwrap_or(true);
-    if autoload && !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
+    if autoload
+        && !vm.classes.contains_key(&original_lower)
+        && !vm.is_known_builtin_class(&original_lower)
+    {
         vm.try_autoload_class(original.as_bytes());
     }
     if !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
-        vm.emit_warning(&format!("Class \"{}\" not found", original.to_string_lossy()));
+        vm.emit_warning(&format!(
+            "Class \"{}\" not found",
+            original.to_string_lossy()
+        ));
         return Ok(Value::False);
     }
     if let Some(existing) = vm.classes.get(&alias_lower) {
@@ -7676,8 +9605,13 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Some(o) if o.is_enum => "enum",
             _ => "class",
         };
-        let msg = format!("Cannot redeclare {} {} (previously declared in {}:{})", kind, alias.to_string_lossy(),
-            existing.filename.clone().unwrap_or_default(), existing.start_line);
+        let msg = format!(
+            "Cannot redeclare {} {} (previously declared in {}:{})",
+            kind,
+            alias.to_string_lossy(),
+            existing.filename.clone().unwrap_or_default(),
+            existing.start_line
+        );
         vm.emit_warning(&msg);
         return Ok(Value::False);
     }
@@ -7687,7 +9621,8 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Keep original class name so get_class() returns the canonical name
         vm.classes.insert(alias_lower.clone(), aliased_class);
         // Register bidirectional alias mappings so instanceof works correctly
-        vm.class_aliases.insert(alias_lower.clone(), original_lower.clone());
+        vm.class_aliases
+            .insert(alias_lower.clone(), original_lower.clone());
         vm.class_aliases.insert(original_lower, alias_lower);
         Ok(Value::True)
     } else if vm.is_known_builtin_class(&original_lower) {
@@ -7695,7 +9630,8 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut class = goro_core::object::ClassEntry::new(original.as_bytes().to_vec());
         class.allow_dynamic_properties = true; // builtins generally allow this
         vm.classes.insert(alias_lower.clone(), class);
-        vm.class_aliases.insert(alias_lower.clone(), original_lower.clone());
+        vm.class_aliases
+            .insert(alias_lower.clone(), original_lower.clone());
         vm.class_aliases.insert(original_lower, alias_lower);
         Ok(Value::True)
     } else {
@@ -7804,8 +9740,7 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
         // Move to parent
         match &class_entry.parent {
             Some(parent) => {
-                let parent_lower: Vec<u8> =
-                    parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if parent_lower == check_lower {
                     return true;
                 }
@@ -7821,7 +9756,10 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
 fn class_is_a_interface(vm: &Vm, iface_name: &[u8], check_name: &[u8]) -> bool {
     if let Some(ce) = vm.classes.get(iface_name) {
         for parent_iface in &ce.interfaces {
-            let pi_lower: Vec<u8> = parent_iface.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let pi_lower: Vec<u8> = parent_iface
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if pi_lower == check_name {
                 return true;
             }
@@ -7840,7 +9778,10 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
                 vm.try_autoload_class(s.as_bytes());
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: "Uncaught exception".into(),
+                        line: vm.current_line,
+                    });
                 }
                 if !vm.classes.contains_key(&lower) && !vm.is_known_builtin_class(&lower) {
                     return Err(throw_type_error_msg(vm, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, string given".to_string()));
@@ -7856,7 +9797,13 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Some(other) => {
-            return Err(throw_type_error_msg(vm, format!("get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&other))));
+            return Err(throw_type_error_msg(
+                vm,
+                format!(
+                    "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                    Vm::value_type_name(&other)
+                ),
+            ));
         }
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -7943,10 +9890,16 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                     Value::Object(_) => "object",
                     _ => "unknown",
                 };
-                let msg = format!("array_change_key_case(): Argument #2 ($case) must be of type int, {} given", type_name);
+                let msg = format!(
+                    "array_change_key_case(): Argument #2 ($case) must be of type int, {} given",
+                    type_name
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             // For string values, throw TypeError too
             if let Value::String(s) = case_val {
@@ -7954,7 +9907,10 @@ fn array_change_key_case_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                     let msg = "array_change_key_case(): Argument #2 ($case) must be of type int, string given".to_string();
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
         }
@@ -8015,14 +9971,25 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 type_allowed = true;
             }
             Value::Long(n) => {
-                let fname = if i == 0 { "Argument #1 ($array)".to_string() } else { format!("Argument #{}", i + 1) };
+                let fname = if i == 0 {
+                    "Argument #1 ($array)".to_string()
+                } else {
+                    format!("Argument #{}", i + 1)
+                };
                 match n & !SORT_FLAG_CASE {
                     3 | 4 => {
                         if order_allowed {
                             sort_order_desc = *n == 3;
                             order_allowed = false;
                         } else {
-                            return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag that has not already been specified", fname));
+                            return throw(
+                                vm,
+                                b"TypeError",
+                                format!(
+                                    "array_multisort(): {} must be an array or a sort flag that has not already been specified",
+                                    fname
+                                ),
+                            );
                         }
                     }
                     0 | 1 | 2 | 5 | 6 => {
@@ -8030,24 +9997,50 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             sort_type = *n;
                             type_allowed = false;
                         } else {
-                            return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag that has not already been specified", fname));
+                            return throw(
+                                vm,
+                                b"TypeError",
+                                format!(
+                                    "array_multisort(): {} must be an array or a sort flag that has not already been specified",
+                                    fname
+                                ),
+                            );
                         }
                     }
                     _ => {
-                        return throw(vm, b"ValueError", format!("array_multisort(): {} must be a valid sort flag", fname));
+                        return throw(
+                            vm,
+                            b"ValueError",
+                            format!("array_multisort(): {} must be a valid sort flag", fname),
+                        );
                     }
                 }
             }
             _ => {
-                let fname = if i == 0 { "Argument #1 ($array)".to_string() } else { format!("Argument #{}", i + 1) };
-                return throw(vm, b"TypeError", format!("array_multisort(): {} must be an array or a sort flag", fname));
+                let fname = if i == 0 {
+                    "Argument #1 ($array)".to_string()
+                } else {
+                    format!("Argument #{}", i + 1)
+                };
+                return throw(
+                    vm,
+                    b"TypeError",
+                    format!(
+                        "array_multisort(): {} must be an array or a sort flag",
+                        fname
+                    ),
+                );
             }
         }
     }
     let size = arrays[0].0.borrow().len();
     for a in &arrays[1..] {
         if a.0.borrow().len() != size {
-            return throw(vm, b"ValueError", "Array sizes are inconsistent".to_string());
+            return throw(
+                vm,
+                b"ValueError",
+                "Array sizes are inconsistent".to_string(),
+            );
         }
     }
     if size < 1 {
@@ -8058,8 +10051,14 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         last.2 = sort_order_desc;
     }
     // Rows: one (key, value) per array.
-    let cols: Vec<Vec<(ArrayKey, Value)>> = arrays.iter()
-        .map(|a| a.0.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    let cols: Vec<Vec<(ArrayKey, Value)>> = arrays
+        .iter()
+        .map(|a| {
+            a.0.borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
         .collect();
     let rows: Vec<Vec<(ArrayKey, Value)>> = (0..size)
         .map(|k| cols.iter().map(|c| c[k].clone()).collect())
@@ -8071,7 +10070,9 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 return 0;
             }
             let mut c = php_data_cmp(vm, &x[r].1, &y[r].1, *ty);
-            if *desc { c = -c; }
+            if *desc {
+                c = -c;
+            }
             if c != 0 {
                 return if c > 0 { 1 } else { -1 };
             }
@@ -8095,11 +10096,10 @@ fn array_multisort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-
 // ============= File I/O implementation using thread-local file handle storage =============
 
 use std::collections::HashMap as StdHashMap;
-use std::io::{Read as IoRead, Write as IoWrite, Seek, SeekFrom};
+use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 
 /// Userspace stream wrappers (stream_wrapper_register classes).
 #[path = "userstream.rs"]
@@ -8163,10 +10163,13 @@ fn alloc_dir_handle(path: String) -> i64 {
         let did = id.get();
         id.set(did + 1);
         DIR_HANDLES.with(|dh| {
-            dh.borrow_mut().insert(did, DirHandle {
-                path,
-                remaining: names,
-            });
+            dh.borrow_mut().insert(
+                did,
+                DirHandle {
+                    path,
+                    remaining: names,
+                },
+            );
         });
         goro_core::value::register_resource(did, b"stream");
         CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
@@ -8258,7 +10261,12 @@ fn alloc_file_handle_uri(file: std::fs::File, mode: &str, uri: &str) -> i64 {
     fid
 }
 
-fn alloc_file_handle_special_uri(file: std::fs::File, mode: &str, special: SpecialStream, uri: &str) -> i64 {
+fn alloc_file_handle_special_uri(
+    file: std::fs::File,
+    mode: &str,
+    special: SpecialStream,
+    uri: &str,
+) -> i64 {
     let fid = alloc_file_handle_special(file, mode, special);
     FILE_HANDLES.with(|h| {
         if let Some(fh) = h.borrow_mut().get_mut(&fid) {
@@ -8277,7 +10285,10 @@ fn alloc_file_handle_special_uri(file: std::fs::File, mode: &str, special: Speci
                     fh.stream_type = "TEMP".to_string();
                     fh.mode = "w+b".to_string();
                 }
-                SpecialStream::Stdin | SpecialStream::Stdout | SpecialStream::Stderr | SpecialStream::Output => {
+                SpecialStream::Stdin
+                | SpecialStream::Stdout
+                | SpecialStream::Stderr
+                | SpecialStream::Output => {
                     fh.wrapper_type = "PHP".to_string();
                     fh.stream_type = "STDIO".to_string();
                     fh.seekable = false;
@@ -8300,10 +10311,16 @@ fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64,
     if has_handle {
         return Ok(fid);
     }
-    let msg = format!("{}(): Argument #1 ($stream) must be an open stream resource", func_name);
+    let msg = format!(
+        "{}(): Argument #1 ($stream) must be an open stream resource",
+        func_name
+    );
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
@@ -8311,21 +10328,24 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
         let fid = id.get();
         id.set(fid + 1);
         FILE_HANDLES.with(|handles| {
-            handles.borrow_mut().insert(fid, FileHandle {
-                file,
-                mode: mode.to_string(),
-                eof: false,
-                special,
-                filter_read_pending: Vec::new(),
-                filter_read_ready: Vec::new(),
-                uri: String::new(),
-                wrapper_type: "plainfile".to_string(),
-                stream_type: "STDIO".to_string(),
-                seekable: true,
-                user_wrapper: None,
-                user_wrapper_class: None,
-                user_scheme: None,
-            });
+            handles.borrow_mut().insert(
+                fid,
+                FileHandle {
+                    file,
+                    mode: mode.to_string(),
+                    eof: false,
+                    special,
+                    filter_read_pending: Vec::new(),
+                    filter_read_ready: Vec::new(),
+                    uri: String::new(),
+                    wrapper_type: "plainfile".to_string(),
+                    stream_type: "STDIO".to_string(),
+                    seekable: true,
+                    user_wrapper: None,
+                    user_wrapper_class: None,
+                    user_scheme: None,
+                },
+            );
         });
         fid
     })
@@ -8339,7 +10359,9 @@ fn data_uri_base64_decode(input: &[u8]) -> Vec<u8> {
             _ => {}
         }
     }
-    while filtered.len() % 4 != 0 { filtered.push(b'='); }
+    while filtered.len() % 4 != 0 {
+        filtered.push(b'=');
+    }
     let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
     let mut i = 0;
     while i + 4 <= filtered.len() {
@@ -8353,14 +10375,21 @@ fn data_uri_base64_decode(input: &[u8]) -> Vec<u8> {
                 b'0'..=b'9' => (c - b'0' + 52) as u32,
                 b'+' => 62,
                 b'/' => 63,
-                b'=' => { pad += 1; 0 }
+                b'=' => {
+                    pad += 1;
+                    0
+                }
                 _ => 0,
             };
             n = (n << 6) | v;
         }
         out.push(((n >> 16) & 0xff) as u8);
-        if pad < 2 { out.push(((n >> 8) & 0xff) as u8); }
-        if pad < 1 { out.push((n & 0xff) as u8); }
+        if pad < 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if pad < 1 {
+            out.push((n & 0xff) as u8);
+        }
         i += 4;
     }
     out
@@ -8374,9 +10403,17 @@ fn data_uri_urldecode(input: &[u8]) -> Vec<u8> {
         if b == b'%' && i + 2 < input.len() {
             let h1 = hex_digit_misc(input[i + 1]);
             let h2 = hex_digit_misc(input[i + 2]);
-            if let (Some(a), Some(b)) = (h1, h2) { out.push((a << 4) | b); i += 3; continue; }
+            if let (Some(a), Some(b)) = (h1, h2) {
+                out.push((a << 4) | b);
+                i += 3;
+                continue;
+            }
         }
-        if b == b'+' { out.push(b' '); } else { out.push(b); }
+        if b == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(b);
+        }
         i += 1;
     }
     out
@@ -8393,24 +10430,39 @@ fn hex_digit_misc(b: u8) -> Option<u8> {
 
 /// Call a builtin through the function table (so wrappers installed over
 /// it, e.g. userspace stream dispatch, apply), falling back to `f`.
-fn call_registered(vm: &mut Vm, name: &[u8], f: fn(&mut Vm, &[Value]) -> Result<Value, VmError>, args: &[Value]) -> Result<Value, VmError> {
+fn call_registered(
+    vm: &mut Vm,
+    name: &[u8],
+    f: fn(&mut Vm, &[Value]) -> Result<Value, VmError>,
+    args: &[Value],
+) -> Result<Value, VmError> {
     let g = vm.functions.get(name).copied().unwrap_or(f);
     g(vm, args)
 }
 
 pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mut filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let mut filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     // Empty filename → ValueError, matching PHP's behavior.
     if filename.is_empty() {
         let msg = "fopen(): Argument #1 ($filename) cannot be empty";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // Preserve the original filename for the uri field of stream_get_meta_data.
     // PHP keeps the path as passed to fopen() (including any file:// prefix).
     let original_uri = filename.clone();
-    let mode = args.get(1).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_else(|| "r".to_string());
+    let mode = args
+        .get(1)
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_else(|| "r".to_string());
 
     // PHP fopen rejects null bytes embedded in the path.
     if filename.contains('\0') {
@@ -8459,7 +10511,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let tmp_path = std::env::temp_dir().join(format!(
             "goro_http_{}_{}.tmp",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         if std::fs::write(&tmp_path, &body).is_err() {
             return Ok(Value::False);
@@ -8489,7 +10544,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let mut dec = flate2::read::GzDecoder::new(data.as_slice());
                         let mut buf = Vec::new();
                         if dec.read_to_end(&mut buf).is_err() {
-                            vm.emit_warning(&format!("fopen({}): Failed to open stream: operation failed", filename));
+                            vm.emit_warning(&format!(
+                                "fopen({}): Failed to open stream: operation failed",
+                                filename
+                            ));
                             return Ok(Value::False);
                         }
                         buf
@@ -8519,7 +10577,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Ok(Value::Resource(fid));
                 }
                 Err(_) => {
-                    vm.emit_warning(&format!("fopen({}): Failed to open stream: No such file or directory", filename));
+                    vm.emit_warning(&format!(
+                        "fopen({}): Failed to open stream: No such file or directory",
+                        filename
+                    ));
                     return Ok(Value::False);
                 }
             }
@@ -8533,13 +10594,20 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let (chain_str, inner_url) = if let Some(idx) = rest.find("/resource=") {
             (&rest[..idx], &rest[idx + "/resource=".len()..])
         } else if let Some(idx) = rest.find("resource=") {
-            (&rest[..idx.saturating_sub(1)], &rest[idx + "resource=".len()..])
+            (
+                &rest[..idx.saturating_sub(1)],
+                &rest[idx + "resource=".len()..],
+            )
         } else {
             (rest, "")
         };
         // Recurse on the inner URL (through the registered fopen, so
         // userspace wrappers can serve it).
-        let mut inner_args = vec![Value::String(PhpString::from_string(inner_url.to_string())), Value::String(PhpString::from_string(mode.clone())), Value::False];
+        let mut inner_args = vec![
+            Value::String(PhpString::from_string(inner_url.to_string())),
+            Value::String(PhpString::from_string(mode.clone())),
+            Value::False,
+        ];
         if let Some(ctx) = args.get(3) {
             inner_args.push(ctx.clone());
         }
@@ -8550,7 +10618,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         // Parse and attach each filter spec separated by '|'.
         for spec in chain_str.split('|') {
-            if spec.is_empty() { continue; }
+            if spec.is_empty() {
+                continue;
+            }
             // spec may be "read=<filter>", "write=<filter>", or just <filter>.
             let (dir, name) = if let Some(rest) = spec.strip_prefix("read=") {
                 (crate::stream_filters::STREAM_FILTER_READ, rest)
@@ -8574,7 +10644,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Handle data: URLs: data:[mediatype][;base64],<data> (both data: and
     // data:// forms — only the latter is canonical for PHP wrappers but
     // RFC2397 uses the former).
-    let data_rest = filename.strip_prefix("data://").or_else(|| filename.strip_prefix("data:"));
+    let data_rest = filename
+        .strip_prefix("data://")
+        .or_else(|| filename.strip_prefix("data:"));
     if let Some(rest) = data_rest {
         // Optional mediatype and ;base64 prefix.
         let (header, payload) = rest.split_once(',').unwrap_or(("", rest));
@@ -8658,7 +10730,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if lim > 0 { lim as i64 } else { 1024 }
                 }
                 #[cfg(not(target_os = "linux"))]
-                { 1024 }
+                {
+                    1024
+                }
             };
             match parsed {
                 Some(n) if n >= 0 && n < max_fd => {
@@ -8707,7 +10781,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             let first = chars[0];
             let valid_first = matches!(first, 'r' | 'w' | 'a' | 'x' | 'c');
-            let valid_rest = chars[1..].iter().all(|&c| matches!(c, '+' | 'b' | 't' | 'e'));
+            let valid_rest = chars[1..]
+                .iter()
+                .all(|&c| matches!(c, '+' | 'b' | 't' | 'e'));
             valid_first && valid_rest
         }
     };
@@ -8729,7 +10805,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         && !filename.starts_with("./")
         && !filename.starts_with("../")
     {
-        let inc = vm.constants.get(b"include_path".as_ref())
+        let inc = vm
+            .constants
+            .get(b"include_path".as_ref())
             .map(|v| v.to_php_string().to_string_lossy())
             .unwrap_or_else(|| ".".to_string());
         let mut found: Option<String> = None;
@@ -8774,15 +10852,46 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let file = match mode_clean.as_str() {
         "r" => std::fs::File::open(&open_path),
-        "r+" => std::fs::OpenOptions::new().read(true).write(true).open(&open_path),
+        "r+" => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&open_path),
         "w" => std::fs::File::create(&open_path),
-        "w+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&open_path),
-        "a" => std::fs::OpenOptions::new().append(true).create(true).open(&open_path),
-        "a+" => std::fs::OpenOptions::new().read(true).append(true).create(true).open(&open_path),
-        "x" => std::fs::OpenOptions::new().write(true).create_new(true).open(&open_path),
-        "x+" => std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&open_path),
-        "c" => std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&open_path),
-        "c+" => std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&open_path),
+        "w+" => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&open_path),
+        "a" => std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&open_path),
+        "a+" => std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&open_path),
+        "x" => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&open_path),
+        "x+" => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&open_path),
+        "c" => std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&open_path),
+        "c+" => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&open_path),
         _ => std::fs::File::open(&open_path), // default to read
     };
 
@@ -8796,7 +10905,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
-            vm.emit_warning(&format!("fopen({}): Failed to open stream: {}", filename, msg));
+            vm.emit_warning(&format!(
+                "fopen({}): Failed to open stream: {}",
+                filename, msg
+            ));
             Ok(Value::False)
         }
     }
@@ -8805,7 +10917,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     // Flush write-filter chain.
-    let flush_bytes = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
+    let flush_bytes =
+        crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_WRITE);
     if !flush_bytes.is_empty() {
         write_to_stream(vm, fid, &flush_bytes);
     }
@@ -8832,7 +10945,10 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     }
     // Check special routing for explicitly opened php://stdout etc.
     let special = FILE_HANDLES.with(|h| {
-        h.borrow().get(&fid).map(|fh| fh.special).unwrap_or(SpecialStream::None)
+        h.borrow()
+            .get(&fid)
+            .map(|fh| fh.special)
+            .unwrap_or(SpecialStream::None)
     });
     match special {
         SpecialStream::Stdout | SpecialStream::Output | SpecialStream::Stderr => {
@@ -8852,12 +10968,18 @@ fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
                     // .append(true) on Linux already enforces it via O_APPEND for real
                     // files, but tempfile-backed php://temp / php://memory streams need
                     // an explicit seek since they are opened with .read+.write.
-                    let mode_chars: String = fh.mode.chars().filter(|&c| c != 'b' && c != 't' && c != 'e').collect();
+                    let mode_chars: String = fh
+                        .mode
+                        .chars()
+                        .filter(|&c| c != 'b' && c != 't' && c != 'e')
+                        .collect();
                     if mode_chars.starts_with('a') {
                         let _ = fh.file.seek(SeekFrom::End(0));
                     }
                     fh.file.write(bytes).unwrap_or_default()
-                } else { 0 }
+                } else {
+                    0
+                }
             })
         }
     }
@@ -8871,23 +10993,35 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "fread(): Argument #2 ($length) must be greater than 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let length = length_signed as usize;
     // If read filters are attached, route through filter chain.
-    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    let has_read_filters =
+        crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
-        return Ok(Value::String(PhpString::from_vec(read_filtered(vm, fid, length))));
+        return Ok(Value::String(PhpString::from_vec(read_filtered(
+            vm, fid, length,
+        ))));
     }
     // Detect write-only mode (w/a/x/c without '+')
     let is_write_only = FILE_HANDLES.with(|h| {
-        h.borrow().get(&fid).map(|fh| {
-            let mode = &fh.mode;
-            // Strip 'b'/'t'/'e' suffixes
-            let core: String = mode.chars().filter(|c| matches!(*c, 'r'|'w'|'a'|'x'|'c'|'+')).collect();
-            // Write-only if mode does not contain 'r' or '+'
-            !core.contains('r') && !core.contains('+')
-        }).unwrap_or(false)
+        h.borrow()
+            .get(&fid)
+            .map(|fh| {
+                let mode = &fh.mode;
+                // Strip 'b'/'t'/'e' suffixes
+                let core: String = mode
+                    .chars()
+                    .filter(|c| matches!(*c, 'r' | 'w' | 'a' | 'x' | 'c' | '+'))
+                    .collect();
+                // Write-only if mode does not contain 'r' or '+'
+                !core.contains('r') && !core.contains('+')
+            })
+            .unwrap_or(false)
     });
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -8904,7 +11038,12 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     // from a stream. This applies to plain files and to
                     // php://memory / php://temp (which are seekable, so once
                     // we hit the end we report EOF).
-                    if n < length && matches!(fh.special, SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp) {
+                    if n < length
+                        && matches!(
+                            fh.special,
+                            SpecialStream::None | SpecialStream::Memory | SpecialStream::Temp
+                        )
+                    {
                         fh.eof = true;
                     }
                     Ok(Value::String(PhpString::from_vec(buf)))
@@ -8926,14 +11065,17 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // its internal 8192-byte buffer size for the reported count,
                 // not the user-requested length.
                 let line = vm.current_line;
-                vm.emit_notice_at(&format!(
-                    "fread(): Read of 8192 bytes failed with errno={} {}",
-                    errno,
-                    match errno {
-                        9 => "Bad file descriptor",
-                        _ => "Unknown error",
-                    }
-                ), line);
+                vm.emit_notice_at(
+                    &format!(
+                        "fread(): Read of 8192 bytes failed with errno={} {}",
+                        errno,
+                        match errno {
+                            9 => "Bad file descriptor",
+                            _ => "Unknown error",
+                        }
+                    ),
+                    line,
+                );
             }
             Ok(Value::False)
         }
@@ -8946,16 +11088,24 @@ fn fread_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// `length` bytes. Excess filtered output stays buffered on the handle.
 fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
     let mut produced: Vec<u8> = FILE_HANDLES.with(|h| {
-        h.borrow_mut().get_mut(&fid).map(|fh| std::mem::take(&mut fh.filter_read_ready)).unwrap_or_default()
+        h.borrow_mut()
+            .get_mut(&fid)
+            .map(|fh| std::mem::take(&mut fh.filter_read_ready))
+            .unwrap_or_default()
     });
     while produced.len() < length {
         // Read a chunk of raw bytes from the file.
         let mut raw = vec![0u8; 8192];
         let (n, eof_flag) = FILE_HANDLES.with(|h| {
             let mut h = h.borrow_mut();
-            let Some(fh) = h.get_mut(&fid) else { return (0usize, true); };
+            let Some(fh) = h.get_mut(&fid) else {
+                return (0usize, true);
+            };
             match fh.file.read(&mut raw) {
-                Ok(0) => { fh.eof = true; (0, true) }
+                Ok(0) => {
+                    fh.eof = true;
+                    (0, true)
+                }
                 Ok(n) => (n, false),
                 Err(_) => (0, true),
             }
@@ -8963,7 +11113,11 @@ fn read_filtered(vm: &mut Vm, fid: i64, length: usize) -> Vec<u8> {
         raw.truncate(n);
         if n == 0 {
             // Flush the chain to extract trailing bytes.
-            let trailing = crate::stream_filters::flush_chain(vm, fid, crate::stream_filters::STREAM_FILTER_READ);
+            let trailing = crate::stream_filters::flush_chain(
+                vm,
+                fid,
+                crate::stream_filters::STREAM_FILTER_READ,
+            );
             produced.extend_from_slice(&trailing);
             break;
         }
@@ -8991,7 +11145,11 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // For STDOUT/STDERR (1/2/3) without FILE_HANDLES entry, accept long IDs.
     let raw_fid = arg.to_long();
     let is_special_writer = raw_fid == 1 || raw_fid == 2 || raw_fid == 3;
-    let fid = if is_special_writer { raw_fid } else { require_open_stream(vm, arg, "fwrite")? };
+    let fid = if is_special_writer {
+        raw_fid
+    } else {
+        require_open_stream(vm, arg, "fwrite")?
+    };
     let data = match args.get(1) {
         Some(v @ Value::Object(_)) => vm.value_to_string_checked(v)?,
         Some(v) => v.to_php_string(),
@@ -9003,7 +11161,11 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let length: usize = match args.get(2) {
         Some(v) if !matches!(v, Value::Null | Value::Undef) => {
             let n = v.to_long();
-            if n <= 0 { 0 } else { (n as usize).min(bytes.len()) }
+            if n <= 0 {
+                0
+            } else {
+                (n as usize).min(bytes.len())
+            }
         }
         _ => bytes.len(),
     };
@@ -9014,7 +11176,10 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (stream_mode, is_special) = FILE_HANDLES.with(|h| {
         let b = h.borrow();
         match b.get(&fid) {
-            Some(fh) => (Some(fh.mode.clone()), !matches!(fh.special, SpecialStream::None)),
+            Some(fh) => (
+                Some(fh.mode.clone()),
+                !matches!(fh.special, SpecialStream::None),
+            ),
             None => (None, false),
         }
     });
@@ -9024,10 +11189,13 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if clean == "r" {
             if !is_special {
                 let line = vm.current_line;
-                vm.emit_notice_at(&format!(
-                    "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
-                    original_len
-                ), line);
+                vm.emit_notice_at(
+                    &format!(
+                        "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                        original_len
+                    ),
+                    line,
+                );
             }
             return Ok(Value::False);
         }
@@ -9036,8 +11204,11 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Apply write filter chain if any are attached.
     let filtered = crate::stream_filters::apply_write_chain(vm, fid, to_write);
     // STDOUT/STDERR are resource ids 1/2/3 without a FILE_HANDLES entry.
-    let exists = fid == 1 || fid == 2 || fid == 3 || FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
-    if !exists { return Ok(Value::False); }
+    let exists =
+        fid == 1 || fid == 2 || fid == 3 || FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
+    if !exists {
+        return Ok(Value::False);
+    }
     write_to_stream(vm, fid, &filtered);
     // PHP returns the number of bytes from the user's input that were
     // accepted, regardless of how many post-filter bytes were emitted.
@@ -9051,7 +11222,9 @@ pub(crate) fn has_file_handle(fid: i64) -> bool {
 
 fn stream_mode_clean(fid: i64) -> Option<String> {
     FILE_HANDLES.with(|h| {
-        h.borrow().get(&fid).map(|fh| fh.mode.chars().filter(|&c| c != 'b' && c != 't').collect())
+        h.borrow()
+            .get(&fid)
+            .map(|fh| fh.mode.chars().filter(|&c| c != 'b' && c != 't').collect())
     })
 }
 
@@ -9059,12 +11232,23 @@ fn stream_mode_clean(fid: i64) -> Option<String> {
 /// standard functions built on it (fgetcsv, fscanf): reads one line
 /// (through the regular fgets() path), or at most `maxlen` bytes.
 /// Read errors on write-only streams are reported under `func`.
-pub(crate) fn stream_get_line(vm: &mut Vm, func: &str, handle: &Value, maxlen: Option<usize>) -> Option<Vec<u8>> {
+pub(crate) fn stream_get_line(
+    vm: &mut Vm,
+    func: &str,
+    handle: &Value,
+    maxlen: Option<usize>,
+) -> Option<Vec<u8>> {
     let fid = handle.to_long();
     if let Some(m) = stream_mode_clean(fid) {
         if matches!(m.as_str(), "w" | "a" | "x" | "c") {
             let line = vm.current_line;
-            vm.emit_notice_at(&format!("{}(): Read of 8192 bytes failed with errno=9 Bad file descriptor", func), line);
+            vm.emit_notice_at(
+                &format!(
+                    "{}(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+                    func
+                ),
+                line,
+            );
             return None;
         }
     }
@@ -9085,20 +11269,30 @@ pub(crate) fn stream_write(vm: &mut Vm, func: &str, handle: &Value, data: &[u8])
     let fid = handle.to_long();
     if let Some(m) = stream_mode_clean(fid) {
         let is_special = FILE_HANDLES.with(|h| {
-            h.borrow().get(&fid).map(|fh| !matches!(fh.special, SpecialStream::None)).unwrap_or(false)
+            h.borrow()
+                .get(&fid)
+                .map(|fh| !matches!(fh.special, SpecialStream::None))
+                .unwrap_or(false)
         });
         if m == "r" {
             if !is_special {
                 let line = vm.current_line;
                 vm.emit_notice_at(
-                    &format!("{}(): Write of {} bytes failed with errno=9 Bad file descriptor", func, data.len()),
+                    &format!(
+                        "{}(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                        func,
+                        data.len()
+                    ),
                     line,
                 );
             }
             return None;
         }
     }
-    match fwrite_fn(vm, &[handle.clone(), Value::String(PhpString::from_bytes(data))]) {
+    match fwrite_fn(
+        vm,
+        &[handle.clone(), Value::String(PhpString::from_bytes(data))],
+    ) {
         Ok(Value::Long(n)) => Some(n),
         _ => None,
     }
@@ -9119,7 +11313,10 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "fgets(): Argument #2 ($length) must be greater than 0".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         (n as usize).saturating_sub(1)
     } else {
@@ -9144,18 +11341,31 @@ fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    let has_read_filters =
+        crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
         let mut out: Vec<u8> = Vec::new();
         let mut hit_newline = false;
         while out.len() < limit {
             let chunk = read_filtered(vm, fid, 1);
-            if chunk.is_empty() { break; }
+            if chunk.is_empty() {
+                break;
+            }
             out.extend_from_slice(&chunk);
-            if *chunk.last().unwrap() == b'\n' { hit_newline = true; break; }
+            if *chunk.last().unwrap() == b'\n' {
+                hit_newline = true;
+                break;
+            }
         }
-        let is_eof_now = FILE_HANDLES.with(|h| h.borrow().get(&fid).map(|fh| fh.eof && fh.filter_read_ready.is_empty()).unwrap_or(true));
-        if out.is_empty() && is_eof_now { return Ok(Value::False); }
+        let is_eof_now = FILE_HANDLES.with(|h| {
+            h.borrow()
+                .get(&fid)
+                .map(|fh| fh.eof && fh.filter_read_ready.is_empty())
+                .unwrap_or(true)
+        });
+        if out.is_empty() && is_eof_now {
+            return Ok(Value::False);
+        }
         let _ = hit_newline;
         return Ok(Value::String(PhpString::from_vec(out)));
     }
@@ -9209,19 +11419,27 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_closed_resource = matches!(arg, Value::Resource(_))
             && goro_core::value::is_registered_resource(fid)
             && !goro_core::value::is_open_resource(fid);
-        let is_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        let is_resource =
+            matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
         if is_closed_resource || !is_resource {
             let msg = "feof(): Argument #1 ($stream) must be an open stream resource".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         return Ok(Value::True);
     }
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
         if let Some(fh) = handles.get(&fid) {
-            if fh.eof { Ok(Value::True) } else { Ok(Value::False) }
+            if fh.eof {
+                Ok(Value::True)
+            } else {
+                Ok(Value::False)
+            }
         } else {
             Ok(Value::True)
         }
@@ -9266,8 +11484,8 @@ fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             fh.eof = false;
             let seek = match whence {
                 0 => SeekFrom::Start(offset as u64), // SEEK_SET
-                1 => SeekFrom::Current(offset),       // SEEK_CUR
-                2 => SeekFrom::End(offset),            // SEEK_END
+                1 => SeekFrom::Current(offset),      // SEEK_CUR
+                2 => SeekFrom::End(offset),          // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
             };
             if is_unseekable_special {
@@ -9299,12 +11517,16 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let is_closed_resource = matches!(arg, Value::Resource(_))
             && goro_core::value::is_registered_resource(fid)
             && !goro_core::value::is_open_resource(fid);
-        let is_open_resource = matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
+        let is_open_resource =
+            matches!(arg, Value::Resource(_)) && goro_core::value::is_open_resource(fid);
         if is_closed_resource || !is_open_resource {
             let msg = "ftell(): Argument #1 ($stream) must be an open stream resource".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         return Ok(Value::False);
     }
@@ -9339,12 +11561,19 @@ fn fflush_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fsync")?;
-    enum Result3 { Ok, Err, NoFsync }
+    enum Result3 {
+        Ok,
+        Err,
+        NoFsync,
+    }
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             // Memory/Temp/Output have no real backing fd; cannot fsync.
-            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+            if matches!(
+                fh.special,
+                SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output
+            ) {
                 return Result3::NoFsync;
             }
             // Stdin can't be fsynced (real fd 0 returns EINVAL).
@@ -9373,11 +11602,18 @@ fn fsync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, "fdatasync")?;
-    enum Result3 { Ok, Err, NoFsync }
+    enum Result3 {
+        Ok,
+        Err,
+        NoFsync,
+    }
     let result = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
-            if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output) {
+            if matches!(
+                fh.special,
+                SpecialStream::Memory | SpecialStream::Temp | SpecialStream::Output
+            ) {
                 return Result3::NoFsync;
             }
             if matches!(fh.special, SpecialStream::Stdin) {
@@ -9402,7 +11638,11 @@ fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let filename = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     match std::fs::remove_file(&filename) {
         Ok(_) => Ok(Value::True),
         Err(_) => Ok(Value::False),
@@ -9410,8 +11650,16 @@ fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let from = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    let to = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let from = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let to = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     match std::fs::rename(&from, &to) {
         Ok(_) => Ok(Value::True),
         Err(_) => Ok(Value::False),
@@ -9419,8 +11667,16 @@ fn rename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let from = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
-    let to = args.get(1).unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let from = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
+    let to = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     match std::fs::copy(&from, &to) {
         Ok(_) => Ok(Value::True),
         Err(_) => Ok(Value::False),
@@ -9434,7 +11690,10 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "mkdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let path = path_v.to_string_lossy().to_string();
     let path = strip_file_scheme(&path).unwrap_or(path);
@@ -9460,7 +11719,10 @@ fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "rmdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let path = path_v.to_string_lossy().to_string();
     // Support file:// scheme for tests.
@@ -9524,18 +11786,25 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // Strip trailing slash before testing is_dir (so GLOB_MARK
                 // entries still work).
                 let test_path = path.trim_end_matches('/');
-                if !std::fs::metadata(test_path).map(|m| m.is_dir()).unwrap_or(false) {
+                if !std::fs::metadata(test_path)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
             }
             arr.push(Value::String(PhpString::from_string(path)));
         }
     }
-    unsafe { libc::globfree(&mut glob_buf); }
+    unsafe {
+        libc::globfree(&mut glob_buf);
+    }
 
     // GLOB_NOCHECK = 16: if no matches, return the pattern itself
     if ret != 0 && flags & 16 != 0 {
-        arr.push(Value::String(PhpString::from_string(pattern_str.to_string())));
+        arr.push(Value::String(PhpString::from_string(
+            pattern_str.to_string(),
+        )));
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
@@ -9600,7 +11869,10 @@ pub fn headers_already_sent_error(vm: &mut Vm) -> bool {
         return false;
     }
     let msg = match vm.output_start.clone() {
-        Some((f, l)) => format!("Cannot modify header information - headers already sent by (output started at {}:{})", f, l),
+        Some((f, l)) => format!(
+            "Cannot modify header information - headers already sent by (output started at {}:{})",
+            f, l
+        ),
         None => "Cannot modify header information - headers already sent".to_string(),
     };
     vm.emit_warning(&msg);
@@ -9613,7 +11885,10 @@ pub fn sapi_add_header(line: &[u8], replace: bool) {
         Some(c) => c,
         None => return,
     };
-    let name = String::from_utf8_lossy(&line[..colon]).trim().as_bytes().to_vec();
+    let name = String::from_utf8_lossy(&line[..colon])
+        .trim()
+        .as_bytes()
+        .to_vec();
     let mut v = &line[colon + 1..];
     while let Some((&b' ', rest)) = v.split_first() {
         v = rest;
@@ -9631,7 +11906,8 @@ pub fn sapi_add_header(line: &[u8], replace: bool) {
 /// SAPI_HEADER_DELETE_PREFIX: remove headers `name` whose value starts with `value_prefix`.
 pub fn sapi_delete_header_prefix(name: &[u8], value_prefix: &[u8]) {
     SENT_HEADERS.with(|h| {
-        h.borrow_mut().retain(|(k, v)| !(k.eq_ignore_ascii_case(name) && v.starts_with(value_prefix)));
+        h.borrow_mut()
+            .retain(|(k, v)| !(k.eq_ignore_ascii_case(name) && v.starts_with(value_prefix)));
     });
 }
 
@@ -9660,14 +11936,18 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // status code (and the current code is still 200).
         if name.eq_ignore_ascii_case(b"WWW-Authenticate") && response_code == 0 {
             RESPONSE_CODE.with(|c| {
-                if c.get() == 200 { c.set(401); }
+                if c.get() == 200 {
+                    c.set(401);
+                }
             });
         }
         // PHP auto-sets 302 for Location: headers (unless code is already 3xx).
         if name.eq_ignore_ascii_case(b"Location") && response_code == 0 {
             RESPONSE_CODE.with(|c| {
                 let cur = c.get();
-                if cur == 200 || cur < 300 { c.set(302); }
+                if cur == 200 || cur < 300 {
+                    c.set(302);
+                }
             });
         }
         if replace {
@@ -9702,21 +11982,50 @@ fn cookie_gmt_date(t: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT", wd, d, months[(m - 1) as usize], y, secs / 3600, (secs / 60) % 60, secs % 60)
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        wd,
+        d,
+        months[(m - 1) as usize],
+        y,
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60
+    )
 }
 
 /// php_setcookie_common() + php_setcookie() (ext/standard/head.c)
-fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> Result<Value, VmError> {
+fn setcookie_common(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    is_raw: bool,
+) -> Result<Value, VmError> {
     let throw = |vm: &mut Vm, class: &[u8], msg: String| -> Result<Value, VmError> {
         let exc = vm.create_exception(class, &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg, line: vm.current_line })
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
     };
     let illegal = "\",\", \";\", \" \", \"\\t\", \"\\r\", \"\\n\", \"\\013\", or \"\\014\"";
-    let bad = |b: &[u8], with_eq: bool| b.iter().any(|&c| matches!(c, b',' | b';' | b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c) || (with_eq && c == b'='));
-    let name = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
-    let value: Option<Vec<u8>> = args.get(1).map(|v| vm.value_to_string(v).as_bytes().to_vec());
+    let bad = |b: &[u8], with_eq: bool| {
+        b.iter().any(|&c| {
+            matches!(c, b',' | b';' | b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c)
+                || (with_eq && c == b'=')
+        })
+    };
+    let name = vm
+        .value_to_string(args.first().unwrap_or(&Value::Null))
+        .as_bytes()
+        .to_vec();
+    let value: Option<Vec<u8>> = args
+        .get(1)
+        .map(|v| vm.value_to_string(v).as_bytes().to_vec());
     let mut expires: i64 = 0;
     let mut path: Option<Vec<u8>> = None;
     let mut domain: Option<Vec<u8>> = None;
@@ -9727,13 +12036,30 @@ fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> R
     match args.get(2).map(|v| v.deref()) {
         Some(Value::Array(opts)) => {
             if args.len() > 3 {
-                return throw(vm, b"ArgumentCountError", format!("{}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array", fname));
+                return throw(
+                    vm,
+                    b"ArgumentCountError",
+                    format!(
+                        "{}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array",
+                        fname
+                    ),
+                );
             }
-            let entries: Vec<(ArrayKey, Value)> = opts.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let entries: Vec<(ArrayKey, Value)> = opts
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (k, v) in entries {
                 let key = match k {
                     ArrayKey::String(s) => s.as_bytes().to_vec(),
-                    ArrayKey::Int(_) => return throw(vm, b"ValueError", format!("{}(): option array cannot have numeric keys", fname)),
+                    ArrayKey::Int(_) => {
+                        return throw(
+                            vm,
+                            b"ValueError",
+                            format!("{}(): option array cannot have numeric keys", fname),
+                        );
+                    }
                 };
                 match key.to_ascii_lowercase().as_slice() {
                     b"expires" => expires = v.to_long(),
@@ -9743,51 +12069,113 @@ fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> R
                     b"httponly" => httponly = v.is_truthy(),
                     b"samesite" => samesite = Some(vm.value_to_string(&v).as_bytes().to_vec()),
                     b"partitioned" => partitioned = v.is_truthy(),
-                    _ => return throw(vm, b"ValueError", format!("{}(): option \"{}\" is invalid", fname, String::from_utf8_lossy(&key))),
+                    _ => {
+                        return throw(
+                            vm,
+                            b"ValueError",
+                            format!(
+                                "{}(): option \"{}\" is invalid",
+                                fname,
+                                String::from_utf8_lossy(&key)
+                            ),
+                        );
+                    }
                 }
             }
         }
         Some(v) => expires = v.to_long(),
         None => {}
     }
-    if let Some(v) = args.get(3) { path = Some(vm.value_to_string(v).as_bytes().to_vec()); }
-    if let Some(v) = args.get(4) { domain = Some(vm.value_to_string(v).as_bytes().to_vec()); }
-    if let Some(v) = args.get(5) { secure = v.is_truthy(); }
-    if let Some(v) = args.get(6) { httponly = v.is_truthy(); }
+    if let Some(v) = args.get(3) {
+        path = Some(vm.value_to_string(v).as_bytes().to_vec());
+    }
+    if let Some(v) = args.get(4) {
+        domain = Some(vm.value_to_string(v).as_bytes().to_vec());
+    }
+    if let Some(v) = args.get(5) {
+        secure = v.is_truthy();
+    }
+    if let Some(v) = args.get(6) {
+        httponly = v.is_truthy();
+    }
 
     if name.is_empty() {
-        return throw(vm, b"ValueError", format!("{}(): Argument #1 ($name) must not be empty", fname));
+        return throw(
+            vm,
+            b"ValueError",
+            format!("{}(): Argument #1 ($name) must not be empty", fname),
+        );
     }
     if bad(&name, true) {
-        return throw(vm, b"ValueError", format!("{}(): Argument #1 ($name) cannot contain \"=\", {}", fname, illegal));
+        return throw(
+            vm,
+            b"ValueError",
+            format!(
+                "{}(): Argument #1 ($name) cannot contain \"=\", {}",
+                fname, illegal
+            ),
+        );
     }
     if is_raw {
         if let Some(v) = &value {
             if bad(v, false) {
-                return throw(vm, b"ValueError", format!("{}(): Argument #2 ($value) cannot contain {}", fname, illegal));
+                return throw(
+                    vm,
+                    b"ValueError",
+                    format!(
+                        "{}(): Argument #2 ($value) cannot contain {}",
+                        fname, illegal
+                    ),
+                );
             }
         }
     }
     if let Some(p) = &path {
         if bad(p, false) {
-            return throw(vm, b"ValueError", format!("{}(): \"path\" option cannot contain {}", fname, illegal));
+            return throw(
+                vm,
+                b"ValueError",
+                format!("{}(): \"path\" option cannot contain {}", fname, illegal),
+            );
         }
     }
     if let Some(d) = &domain {
         if bad(d, false) {
-            return throw(vm, b"ValueError", format!("{}(): \"domain\" option cannot contain {}", fname, illegal));
+            return throw(
+                vm,
+                b"ValueError",
+                format!("{}(): \"domain\" option cannot contain {}", fname, illegal),
+            );
         }
     }
     if expires >= 253402300800 {
-        return throw(vm, b"ValueError", format!("{}(): \"expires\" option cannot have a year greater than 9999", fname));
+        return throw(
+            vm,
+            b"ValueError",
+            format!(
+                "{}(): \"expires\" option cannot have a year greater than 9999",
+                fname
+            ),
+        );
     }
     if partitioned && !secure {
-        return throw(vm, b"ValueError", format!("{}(): \"partitioned\" option cannot be used without \"secure\" option", fname));
+        return throw(
+            vm,
+            b"ValueError",
+            format!(
+                "{}(): \"partitioned\" option cannot be used without \"secure\" option",
+                fname
+            ),
+        );
     }
     let mut buf: Vec<u8> = name.clone();
     match &value {
-        None => buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0"),
-        Some(v) if v.is_empty() => buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0"),
+        None => {
+            buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0")
+        }
+        Some(v) if v.is_empty() => {
+            buf.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0")
+        }
         Some(v) => {
             buf.push(b'=');
             if is_raw {
@@ -9795,7 +12183,9 @@ fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> R
             } else {
                 for &b in v {
                     match b {
-                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => buf.push(b),
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                            buf.push(b)
+                        }
                         _ => buf.extend_from_slice(format!("%{:02X}", b).as_bytes()),
                     }
                 }
@@ -9803,18 +12193,42 @@ fn setcookie_common(vm: &mut Vm, args: &[Value], fname: &str, is_raw: bool) -> R
             if expires > 0 {
                 buf.extend_from_slice(b"; expires=");
                 buf.extend_from_slice(cookie_gmt_date(expires).as_bytes());
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 let diff = (expires - now).max(0);
                 buf.extend_from_slice(format!("; Max-Age={}", diff).as_bytes());
             }
         }
     }
-    if let Some(p) = &path { if !p.is_empty() { buf.extend_from_slice(b"; path="); buf.extend_from_slice(p); } }
-    if let Some(d) = &domain { if !d.is_empty() { buf.extend_from_slice(b"; domain="); buf.extend_from_slice(d); } }
-    if secure { buf.extend_from_slice(b"; secure"); }
-    if httponly { buf.extend_from_slice(b"; HttpOnly"); }
-    if let Some(ss) = &samesite { if !ss.is_empty() { buf.extend_from_slice(b"; SameSite="); buf.extend_from_slice(ss); } }
-    if partitioned { buf.extend_from_slice(b"; Partitioned"); }
+    if let Some(p) = &path {
+        if !p.is_empty() {
+            buf.extend_from_slice(b"; path=");
+            buf.extend_from_slice(p);
+        }
+    }
+    if let Some(d) = &domain {
+        if !d.is_empty() {
+            buf.extend_from_slice(b"; domain=");
+            buf.extend_from_slice(d);
+        }
+    }
+    if secure {
+        buf.extend_from_slice(b"; secure");
+    }
+    if httponly {
+        buf.extend_from_slice(b"; HttpOnly");
+    }
+    if let Some(ss) = &samesite {
+        if !ss.is_empty() {
+            buf.extend_from_slice(b"; SameSite=");
+            buf.extend_from_slice(ss);
+        }
+    }
+    if partitioned {
+        buf.extend_from_slice(b"; Partitioned");
+    }
     if headers_already_sent_error(vm) {
         return Ok(Value::False);
     }
@@ -9839,7 +12253,11 @@ fn headers_sent_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Reference(r)) = args.get(1) {
         *r.borrow_mut() = Value::Long(line as i64);
     }
-    Ok(if vm.headers_sent { Value::True } else { Value::False })
+    Ok(if vm.headers_sent {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -9874,13 +12292,20 @@ fn getallheaders_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
             if let Some(rest) = key.strip_prefix("HTTP_") {
                 // HTTP_USER_AGENT -> User-Agent
                 let parts: Vec<&str> = rest.split('_').collect();
-                let header_name: String = parts.iter().map(|p| {
-                    let mut chars = p.chars();
-                    match chars.next() {
-                        Some(c) => c.to_uppercase().chain(chars.flat_map(|c| c.to_lowercase())).collect::<String>(),
-                        None => String::new(),
-                    }
-                }).collect::<Vec<_>>().join("-");
+                let header_name: String = parts
+                    .iter()
+                    .map(|p| {
+                        let mut chars = p.chars();
+                        match chars.next() {
+                            Some(c) => c
+                                .to_uppercase()
+                                .chain(chars.flat_map(|c| c.to_lowercase()))
+                                .collect::<String>(),
+                            None => String::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("-");
                 out.set(
                     ArrayKey::String(PhpString::from_string(header_name)),
                     v.clone(),
@@ -9910,8 +12335,12 @@ fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
     let mut has_ct = false;
     SENT_HEADERS.with(|h| {
         for (k, _v) in h.borrow().iter() {
-            if k.eq_ignore_ascii_case(b"X-Powered-By") { has_xpb = true; }
-            if k.eq_ignore_ascii_case(b"Content-Type") || k.eq_ignore_ascii_case(b"Content-type") { has_ct = true; }
+            if k.eq_ignore_ascii_case(b"X-Powered-By") {
+                has_xpb = true;
+            }
+            if k.eq_ignore_ascii_case(b"Content-Type") || k.eq_ignore_ascii_case(b"Content-type") {
+                has_ct = true;
+            }
         }
     });
     if !has_xpb {
@@ -9954,17 +12383,31 @@ fn http_response_code_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Type check all arguments
     for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        let a = if let Value::Reference(r) = arg {
+            r.borrow().clone()
+        } else {
+            arg.clone()
+        };
         if !matches!(a, Value::Array(_)) {
             let type_name = arg_type_name(&a);
             let msg = if i == 0 {
-                format!("array_diff_key(): Argument #1 ($array) must be of type array, {} given", type_name)
+                format!(
+                    "array_diff_key(): Argument #1 ($array) must be of type array, {} given",
+                    type_name
+                )
             } else {
-                format!("array_diff_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!(
+                    "array_diff_key(): Argument #{} must be of type array, {} given",
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     if args.len() < 2 {
@@ -9998,17 +12441,31 @@ fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        let a = if let Value::Reference(r) = arg {
+            r.borrow().clone()
+        } else {
+            arg.clone()
+        };
         if !matches!(a, Value::Array(_)) {
             let type_name = arg_type_name(&a);
             let msg = if i == 0 {
-                format!("array_diff_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
+                format!(
+                    "array_diff_assoc(): Argument #1 ($array) must be of type array, {} given",
+                    type_name
+                )
             } else {
-                format!("array_diff_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!(
+                    "array_diff_assoc(): Argument #{} must be of type array, {} given",
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     if args.len() < 2 {
@@ -10046,22 +12503,38 @@ fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        let a = if let Value::Reference(r) = arg {
+            r.borrow().clone()
+        } else {
+            arg.clone()
+        };
         if !matches!(a, Value::Array(_)) {
             let type_name = arg_type_name(&a);
             let msg = if i == 0 {
-                format!("array_intersect_key(): Argument #1 ($array) must be of type array, {} given", type_name)
+                format!(
+                    "array_intersect_key(): Argument #1 ($array) must be of type array, {} given",
+                    type_name
+                )
             } else {
-                format!("array_intersect_key(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!(
+                    "array_intersect_key(): Argument #{} must be of type array, {} given",
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     if args.len() < 2 {
         return match args.first() {
-            Some(Value::Array(arr)) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            Some(Value::Array(arr)) => {
+                Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
+            }
             _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
         };
     }
@@ -10070,12 +12543,13 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
     // Collect keys from all other arrays
-    let other_key_sets: Vec<Vec<ArrayKey>> = args[1..].iter().map(|arg| {
-        match arg {
+    let other_key_sets: Vec<Vec<ArrayKey>> = args[1..]
+        .iter()
+        .map(|arg| match arg {
             Value::Array(arr) => arr.borrow().keys().cloned().collect(),
             _ => Vec::new(),
-        }
-    }).collect();
+        })
+        .collect();
     let mut result = PhpArray::new();
     for (key, val) in first.iter() {
         if other_key_sets.iter().all(|keys| keys.contains(key)) {
@@ -10087,22 +12561,38 @@ fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 
 fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg { r.borrow().clone() } else { arg.clone() };
+        let a = if let Value::Reference(r) = arg {
+            r.borrow().clone()
+        } else {
+            arg.clone()
+        };
         if !matches!(a, Value::Array(_)) {
             let type_name = arg_type_name(&a);
             let msg = if i == 0 {
-                format!("array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given", type_name)
+                format!(
+                    "array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given",
+                    type_name
+                )
             } else {
-                format!("array_intersect_assoc(): Argument #{} must be of type array, {} given", i + 1, type_name)
+                format!(
+                    "array_intersect_assoc(): Argument #{} must be of type array, {} given",
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     if args.len() < 2 {
         return match args.first() {
-            Some(Value::Array(arr)) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
+            Some(Value::Array(arr)) => {
+                Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
+            }
             _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
         };
     }
@@ -10110,9 +12600,16 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         Value::Array(a) => a.borrow().clone(),
         _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     };
-    let other_arrays: Vec<_> = args[1..].iter().filter_map(|arg| {
-        if let Value::Array(arr) = arg { Some(arr.borrow().clone()) } else { None }
-    }).collect();
+    let other_arrays: Vec<_> = args[1..]
+        .iter()
+        .filter_map(|arg| {
+            if let Value::Array(arr) = arg {
+                Some(arr.borrow().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut result = PhpArray::new();
     for (key, val) in first.iter() {
         let val_str = val.to_php_string().as_bytes().to_vec();
@@ -10137,7 +12634,11 @@ fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 
 fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let arr_data: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let callback = args.get(1);
 
         if let Some(cb) = callback {
@@ -10166,7 +12667,11 @@ fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_any_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
-        let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let arr_data: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let callback = args.get(1);
 
         if let Some(cb) = callback {
@@ -10217,7 +12722,14 @@ fn str_contains_builtin(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
 /// php_array_user_compare_unstable(): call the user comparator, handling the
 /// bool-return deprecation (with swapped retry for false) like PHP.
-fn user_sort_compare(vm: &mut Vm, cb: &Value, a: Value, b: Value, fname: &str, warned: &mut bool) -> i32 {
+fn user_sort_compare(
+    vm: &mut Vm,
+    cb: &Value,
+    a: Value,
+    b: Value,
+    fname: &str,
+    warned: &mut bool,
+) -> i32 {
     if vm.current_exception.is_some() {
         return 0;
     }
@@ -10242,19 +12754,41 @@ fn user_sort_compare(vm: &mut Vm, cb: &Value, a: Value, b: Value, fname: &str, w
                 Err(_) => return 0,
             };
             let n = r2.to_long();
-            return if n > 0 { -1 } else if n < 0 { 1 } else { 0 };
+            return if n > 0 {
+                -1
+            } else if n < 0 {
+                1
+            } else {
+                0
+            };
         }
     }
     let n = result.to_long();
-    if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+    if n > 0 {
+        1
+    } else if n < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
-fn php_user_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, renumber: bool) -> Result<Value, VmError> {
+fn php_user_sort(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    by_key: bool,
+    renumber: bool,
+) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, fname, "array", 1)?;
     if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
         let cb = callback.clone();
-        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if entries.is_empty() {
             return Ok(Value::True);
         }
@@ -10262,7 +12796,14 @@ fn php_user_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, renumbe
         let sorted = if entries.len() > 1 {
             crate::zsort::zend_sort_stable(entries, |x, y| {
                 if by_key {
-                    user_sort_compare(vm, &cb, key_to_value(&x.0), key_to_value(&y.0), fname, &mut warned)
+                    user_sort_compare(
+                        vm,
+                        &cb,
+                        key_to_value(&x.0),
+                        key_to_value(&y.0),
+                        fname,
+                        &mut warned,
+                    )
                 } else {
                     user_sort_compare(vm, &cb, x.1.clone(), y.1.clone(), fname, &mut warned)
                 }
@@ -10272,7 +12813,11 @@ fn php_user_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, renumbe
         };
         let mut new_arr = PhpArray::new();
         for (k, v) in sorted {
-            if renumber { new_arr.push(v); } else { new_arr.set(k, v); }
+            if renumber {
+                new_arr.push(v);
+            } else {
+                new_arr.set(k, v);
+            }
         }
         *arr.borrow_mut() = new_arr;
     }
@@ -10348,18 +12893,26 @@ fn array_is_list_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match args.first() {
         Some(Value::Array(arr)) => {
             let arr = arr.borrow();
-            let is_list = arr
-                .iter()
-                .enumerate()
-                .all(|(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64));
+            let is_list = arr.iter().enumerate().all(
+                |(i, (k, _))| matches!(k, goro_core::array::ArrayKey::Int(n) if *n == i as i64),
+            );
             Ok(if is_list { Value::True } else { Value::False })
         }
         _ => {
-            let type_name = args.first().map(Vm::value_type_name).unwrap_or("null".to_string());
-            let msg = format!("array_is_list(): Argument #1 ($array) must be of type array, {} given", type_name);
+            let type_name = args
+                .first()
+                .map(Vm::value_type_name)
+                .unwrap_or("null".to_string());
+            let msg = format!(
+                "array_is_list(): Argument #1 ($array) must be of type array, {} given",
+                type_name
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -10372,9 +12925,19 @@ fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     let mut put = |k: &[u8], v: Value| {
-        result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(k)), v);
+        result.set(
+            goro_core::array::ArrayKey::String(PhpString::from_bytes(k)),
+            v,
+        );
     };
-    put(b"running", if goro_core::gc::gc_active() { Value::True } else { Value::False });
+    put(
+        b"running",
+        if goro_core::gc::gc_active() {
+            Value::True
+        } else {
+            Value::False
+        },
+    );
     put(b"protected", Value::False);
     put(b"full", Value::False);
     put(b"runs", Value::Long(goro_core::gc::gc_runs()));
@@ -10417,12 +12980,21 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
         }
         Value::String(s) => {
             vm.write_output(
-                format!("{}string({}) \"{}\" refcount({})\n", prefix, s.len(), s.to_string_lossy(), 1).as_bytes(),
+                format!(
+                    "{}string({}) \"{}\" refcount({})\n",
+                    prefix,
+                    s.len(),
+                    s.to_string_lossy(),
+                    1
+                )
+                .as_bytes(),
             );
         }
         Value::Array(arr) => {
             let arr = arr.borrow();
-            vm.write_output(format!("{}array({}) refcount({}){{\n", prefix, arr.len(), 2).as_bytes());
+            vm.write_output(
+                format!("{}array({}) refcount({}){{\n", prefix, arr.len(), 2).as_bytes(),
+            );
             for (key, value) in arr.iter() {
                 match key {
                     goro_core::array::ArrayKey::Int(n) => {
@@ -10453,7 +13025,11 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                 if let Value::Object(real) = obj_borrow.get_property(b"__lazy_real") {
                     drop(obj_borrow);
                     vm.write_output(
-                        format!("{}lazy proxy object({})#{} (1) refcount({}){{\n", prefix, class_name, oid, 2).as_bytes(),
+                        format!(
+                            "{}lazy proxy object({})#{} (1) refcount({}){{\n",
+                            prefix, class_name, oid, 2
+                        )
+                        .as_bytes(),
                     );
                     vm.write_output(format!("{}  [\"instance\"]=>\n", prefix).as_bytes());
                     debug_zval_dump_value(vm, &Value::Object(real), indent + 2);
@@ -10461,11 +13037,17 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                     return;
                 }
             }
-            let prop_count = obj_borrow.properties.iter()
+            let prop_count = obj_borrow
+                .properties
+                .iter()
                 .filter(|(name, val)| !name.starts_with(b"__") && !matches!(val, Value::Undef))
                 .count();
             vm.write_output(
-                format!("{}{}object({})#{} ({}) refcount({}){{\n", prefix, lazy_prefix, class_name, oid, prop_count, 2).as_bytes(),
+                format!(
+                    "{}{}object({})#{} ({}) refcount({}){{\n",
+                    prefix, lazy_prefix, class_name, oid, prop_count, 2
+                )
+                .as_bytes(),
             );
             for (name, value) in &obj_borrow.properties {
                 if name.starts_with(b"__") {
@@ -10476,13 +13058,21 @@ fn debug_zval_dump_value(vm: &mut Vm, val: &Value, indent: usize) {
                 if matches!(value, Value::Undef) {
                     // Emit a PHP-style uninitialized marker for typed props.
                     // We look up the class to get the property's type.
-                    let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    let prop_type = vm.classes.get(&class_lower)
+                    let class_lower: Vec<u8> = obj_borrow
+                        .class_name
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    let prop_type = vm
+                        .classes
+                        .get(&class_lower)
                         .and_then(|c| c.properties.iter().find(|p| p.name == *name))
                         .and_then(|p| p.property_type.as_ref())
                         .map(|t| vm.param_type_name(t))
                         .unwrap_or_else(|| String::from("mixed"));
-                    vm.write_output(format!("{}  uninitialized({})\n", prefix, prop_type).as_bytes());
+                    vm.write_output(
+                        format!("{}  uninitialized({})\n", prefix, prop_type).as_bytes(),
+                    );
                 } else {
                     debug_zval_dump_value(vm, value, indent + 2);
                 }
@@ -10512,7 +13102,10 @@ fn var_dump_direct(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn throw_type_error_msg(vm: &mut Vm, msg: String) -> VmError {
     let exc = vm.throw_type_error(msg.clone());
     vm.current_exception = Some(exc);
-    VmError { message: format!("Uncaught TypeError: {}", msg), line: vm.current_line }
+    VmError {
+        message: format!("Uncaught TypeError: {}", msg),
+        line: vm.current_line,
+    }
 }
 
 fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10524,21 +13117,39 @@ fn get_class_methods_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !vm.classes.contains_key(&lower) {
                 vm.try_autoload_class(&name);
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: "Uncaught exception".into(),
+                        line: vm.current_line,
+                    });
                 }
             }
-            if !vm.classes.contains_key(&lower) && goro_core::reflection::class_method_list(vm, &lower).is_none() {
-                return Err(throw_type_error_msg(vm, format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&val))));
+            if !vm.classes.contains_key(&lower)
+                && goro_core::reflection::class_method_list(vm, &lower).is_none()
+            {
+                return Err(throw_type_error_msg(
+                    vm,
+                    format!(
+                        "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                        Vm::value_type_name(&val)
+                    ),
+                ));
             }
             name
         }
         Value::Object(obj) => obj.borrow().class_name.clone(),
         _ => {
-            return Err(throw_type_error_msg(vm, format!("get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given", Vm::value_type_name(&val))));
+            return Err(throw_type_error_msg(
+                vm,
+                format!(
+                    "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {} given",
+                    Vm::value_type_name(&val)
+                ),
+            ));
         }
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let scope: Option<Vec<u8>> = vm.current_class_scope()
+    let scope: Option<Vec<u8>> = vm
+        .current_class_scope()
         .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
     let mut result = PhpArray::new();
     if let Some(methods) = goro_core::reflection::class_method_list(vm, &class_lower) {
@@ -10640,7 +13251,8 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // does at the engine level. Compare scopes in lowercase form because
     // PHP class names are case-insensitive and declaring_class is stored
     // lowercase.
-    let caller_scope: Option<Vec<u8>> = vm.current_class_scope()
+    let caller_scope: Option<Vec<u8>> = vm
+        .current_class_scope()
         .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect());
     let can_see = |prop: &goro_core::object::PropertyDef| -> bool {
         match prop.visibility {
@@ -10652,8 +13264,11 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 // the declaring class descends from the caller. This
                 // matches the check Zend performs at object access.
                 if let Some(scope) = &caller_scope {
-                    let decl_lower: Vec<u8> = prop.declaring_class
-                        .iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let decl_lower: Vec<u8> = prop
+                        .declaring_class
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     *scope == decl_lower
                         || vm.class_extends(scope, &decl_lower)
                         || vm.class_extends(&decl_lower, scope)
@@ -10691,8 +13306,11 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if prop.is_static || prop.is_virtual {
                     continue;
                 }
-                let decl_lower: Vec<u8> =
-                    prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let decl_lower: Vec<u8> = prop
+                    .declaring_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if decl_lower != *cls_lower {
                     continue;
                 }
@@ -10715,8 +13333,11 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if !prop.is_static {
                     continue;
                 }
-                let decl_lower: Vec<u8> =
-                    prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let decl_lower: Vec<u8> = prop
+                    .declaring_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if decl_lower != *cls_lower {
                     continue;
                 }
@@ -10986,7 +13607,10 @@ fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             );
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     #[cfg(unix)]
@@ -11072,7 +13696,8 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let stack_len = vm.call_stack.len();
     let max_frames = if limit > 0 { limit as usize } else { stack_len };
 
-    let frames: Vec<(String, String, u32, Vec<Value>, bool)> = vm.call_stack.iter().rev().cloned().collect();
+    let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
+        vm.call_stack.iter().rev().cloned().collect();
     for (idx, (func_name, file, line, frame_args, is_method)) in frames.iter().enumerate() {
         let frame_args = &vm.trace_frame_args(func_name, frame_args);
         if idx >= max_frames {
@@ -11095,7 +13720,7 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !func_name.starts_with("{closure:") && func_name.find("::").is_some() {
             let sep = func_name.find("::").unwrap();
             let class_name = &func_name[..sep];
-            let method_name = &func_name[sep+2..];
+            let method_name = &func_name[sep + 2..];
             frame.set(
                 ArrayKey::String(PhpString::from_bytes(b"function")),
                 Value::String(PhpString::from_string(method_name.to_string())),
@@ -11113,7 +13738,7 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else if !func_name.starts_with("{closure:") && func_name.find("->").is_some() {
             let sep = func_name.find("->").unwrap();
             let class_name = &func_name[..sep];
-            let method_name = &func_name[sep+2..];
+            let method_name = &func_name[sep + 2..];
             frame.set(
                 ArrayKey::String(PhpString::from_bytes(b"function")),
                 Value::String(PhpString::from_string(method_name.to_string())),
@@ -11143,7 +13768,10 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Array(Rc::new(RefCell::new(args_arr))),
             );
         }
-        trace_arr.set(ArrayKey::Int(idx as i64), Value::Array(Rc::new(RefCell::new(frame))));
+        trace_arr.set(
+            ArrayKey::Int(idx as i64),
+            Value::Array(Rc::new(RefCell::new(frame))),
+        );
     }
     Ok(Value::Array(Rc::new(RefCell::new(trace_arr))))
 }
@@ -11157,7 +13785,8 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let max_frames = if limit > 0 { limit as usize } else { stack_len };
 
     let mut lines = Vec::new();
-    let frames: Vec<(String, String, u32, Vec<Value>, bool)> = vm.call_stack.iter().rev().cloned().collect();
+    let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
+        vm.call_stack.iter().rev().cloned().collect();
     for (i, (func_name, file, line, frame_args, is_instance)) in frames.iter().enumerate() {
         let frame_args = &vm.trace_frame_args(func_name, frame_args);
         if i >= max_frames {
@@ -11220,7 +13849,10 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // matching PHP's deprecation notice format.
             let prev_prec = goro_core::value::get_php_precision();
             goro_core::value::set_php_precision(-1);
-            let formatted: String = Value::Double(f).to_php_string().to_string_lossy().to_string();
+            let formatted: String = Value::Double(f)
+                .to_php_string()
+                .to_string_lossy()
+                .to_string();
             goro_core::value::set_php_precision(prev_prec);
             let msg = format!(
                 "Implicit conversion from float {} to int loses precision",
@@ -11231,7 +13863,10 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     if let Value::Resource(id) = key_deref {
-        vm.emit_warning(&format!("Resource ID#{} used as offset, casting to integer ({})", id, id));
+        vm.emit_warning(&format!(
+            "Resource ID#{} used as offset, casting to integer ({})",
+            id, id
+        ));
     }
 
     // Check for invalid key types (array, object)
@@ -11240,14 +13875,20 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "Cannot access offset of type array on array".to_string();
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         Value::Object(obj) => {
             let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
             let msg = format!("Cannot access offset of type {} on array", class_name);
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => {}
     }
@@ -11261,10 +13902,16 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         })
     } else {
         let type_name = arg_type_name(arr);
-        let msg = format!("array_key_exists(): Argument #2 ($array) must be of type array, {} given", type_name);
+        let msg = format!(
+            "array_key_exists(): Argument #2 ($array) must be of type array, {} given",
+            type_name
+        );
         let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
-        Err(VmError { message: msg, line: vm.current_line })
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
     }
 }
 
@@ -11274,10 +13921,16 @@ fn clearstatcache_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.len() > 3 {
-        let msg = format!("array_walk_recursive() expects at most 3 arguments, {} given", args.len());
+        let msg = format!(
+            "array_walk_recursive() expects at most 3 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let arr_val = args.first().unwrap_or(&Value::Null);
     let callback = args.get(1).unwrap_or(&Value::Null);
@@ -11311,10 +13964,16 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let _ = (&func_name, &captured);
     if let Value::Array(a) = arr_val.deref() {
         if let Some(reason) = callable_error(vm, callback) {
-            let msg = format!("array_walk_recursive(): Argument #2 ($callback) must be a valid callback, {}", reason);
+            let msg = format!(
+                "array_walk_recursive(): Argument #2 ($callback) must be a valid callback, {}",
+                reason
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         php_array_walk_arr(vm, &a, callback, extra_data.as_ref(), true, 0)?;
     }
@@ -11398,16 +14057,30 @@ fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// php_natsort(): zend_hash_sort with php_array_natural_(case_)compare, keys kept.
-fn php_natsort(vm: &mut Vm, args: &[Value], fname: &str, fold_case: bool) -> Result<Value, VmError> {
+fn php_natsort(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    fold_case: bool,
+) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, fname, "array", 1)?;
     if let Value::Array(arr) = first.deref() {
-        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if entries.len() <= 1 {
             return Ok(Value::True);
         }
-        let flags = if fold_case { SORT_NATURAL | SORT_FLAG_CASE } else { SORT_NATURAL };
-        let sorted = crate::zsort::zend_sort_stable(entries, |x, y| php_data_cmp(vm, &x.1, &y.1, flags));
+        let flags = if fold_case {
+            SORT_NATURAL | SORT_FLAG_CASE
+        } else {
+            SORT_NATURAL
+        };
+        let sorted =
+            crate::zsort::zend_sort_stable(entries, |x, y| php_data_cmp(vm, &x.1, &y.1, flags));
         let mut new_arr = PhpArray::new();
         for (k, v) in sorted {
             new_arr.set(k, v);
@@ -11427,21 +14100,31 @@ fn natcasesort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn set_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let old = vm.constants.get(b"include_path".as_ref()).cloned()
+    let old = vm
+        .constants
+        .get(b"include_path".as_ref())
+        .cloned()
         .unwrap_or_else(|| Value::String(PhpString::from_bytes(b".")));
-    vm.constants.insert(b"include_path".to_vec(),
-        Value::String(PhpString::from_vec(path.as_bytes().to_vec())));
+    vm.constants.insert(
+        b"include_path".to_vec(),
+        Value::String(PhpString::from_vec(path.as_bytes().to_vec())),
+    );
     Ok(old)
 }
 
 fn get_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(vm.constants.get(b"include_path".as_ref()).cloned()
+    Ok(vm
+        .constants
+        .get(b"include_path".as_ref())
+        .cloned()
         .unwrap_or_else(|| Value::String(PhpString::from_bytes(b"."))))
 }
 
 fn restore_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    vm.constants.insert(b"include_path".to_vec(),
-        Value::String(PhpString::from_bytes(b".")));
+    vm.constants.insert(
+        b"include_path".to_vec(),
+        Value::String(PhpString::from_bytes(b".")),
+    );
     Ok(Value::Null)
 }
 
@@ -11449,7 +14132,8 @@ fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     let val = args.first().unwrap_or(&Value::Null);
     // For closed resources, return "Unknown" (matches PHP behavior).
     if let Value::Resource(id) = val {
-        if goro_core::value::is_registered_resource(*id) && !goro_core::value::is_open_resource(*id) {
+        if goro_core::value::is_registered_resource(*id) && !goro_core::value::is_open_resource(*id)
+        {
             return Ok(Value::String(PhpString::from_bytes(b"Unknown")));
         }
     }
@@ -11478,7 +14162,10 @@ fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "unlink(): Argument #1 ($filename) must not contain any null bytes".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let path_str = path.to_string_lossy();
     match std::fs::remove_file(&*path_str) {
@@ -11547,7 +14234,10 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // PHP: copy of same source -> destination returns false (no warning),
     // resolved via canonicalize as a fallback.
-    if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(&*from_str), std::fs::canonicalize(&*to_str)) {
+    if let (Ok(c1), Ok(c2)) = (
+        std::fs::canonicalize(&*from_str),
+        std::fs::canonicalize(&*to_str),
+    ) {
         if c1 == c2 {
             return Ok(Value::False);
         }
@@ -11556,7 +14246,10 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(_) => Ok(Value::True),
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
-            vm.emit_warning(&format!("copy({}): Failed to open stream: {}", from_str, msg));
+            vm.emit_warning(&format!(
+                "copy({}): Failed to open stream: {}",
+                from_str, msg
+            ));
             Ok(Value::False)
         }
     }
@@ -11569,7 +14262,10 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "Path must not be empty".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
@@ -11585,7 +14281,7 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 path_str
             ));
             Ok(Value::False)
-        },
+        }
     }
 }
 
@@ -11635,7 +14331,10 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "file(): Argument #2 ($flags) must be a valid flag value".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let ignore_new_lines = flags & 2 != 0; // FILE_IGNORE_NEW_LINES
     let skip_empty = flags & 4 != 0; // FILE_SKIP_EMPTY_LINES
@@ -11673,7 +14372,11 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
                 if skip_empty {
-                    let trimmed: Vec<u8> = l.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+                    let trimmed: Vec<u8> = l
+                        .iter()
+                        .copied()
+                        .filter(|b| !b.is_ascii_whitespace())
+                        .collect();
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -11683,7 +14386,10 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
         Err(_) => {
-            vm.emit_warning(&format!("file({}): Failed to open stream: No such file or directory", path_str));
+            vm.emit_warning(&format!(
+                "file({}): Failed to open stream: No such file or directory",
+                path_str
+            ));
             Ok(Value::False)
         }
     }
@@ -11703,11 +14409,13 @@ fn is_executable_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     #[cfg(unix)]
     {
-        Ok(if check_access_bit(&path.to_string_lossy(), 0o100, 0o010, 0o001) {
-            Value::True
-        } else {
-            Value::False
-        })
+        Ok(
+            if check_access_bit(&path.to_string_lossy(), 0o100, 0o010, 0o001) {
+                Value::True
+            } else {
+                Value::False
+            },
+        )
     }
     #[cfg(not(unix))]
     {
@@ -11720,10 +14428,14 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Validate prefix type: must be a stringable scalar; arrays cause TypeError.
     let prefix_val = args.get(1).cloned().unwrap_or(Value::Null);
     if matches!(prefix_val, Value::Array(_)) {
-        let msg = "tempnam(): Argument #2 ($prefix) must be of type string, array given".to_string();
+        let msg =
+            "tempnam(): Argument #2 ($prefix) must be of type string, array given".to_string();
         let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let prefix = prefix_val.to_php_string();
     // Reject null bytes in prefix.
@@ -11731,7 +14443,10 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "tempnam(): Argument #2 ($prefix) must not contain any null bytes".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
     let raw_dir_str = if dir.is_empty() {
@@ -11818,7 +14533,11 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         let arg_deref = arg.deref();
         if let Value::Array(arr) = &arg_deref {
             let arr_ptr = Rc::as_ptr(arr) as usize;
-            let entries: Vec<_> = arr.borrow().iter().map(|(k, v)| (k.clone(), unwrap_rc1_ref(v))).collect();
+            let entries: Vec<_> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
+                .collect();
             for (key, value) in entries {
                 let value_deref = value.deref();
                 if let Value::Array(inner_new) = &value_deref {
@@ -11828,14 +14547,21 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
                         let e = "Recursion detected".to_string();
                         let exc = vm.create_exception(b"Error", &e, vm.current_line);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", e),
+                            line: vm.current_line,
+                        });
                     }
                     let existing_inner = if let Some(existing) = result.get(&key) {
                         let existing = existing.deref();
                         if let Value::Array(inner_old) = existing {
                             Some(inner_old.clone())
-                        } else { None }
-                    } else { None };
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     if let Some(inner_old) = existing_inner {
                         let mut visited = vec![arr_ptr, inner_new_ptr];
                         match array_replace_recursive_inner(
@@ -11850,7 +14576,10 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
                             Err(e) => {
                                 let exc = vm.create_exception(b"Error", &e, vm.current_line);
                                 vm.current_exception = Some(exc);
-                                return Err(VmError { message: format!("Uncaught Error: {}", e), line: vm.current_line });
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", e),
+                                    line: vm.current_line,
+                                });
                             }
                         }
                     }
@@ -11862,7 +14591,11 @@ fn array_replace_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpArray>>, visited: &mut Vec<usize>) -> Result<Value, String> {
+fn array_replace_recursive_inner(
+    base: &PhpArray,
+    replacement: &Rc<RefCell<PhpArray>>,
+    visited: &mut Vec<usize>,
+) -> Result<Value, String> {
     let mut result = base.clone();
     let replacement_borrow = replacement.borrow();
     for (key, value) in replacement_borrow.iter() {
@@ -11878,7 +14611,8 @@ fn array_replace_recursive_inner(base: &PhpArray, replacement: &Rc<RefCell<PhpAr
                 let existing = existing.deref();
                 if let Value::Array(inner_old) = existing {
                     visited.push(ptr);
-                    let merged = array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
+                    let merged =
+                        array_replace_recursive_inner(&inner_old.borrow(), inner_new, visited)?;
                     visited.pop();
                     result.set(key.clone(), merged);
                     continue;
@@ -11910,7 +14644,11 @@ fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.clone(),
         _ => return Ok(Value::Null),
     };
-    let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let arr_data: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (key, value) in &arr_data {
         let key_val = match key {
             ArrayKey::Int(n) => Value::Long(*n),
@@ -11933,7 +14671,11 @@ fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => v.clone(),
         _ => return Ok(Value::Null),
     };
-    let arr_data: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let arr_data: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (key, value) in &arr_data {
         let key_val = match key {
             ArrayKey::Int(n) => Value::Long(*n),
@@ -11951,7 +14693,13 @@ fn array_find_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// php_array_binop() (array_sum / array_product).
-fn php_array_binop(vm: &mut Vm, args: &[Value], fname: &str, op_name: &str, mul: bool) -> Result<Value, VmError> {
+fn php_array_binop(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    op_name: &str,
+    mul: bool,
+) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null).deref();
     require_array_arg(vm, &first, fname, "array", 1)?;
     let entries: Vec<Value> = match &first {
@@ -11962,10 +14710,18 @@ fn php_array_binop(vm: &mut Vm, args: &[Value], fname: &str, op_name: &str, mul:
     let apply = |acc: &Value, n: &Value| -> Value {
         match (acc, n) {
             (Value::Long(x), Value::Long(y)) => {
-                let r = if mul { x.checked_mul(*y) } else { x.checked_add(*y) };
+                let r = if mul {
+                    x.checked_mul(*y)
+                } else {
+                    x.checked_add(*y)
+                };
                 match r {
                     Some(v) => Value::Long(v),
-                    None => Value::Double(if mul { *x as f64 * *y as f64 } else { *x as f64 + *y as f64 }),
+                    None => Value::Double(if mul {
+                        *x as f64 * *y as f64
+                    } else {
+                        *x as f64 + *y as f64
+                    }),
                 }
             }
             _ => {
@@ -11988,7 +14744,10 @@ fn php_array_binop(vm: &mut Vm, args: &[Value], fname: &str, op_name: &str, mul:
                             vm.emit_warning("A non-numeric value encountered");
                         }
                         let t = st.trim_start();
-                        let numpart: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
+                        let numpart: String = t
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+')
+                            .collect();
                         let is_int = !t[numpart.len()..].starts_with(['.', 'e', 'E']);
                         match (is_int, numpart.parse::<i64>()) {
                             (true, Ok(n)) => Some(Value::Long(n)),
@@ -11997,29 +14756,45 @@ fn php_array_binop(vm: &mut Vm, args: &[Value], fname: &str, op_name: &str, mul:
                     }
                     None => {
                         acc = apply(&acc, &Value::Long(0));
-                        vm.emit_warning(&format!("{}(): {} is not supported on type string", fname, op_name));
+                        vm.emit_warning(&format!(
+                            "{}(): {} is not supported on type string",
+                            fname, op_name
+                        ));
                         None
                     }
                 }
             }
             Value::Resource(id) => {
                 acc = apply(&acc, &Value::Long(*id));
-                vm.emit_warning(&format!("{}(): {} is not supported on type resource", fname, op_name));
+                vm.emit_warning(&format!(
+                    "{}(): {} is not supported on type resource",
+                    fname, op_name
+                ));
                 None
             }
             Value::Object(o) => {
                 let cast = vm.object_to_long.and_then(|f| f(&v));
                 match cast {
-                    Some(n) if vm.object_is_operator_type.map(|f| f(&v)).unwrap_or(false) => Some(Value::Long(n)),
+                    Some(n) if vm.object_is_operator_type.map(|f| f(&v)).unwrap_or(false) => {
+                        Some(Value::Long(n))
+                    }
                     _ => {
                         let name = goro_core::value::display_class_name(&o.borrow().class_name);
-                        vm.emit_warning(&format!("{}(): {} is not supported on type {}", fname, op_name, name));
+                        vm.emit_warning(&format!(
+                            "{}(): {} is not supported on type {}",
+                            fname, op_name, name
+                        ));
                         None
                     }
                 }
             }
             _ => {
-                vm.emit_warning(&format!("{}(): {} is not supported on type {}", fname, op_name, Vm::value_type_name(&v)));
+                vm.emit_warning(&format!(
+                    "{}(): {} is not supported on type {}",
+                    fname,
+                    op_name,
+                    Vm::value_type_name(&v)
+                ));
                 None
             }
         };
@@ -12070,15 +14845,26 @@ fn array_uintersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
 
 /// Validate a callback argument for array_diff_u*/array_intersect_u*/array_udiff*/array_uintersect* functions.
 /// Returns Ok(()) if valid, or Err with TypeError if not.
-fn validate_array_callback(vm: &mut Vm, callback: &Value, func_name: &str, arg_num: usize) -> Result<(), VmError> {
+fn validate_array_callback(
+    vm: &mut Vm,
+    callback: &Value,
+    func_name: &str,
+    arg_num: usize,
+) -> Result<(), VmError> {
     match callback {
         Value::String(s) => {
             let name = s.as_bytes();
             if name.is_empty() {
-                let msg = format!("{}(): Argument #{} must be a valid callback, function \"\" not found or invalid function name", func_name, arg_num);
+                let msg = format!(
+                    "{}(): Argument #{} must be a valid callback, function \"\" not found or invalid function name",
+                    func_name, arg_num
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             let name_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
             if name_lower.starts_with(b"__closure_") || name_lower.starts_with(b"__arrow_") {
@@ -12094,37 +14880,66 @@ fn validate_array_callback(vm: &mut Vm, callback: &Value, func_name: &str, arg_n
                             return Ok(());
                         }
                     }
-                    let msg = format!("{}(): Argument #{} must be a valid callback, class \"{}\" not found", func_name, arg_num, String::from_utf8_lossy(&name[..pos]));
+                    let msg = format!(
+                        "{}(): Argument #{} must be a valid callback, class \"{}\" not found",
+                        func_name,
+                        arg_num,
+                        String::from_utf8_lossy(&name[..pos])
+                    );
                     let exc = vm.throw_type_error(msg.clone());
                     vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
                 }
             }
-            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower) {
+            if vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower)
+            {
                 return Ok(());
             }
-            let msg = format!("{}(): Argument #{} must be a valid callback, function \"{}\" not found or invalid function name", func_name, arg_num, String::from_utf8_lossy(name));
+            let msg = format!(
+                "{}(): Argument #{} must be a valid callback, function \"{}\" not found or invalid function name",
+                func_name,
+                arg_num,
+                String::from_utf8_lossy(name)
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
         Value::Array(arr) => {
             let arr_borrow = arr.borrow();
             let len = arr_borrow.len();
             if len != 2 {
-                let msg = format!("{}(): Argument #{} must be a valid callback, array callback must have exactly two members", func_name, arg_num);
+                let msg = format!(
+                    "{}(): Argument #{} must be a valid callback, array callback must have exactly two members",
+                    func_name, arg_num
+                );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             Ok(())
         }
         Value::Object(_) => Ok(()),
         _ => {
-            let msg = format!("{}(): Argument #{} must be a valid callback, no array or string given", func_name, arg_num);
+            let msg = format!(
+                "{}(): Argument #{} must be a valid callback, no array or string given",
+                func_name, arg_num
+            );
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line: vm.current_line })
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -12157,13 +14972,24 @@ fn array_u_op(
         if !matches!(val, Value::Array(_)) {
             let type_name = arg_type_name(&val);
             let msg = if i == 0 {
-                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+                format!(
+                    "{}(): Argument #1 ($array) must be of type array, {} given",
+                    func_name, type_name
+                )
             } else {
-                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+                format!(
+                    "{}(): Argument #{} must be of type array, {} given",
+                    func_name,
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     let callback = args[args.len() - num_callbacks].clone();
@@ -12203,7 +15029,8 @@ fn array_u_op(
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
                 if compare_keys {
-                    let cmp_result = call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
+                    let cmp_result =
+                        call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
                     if cmp_result.to_long() == 0 {
                         if also_compare_values {
                             // PHP uses string comparison (zend_compare with string semantics)
@@ -12219,7 +15046,8 @@ fn array_u_op(
                     }
                 } else {
                     // Compare values
-                    let cmp_result = call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
+                    let cmp_result =
+                        call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
                     if cmp_result.to_long() == 0 {
                         found_in_this = true;
                         break;
@@ -12234,7 +15062,11 @@ fn array_u_op(
         }
         // intersect: keep if found in ALL others
         // diff: keep if NOT found in ANY other
-        let keep = if is_intersect { found_in_all } else { !found_in_any };
+        let keep = if is_intersect {
+            found_in_all
+        } else {
+            !found_in_any
+        };
         if keep {
             result.set(key.clone(), value.clone());
         }
@@ -12260,13 +15092,24 @@ fn array_udiff_with_key_check(
         if !matches!(val, Value::Array(_)) {
             let type_name = arg_type_name(&val);
             let msg = if i == 0 {
-                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+                format!(
+                    "{}(): Argument #1 ($array) must be of type array, {} given",
+                    func_name, type_name
+                )
             } else {
-                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+                format!(
+                    "{}(): Argument #{} must be of type array, {} given",
+                    func_name,
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     // Single array + callback: return the first array
@@ -12299,7 +15142,8 @@ fn array_udiff_with_key_check(
         for other in &other_arrays {
             let mut found = false;
             if let Some(ovalue) = other.get(key) {
-                let cmp_result = call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
+                let cmp_result =
+                    call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
                 if cmp_result.to_long() == 0 {
                     found = true;
                 }
@@ -12332,13 +15176,24 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Resu
         if !matches!(val, Value::Array(_)) {
             let type_name = arg_type_name(&val);
             let msg = if i == 0 {
-                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+                format!(
+                    "{}(): Argument #1 ($array) must be of type array, {} given",
+                    func_name, type_name
+                )
             } else {
-                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+                format!(
+                    "{}(): Argument #{} must be of type array, {} given",
+                    func_name,
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     // Single array + two callbacks: return the first array
@@ -12380,9 +15235,11 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Resu
                     ArrayKey::Int(n) => Value::Long(*n),
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
-                let key_cmp = call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
+                let key_cmp =
+                    call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
                 if key_cmp.to_long() == 0 {
-                    let val_cmp = call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
+                    let val_cmp =
+                        call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
                     if val_cmp.to_long() == 0 {
                         found = true;
                         break;
@@ -12401,7 +15258,11 @@ fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Resu
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
+fn array_uintersect_uassoc_impl(
+    vm: &mut Vm,
+    args: &[Value],
+    func_name: &str,
+) -> Result<Value, VmError> {
     if args.len() < 3 {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
@@ -12417,13 +15278,24 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
         if !matches!(val, Value::Array(_)) {
             let type_name = arg_type_name(&val);
             let msg = if i == 0 {
-                format!("{}(): Argument #1 ($array) must be of type array, {} given", func_name, type_name)
+                format!(
+                    "{}(): Argument #1 ($array) must be of type array, {} given",
+                    func_name, type_name
+                )
             } else {
-                format!("{}(): Argument #{} must be of type array, {} given", func_name, i + 1, type_name)
+                format!(
+                    "{}(): Argument #{} must be of type array, {} given",
+                    func_name,
+                    i + 1,
+                    type_name
+                )
             };
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     // Single array + two callbacks: return the first array
@@ -12465,9 +15337,11 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
                     ArrayKey::Int(n) => Value::Long(*n),
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
-                let key_cmp = call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
+                let key_cmp =
+                    call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
                 if key_cmp.to_long() == 0 {
-                    let val_cmp = call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
+                    let val_cmp =
+                        call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
                     if val_cmp.to_long() == 0 {
                         found = true;
                         break;
@@ -12486,15 +15360,23 @@ fn array_uintersect_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) ->
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-
 fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = match args.first().map(|v| v.deref()) {
         Some(v) => v.to_php_string().as_bytes().to_vec(),
         None => return Ok(Value::False),
     };
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(crate::ini_parser::SCANNER_NORMAL);
-    Ok(crate::ini_parser::parse_ini(vm, &data, process_sections, scanner_mode, "Unknown"))
+    let scanner_mode = args
+        .get(2)
+        .map(|v| v.to_long())
+        .unwrap_or(crate::ini_parser::SCANNER_NORMAL);
+    Ok(crate::ini_parser::parse_ini(
+        vm,
+        &data,
+        process_sections,
+        scanner_mode,
+        "Unknown",
+    ))
 }
 
 fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12511,7 +15393,10 @@ fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => None,
     };
     if let Some(name) = const_name {
-        vm.emit_deprecated(&format!("Constant {} is deprecated since 8.3, as assert_options() is deprecated", name));
+        vm.emit_deprecated(&format!(
+            "Constant {} is deprecated since 8.3, as assert_options() is deprecated",
+            name
+        ));
     }
     vm.emit_deprecated("Function assert_options() is deprecated since 8.3");
 
@@ -12522,14 +15407,22 @@ fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         5 => (b"assert.exception", true),
         2 => {
             // ASSERT_CALLBACK
-            let prev = ASSERT_CALLBACK.with(|c| c.borrow().clone()).unwrap_or_else(|| {
-                match vm.constants.get(b"assert.callback".as_ref()) {
-                    Some(v) if !v.to_php_string().as_bytes().is_empty() => Value::String(v.to_php_string()),
+            let prev = ASSERT_CALLBACK
+                .with(|c| c.borrow().clone())
+                .unwrap_or_else(|| match vm.constants.get(b"assert.callback".as_ref()) {
+                    Some(v) if !v.to_php_string().as_bytes().is_empty() => {
+                        Value::String(v.to_php_string())
+                    }
                     _ => Value::Null,
-                }
-            });
+                });
             if let Some(nv) = new_value {
-                ASSERT_CALLBACK.with(|c| *c.borrow_mut() = if matches!(nv, Value::Null) { None } else { Some(nv) });
+                ASSERT_CALLBACK.with(|c| {
+                    *c.borrow_mut() = if matches!(nv, Value::Null) {
+                        None
+                    } else {
+                        Some(nv)
+                    }
+                });
             }
             return Ok(prev);
         }
@@ -12537,7 +15430,10 @@ fn assert_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let msg = "assert_options(): Argument #1 ($option) must be an ASSERT_* constant";
             let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: format!("Uncaught ValueError: {}", msg), line: vm.current_line });
+            return Err(VmError {
+                message: format!("Uncaught ValueError: {}", msg),
+                line: vm.current_line,
+            });
         }
     };
     let old = assert_ini_bool(vm, key, default);
@@ -12559,7 +15455,10 @@ fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "ftruncate(): Argument #2 ($size) must be greater than or equal to 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let size = size_long as u64;
     FILE_HANDLES.with(|handles| {
@@ -12586,7 +15485,9 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     }
     // Remove the file immediately so it's automatically cleaned up
     let path = std::ffi::CStr::from_bytes_with_nul(&buf).unwrap();
-    unsafe { libc::unlink(path.as_ptr()); }
+    unsafe {
+        libc::unlink(path.as_ptr());
+    }
     // Convert fd to std::fs::File
     use std::os::unix::io::FromRawFd;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -12607,7 +15508,10 @@ fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(modified) = meta.modified() {
-                let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let secs = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
                 Ok(Value::Long(secs as i64))
             } else {
                 Ok(Value::False)
@@ -12632,7 +15536,10 @@ fn fileatime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match std::fs::metadata(&*path_str) {
         Ok(meta) => {
             if let Ok(accessed) = meta.accessed() {
-                let secs = accessed.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let secs = accessed
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
                 Ok(Value::Long(secs as i64))
             } else {
                 Ok(Value::False)
@@ -12671,7 +15578,10 @@ fn filectime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match std::fs::metadata(&*path_str) {
             Ok(meta) => {
                 if let Ok(c) = meta.created() {
-                    let secs = c.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let secs = c
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     Ok(Value::Long(secs as i64))
                 } else {
                     Ok(Value::False)
@@ -12797,12 +15707,15 @@ fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    let has_read_filters =
+        crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
         let mut total = 0i64;
         loop {
             let chunk = read_filtered(vm, fid, 8192);
-            if chunk.is_empty() { break; }
+            if chunk.is_empty() {
+                break;
+            }
             total += chunk.len() as i64;
             vm.write_output(&chunk);
         }
@@ -12860,7 +15773,12 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     if path.as_bytes().is_empty() {
-        return Err(throw_value_error_in(vm, "parse_ini_file", args, "parse_ini_file(): Argument #1 ($filename) must not be empty"));
+        return Err(throw_value_error_in(
+            vm,
+            "parse_ini_file",
+            args,
+            "parse_ini_file(): Argument #1 ($filename) must not be empty",
+        ));
     }
     let process_sections = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     let scanner_mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -12886,9 +15804,13 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     });
 
     match read_result {
-        Ok(content) => {
-            Ok(crate::ini_parser::parse_ini(vm, content.as_bytes(), process_sections, scanner_mode, &path_str))
-        }
+        Ok(content) => Ok(crate::ini_parser::parse_ini(
+            vm,
+            content.as_bytes(),
+            process_sections,
+            scanner_mode,
+            &path_str,
+        )),
         Err(_) => {
             vm.emit_warning(&format!(
                 "parse_ini_file({}): Failed to open stream: No such file or directory",
@@ -12901,19 +15823,37 @@ fn parse_ini_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if !args.is_empty() {
-        let msg = format!("error_get_last() expects exactly 0 arguments, {} given", args.len());
+        let msg = format!(
+            "error_get_last() expects exactly 0 arguments, {} given",
+            args.len()
+        );
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", msg), line: vm.current_line });
+        return Err(VmError {
+            message: format!("Uncaught ArgumentCountError: {}", msg),
+            line: vm.current_line,
+        });
     }
     match vm.last_error.clone() {
         None => Ok(Value::Null),
         Some((ty, msg, file, line)) => {
             let mut arr = PhpArray::new();
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"type")), Value::Long(ty));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"message")), Value::String(PhpString::from_string(msg)));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"file")), Value::String(PhpString::from_string(file)));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"line")), Value::Long(line as i64));
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"type")),
+                Value::Long(ty),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"message")),
+                Value::String(PhpString::from_string(msg)),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"file")),
+                Value::String(PhpString::from_string(file)),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"line")),
+                Value::Long(line as i64),
+            );
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
     }
@@ -12940,13 +15880,22 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn php_uname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let mode = args.first().map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"a"));
+    let mode = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"a"));
     if mode.len() != 1 {
-        return Err(throw_value_error_msg(_vm, "php_uname(): Argument #1 ($mode) must be a single character"));
+        return Err(throw_value_error_msg(
+            _vm,
+            "php_uname(): Argument #1 ($mode) must be a single character",
+        ));
     }
     let mode_char = mode.as_bytes()[0];
     if !matches!(mode_char, b'a' | b'm' | b'n' | b'r' | b's' | b'v') {
-        return Err(throw_value_error_msg(_vm, "php_uname(): Argument #1 ($mode) must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\""));
+        return Err(throw_value_error_msg(
+            _vm,
+            "php_uname(): Argument #1 ($mode) must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"",
+        ));
     }
     let result = match mode_char {
         b's' => "Linux".to_string(),
@@ -13006,7 +15955,11 @@ pub fn register_cfg_var(key: &str, value: &str) {
 }
 
 fn get_cfg_var_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let name = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     if name == "cfg_file_path" {
         return Ok(Value::String(PhpString::from_bytes(b"")));
     }
@@ -13025,7 +15978,12 @@ fn get_cfg_var_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if off.is_empty() {
                         a.push(val);
                     } else {
-                        a.set(Vm::value_to_array_key(Value::String(PhpString::from_string(off.trim().to_string()))), val);
+                        a.set(
+                            Vm::value_to_array_key(Value::String(PhpString::from_string(
+                                off.trim().to_string(),
+                            ))),
+                            val,
+                        );
                     }
                 }
             }
@@ -13067,7 +16025,6 @@ fn get_current_user_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::String(PhpString::from_bytes(b"magicaltux")))
 }
 
-
 fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let name_bytes = name.as_bytes();
@@ -13075,10 +16032,14 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Check for class constants
     if let Some(pos) = name_str.find("::") {
         let class_name = &name_str[..pos];
-        let const_name = &name_str[pos+2..];
+        let const_name = &name_str[pos + 2..];
         // Strip leading backslash from class name
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
-        let class_lower: Vec<u8> = class_name_stripped.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        let class_lower: Vec<u8> = class_name_stripped
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         if let Some(class) = vm.classes.get(&class_lower) {
             if class.constants.contains_key(const_name.as_bytes()) {
                 // Constants not visible from the calling scope are "not defined"
@@ -13089,7 +16050,13 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let scope = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
                         let ok = match meta.visibility {
                             Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
-                            _ => scope.map(|sc| sc == decl || vm.class_extends(&sc, &decl) || vm.class_extends(&decl, &sc)).unwrap_or(false),
+                            _ => scope
+                                .map(|sc| {
+                                    sc == decl
+                                        || vm.class_extends(&sc, &decl)
+                                        || vm.class_extends(&decl, &sc)
+                                })
+                                .unwrap_or(false),
                         };
                         if !ok {
                             return Ok(Value::False);
@@ -13127,8 +16094,14 @@ fn zend_version_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ext = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy().to_ascii_lowercase();
-    let loaded = matches!(ext.as_str(),
+    let ext = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let loaded = matches!(
+        ext.as_str(),
         "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
     );
     Ok(if loaded { Value::True } else { Value::False })
@@ -13136,7 +16109,9 @@ fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    for ext in &["Core", "standard", "date", "pcre", "json", "ctype", "hash", "SPL"] {
+    for ext in &[
+        "Core", "standard", "date", "pcre", "json", "ctype", "hash", "SPL",
+    ] {
         result.push(Value::String(PhpString::from_bytes(ext.as_bytes())));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -13155,32 +16130,61 @@ fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "str_increment(): Argument #1 ($string) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // Validate all characters are alphanumeric first
     if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
         let msg = "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // PHP string increment: like spreadsheet columns
     let mut result: Vec<u8> = bytes.to_vec();
     let mut carry = true;
     for i in (0..result.len()).rev() {
-        if !carry { break; }
+        if !carry {
+            break;
+        }
         match result[i] {
-            b'z' => { result[i] = b'a'; carry = true; }
-            b'Z' => { result[i] = b'A'; carry = true; }
-            b'9' => { result[i] = b'0'; carry = true; }
-            b'a'..=b'y' => { result[i] += 1; carry = false; }
-            b'A'..=b'Y' => { result[i] += 1; carry = false; }
-            b'0'..=b'8' => { result[i] += 1; carry = false; }
+            b'z' => {
+                result[i] = b'a';
+                carry = true;
+            }
+            b'Z' => {
+                result[i] = b'A';
+                carry = true;
+            }
+            b'9' => {
+                result[i] = b'0';
+                carry = true;
+            }
+            b'a'..=b'y' => {
+                result[i] += 1;
+                carry = false;
+            }
+            b'A'..=b'Y' => {
+                result[i] += 1;
+                carry = false;
+            }
+            b'0'..=b'8' => {
+                result[i] += 1;
+                carry = false;
+            }
             _ => {
                 let msg = "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
                 let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -13206,14 +16210,20 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "str_decrement(): Argument #1 ($string) must not be empty";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // Validate all characters are alphanumeric first
     if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
         let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
         let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // Check if string is out of decrement range:
     // - Single char: 'a', 'A', '0' are out of range (can't go lower)
@@ -13226,29 +16236,58 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if all_min {
             let first = bytes[0];
             if bytes.len() == 1 || first == b'0' {
-                let msg = format!("str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range", String::from_utf8_lossy(bytes));
+                let msg = format!(
+                    "str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range",
+                    String::from_utf8_lossy(bytes)
+                );
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
     }
     let mut result: Vec<u8> = bytes.to_vec();
     let mut borrow = true;
     for i in (0..result.len()).rev() {
-        if !borrow { break; }
+        if !borrow {
+            break;
+        }
         match result[i] {
-            b'a' => { result[i] = b'z'; borrow = true; }
-            b'A' => { result[i] = b'Z'; borrow = true; }
-            b'0' => { result[i] = b'9'; borrow = true; }
-            b'b'..=b'z' => { result[i] -= 1; borrow = false; }
-            b'B'..=b'Z' => { result[i] -= 1; borrow = false; }
-            b'1'..=b'9' => { result[i] -= 1; borrow = false; }
+            b'a' => {
+                result[i] = b'z';
+                borrow = true;
+            }
+            b'A' => {
+                result[i] = b'Z';
+                borrow = true;
+            }
+            b'0' => {
+                result[i] = b'9';
+                borrow = true;
+            }
+            b'b'..=b'z' => {
+                result[i] -= 1;
+                borrow = false;
+            }
+            b'B'..=b'Z' => {
+                result[i] -= 1;
+                borrow = false;
+            }
+            b'1'..=b'9' => {
+                result[i] -= 1;
+                borrow = false;
+            }
             _ => {
                 let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
                 let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg.to_string(), line: vm.current_line });
+                return Err(VmError {
+                    message: msg.to_string(),
+                    line: vm.current_line,
+                });
             }
         }
     }
@@ -13272,7 +16311,6 @@ fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }
-
 
 fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
@@ -13319,25 +16357,37 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::False => 0,
         Value::Null => 0,
         Value::Array(_) => {
-            let msg = "flock(): Argument #2 ($operation) must be of type int, array given".to_string();
+            let msg =
+                "flock(): Argument #2 ($operation) must be of type int, array given".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         Value::String(_) => {
-            let msg = "flock(): Argument #2 ($operation) must be of type int, string given".to_string();
+            let msg =
+                "flock(): Argument #2 ($operation) must be of type int, string given".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         _ => op_arg.to_long(),
     };
     let basic = op & 3;
     if basic == 0 {
-        let msg = "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN".to_string();
+        let msg = "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN"
+            .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let arg = args.first().cloned().unwrap_or(Value::Null);
     // Allow dir-handle resources (Linux PHP flock on a dir returns false but
@@ -13345,7 +16395,9 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let dir_fid = if let Value::Resource(rid) = &arg {
         let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(rid));
         if is_dir { Some(*rid) } else { None }
-    } else { None };
+    } else {
+        None
+    };
     if dir_fid.is_some() {
         return Ok(Value::False);
     }
@@ -13439,7 +16491,10 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     result.set(ArrayKey::Int(*idx), Value::Long(*val));
                 }
                 for (_idx, name, val) in &fields {
-                    result.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                    result.set(
+                        ArrayKey::String(PhpString::from_bytes(name)),
+                        Value::Long(*val),
+                    );
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(result))))
             }
@@ -13450,17 +16505,29 @@ fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let mut arr = PhpArray::new();
                         let len = meta.len() as i64;
                         let fields: [(i64, &[u8], i64); 13] = [
-                            (0, b"dev", 0), (1, b"ino", 0), (2, b"mode", 0o100644),
-                            (3, b"nlink", 1), (4, b"uid", 0), (5, b"gid", 0), (6, b"rdev", 0),
-                            (7, b"size", len), (8, b"atime", 0), (9, b"mtime", 0),
-                            (10, b"ctime", 0), (11, b"blksize", -1), (12, b"blocks", -1),
+                            (0, b"dev", 0),
+                            (1, b"ino", 0),
+                            (2, b"mode", 0o100644),
+                            (3, b"nlink", 1),
+                            (4, b"uid", 0),
+                            (5, b"gid", 0),
+                            (6, b"rdev", 0),
+                            (7, b"size", len),
+                            (8, b"atime", 0),
+                            (9, b"mtime", 0),
+                            (10, b"ctime", 0),
+                            (11, b"blksize", -1),
+                            (12, b"blocks", -1),
                         ];
                         // PHP stat returns all numeric keys first (0-12), then all string keys
                         for (idx, _name, val) in &fields {
                             arr.set(ArrayKey::Int(*idx), Value::Long(*val));
                         }
                         for (_idx, name, val) in &fields {
-                            arr.set(ArrayKey::String(PhpString::from_bytes(name)), Value::Long(*val));
+                            arr.set(
+                                ArrayKey::String(PhpString::from_bytes(name)),
+                                Value::Long(*val),
+                            );
                         }
                         Ok(Value::Array(Rc::new(RefCell::new(arr))))
                     }
@@ -13478,7 +16545,8 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
     let max_length = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(-1);
 
-    let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
+    let has_read_filters =
+        crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
         if offset >= 0 {
             FILE_HANDLES.with(|h| {
@@ -13487,12 +16555,18 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
                 }
             });
         }
-        let limit = if max_length < 0 { usize::MAX } else { max_length as usize };
+        let limit = if max_length < 0 {
+            usize::MAX
+        } else {
+            max_length as usize
+        };
         let mut out: Vec<u8> = Vec::new();
         while out.len() < limit {
             let want = (limit - out.len()).min(8192);
             let chunk = read_filtered(vm, fid, want);
-            if chunk.is_empty() { break; }
+            if chunk.is_empty() {
+                break;
+            }
             out.extend_from_slice(&chunk);
         }
         return Ok(Value::String(PhpString::from_vec(out)));
@@ -13511,7 +16585,9 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
                 match fh.file.read(&mut buf) {
                     Ok(n) => {
                         buf.truncate(n);
-                        if n == 0 { fh.eof = true; }
+                        if n == 0 {
+                            fh.eof = true;
+                        }
                         Ok(Value::String(PhpString::from_vec(buf)))
                     }
                     Err(_) => Ok(Value::False),
@@ -13551,7 +16627,10 @@ fn get_included_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError
 
 fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let obj_or_class = args.first().unwrap_or(&Value::Null);
-    let prop_name = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let prop_name = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
     let prop_bytes = prop_name.as_bytes();
     // ArrayObject ARRAY_AS_PROPS: has_property(ZEND_PROPERTY_EXISTS) checks the storage.
     if let Value::Object(o) = obj_or_class {
@@ -13565,8 +16644,14 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
         if let Some(ce) = vm.get_class_def(class_lower) {
             for prop in &ce.properties {
-                if prop.name != pname { continue; }
-                let decl_lower: Vec<u8> = prop.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if prop.name != pname {
+                    continue;
+                }
+                let decl_lower: Vec<u8> = prop
+                    .declaring_class
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if prop.visibility == Visibility::Private && decl_lower != class_lower {
                     continue;
                 }
@@ -13579,13 +16664,21 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)
     if let Value::Object(obj) = obj_or_class {
         if let Some(r) = vm.native_prop_read(obj, prop_bytes) {
-            return Ok(if r.is_some() { Value::True } else { Value::False });
+            return Ok(if r.is_some() {
+                Value::True
+            } else {
+                Value::False
+            });
         }
     }
     match obj_or_class {
         Value::Object(obj) => {
             let obj_borrow = obj.borrow();
-            let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj_borrow
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             // Declared property check (filters out inherited private).
             if class_has_visible_prop(vm, &class_lower, prop_bytes) {
                 return Ok(Value::True);
@@ -13605,27 +16698,53 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         declared_anywhere = true;
                         break;
                     }
-                    current = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                } else { break; }
+                    current = ce
+                        .parent
+                        .as_ref()
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                } else {
+                    break;
+                }
             }
-            Ok(if !declared_anywhere { Value::True } else { Value::False })
+            Ok(if !declared_anywhere {
+                Value::True
+            } else {
+                Value::False
+            })
         }
         Value::String(s) => {
-            let class_lower: Vec<u8> = s.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = s
+                .as_bytes()
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
                 vm.try_autoload_class(s.as_bytes());
                 if vm.current_exception.is_some() {
-                    return Err(VmError { message: "Uncaught exception".into(), line: vm.current_line });
+                    return Err(VmError {
+                        message: "Uncaught exception".into(),
+                        line: vm.current_line,
+                    });
                 }
             }
-            Ok(if class_has_visible_prop(vm, &class_lower, prop_bytes) { Value::True } else { Value::False })
+            Ok(if class_has_visible_prop(vm, &class_lower, prop_bytes) {
+                Value::True
+            } else {
+                Value::False
+            })
         }
         Value::Reference(r) => {
             let mut a = args.to_vec();
             a[0] = r.borrow().clone();
             property_exists_fn(vm, &a)
         }
-        other => Err(throw_type_error_msg(vm, format!("property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given", Vm::value_type_name(other)))),
+        other => Err(throw_type_error_msg(
+            vm,
+            format!(
+                "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
+                Vm::value_type_name(other)
+            ),
+        )),
     }
 }
 
@@ -13634,46 +16753,64 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         // For initialized lazy proxy, redirect to the real backing object.
         let obj_rc = vm.proxy_redirect(outer);
         let obj = obj_rc.borrow();
-        let class_name_lower: Vec<u8> = obj.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let prop_info: std::collections::HashMap<Vec<u8>, (goro_core::object::Visibility, Vec<u8>)> =
-            if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def.properties.iter()
-                    .map(|p| {
-                        let decl_lower = &p.declaring_class;
-                        let decl_display = vm.get_class_def(decl_lower)
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| p.declaring_class.clone());
-                        (p.name.clone(), (p.visibility, decl_display))
-                    })
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
+        let class_name_lower: Vec<u8> = obj
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let prop_info: std::collections::HashMap<
+            Vec<u8>,
+            (goro_core::object::Visibility, Vec<u8>),
+        > = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
+            class_def
+                .properties
+                .iter()
+                .map(|p| {
+                    let decl_lower = &p.declaring_class;
+                    let decl_display = vm
+                        .get_class_def(decl_lower)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| p.declaring_class.clone());
+                    (p.name.clone(), (p.visibility, decl_display))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut arr = PhpArray::new();
         for (name, val) in &obj.properties {
-            if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_") || name.starts_with(b"__enum_")
-                || name.starts_with(b"__ctor_") || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-                || name.starts_with(b"__fiber_") || name.starts_with(b"__timestamp")
-                || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
-                || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-                || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
-                || name.starts_with(b"__pkey_id") {
+            if name.starts_with(b"__spl_")
+                || name.starts_with(b"__reflection_")
+                || name.starts_with(b"__enum_")
+                || name.starts_with(b"__ctor_")
+                || name.starts_with(b"__clone_")
+                || name.starts_with(b"__destructed")
+                || name.starts_with(b"__fiber_")
+                || name.starts_with(b"__timestamp")
+                || name.starts_with(b"__lazy_")
+                || name.starts_with(b"__uri_")
+                || name.starts_with(b"__weak_ref_id")
+                || name.starts_with(b"__sxml_")
+                || name.starts_with(b"__hash_")
+                || name.starts_with(b"__hmac_")
+                || name.starts_with(b"__pkey_id")
+            {
                 continue;
             }
             // Skip uninitialized properties (Undef).
             if matches!(val, Value::Undef) {
                 continue;
             }
-            let (vis, declaring_class) = prop_info.get(name)
+            let (vis, declaring_class) = prop_info
+                .get(name)
                 .map(|(v, dc)| (Some(*v), dc.as_slice()))
                 .unwrap_or((None, &[]));
             let mangled = mangle_property_name(name, declaring_class, vis);
-            arr.set(
-                ArrayKey::String(PhpString::from_vec(mangled)),
-                val.clone(),
-            );
+            arr.set(ArrayKey::String(PhpString::from_vec(mangled)), val.clone());
         }
-        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(RefCell::new(arr)))))
+        Ok(Value::Array(Vm::proptable_to_symtable(Rc::new(
+            RefCell::new(arr),
+        ))))
     } else {
         Ok(Value::Null)
     }
@@ -13690,7 +16827,11 @@ fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ip2long_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let ip = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let ip = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let parts: Vec<&str> = ip.split('.').collect();
     if parts.len() != 4 {
         return Ok(Value::False);
@@ -13710,7 +16851,8 @@ fn ip2long_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn long2ip_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let ip = args.first().unwrap_or(&Value::Null).to_long() as u32;
-    let s = format!("{}.{}.{}.{}",
+    let s = format!(
+        "{}.{}.{}.{}",
         (ip >> 24) & 0xFF,
         (ip >> 16) & 0xFF,
         (ip >> 8) & 0xFF,
@@ -13774,7 +16916,11 @@ fn umask_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let command = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
@@ -13785,7 +16931,7 @@ fn exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let raw_lines: Vec<&str> = stdout.split('\n').collect();
             // Remove trailing empty element from final newline
             let lines: Vec<&str> = if raw_lines.last() == Some(&"") && raw_lines.len() > 1 {
-                raw_lines[..raw_lines.len()-1].to_vec()
+                raw_lines[..raw_lines.len() - 1].to_vec()
             } else {
                 raw_lines
             };
@@ -13824,7 +16970,11 @@ fn exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let command = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
@@ -13843,7 +16993,11 @@ fn system_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let command = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
@@ -13858,7 +17012,11 @@ fn shell_exec_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn passthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let command = args.first().unwrap_or(&Value::Null).to_php_string().to_string_lossy();
+    let command = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .to_string_lossy();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
@@ -13881,8 +17039,15 @@ struct GetoptOpt {
 /// Port of main/getopt.c php_getopt(). Returns the option char (0 for a long
 /// option, -2 for an invalid argument, -1 at the end) and sets *optidx.
 #[allow(clippy::if_same_then_else)] // branches mirror php-src
-fn php_getopt(argv: &[Vec<u8>], opts: &[GetoptOpt], optarg: &mut Option<Vec<u8>>, optind: &mut usize,
-              optchr: &mut usize, dash: &mut bool, optidx: &mut isize) -> i32 {
+fn php_getopt(
+    argv: &[Vec<u8>],
+    opts: &[GetoptOpt],
+    optarg: &mut Option<Vec<u8>>,
+    optind: &mut usize,
+    optchr: &mut usize,
+    dash: &mut bool,
+    optidx: &mut isize,
+) -> i32 {
     const INVALID: i32 = -2;
     let argc = argv.len();
     *optidx = -1;
@@ -13931,7 +17096,11 @@ fn php_getopt(argv: &[Vec<u8>], opts: &[GetoptOpt], optarg: &mut Option<Vec<u8>>
         }
         *optchr = 0;
         *dash = false;
-        arg_start += opts[*optidx as usize].opt_name.as_ref().map(|n| n.len()).unwrap_or(0);
+        arg_start += opts[*optidx as usize]
+            .opt_name
+            .as_ref()
+            .map(|n| n.len())
+            .unwrap_or(0);
     } else {
         if !*dash {
             *dash = true;
@@ -13998,7 +17167,10 @@ fn php_getopt(argv: &[Vec<u8>], opts: &[GetoptOpt], optarg: &mut Option<Vec<u8>>
 }
 
 fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let options = args.first().map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let options = args
+        .first()
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     let optind_ref = match args.get(2) {
         Some(Value::Reference(r)) => Some(r.clone()),
         _ => None,
@@ -14010,14 +17182,23 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let argv_val = match vm.get_global(b"_SERVER") {
         Some(Value::Array(server)) => server.borrow().get_str(b"argv").cloned(),
         _ => None,
-    // The CLI SAPI always provides $_SERVER['argv'] (at least the script name).
-    }.or_else(|| Some(Value::Array(Rc::new(RefCell::new({
-        let mut a = PhpArray::new();
-        a.push(Value::String(PhpString::from_string(vm.current_file.clone())));
-        a
-    })))));
+        // The CLI SAPI always provides $_SERVER['argv'] (at least the script name).
+    }
+    .or_else(|| {
+        Some(Value::Array(Rc::new(RefCell::new({
+            let mut a = PhpArray::new();
+            a.push(Value::String(PhpString::from_string(
+                vm.current_file.clone(),
+            )));
+            a
+        }))))
+    });
     let argv: Vec<Vec<u8>> = match argv_val.map(|v| v.deref()) {
-        Some(Value::Array(a)) => a.borrow().values().map(|v| v.to_php_string().as_bytes().to_vec()).collect(),
+        Some(Value::Array(a)) => a
+            .borrow()
+            .values()
+            .map(|v| v.to_php_string().as_bytes().to_vec())
+            .collect(),
         Some(_) => return Ok(Value::False),
         None => return Ok(Value::False),
     };
@@ -14036,7 +17217,11 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 i += 1;
             }
         }
-        opts.push(GetoptOpt { opt_char: c, opt_name: None, need_param: need });
+        opts.push(GetoptOpt {
+            opt_char: c,
+            opt_name: None,
+            need_param: need,
+        });
     }
     if let Some(Value::Array(longopts)) = args.get(1).map(|v| v.deref()) {
         for v in longopts.borrow().values() {
@@ -14050,10 +17235,18 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     name.pop();
                 }
             }
-            opts.push(GetoptOpt { opt_char: 0, opt_name: Some(name), need_param: need });
+            opts.push(GetoptOpt {
+                opt_char: 0,
+                opt_name: Some(name),
+                need_param: need,
+            });
         }
     }
-    opts.push(GetoptOpt { opt_char: b'-', opt_name: None, need_param: 0 });
+    opts.push(GetoptOpt {
+        opt_char: b'-',
+        opt_name: None,
+        need_param: 0,
+    });
 
     let mut result = PhpArray::new();
     let mut optind = 1usize;
@@ -14062,7 +17255,15 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut optidx: isize = -1;
     loop {
         let mut optarg: Option<Vec<u8>> = None;
-        let o = php_getopt(&argv, &opts, &mut optarg, &mut optind, &mut optchr, &mut dash, &mut optidx);
+        let o = php_getopt(
+            &argv,
+            &opts,
+            &mut optarg,
+            &mut optind,
+            &mut optchr,
+            &mut dash,
+            &mut optidx,
+        );
         if o == -1 {
             break;
         }
@@ -14079,7 +17280,10 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             None => Value::False,
         };
         let key = if !(optname.len() > 1 && optname[0] == b'0') {
-            match std::str::from_utf8(&optname).ok().and_then(|s| s.parse::<i64>().ok()) {
+            match std::str::from_utf8(&optname)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+            {
                 Some(n) => ArrayKey::Int(n),
                 None => ArrayKey::String(PhpString::from_vec(optname.clone())),
             }
@@ -14105,12 +17309,21 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn host_arg(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Vec<u8>, VmError> {
-    let h = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
+    let h = vm
+        .value_to_string(args.first().unwrap_or(&Value::Null))
+        .as_bytes()
+        .to_vec();
     if h.contains(&0) {
-        let msg = format!("{}(): Argument #1 ($hostname) must not contain any null bytes", fname);
+        let msg = format!(
+            "{}(): Argument #1 ($hostname) must not contain any null bytes",
+            fname
+        );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     Ok(h)
 }
@@ -14119,7 +17332,10 @@ fn resolve_ipv4(host: &[u8]) -> Vec<String> {
     use std::net::ToSocketAddrs;
     let addr_str = format!("{}:0", String::from_utf8_lossy(host));
     match addr_str.to_socket_addrs() {
-        Ok(addrs) => addrs.filter(|a| a.is_ipv4()).map(|a| a.ip().to_string()).collect(),
+        Ok(addrs) => addrs
+            .filter(|a| a.is_ipv4())
+            .map(|a| a.ip().to_string())
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -14146,7 +17362,10 @@ fn gethostbynamel_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if ips.is_empty() {
         // gethostbyname() failure
         use std::net::ToSocketAddrs;
-        if format!("{}:0", String::from_utf8_lossy(&host)).to_socket_addrs().is_err() {
+        if format!("{}:0", String::from_utf8_lossy(&host))
+            .to_socket_addrs()
+            .is_err()
+        {
             return Ok(Value::False);
         }
     }
@@ -14158,7 +17377,10 @@ fn gethostbynamel_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn gethostbyaddr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let addr = vm.value_to_string(args.first().unwrap_or(&Value::Null)).as_bytes().to_vec();
+    let addr = vm
+        .value_to_string(args.first().unwrap_or(&Value::Null))
+        .as_bytes()
+        .to_vec();
     let s = String::from_utf8_lossy(&addr).to_string();
     let ip: std::net::IpAddr = match s.parse() {
         Ok(ip) if !addr.contains(&0) => ip,
@@ -14175,15 +17397,29 @@ fn gethostbyaddr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let mut sa: libc::sockaddr_in = std::mem::zeroed();
                 sa.sin_family = libc::AF_INET as libc::sa_family_t;
                 sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
-                libc::getnameinfo(&sa as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                    host.as_mut_ptr(), host.len() as libc::socklen_t, std::ptr::null_mut(), 0, libc::NI_NAMEREQD)
+                libc::getnameinfo(
+                    &sa as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    host.as_mut_ptr(),
+                    host.len() as libc::socklen_t,
+                    std::ptr::null_mut(),
+                    0,
+                    libc::NI_NAMEREQD,
+                )
             }
             std::net::IpAddr::V6(v6) => {
                 let mut sa: libc::sockaddr_in6 = std::mem::zeroed();
                 sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
                 sa.sin6_addr.s6_addr = v6.octets();
-                libc::getnameinfo(&sa as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-                    host.as_mut_ptr(), host.len() as libc::socklen_t, std::ptr::null_mut(), 0, libc::NI_NAMEREQD)
+                libc::getnameinfo(
+                    &sa as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                    host.as_mut_ptr(),
+                    host.len() as libc::socklen_t,
+                    std::ptr::null_mut(),
+                    0,
+                    libc::NI_NAMEREQD,
+                )
             }
         };
         if rc == 0 {
@@ -14241,36 +17477,81 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(spec)) = descriptor_spec {
         let spec = spec.borrow();
         for (key, val) in spec.iter() {
-            let fd_num = match key { ArrayKey::Int(n) => *n, _ => continue };
+            let fd_num = match key {
+                ArrayKey::Int(n) => *n,
+                _ => continue,
+            };
             match val {
                 Value::Array(fd_spec) => {
                     let fd_spec = fd_spec.borrow();
-                    let fd_type = fd_spec.get_int(0).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+                    let fd_type = fd_spec
+                        .get_int(0)
+                        .map(|v| v.to_php_string())
+                        .unwrap_or_else(|| PhpString::from_bytes(b""));
                     match &*fd_type.to_string_lossy() {
                         "pipe" => match fd_num {
-                            0 => { child_cmd.stdin(Stdio::piped()); has_stdin_pipe = true; stdin_assigned = true; }
-                            1 => { child_cmd.stdout(Stdio::piped()); has_stdout_pipe = true; stdout_assigned = true; }
-                            2 => { child_cmd.stderr(Stdio::piped()); has_stderr_pipe = true; stderr_assigned = true; }
+                            0 => {
+                                child_cmd.stdin(Stdio::piped());
+                                has_stdin_pipe = true;
+                                stdin_assigned = true;
+                            }
+                            1 => {
+                                child_cmd.stdout(Stdio::piped());
+                                has_stdout_pipe = true;
+                                stdout_assigned = true;
+                            }
+                            2 => {
+                                child_cmd.stderr(Stdio::piped());
+                                has_stderr_pipe = true;
+                                stderr_assigned = true;
+                            }
                             _ => {}
                         },
                         "file" => {
-                            let filename = fd_spec.get_int(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
-                            let mode = fd_spec.get_int(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
+                            let filename = fd_spec
+                                .get_int(1)
+                                .map(|v| v.to_php_string())
+                                .unwrap_or_else(|| PhpString::from_bytes(b""));
+                            let mode = fd_spec
+                                .get_int(2)
+                                .map(|v| v.to_php_string())
+                                .unwrap_or_else(|| PhpString::from_bytes(b"r"));
                             let mode_str = mode.to_string_lossy();
                             let filename_str = filename.to_string_lossy();
                             match fd_num {
-                                0 => { if let Ok(f) = std::fs::File::open(&*filename_str) { child_cmd.stdin(f); stdin_assigned = true; } }
+                                0 => {
+                                    if let Ok(f) = std::fs::File::open(&*filename_str) {
+                                        child_cmd.stdin(f);
+                                        stdin_assigned = true;
+                                    }
+                                }
                                 1 => {
                                     let file = if mode_str.contains('a') {
-                                        std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
-                                    } else { std::fs::File::create(&*filename_str) };
-                                    if let Ok(f) = file { child_cmd.stdout(f); stdout_assigned = true; }
+                                        std::fs::OpenOptions::new()
+                                            .append(true)
+                                            .create(true)
+                                            .open(&*filename_str)
+                                    } else {
+                                        std::fs::File::create(&*filename_str)
+                                    };
+                                    if let Ok(f) = file {
+                                        child_cmd.stdout(f);
+                                        stdout_assigned = true;
+                                    }
                                 }
                                 2 => {
                                     let file = if mode_str.contains('a') {
-                                        std::fs::OpenOptions::new().append(true).create(true).open(&*filename_str)
-                                    } else { std::fs::File::create(&*filename_str) };
-                                    if let Ok(f) = file { child_cmd.stderr(f); stderr_assigned = true; }
+                                        std::fs::OpenOptions::new()
+                                            .append(true)
+                                            .create(true)
+                                            .open(&*filename_str)
+                                    } else {
+                                        std::fs::File::create(&*filename_str)
+                                    };
+                                    if let Ok(f) = file {
+                                        child_cmd.stderr(f);
+                                        stderr_assigned = true;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -14287,9 +17568,18 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if fid_v <= 3 {
                         // Inherit standard streams: stdio is fd 0/1/2
                         match fd_num {
-                            0 => { child_cmd.stdin(Stdio::inherit()); stdin_assigned = true; }
-                            1 => { child_cmd.stdout(Stdio::inherit()); stdout_assigned = true; }
-                            2 => { child_cmd.stderr(Stdio::inherit()); stderr_assigned = true; }
+                            0 => {
+                                child_cmd.stdin(Stdio::inherit());
+                                stdin_assigned = true;
+                            }
+                            1 => {
+                                child_cmd.stdout(Stdio::inherit());
+                                stdout_assigned = true;
+                            }
+                            2 => {
+                                child_cmd.stderr(Stdio::inherit());
+                                stderr_assigned = true;
+                            }
                             _ => {}
                         }
                     } else {
@@ -14303,11 +17593,22 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         });
                         if let Some(dup_fd) = dup_fd {
                             if dup_fd >= 0 {
-                                let stdio: Stdio = unsafe { <Stdio as std::os::unix::io::FromRawFd>::from_raw_fd(dup_fd) };
+                                let stdio: Stdio = unsafe {
+                                    <Stdio as std::os::unix::io::FromRawFd>::from_raw_fd(dup_fd)
+                                };
                                 match fd_num {
-                                    0 => { child_cmd.stdin(stdio); stdin_assigned = true; }
-                                    1 => { child_cmd.stdout(stdio); stdout_assigned = true; }
-                                    2 => { child_cmd.stderr(stdio); stderr_assigned = true; }
+                                    0 => {
+                                        child_cmd.stdin(stdio);
+                                        stdin_assigned = true;
+                                    }
+                                    1 => {
+                                        child_cmd.stdout(stdio);
+                                        stdout_assigned = true;
+                                    }
+                                    2 => {
+                                        child_cmd.stderr(stdio);
+                                        stderr_assigned = true;
+                                    }
                                     _ => {}
                                 }
                             }
@@ -14318,20 +17619,31 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    if !stdin_assigned { child_cmd.stdin(Stdio::null()); }
-    if !stdout_assigned { child_cmd.stdout(Stdio::inherit()); }
-    if !stderr_assigned { child_cmd.stderr(Stdio::inherit()); }
+    if !stdin_assigned {
+        child_cmd.stdin(Stdio::null());
+    }
+    if !stdout_assigned {
+        child_cmd.stdout(Stdio::inherit());
+    }
+    if !stderr_assigned {
+        child_cmd.stderr(Stdio::inherit());
+    }
 
     if let Some(cwd) = args.get(3) {
         if !matches!(cwd, Value::Null) {
             let s = cwd.to_php_string().to_string_lossy();
-            if !s.is_empty() { child_cmd.current_dir(&*s); }
+            if !s.is_empty() {
+                child_cmd.current_dir(&*s);
+            }
         }
     }
     if let Some(Value::Array(env_arr)) = args.get(4) {
         child_cmd.env_clear();
         for (key, val) in env_arr.borrow().iter() {
-            let k = match key { ArrayKey::String(s) => s.to_string_lossy(), ArrayKey::Int(n) => format!("{}", n) };
+            let k = match key {
+                ArrayKey::String(s) => s.to_string_lossy(),
+                ArrayKey::Int(n) => format!("{}", n),
+            };
             child_cmd.env(&*k, &*val.to_php_string().to_string_lossy());
         }
     }
@@ -14342,21 +17654,30 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut pipes_arr = PhpArray::new();
             if has_stdin_pipe {
                 if let Some(stdin) = child.stdin.take() {
-                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, "w");
+                    let fid = alloc_file_handle(
+                        unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) },
+                        "w",
+                    );
                     goro_core::value::register_resource(fid, b"stream");
                     pipes_arr.set(ArrayKey::Int(0), Value::Resource(fid));
                 }
             }
             if has_stdout_pipe {
                 if let Some(stdout) = child.stdout.take() {
-                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, "r");
+                    let fid = alloc_file_handle(
+                        unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) },
+                        "r",
+                    );
                     goro_core::value::register_resource(fid, b"stream");
                     pipes_arr.set(ArrayKey::Int(1), Value::Resource(fid));
                 }
             }
             if has_stderr_pipe {
                 if let Some(stderr) = child.stderr.take() {
-                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stderr.into_raw_fd()) }, "r");
+                    let fid = alloc_file_handle(
+                        unsafe { std::fs::File::from_raw_fd(stderr.into_raw_fd()) },
+                        "r",
+                    );
                     goro_core::value::register_resource(fid, b"stream");
                     pipes_arr.set(ArrayKey::Int(2), Value::Resource(fid));
                 }
@@ -14365,7 +17686,8 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(pipes_arr)));
             }
             let proc_id = NEXT_PROC_ID.with(|id| {
-                let pid = id.get(); id.set(pid + 1);
+                let pid = id.get();
+                id.set(pid + 1);
                 PROC_HANDLES.with(|h| h.borrow_mut().insert(pid, child));
                 pid
             });
@@ -14378,11 +17700,12 @@ fn proc_open_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn proc_close_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let proc_id = args.first().unwrap_or(&Value::Null).to_long();
-    let exit_code = PROC_HANDLES.with(|h| {
-        match h.borrow_mut().remove(&proc_id) {
-            Some(mut child) => child.wait().map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1),
-            None => -1,
-        }
+    let exit_code = PROC_HANDLES.with(|h| match h.borrow_mut().remove(&proc_id) {
+        Some(mut child) => child
+            .wait()
+            .map(|s| s.code().unwrap_or(-1) as i64)
+            .unwrap_or(-1),
+        None => -1,
     });
     Ok(Value::Long(exit_code))
 }
@@ -14395,29 +17718,79 @@ fn proc_get_status_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut arr = PhpArray::new();
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"command")), Value::String(PhpString::from_bytes(b"")));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"pid")), Value::Long(child.id() as i64));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"running")), Value::False);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"signaled")), Value::False);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopped")), Value::False);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"exitcode")), Value::Long(status.code().unwrap_or(-1) as i64));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"termsig")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopsig")), Value::Long(0));
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"command")),
+                        Value::String(PhpString::from_bytes(b"")),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"pid")),
+                        Value::Long(child.id() as i64),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"running")),
+                        Value::False,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"signaled")),
+                        Value::False,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"stopped")),
+                        Value::False,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"exitcode")),
+                        Value::Long(status.code().unwrap_or(-1) as i64),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"termsig")),
+                        Value::Long(0),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"stopsig")),
+                        Value::Long(0),
+                    );
                 }
                 Ok(None) => {
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"command")), Value::String(PhpString::from_bytes(b"")));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"pid")), Value::Long(child.id() as i64));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"running")), Value::True);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"signaled")), Value::False);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopped")), Value::False);
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"exitcode")), Value::Long(-1));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"termsig")), Value::Long(0));
-                    arr.set(ArrayKey::String(PhpString::from_bytes(b"stopsig")), Value::Long(0));
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"command")),
+                        Value::String(PhpString::from_bytes(b"")),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"pid")),
+                        Value::Long(child.id() as i64),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"running")),
+                        Value::True,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"signaled")),
+                        Value::False,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"stopped")),
+                        Value::False,
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"exitcode")),
+                        Value::Long(-1),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"termsig")),
+                        Value::Long(0),
+                    );
+                    arr.set(
+                        ArrayKey::String(PhpString::from_bytes(b"stopsig")),
+                        Value::Long(0),
+                    );
                 }
                 Err(_) => return Ok(Value::False),
             }
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
-        } else { Ok(Value::False) }
+        } else {
+            Ok(Value::False)
+        }
     })
 }
 
@@ -14425,8 +17798,13 @@ fn proc_terminate_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let proc_id = args.first().unwrap_or(&Value::Null).to_long();
     PROC_HANDLES.with(|h| {
         if let Some(child) = h.borrow_mut().get_mut(&proc_id) {
-            match child.kill() { Ok(_) => Ok(Value::True), Err(_) => Ok(Value::False) }
-        } else { Ok(Value::False) }
+            match child.kill() {
+                Ok(_) => Ok(Value::True),
+                Err(_) => Ok(Value::False),
+            }
+        } else {
+            Ok(Value::False)
+        }
     })
 }
 
@@ -14470,7 +17848,11 @@ fn inet_ntop_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Private: \0DeclaringClass\0propName
 /// Protected: \0*\0propName
 /// Public: propName (unchanged)
-fn mangle_property_name(name: &[u8], declaring_class: &[u8], visibility: Option<goro_core::object::Visibility>) -> Vec<u8> {
+fn mangle_property_name(
+    name: &[u8],
+    declaring_class: &[u8],
+    visibility: Option<goro_core::object::Visibility>,
+) -> Vec<u8> {
     match visibility {
         Some(goro_core::object::Visibility::Private) => {
             let mut mangled = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
@@ -14526,14 +17908,23 @@ fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     }
     // Pull bytes (post READ-filter) from source. Push them through dst
     // (which routes through WRITE filters in fwrite_fn).
-    let has_src_read_filters = crate::stream_filters::chain_has_direction(src_fid, crate::stream_filters::STREAM_FILTER_READ);
+    let has_src_read_filters = crate::stream_filters::chain_has_direction(
+        src_fid,
+        crate::stream_filters::STREAM_FILTER_READ,
+    );
     let mut buf: Vec<u8> = Vec::new();
     if has_src_read_filters {
-        let limit = if max_length < 0 { usize::MAX } else { max_length as usize };
+        let limit = if max_length < 0 {
+            usize::MAX
+        } else {
+            max_length as usize
+        };
         while buf.len() < limit {
             let want = (limit - buf.len()).min(8192);
             let chunk = read_filtered(vm, src_fid, want);
-            if chunk.is_empty() { break; }
+            if chunk.is_empty() {
+                break;
+            }
             buf.extend_from_slice(&chunk);
         }
     } else {
@@ -14544,38 +17935,77 @@ fn stream_copy_to_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 let mut buf = Vec::new();
                 if max_length >= 0 {
                     buf.resize(max_length as usize, 0);
-                    match fh.file.read(&mut buf) { Ok(n) => { buf.truncate(n); Some(buf) } Err(_) => None }
+                    match fh.file.read(&mut buf) {
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Some(buf)
+                        }
+                        Err(_) => None,
+                    }
                 } else {
-                    match fh.file.read_to_end(&mut buf) { Ok(_) => Some(buf), Err(_) => None }
+                    match fh.file.read_to_end(&mut buf) {
+                        Ok(_) => Some(buf),
+                        Err(_) => None,
+                    }
                 }
-            } else { None }
+            } else {
+                None
+            }
         });
-        match data { Some(b) => buf = b, None => return Ok(Value::False), }
+        match data {
+            Some(b) => buf = b,
+            None => return Ok(Value::False),
+        }
     }
     let len = buf.len();
     let filtered = crate::stream_filters::apply_write_chain(vm, dst_fid, &buf);
-    let exists = dst_fid == 1 || dst_fid == 2 || dst_fid == 3 || FILE_HANDLES.with(|h| h.borrow().contains_key(&dst_fid));
-    if !exists { return Ok(Value::False); }
+    let exists = dst_fid == 1
+        || dst_fid == 2
+        || dst_fid == 3
+        || FILE_HANDLES.with(|h| h.borrow().contains_key(&dst_fid));
+    if !exists {
+        return Ok(Value::False);
+    }
     write_to_stream(vm, dst_fid, &filtered);
     Ok(Value::Long(len as i64))
 }
 
 fn stream_filter_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
-    let class = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+    let name = args
+        .first()
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    let class = args
+        .get(1)
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
     if name.is_empty() {
-        let msg = "stream_filter_register(): Argument #1 ($filter_name) must be a non-empty string".to_string();
+        let msg = "stream_filter_register(): Argument #1 ($filter_name) must be a non-empty string"
+            .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     if class.is_empty() {
-        let msg = "stream_filter_register(): Argument #2 ($class) must be a non-empty string".to_string();
+        let msg =
+            "stream_filter_register(): Argument #2 ($class) must be a non-empty string".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
-    Ok(if crate::stream_filters::register_user_filter(&name, &class) { Value::True } else { Value::False })
+    Ok(
+        if crate::stream_filters::register_user_filter(&name, &class) {
+            Value::True
+        } else {
+            Value::False
+        },
+    )
 }
 
 fn stream_filter_append_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -14598,14 +18028,23 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
         },
         _ => return Ok(Value::False),
     };
-    let name = args.get(1).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
-    if name.is_empty() { return Ok(Value::False); }
-    let direction = args.get(2).map(|v| v.to_long()).unwrap_or(crate::stream_filters::STREAM_FILTER_ALL);
+    let name = args
+        .get(1)
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Ok(Value::False);
+    }
+    let direction = args
+        .get(2)
+        .map(|v| v.to_long())
+        .unwrap_or(crate::stream_filters::STREAM_FILTER_ALL);
     let params = args.get(3).cloned().unwrap_or(Value::Null);
 
     // First check whether it's a registered user filter; if so, instantiate
     // an object of the registered class.
-    let user_obj = crate::stream_filters::user_filter_class(&name).map(|class_name| instantiate_user_filter(vm, &class_name, &name, &params));
+    let user_obj = crate::stream_filters::user_filter_class(&name)
+        .map(|class_name| instantiate_user_filter(vm, &class_name, &name, &params));
 
     let user_obj_opt = match user_obj {
         Some(Some(o)) => Some(o),
@@ -14613,7 +18052,14 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
         None => None,
     };
 
-    match crate::stream_filters::attach_filter(stream_id, &name, direction, &params, prepend, user_obj_opt) {
+    match crate::stream_filters::attach_filter(
+        stream_id,
+        &name,
+        direction,
+        &params,
+        prepend,
+        user_obj_opt,
+    ) {
         Some(fid) => Ok(Value::Resource(fid)),
         None => Ok(Value::False),
     }
@@ -14622,13 +18068,23 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
 /// Instantiate the user-defined class registered for a stream filter.
 /// Sets `filtername`, `params`, and `stream` properties as PHP does, then
 /// calls `onCreate()` if defined.
-fn instantiate_user_filter(vm: &mut Vm, class_name: &[u8], filter_name: &[u8], params: &Value) -> Option<Rc<RefCell<PhpObject>>> {
+fn instantiate_user_filter(
+    vm: &mut Vm,
+    class_name: &[u8],
+    filter_name: &[u8],
+    params: &Value,
+) -> Option<Rc<RefCell<PhpObject>>> {
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    if !vm.classes.contains_key(&class_lower) { return None; }
+    if !vm.classes.contains_key(&class_lower) {
+        return None;
+    }
     let obj_id = vm.next_object_id();
     let mut obj = PhpObject::new(class_name.to_vec(), obj_id);
     vm.apply_class_property_defaults(&mut obj, &class_lower);
-    obj.set_property(b"filtername".to_vec(), Value::String(PhpString::from_bytes(filter_name)));
+    obj.set_property(
+        b"filtername".to_vec(),
+        Value::String(PhpString::from_bytes(filter_name)),
+    );
     obj.set_property(b"params".to_vec(), params.clone());
     let rc = Rc::new(RefCell::new(obj));
     let obj_val = Value::Object(rc.clone());
@@ -14650,25 +18106,42 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let fid = match fid_opt {
         Some(n) if crate::stream_filters::is_filter_resource(n) => n,
         _ => {
-            let msg = "stream_filter_remove(): supplied resource is not a valid stream filter resource".to_string();
+            let msg =
+                "stream_filter_remove(): supplied resource is not a valid stream filter resource"
+                    .to_string();
             let exc = vm.create_exception(b"TypeError", &msg, 0);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
-    if crate::stream_filters::remove_filter(fid) { Ok(Value::True) } else { Ok(Value::False) }
+    if crate::stream_filters::remove_filter(fid) {
+        Ok(Value::True)
+    } else {
+        Ok(Value::False)
+    }
 }
 /// Validate that `arr` has shape ["wrapper"]["opt"] = value (i.e. two levels of arrays).
 /// On invalid, throws a ValueError matching PHP.
-fn validate_context_options(vm: &mut Vm, arr: &Value) -> Result<std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>, VmError> {
+fn validate_context_options(
+    vm: &mut Vm,
+    arr: &Value,
+) -> Result<std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>, VmError>
+{
     let mut out = std::collections::BTreeMap::new();
     let outer = match arr {
         Value::Array(a) => a.clone(),
         _ => {
-            let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+            let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value"
+                .to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let outer_b = outer.borrow();
@@ -14676,19 +18149,27 @@ fn validate_context_options(vm: &mut Vm, arr: &Value) -> Result<std::collections
         let key_bytes: Vec<u8> = match k {
             ArrayKey::String(s) => s.as_bytes().to_vec(),
             ArrayKey::Int(_) => {
-                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value"
+                    .to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         };
         let inner = match v {
             Value::Array(a) => a.clone(),
             _ => {
-                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value".to_string();
+                let msg = "Options should have the form [\"wrappername\"][\"optionname\"] = $value"
+                    .to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         };
         let inner_b = inner.borrow();
@@ -14723,24 +18204,35 @@ fn type_name_of(v: &Value) -> &'static str {
 fn resolve_context_id(val: &Value) -> Option<i64> {
     let fid = val.to_long();
     let has_ctx = STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&fid));
-    if has_ctx { return Some(fid); }
+    if has_ctx {
+        return Some(fid);
+    }
     // Stream resource: lazily attach default context.
     let has_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
     if has_stream {
-        STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(fid, StreamContext::default()); });
+        STREAM_CONTEXTS.with(|c| {
+            c.borrow_mut().insert(fid, StreamContext::default());
+        });
         return Some(fid);
     }
     None
 }
 
-fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) -> Result<(), VmError> {
+fn apply_context_params(
+    vm: &mut Vm,
+    ctx: &mut StreamContext,
+    params: &Value,
+) -> Result<(), VmError> {
     let arr = match params {
         Value::Array(a) => a.clone(),
         _ => {
             let msg = "Invalid stream/context parameter".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let arr_b = arr.borrow();
@@ -14748,12 +18240,16 @@ fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) ->
         if let ArrayKey::String(s) = k {
             match s.as_bytes() {
                 b"notification" => {
-                    let is_valid = matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_));
+                    let is_valid =
+                        matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_));
                     if !is_valid {
                         let msg = "Invalid notification callback".to_string();
                         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg, line: vm.current_line });
+                        return Err(VmError {
+                            message: msg,
+                            line: vm.current_line,
+                        });
                     }
                     ctx.notification = Some(v.clone());
                 }
@@ -14763,7 +18259,10 @@ fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) ->
                         let msg = "Invalid stream/context parameter".to_string();
                         let exc = vm.throw_type_error(msg.clone());
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: msg, line: vm.current_line });
+                        return Err(VmError {
+                            message: msg,
+                            line: vm.current_line,
+                        });
                     }
                     ctx.options = validate_context_options(vm, v)?;
                 }
@@ -14774,7 +18273,9 @@ fn apply_context_params(vm: &mut Vm, ctx: &mut StreamContext, params: &Value) ->
     Ok(())
 }
 
-fn context_options_to_array(opts: &std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>) -> PhpArray {
+fn context_options_to_array(
+    opts: &std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>,
+) -> PhpArray {
     let mut arr = PhpArray::new();
     for (wrapper, inner) in opts {
         let mut inner_arr = PhpArray::new();
@@ -14800,7 +18301,10 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             ctx.options = validate_context_options(vm, opts_val)?;
         }
@@ -14814,7 +18318,10 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 );
                 let exc = vm.throw_type_error(msg.clone());
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
             apply_context_params(vm, &mut ctx, params_val)?;
         }
@@ -14839,7 +18346,10 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             let msg = "stream_context_set_option(): Argument #1 ($context) must be a valid stream/context".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let arg2 = args.get(1).unwrap_or(&Value::Null);
@@ -14852,7 +18362,10 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
                 let msg = "stream_context_set_option(): Argument #3 ($option_name) must be null when argument #2 ($wrapper_or_options) is an array".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
         if let Some(v) = arg4 {
@@ -14860,7 +18373,10 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
                 let msg = "stream_context_set_option(): Argument #4 ($value) cannot be provided when argument #2 ($wrapper_or_options) is an array".to_string();
                 let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
             }
         }
         let opts = validate_context_options(vm, arg2)?;
@@ -14885,19 +18401,28 @@ fn stream_context_set_option_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         if matches!(arg3, Some(Value::Null | Value::Undef) | None) {
             let msg = "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         if arg4.is_none() {
             let msg = "stream_context_set_option(): Argument #4 ($value) must be provided when argument #2 ($wrapper_or_options) is a string".to_string();
             let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
         let wrapper = arg2.to_php_string().as_bytes().to_vec();
         let opt = arg3.unwrap().to_php_string().as_bytes().to_vec();
@@ -14922,11 +18447,17 @@ fn stream_context_get_options_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
             let msg = "stream_context_get_options(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let arr = STREAM_CONTEXTS.with(|c| {
-        c.borrow().get(&fid).map(|ctx| context_options_to_array(&ctx.options)).unwrap_or_default()
+        c.borrow()
+            .get(&fid)
+            .map(|ctx| context_options_to_array(&ctx.options))
+            .unwrap_or_default()
     });
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
@@ -14939,13 +18470,18 @@ fn stream_context_set_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             let msg = "stream_context_set_params(): Argument #1 ($context) must be a valid stream/context".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let params = args.get(1).unwrap_or(&Value::Null);
     let mut ctx_clone = STREAM_CONTEXTS.with(|c| c.borrow().get(&fid).cloned().unwrap_or_default());
     apply_context_params(vm, &mut ctx_clone, params)?;
-    STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(fid, ctx_clone); });
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow_mut().insert(fid, ctx_clone);
+    });
     Ok(Value::True)
 }
 
@@ -14957,18 +18493,26 @@ fn stream_context_get_params_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
             let msg = "stream_context_get_params(): Argument #1 ($stream_or_context) must be a valid stream/context".to_string();
             let exc = vm.throw_type_error(msg.clone());
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     };
     let mut arr = PhpArray::new();
     STREAM_CONTEXTS.with(|c| {
         if let Some(ctx) = c.borrow().get(&fid) {
             if let Some(n) = &ctx.notification {
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"notification")), n.clone());
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"notification")),
+                    n.clone(),
+                );
             }
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"options")),
-                Value::Array(Rc::new(RefCell::new(context_options_to_array(&ctx.options)))),
+                Value::Array(Rc::new(RefCell::new(context_options_to_array(
+                    &ctx.options,
+                )))),
             );
         } else {
             arr.set(
@@ -14990,9 +18534,17 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
         if !matches!(opts, Value::Null | Value::Undef) {
             let merged = validate_context_options(vm, opts)?;
             let fid = DEFAULT_STREAM_CTX.with(|d| {
-                if let Some(id) = d.get() { return id; }
-                let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
-                STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+                if let Some(id) = d.get() {
+                    return id;
+                }
+                let id = NEXT_FILE_ID.with(|n| {
+                    let v = n.get();
+                    n.set(v + 1);
+                    v
+                });
+                STREAM_CONTEXTS.with(|c| {
+                    c.borrow_mut().insert(id, StreamContext::default());
+                });
                 goro_core::value::register_resource(id, b"stream-context");
                 d.set(Some(id));
                 id
@@ -15012,9 +18564,17 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
         }
     }
     let fid = DEFAULT_STREAM_CTX.with(|d| {
-        if let Some(id) = d.get() { return id; }
-        let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
-        STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+        if let Some(id) = d.get() {
+            return id;
+        }
+        let id = NEXT_FILE_ID.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
+        STREAM_CONTEXTS.with(|c| {
+            c.borrow_mut().insert(id, StreamContext::default());
+        });
         goro_core::value::register_resource(id, b"stream-context");
         d.set(Some(id));
         id
@@ -15027,9 +18587,17 @@ fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
         if !matches!(opts, Value::Null | Value::Undef) {
             let merged = validate_context_options(vm, opts)?;
             let fid = DEFAULT_STREAM_CTX.with(|d| {
-                if let Some(id) = d.get() { return id; }
-                let id = NEXT_FILE_ID.with(|n| { let v = n.get(); n.set(v + 1); v });
-                STREAM_CONTEXTS.with(|c| { c.borrow_mut().insert(id, StreamContext::default()); });
+                if let Some(id) = d.get() {
+                    return id;
+                }
+                let id = NEXT_FILE_ID.with(|n| {
+                    let v = n.get();
+                    n.set(v + 1);
+                    v
+                });
+                STREAM_CONTEXTS.with(|c| {
+                    c.borrow_mut().insert(id, StreamContext::default());
+                });
                 goro_core::value::register_resource(id, b"stream-context");
                 d.set(Some(id));
                 id
@@ -15055,9 +18623,14 @@ fn stream_is_local_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match val {
         Value::String(s) => {
             let s_str = s.to_string_lossy();
-            if s_str.starts_with("http://") || s_str.starts_with("https://") || s_str.starts_with("ftp://") {
+            if s_str.starts_with("http://")
+                || s_str.starts_with("https://")
+                || s_str.starts_with("ftp://")
+            {
                 Ok(Value::False)
-            } else { Ok(Value::True) }
+            } else {
+                Ok(Value::True)
+            }
         }
         _ => Ok(Value::True),
     }
@@ -15070,14 +18643,38 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     let is_dir = DIR_HANDLES.with(|h| h.borrow().contains_key(&raw_fid));
     if is_dir {
         let mut arr = PhpArray::new();
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"timed_out")), Value::False);
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"blocked")), Value::True);
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"eof")), Value::False);
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_bytes(b"plainfile")));
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_bytes(b"dir")));
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::String(PhpString::from_bytes(b"r")));
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(0));
-        arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), Value::True);
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"timed_out")),
+            Value::False,
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"blocked")),
+            Value::True,
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"eof")),
+            Value::False,
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"wrapper_type")),
+            Value::String(PhpString::from_bytes(b"plainfile")),
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"stream_type")),
+            Value::String(PhpString::from_bytes(b"dir")),
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"mode")),
+            Value::String(PhpString::from_bytes(b"r")),
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"unread_bytes")),
+            Value::Long(0),
+        );
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(b"seekable")),
+            Value::True,
+        );
         return Ok(Value::Array(Rc::new(RefCell::new(arr))));
     }
     let fid = require_open_stream(vm, first, "stream_get_meta_data")?;
@@ -15086,21 +18683,55 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
         if let Some(fh) = h.borrow().get(&fid) {
             // For user streams, prepend wrapper_data (the wrapper object instance).
             if let Some(obj) = &fh.user_wrapper {
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_data")), obj.clone());
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"wrapper_data")),
+                    obj.clone(),
+                );
             }
             // Order matches PHP's _php_stream_populate_meta_data():
             // timed_out, blocked, eof, [wrapper_data], wrapper_type, stream_type,
             // mode, unread_bytes, seekable, uri.
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"timed_out")), Value::False);
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"blocked")), Value::True);
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"eof")), if fh.eof { Value::True } else { Value::False });
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_type")), Value::String(PhpString::from_string(fh.wrapper_type.clone())));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"stream_type")), Value::String(PhpString::from_string(fh.stream_type.clone())));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"mode")), Value::String(PhpString::from_string(fh.mode.clone())));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"unread_bytes")), Value::Long(fh.filter_read_ready.len() as i64));
-            arr.set(ArrayKey::String(PhpString::from_bytes(b"seekable")), if fh.seekable { Value::True } else { Value::False });
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"timed_out")),
+                Value::False,
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"blocked")),
+                Value::True,
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"eof")),
+                if fh.eof { Value::True } else { Value::False },
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"wrapper_type")),
+                Value::String(PhpString::from_string(fh.wrapper_type.clone())),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"stream_type")),
+                Value::String(PhpString::from_string(fh.stream_type.clone())),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"mode")),
+                Value::String(PhpString::from_string(fh.mode.clone())),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"unread_bytes")),
+                Value::Long(fh.filter_read_ready.len() as i64),
+            );
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"seekable")),
+                if fh.seekable {
+                    Value::True
+                } else {
+                    Value::False
+                },
+            );
             if !fh.uri.is_empty() {
-                arr.set(ArrayKey::String(PhpString::from_bytes(b"uri")), Value::String(PhpString::from_string(fh.uri.clone())));
+                arr.set(
+                    ArrayKey::String(PhpString::from_bytes(b"uri")),
+                    Value::String(PhpString::from_string(fh.uri.clone())),
+                );
             }
         }
     });
@@ -15108,8 +18739,18 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn stream_wrapper_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let scheme = args.first().unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
-    let class = args.get(1).unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
+    let scheme = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .as_bytes()
+        .to_vec();
+    let class = args
+        .get(1)
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .as_bytes()
+        .to_vec();
     let flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
     if scheme.is_empty() {
         vm.emit_warning("stream_wrapper_register(): Protocol must not be empty");
@@ -15118,7 +18759,20 @@ fn stream_wrapper_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     // Check if already registered (built-in or user). PHP returns false and emits
     // a warning if a wrapper for this protocol already exists.
     let scheme_lower: Vec<u8> = scheme.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let builtin = matches!(scheme_lower.as_slice(), b"file" | b"http" | b"https" | b"ftp" | b"ftps" | b"php" | b"data" | b"compress.zlib" | b"compress.bzip2" | b"phar" | b"glob");
+    let builtin = matches!(
+        scheme_lower.as_slice(),
+        b"file"
+            | b"http"
+            | b"https"
+            | b"ftp"
+            | b"ftps"
+            | b"php"
+            | b"data"
+            | b"compress.zlib"
+            | b"compress.bzip2"
+            | b"phar"
+            | b"glob"
+    );
     let already_user = USER_WRAPPERS.with(|w| w.borrow().contains_key(&scheme_lower));
     if builtin || already_user {
         vm.emit_warning(&format!(
@@ -15128,22 +18782,43 @@ fn stream_wrapper_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         return Ok(Value::False);
     }
     USER_WRAPPERS.with(|w| {
-        w.borrow_mut().insert(scheme_lower, UserWrapper {
-            class_name: class,
-            flags,
-        });
+        w.borrow_mut().insert(
+            scheme_lower,
+            UserWrapper {
+                class_name: class,
+                flags,
+            },
+        );
     });
     Ok(Value::True)
 }
 
 fn stream_wrapper_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let scheme = args.first().unwrap_or(&Value::Null).to_php_string().as_bytes().to_vec();
+    let scheme = args
+        .first()
+        .unwrap_or(&Value::Null)
+        .to_php_string()
+        .as_bytes()
+        .to_vec();
     let scheme_lower: Vec<u8> = scheme.iter().map(|b| b.to_ascii_lowercase()).collect();
     let was_present = USER_WRAPPERS.with(|w| w.borrow_mut().remove(&scheme_lower).is_some());
     if !was_present {
         // PHP also lets you "unregister" a built-in wrapper, which then needs to be
         // restored. For now we report false on unknown schemes.
-        let builtin = matches!(scheme_lower.as_slice(), b"file" | b"http" | b"https" | b"ftp" | b"ftps" | b"php" | b"data" | b"compress.zlib" | b"compress.bzip2" | b"phar" | b"glob");
+        let builtin = matches!(
+            scheme_lower.as_slice(),
+            b"file"
+                | b"http"
+                | b"https"
+                | b"ftp"
+                | b"ftps"
+                | b"php"
+                | b"data"
+                | b"compress.zlib"
+                | b"compress.bzip2"
+                | b"phar"
+                | b"glob"
+        );
         if !builtin {
             vm.emit_warning(&format!(
                 "stream_wrapper_unregister(): Unable to unregister protocol {}://",
@@ -15164,7 +18839,12 @@ fn stream_get_wrappers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
     let mut arr = PhpArray::new();
     // Built-in wrappers (alphabetical).
     for name in &[
-        b"data" as &[u8], b"file", b"glob", b"http", b"https", b"php",
+        b"data" as &[u8],
+        b"file",
+        b"glob",
+        b"http",
+        b"https",
+        b"php",
     ] {
         arr.push(Value::String(PhpString::from_bytes(name)));
     }
@@ -15193,18 +18873,33 @@ fn stream_get_transports_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
-fn stream_socket_client_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_server_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_get_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_select_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_pair_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_client_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_server_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_get_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_select_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_pair_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
 
 fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = args.get(1).map(|v| v.to_long() as usize).unwrap_or(0);
-    let ending = args.get(2).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"\n"));
+    let ending = args
+        .get(2)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"\n"));
     let ending_bytes = ending.as_bytes();
-    if max_length == 0 { return Ok(Value::False); }
+    if max_length == 0 {
+        return Ok(Value::False);
+    }
     FILE_HANDLES.with(|h| {
         let mut handles = h.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
@@ -15213,10 +18908,15 @@ fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let mut byte = [0u8; 1];
             for _ in 0..max_length {
                 match fh.file.read(&mut byte) {
-                    Ok(0) => { fh.eof = true; break; }
+                    Ok(0) => {
+                        fh.eof = true;
+                        break;
+                    }
                     Ok(_) => {
                         buf.push(byte[0]);
-                        if buf.len() >= ending_bytes.len() && buf[buf.len() - ending_bytes.len()..] == *ending_bytes {
+                        if buf.len() >= ending_bytes.len()
+                            && buf[buf.len() - ending_bytes.len()..] == *ending_bytes
+                        {
                             buf.truncate(buf.len() - ending_bytes.len());
                             break;
                         }
@@ -15224,9 +18924,14 @@ fn stream_get_line_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Err(_) => break,
                 }
             }
-            if buf.is_empty() && fh.eof { Ok(Value::False) }
-            else { Ok(Value::String(PhpString::from_vec(buf))) }
-        } else { Ok(Value::False) }
+            if buf.is_empty() && fh.eof {
+                Ok(Value::False)
+            } else {
+                Ok(Value::String(PhpString::from_vec(buf)))
+            }
+        } else {
+            Ok(Value::False)
+        }
     })
 }
 
@@ -15238,16 +18943,27 @@ fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         let msg = "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     // We don't currently honour the chunk size internally. Return the default
     // 8192 so callers see a sane previous value.
     Ok(Value::Long(8192))
 }
-fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn stream_socket_recvfrom_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_sendto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_shutdown_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn stream_socket_enable_crypto_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
 fn headers_list_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
     SENT_HEADERS.with(|h| {
@@ -15309,33 +19025,55 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let command = args.first().unwrap_or(&Value::Null).to_php_string();
-    let mode = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b"r"));
+    let mode = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b"r"));
     let cmd_str = command.to_string_lossy();
     let mode_str = mode.to_string_lossy();
     // Validate mode: PHP accepts only "r", "rb", "w", "wb".
     if !matches!(mode_str.as_str(), "r" | "rb" | "w" | "wb") {
-        let msg = "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\"".to_string();
+        let msg = "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\""
+            .to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     use std::process::{Command, Stdio};
     let child = if mode_str.contains('r') {
-        Command::new("sh").arg("-c").arg(&*cmd_str).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
+        Command::new("sh")
+            .arg("-c")
+            .arg(&*cmd_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
     } else {
-        Command::new("sh").arg("-c").arg(&*cmd_str).stdin(Stdio::piped()).spawn()
+        Command::new("sh")
+            .arg("-c")
+            .arg(&*cmd_str)
+            .stdin(Stdio::piped())
+            .spawn()
     };
     match child {
         Ok(child) => {
             use std::os::unix::io::{FromRawFd, IntoRawFd};
             if mode_str.contains('r') {
                 if let Some(stdout) = child.stdout {
-                    let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) }, &mode_str);
+                    let fid = alloc_file_handle(
+                        unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) },
+                        &mode_str,
+                    );
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::Resource(fid));
                 }
             } else if let Some(stdin) = child.stdin {
-                let fid = alloc_file_handle(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) }, &mode_str);
+                let fid = alloc_file_handle(
+                    unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) },
+                    &mode_str,
+                );
                 goro_core::value::register_resource(fid, b"stream");
                 return Ok(Value::Resource(fid));
             }
@@ -15378,19 +19116,35 @@ fn error_log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         3 => {
             if let Some(dest) = destination {
                 use std::io::Write;
-                match std::fs::OpenOptions::new().append(true).create(true).open(&*dest.to_string_lossy()) {
-                    Ok(mut f) => { let _ = f.write_all(message.as_bytes()); Ok(Value::True) }
+                match std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&*dest.to_string_lossy())
+                {
+                    Ok(mut f) => {
+                        let _ = f.write_all(message.as_bytes());
+                        Ok(Value::True)
+                    }
                     Err(_) => Ok(Value::False),
                 }
-            } else { Ok(Value::False) }
+            } else {
+                Ok(Value::False)
+            }
         }
-        _ => { eprintln!("{}", message.to_string_lossy()); Ok(Value::True) }
+        _ => {
+            eprintln!("{}", message.to_string_lossy());
+            Ok(Value::True)
+        }
     }
 }
 
-
-
-fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, called_as: &str) -> Result<Value, VmError> {
+fn disk_space_impl(
+    vm: &mut Vm,
+    args: &[Value],
+    fn_name: &str,
+    total: bool,
+    called_as: &str,
+) -> Result<Value, VmError> {
     let path_val = args.first().cloned().unwrap_or(Value::Null);
     let path_str = path_val.to_php_string();
     let path_bytes = path_str.as_bytes();
@@ -15398,13 +19152,22 @@ fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, call
         let msg = "Path cannot be empty".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     if path_bytes.contains(&0u8) {
-        let msg = format!("{}(): Argument #1 ($directory) must not contain any null bytes", fn_name);
+        let msg = format!(
+            "{}(): Argument #1 ($directory) must not contain any null bytes",
+            fn_name
+        );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let path_string = String::from_utf8_lossy(path_bytes).to_string();
     let path = std::path::Path::new(&path_string);
@@ -15424,7 +19187,10 @@ fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, call
         let r = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
         if r != 0 {
             let line = vm.current_line;
-            vm.emit_warning_at(&format!("{}(): {}", called_as, std::io::Error::last_os_error()), line);
+            vm.emit_warning_at(
+                &format!("{}(): {}", called_as, std::io::Error::last_os_error()),
+                line,
+            );
             return Ok(Value::False);
         }
         let result = if total {
@@ -15436,16 +19202,34 @@ fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, call
     }
     #[cfg(not(unix))]
     {
-        Ok(Value::Double(if total { 10737418240.0 } else { 1073741824.0 }))
+        Ok(Value::Double(if total {
+            10737418240.0
+        } else {
+            1073741824.0
+        }))
     }
 }
-fn disk_free_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_free_space", false, "disk_free_space") }
-fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "diskfreespace", false, "diskfreespace") }
-fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> { disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space") }
-fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))) }
-fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn syslog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
+fn disk_free_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    disk_space_impl(vm, args, "disk_free_space", false, "disk_free_space")
+}
+fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    disk_space_impl(vm, args, "diskfreespace", false, "diskfreespace")
+}
+fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space")
+}
+fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+}
+fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn syslog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
 
 fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Stub: mail() always returns false in test/CLI mode
@@ -15456,7 +19240,10 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = "mail() expects at least 3 arguments, 0 given";
         let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg.to_string(), line: vm.current_line });
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
     }
     // In CLI/test mode, mail() typically fails
     Ok(Value::False)
@@ -15467,7 +19254,11 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let port = args.get(1).map(|v| v.to_long()).unwrap_or(-1);
     let errno_ref = args.get(2);
     let errstr_ref = args.get(3);
-    let timeout = args.get(4).map(|v| v.to_double()).filter(|&d| d > 0.0).unwrap_or(60.0);
+    let timeout = args
+        .get(4)
+        .map(|v| v.to_double())
+        .filter(|&d| d > 0.0)
+        .unwrap_or(60.0);
 
     let host_str = hostname.to_string_lossy();
 
@@ -15490,20 +19281,33 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(mut iter) => match iter.next() {
             Some(a) => a,
             None => {
-                if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); }
-                if let Some(Value::Reference(r)) = errstr_ref {
-                    *r.borrow_mut() = Value::String(PhpString::from_string(format!("DNS lookup failed for {}", addr)));
+                if let Some(Value::Reference(r)) = errno_ref {
+                    *r.borrow_mut() = Value::Long(111);
                 }
-                vm.emit_warning(&format!("fsockopen(): Unable to connect to {} (DNS lookup failed)", addr));
+                if let Some(Value::Reference(r)) = errstr_ref {
+                    *r.borrow_mut() = Value::String(PhpString::from_string(format!(
+                        "DNS lookup failed for {}",
+                        addr
+                    )));
+                }
+                vm.emit_warning(&format!(
+                    "fsockopen(): Unable to connect to {} (DNS lookup failed)",
+                    addr
+                ));
                 return Ok(Value::False);
             }
         },
         Err(e) => {
-            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); }
+            if let Some(Value::Reference(r)) = errno_ref {
+                *r.borrow_mut() = Value::Long(111);
+            }
             if let Some(Value::Reference(r)) = errstr_ref {
                 *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
             }
-            vm.emit_warning(&format!("fsockopen(): Unable to connect to {} ({})", addr, e));
+            vm.emit_warning(&format!(
+                "fsockopen(): Unable to connect to {} ({})",
+                addr, e
+            ));
             return Ok(Value::False);
         }
     };
@@ -15511,8 +19315,12 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs_f64(timeout)) {
         Ok(stream) => {
             // Set errno to 0 and errstr to ""
-            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(0); }
-            if let Some(Value::Reference(r)) = errstr_ref { *r.borrow_mut() = Value::String(PhpString::from_bytes(b"")); }
+            if let Some(Value::Reference(r)) = errno_ref {
+                *r.borrow_mut() = Value::Long(0);
+            }
+            if let Some(Value::Reference(r)) = errstr_ref {
+                *r.borrow_mut() = Value::String(PhpString::from_bytes(b""));
+            }
 
             use std::os::unix::io::IntoRawFd;
             let raw_fd = stream.into_raw_fd();
@@ -15523,11 +19331,16 @@ fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::Resource(fid))
         }
         Err(e) => {
-            if let Some(Value::Reference(r)) = errno_ref { *r.borrow_mut() = Value::Long(111); } // ECONNREFUSED
+            if let Some(Value::Reference(r)) = errno_ref {
+                *r.borrow_mut() = Value::Long(111);
+            } // ECONNREFUSED
             if let Some(Value::Reference(r)) = errstr_ref {
                 *r.borrow_mut() = Value::String(PhpString::from_string(e.to_string()));
             }
-            vm.emit_warning(&format!("fsockopen(): Unable to connect to {} ({})", addr, e));
+            vm.emit_warning(&format!(
+                "fsockopen(): Unable to connect to {} ({})",
+                addr, e
+            ));
             Ok(Value::False)
         }
     }
@@ -15549,17 +19362,39 @@ fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     }
     Ok(Value::Null)
 }
-fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::True) }
-fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn dns_get_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn getmxrr_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn getservbyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn getservbyport_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::Long(-1)) }
-fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
-fn stream_socket_accept_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> { Ok(Value::False) }
+fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::True)
+}
+fn dns_check_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn dns_get_record_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn getmxrr_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn getservbyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn getservbyport_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn getprotobyname_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(-1))
+}
+fn getprotobynumber_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn get_browser_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
+fn stream_socket_accept_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::False)
+}
 
 fn stream_isatty_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // In CLI mode, always return false (not a TTY)
@@ -15610,7 +19445,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let flags = if args.len() > 1 { args[1].to_long() } else { 0 };
     let token_parse = (flags & 1) != 0; // TOKEN_PARSE
     if !token_parse {
-        return Ok(Value::Array(Rc::new(RefCell::new(crate::highlight::tokenize_raw(source.as_bytes())))));
+        return Ok(Value::Array(Rc::new(RefCell::new(
+            crate::highlight::tokenize_raw(source.as_bytes()),
+        ))));
     }
 
     let mut lexer = goro_parser::Lexer::new(source.as_bytes());
@@ -15639,7 +19476,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let s_line = tok.span.line;
 
         let adjacent = |idx: usize, end_pos: usize| -> bool {
-            tokens.get(idx).is_some_and(|t| t.span.start as usize == end_pos)
+            tokens
+                .get(idx)
+                .is_some_and(|t| t.span.start as usize == end_pos)
         };
 
         // Case 1: `\` + Ident (+ \ Ident)* → T_NAME_FULLY_QUALIFIED (263)
@@ -15666,7 +19505,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Case 2: `namespace` + `\` + Ident (+ \ Ident)* → T_NAME_RELATIVE (264)
         if matches!(tok.kind, TK::Namespace)
             && adjacent(i + 1, s_end)
-            && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
+            && tokens
+                .get(i + 1)
+                .is_some_and(|t| matches!(t.kind, TK::Backslash))
             && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
             && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
         {
@@ -15687,7 +19528,9 @@ fn token_get_all_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Case 3: Ident + `\` + Ident (+ \ Ident)* → T_NAME_QUALIFIED (265)
         if is_ident(&tok.kind)
-            && tokens.get(i + 1).is_some_and(|t| matches!(t.kind, TK::Backslash))
+            && tokens
+                .get(i + 1)
+                .is_some_and(|t| matches!(t.kind, TK::Backslash))
             && tokens[i + 1].span.start as usize == s_end
             && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
             && tokens[i + 2].span.start as usize == tokens[i + 1].span.end as usize
@@ -15781,26 +19624,54 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     let size_keys: &[&[u8]] = &[b"upload_max_filesize", b"post_max_size"];
     if let Some(opts) = args.first() {
         if let Value::Array(arr) = opts {
-            let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (k, v) in pairs {
                 match k {
                     goro_core::array::ArrayKey::Int(_) => {
-                        let exc = vm.create_exception(b"ValueError", "Invalid integer key in $options argument", 0);
+                        let exc = vm.create_exception(
+                            b"ValueError",
+                            "Invalid integer key in $options argument",
+                            0,
+                        );
                         vm.current_exception = Some(exc);
-                        return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                        return Err(VmError {
+                            message: "Uncaught ValueError".to_string(),
+                            line: 0,
+                        });
                     }
                     goro_core::array::ArrayKey::String(s) => {
                         let bytes = s.as_bytes();
                         if !valid_keys.contains(&bytes) {
-                            let exc = vm.create_exception(b"ValueError", &format!("Invalid key \"{}\" in $options argument", s.to_string_lossy()), 0);
+                            let exc = vm.create_exception(
+                                b"ValueError",
+                                &format!(
+                                    "Invalid key \"{}\" in $options argument",
+                                    s.to_string_lossy()
+                                ),
+                                0,
+                            );
                             vm.current_exception = Some(exc);
-                            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                            return Err(VmError {
+                                message: "Uncaught ValueError".to_string(),
+                                line: 0,
+                            });
                         }
                         // Check value type
                         if let Value::Array(_) = v {
-                            let exc = vm.create_exception(b"ValueError", "Invalid array value in $options argument", 0);
+                            let exc = vm.create_exception(
+                                b"ValueError",
+                                "Invalid array value in $options argument",
+                                0,
+                            );
                             vm.current_exception = Some(exc);
-                            return Err(VmError { message: "Uncaught ValueError".to_string(), line: 0 });
+                            return Err(VmError {
+                                message: "Uncaught ValueError".to_string(),
+                                line: 0,
+                            });
                         }
                         // For *_max_filesize/post_max_size keys: validate suffix (K/M/G).
                         if size_keys.contains(&bytes) {
@@ -15810,7 +19681,8 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                                     if last.is_ascii_alphabetic()
                                         && !matches!(last, b'K' | b'M' | b'G' | b'k' | b'm' | b'g')
                                     {
-                                        let mult = std::str::from_utf8(&[last]).unwrap_or("?").to_string();
+                                        let mult =
+                                            std::str::from_utf8(&[last]).unwrap_or("?").to_string();
                                         vm.emit_warning(&format!(
                                             "Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"1\" for backwards compatibility",
                                             strval.to_string_lossy(),
@@ -15828,9 +19700,16 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 
     // After validation, request_parse_body fails with a RequestParseBodyException
     // because we have no request context to parse.
-    let exc = vm.create_exception(b"RequestParseBodyException", "Request does not provide a content type", 0);
+    let exc = vm.create_exception(
+        b"RequestParseBodyException",
+        "Request does not provide a content type",
+        0,
+    );
     vm.current_exception = Some(exc);
-    Err(VmError { message: "Uncaught RequestParseBodyException".to_string(), line: 0 })
+    Err(VmError {
+        message: "Uncaught RequestParseBodyException".to_string(),
+        line: 0,
+    })
 }
 
 fn ignore_user_abort_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -15851,20 +19730,56 @@ fn nl_langinfo_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn localeconv_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    result.set(ArrayKey::String(PhpString::from_bytes(b"decimal_point")), Value::String(PhpString::from_bytes(b".")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"thousands_sep")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"int_curr_symbol")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"currency_symbol")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_decimal_point")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_thousands_sep")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"positive_sign")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"negative_sign")), Value::String(PhpString::from_bytes(b"")));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"int_frac_digits")), Value::Long(127));
-    result.set(ArrayKey::String(PhpString::from_bytes(b"frac_digits")), Value::Long(127));
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"decimal_point")),
+        Value::String(PhpString::from_bytes(b".")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"thousands_sep")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"int_curr_symbol")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"currency_symbol")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"mon_decimal_point")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"mon_thousands_sep")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"positive_sign")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"negative_sign")),
+        Value::String(PhpString::from_bytes(b"")),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"int_frac_digits")),
+        Value::Long(127),
+    );
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"frac_digits")),
+        Value::Long(127),
+    );
     let grouping = PhpArray::new();
-    result.set(ArrayKey::String(PhpString::from_bytes(b"grouping")), Value::Array(Rc::new(RefCell::new(grouping))));
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"grouping")),
+        Value::Array(Rc::new(RefCell::new(grouping))),
+    );
     let mon_grouping = PhpArray::new();
-    result.set(ArrayKey::String(PhpString::from_bytes(b"mon_grouping")), Value::Array(Rc::new(RefCell::new(mon_grouping))));
+    result.set(
+        ArrayKey::String(PhpString::from_bytes(b"mon_grouping")),
+        Value::Array(Rc::new(RefCell::new(mon_grouping))),
+    );
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
@@ -15894,8 +19809,13 @@ fn set_file_buffer_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-    if filename.is_empty() { return Ok(Value::False); }
+    let filename = args
+        .first()
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    if filename.is_empty() {
+        return Ok(Value::False);
+    }
     // Absolute paths resolve directly.
     let p = std::path::Path::new(&*filename);
     if p.is_absolute() {
@@ -15910,9 +19830,15 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         .get(b"include_path".as_ref())
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_else(|| ".".to_string());
-    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    let sep = if cfg!(target_os = "windows") {
+        ';'
+    } else {
+        ':'
+    };
     for entry in include_path.split(sep) {
-        if entry.is_empty() { continue; }
+        if entry.is_empty() {
+            continue;
+        }
         let candidate = if entry == "." {
             std::path::PathBuf::from(&*filename)
         } else {
@@ -15921,7 +19847,9 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
         if candidate.exists() {
             return Ok(match std::fs::canonicalize(&candidate) {
                 Ok(cp) => Value::String(PhpString::from_string(cp.to_string_lossy().into_owned())),
-                Err(_) => Value::String(PhpString::from_string(candidate.to_string_lossy().into_owned())),
+                Err(_) => Value::String(PhpString::from_string(
+                    candidate.to_string_lossy().into_owned(),
+                )),
             });
         }
     }
@@ -15935,11 +19863,13 @@ fn stream_supports_lock_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErr
 fn stream_bucket_new_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Return a simple object representing a stream bucket
     let _stream = args.first().unwrap_or(&Value::Null);
-    let data = args.get(1).map(|v| v.to_php_string()).unwrap_or_else(|| PhpString::from_bytes(b""));
+    let data = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(|| PhpString::from_bytes(b""));
     let id = _vm.next_object_id();
     let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), id);
     obj.set_property(b"data".to_vec(), Value::String(data));
     obj.set_property(b"datalen".to_vec(), Value::Long(0));
     Ok(Value::Object(Rc::new(RefCell::new(obj))))
 }
-

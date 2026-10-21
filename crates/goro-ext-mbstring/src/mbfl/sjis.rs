@@ -4,7 +4,10 @@
 use super::common::*;
 use super::mobile::*;
 use super::tables::emoji2uni::*;
-use super::tables::filt_cjk::{mblen_table_sjis, mblen_table_sjis_mobile, mblen_table_sjismac, mblen_table_sjiswin, sjis_decode_tbl1, sjis_decode_tbl2, sjis_mobile_decode_tbl1};
+use super::tables::filt_cjk::{
+    mblen_table_sjis, mblen_table_sjis_mobile, mblen_table_sjismac, mblen_table_sjiswin,
+    sjis_decode_tbl1, sjis_decode_tbl2, sjis_mobile_decode_tbl1,
+};
 use super::tables::sjis_mac2uni::*;
 use super::tables::unicode_table_cp932_ext::*;
 use super::tables::unicode_table_jis::*;
@@ -28,12 +31,12 @@ fn emit_sjis_kanji(buf: &mut ConvBuf, s: u32) {
 fn cp932_row12(s: u32) -> u32 {
     if s <= 137 {
         match s {
-            31 => 0xFF3C, /* FULLWIDTH REVERSE SOLIDUS */
-            32 => 0xFF5E, /* FULLWIDTH TILDE */
-            33 => 0x2225, /* PARALLEL TO */
-            60 => 0xFF0D, /* FULLWIDTH HYPHEN-MINUS */
-            80 => 0xFFE0, /* FULLWIDTH CENT SIGN */
-            81 => 0xFFE1, /* FULLWIDTH POUND SIGN */
+            31 => 0xFF3C,  /* FULLWIDTH REVERSE SOLIDUS */
+            32 => 0xFF5E,  /* FULLWIDTH TILDE */
+            33 => 0x2225,  /* PARALLEL TO */
+            60 => 0xFF0D,  /* FULLWIDTH HYPHEN-MINUS */
+            80 => 0xFFE0,  /* FULLWIDTH CENT SIGN */
+            81 => 0xFFE1,  /* FULLWIDTH POUND SIGN */
             137 => 0xFFE2, /* FULLWIDTH NOT SIGN */
             _ => 0,
         }
@@ -295,7 +298,15 @@ enum HintResult {
 }
 
 /// Inner loop for Apple 'transcoding hint' sequences (resumable)
-fn sjismac_hint(ti: usize, mut index: usize, w: u32, input: &[u32], i: &mut usize, buf: &mut ConvBuf, end: bool) -> HintResult {
+fn sjismac_hint(
+    ti: usize,
+    mut index: usize,
+    w: u32,
+    input: &[u32],
+    i: &mut usize,
+    buf: &mut ConvBuf,
+    end: bool,
+) -> HintResult {
     let expected = TRANSCODING_HINT_CP_WIDTH[(w - 0xF860) as usize];
     while index <= expected {
         if *i >= input.len() {
@@ -576,7 +587,8 @@ fn sjis_mobile_kanji(vendor: Vendor, c: u8, c2: u8, p: &mut usize, out: &mut Vec
                 if w == 0 {
                     w = tbl_sum(&sjis_mobile_decode_tbl1, c, c2);
                     if w >= cp932ext3_ucs_table_min as u32 && w < cp932ext3_ucs_table_max as u32 {
-                        w = cp932ext3_ucs_table[(w - cp932ext3_ucs_table_min as u32) as usize] as u32;
+                        w = cp932ext3_ucs_table[(w - cp932ext3_ucs_table_min as u32) as usize]
+                            as u32;
                     } else if w >= 94 * 94 && w < 114 * 94 {
                         w = w - (94 * 94) + 0xE000;
                     }
@@ -612,11 +624,13 @@ fn sjis_mobile_to_wchar(vendor: Vendor, input: &[u8], out: &mut Vec<u32>, state:
         p += 1;
         if vendor == Vendor::Sb && c == 0x1B {
             /* Escape sequence */
-            if p == e || {
-                let x = input[p];
-                p += 1;
-                x != b'$'
-            } || p == e
+            if p == e
+                || {
+                    let x = input[p];
+                    p += 1;
+                    x != b'$'
+                }
+                || p == e
             {
                 out.push(MBFL_BAD_INPUT);
                 continue;
@@ -708,7 +722,11 @@ fn mobile_prefix(w: u32) -> u32 {
         return (((t / 94) + 0x7F) << 8) | ((t % 94) + 0x21);
     }
     if s == 0 {
-        s = if w == 0xA5 { 0x216F } else { cp932_special_reverse(w) };
+        s = if w == 0xA5 {
+            0x216F
+        } else {
+            cp932_special_reverse(w)
+        };
     }
     if w != 0 && (s == 0 || s >= 0x8080) {
         s = 0;
@@ -731,7 +749,13 @@ fn kuten_to_jis(t: u32) -> u32 {
     (((t / 94) + 0x21) << 8) | ((t % 94) + 0x21)
 }
 
-fn wchar_to_sjis_mobile(vendor: Vendor, input: &[u32], buf: &mut ConvBuf, end: bool, self_fn: FromWcharFn) {
+fn wchar_to_sjis_mobile(
+    vendor: Vendor,
+    input: &[u32],
+    buf: &mut ConvBuf,
+    end: bool,
+    self_fn: FromWcharFn,
+) {
     let len = input.len();
     let mut i = 0usize;
     let mut pending: Option<u32> = None;
@@ -802,7 +826,11 @@ fn wchar_to_sjis_mobile(vendor: Vendor, input: &[u32], buf: &mut ConvBuf, end: b
                 if w2 >= nflags(b'B') && w2 <= nflags(b'U') {
                     for k in 0..10 {
                         if w == nflags(nflags_s[k][0]) && w2 == nflags(nflags_s[k][1]) {
-                            let code = if vendor == Vendor::Kddi { nflags_code_kddi[k] } else { nflags_code_sb[k] };
+                            let code = if vendor == Vendor::Kddi {
+                                nflags_code_kddi[k]
+                            } else {
+                                nflags_code_sb[k]
+                            };
                             s = kuten_to_jis(code as u32);
                             break 'emit;
                         }
@@ -874,7 +902,11 @@ pub static ENC_SJIS_SB: Encoding = Encoding {
     no: EncNo::SjisSb,
     name: "SJIS-Mobile#SOFTBANK",
     mime_name: Some("Shift_JIS"),
-    aliases: &["SJIS-SOFTBANK", "shift_jis-softbank", "x-sjis-emoji-softbank"],
+    aliases: &[
+        "SJIS-SOFTBANK",
+        "shift_jis-softbank",
+        "x-sjis-emoji-softbank",
+    ],
     mblen_table: Some(&mblen_table_sjis_mobile),
     flag: MBFL_ENCTYPE_GL_UNSAFE,
     to_wchar: Some(mb_sjis_sb_to_wchar),
@@ -954,7 +986,12 @@ pub fn ucs_to_jisx0213(w: u32, input: &[u32], i: &mut usize, end: bool) -> X0213
     let mut s: u32 = 0;
 
     /* Check for 1st char of combining characters */
-    if w == 0xE6 || (0x254..=0x2E9).contains(&w) || (0x304B..=0x3053).contains(&w) || (0x30AB..=0x30C8).contains(&w) || w == 0x31F7 {
+    if w == 0xE6
+        || (0x254..=0x2E9).contains(&w)
+        || (0x304B..=0x3053).contains(&w)
+        || (0x30AB..=0x30C8).contains(&w)
+        || w == 0x31F7
+    {
         let n = jisx0213_u2_tbl_len as usize;
         let mut k = 0usize;
         while k < n {
@@ -998,13 +1035,18 @@ pub fn ucs_to_jisx0213(w: u32, input: &[u32], i: &mut usize, end: bool) -> X0213
     if s == 0 && w >= ucs_c1_jisx0213_min as u32 && w <= ucs_c1_jisx0213_max as u32 {
         let k = mbfl_bisec_srch(w as i32, &ucs_c1_jisx0213_tbl, ucs_c1_jisx0213_tbl_len);
         if k >= 0 {
-            s = ucs_c1_jisx0213_ofst[k as usize] as u32 + w - ucs_c1_jisx0213_tbl[2 * k as usize] as u32;
+            s = ucs_c1_jisx0213_ofst[k as usize] as u32 + w
+                - ucs_c1_jisx0213_tbl[2 * k as usize] as u32;
         }
     }
 
     /* Check for Japanese chars in CJK Unified Ideographs ext.B (U+2XXXX) */
     if s == 0 && w >= jisx0213_u5_tbl_min as u32 && w <= jisx0213_u5_tbl_max as u32 {
-        let k = mbfl_bisec_srch2(w as i32 - 0x20000, &jisx0213_u5_jis_key, jisx0213_u5_tbl_len);
+        let k = mbfl_bisec_srch2(
+            w as i32 - 0x20000,
+            &jisx0213_u5_jis_key,
+            jisx0213_u5_tbl_len,
+        );
         if k >= 0 {
             s = jisx0213_u5_jis_tbl[k as usize] as u32;
         }
@@ -1018,7 +1060,11 @@ pub fn ucs_to_jisx0213(w: u32, input: &[u32], i: &mut usize, end: bool) -> X0213
             s = 0x233D;
         } else if (0xF91D..=0xF9DC).contains(&w) {
             /* CJK Compatibility Ideographs: U+F900-U+F92A */
-            let k = mbfl_bisec_srch2(w as i32, &ucs_r2b_jisx0213_cmap_key, ucs_r2b_jisx0213_cmap_len);
+            let k = mbfl_bisec_srch2(
+                w as i32,
+                &ucs_r2b_jisx0213_cmap_key,
+                ucs_r2b_jisx0213_cmap_len,
+            );
             if k >= 0 {
                 s = ucs_r2b_jisx0213_cmap_val[k as usize] as u32;
             }
@@ -1144,10 +1190,18 @@ fn wchar_to_cp932_common(input: &[u32], buf: &mut ConvBuf, sjiswin: bool) {
 
         if s1 == 0 || (s1 >= 0x8080 && s2 == 0) {
             /* not found or X 0212 */
-            if let Some(l) = mbfl_binary_search_paired_sorted_table(w, &cp932ext1_ucs_table_paired_sorted, cp932ext1_ucs_table_paired_sorted.len() as i32) {
+            if let Some(l) = mbfl_binary_search_paired_sorted_table(
+                w,
+                &cp932ext1_ucs_table_paired_sorted,
+                cp932ext1_ucs_table_paired_sorted.len() as i32,
+            ) {
                 let l = l as u32;
                 s1 = ((l / 94 + 0x2D) << 8) + (l % 94 + 0x21);
-            } else if let Some(l) = mbfl_binary_search_paired_sorted_table(w, &cp932ext3_ucs_table_paired_sorted, cp932ext3_ucs_table_paired_sorted.len() as i32) {
+            } else if let Some(l) = mbfl_binary_search_paired_sorted_table(
+                w,
+                &cp932ext3_ucs_table_paired_sorted,
+                cp932ext3_ucs_table_paired_sorted.len() as i32,
+            ) {
                 let l = l as u32;
                 s1 = ((l / 94 + 0x93) << 8) + (l % 94 + 0x21);
             } else {

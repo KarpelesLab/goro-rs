@@ -26,12 +26,18 @@ fn lower(b: &[u8]) -> Vec<u8> {
 }
 
 fn is_internal_property(name: &[u8]) -> bool {
-    name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-        || name.starts_with(b"__timestamp") || name.starts_with(b"__enum_")
-        || name.starts_with(b"__fiber_") || name.starts_with(b"__ctor_")
-        || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
-        || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
-        || name.starts_with(b"__dir_") || name.starts_with(b"__pkey_id")
+    name.starts_with(b"__spl_")
+        || name.starts_with(b"__reflection_")
+        || name.starts_with(b"__timestamp")
+        || name.starts_with(b"__enum_")
+        || name.starts_with(b"__fiber_")
+        || name.starts_with(b"__ctor_")
+        || name.starts_with(b"__clone_")
+        || name.starts_with(b"__destructed")
+        || name.starts_with(b"__weak_ref_id")
+        || name.starts_with(b"__sxml_")
+        || name.starts_with(b"__dir_")
+        || name.starts_with(b"__pkey_id")
         || name.starts_with(b"__lazy_")
 }
 
@@ -67,9 +73,21 @@ fn find_prop_decl(vm: &Vm, class_lower: &[u8], name: &[u8]) -> Option<(Visibilit
     let mut cur = class_lower.to_vec();
     for _ in 0..64 {
         let ce = vm.classes.get(&cur)?;
-        if let Some(p) = ce.properties.iter().find(|p| p.name == name && !p.is_static) {
-            let decl = if p.declaring_class.is_empty() { cur.clone() } else { p.declaring_class.clone() };
-            let decl_name = vm.classes.get(&decl).map(|c| c.name.clone()).unwrap_or_else(|| ce.name.clone());
+        if let Some(p) = ce
+            .properties
+            .iter()
+            .find(|p| p.name == name && !p.is_static)
+        {
+            let decl = if p.declaring_class.is_empty() {
+                cur.clone()
+            } else {
+                p.declaring_class.clone()
+            };
+            let decl_name = vm
+                .classes
+                .get(&decl)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| ce.name.clone());
             return Some((p.visibility, decl_name));
         }
         cur = lower(ce.parent.as_ref()?);
@@ -199,13 +217,21 @@ pub fn serialize(vm: &mut Vm, val: &Value, st: &mut SerializeState, out: &mut Ve
         Value::String(s) => push_str(out, s.as_bytes()),
         Value::Resource(_) | Value::Reference(_) => out.extend_from_slice(b"i:0;"),
         Value::Generator(_) => {
-            let exc = vm.create_exception(b"Exception", "Serialization of 'Generator' is not allowed", vm.current_line);
+            let exc = vm.create_exception(
+                b"Exception",
+                "Serialization of 'Generator' is not allowed",
+                vm.current_line,
+            );
             vm.current_exception = Some(exc);
         }
         Value::Array(arr) => {
             let ptr = Rc::as_ptr(arr) as *const u8 as usize;
             st.active.insert(ptr);
-            let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let entries: Vec<(ArrayKey, Value)> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             out.extend_from_slice(format!("a:{}:{{", entries.len()).as_bytes());
             serialize_nested(vm, &entries, st, out);
             out.push(b'}');
@@ -215,7 +241,12 @@ pub fn serialize(vm: &mut Vm, val: &Value, st: &mut SerializeState, out: &mut Ve
     }
 }
 
-fn serialize_nested(vm: &mut Vm, entries: &[(ArrayKey, Value)], st: &mut SerializeState, out: &mut Vec<u8>) {
+fn serialize_nested(
+    vm: &mut Vm,
+    entries: &[(ArrayKey, Value)],
+    st: &mut SerializeState,
+    out: &mut Vec<u8>,
+) {
     for (k, v) in entries {
         push_key(out, k);
         let inner_arr = match v {
@@ -243,7 +274,13 @@ fn class_header(out: &mut Vm, name: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(b"\":");
 }
 
-fn serialize_object(vm: &mut Vm, val: &Value, obj: &Rc<RefCell<PhpObject>>, st: &mut SerializeState, out: &mut Vec<u8>) {
+fn serialize_object(
+    vm: &mut Vm,
+    val: &Value,
+    obj: &Rc<RefCell<PhpObject>>,
+    st: &mut SerializeState,
+    out: &mut Vec<u8>,
+) {
     let class_name = obj.borrow().class_name.clone();
     let cl = lower(&class_name);
     if Vm::is_enum_case(val) {
@@ -265,11 +302,20 @@ fn serialize_object(vm: &mut Vm, val: &Value, obj: &Rc<RefCell<PhpObject>>, st: 
         return;
     }
     let display = if cl == b"__php_incomplete_class" {
-        obj.borrow().get_property(b"__PHP_Incomplete_Class_Name").to_php_string().as_bytes().to_vec()
+        obj.borrow()
+            .get_property(b"__PHP_Incomplete_Class_Name")
+            .to_php_string()
+            .as_bytes()
+            .to_vec()
     } else {
         goro_core::value::display_class_name(&class_name).into_bytes()
     };
-    let has = |vm: &Vm, m: &[u8]| vm.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false);
+    let has = |vm: &Vm, m: &[u8]| {
+        vm.classes
+            .get(&cl)
+            .map(|c| c.get_method(m).is_some())
+            .unwrap_or(false)
+    };
     if has(vm, b"__serialize") {
         let r = vm.call_object_method(val, b"__serialize", &[]);
         if vm.current_exception.is_some() {
@@ -277,14 +323,21 @@ fn serialize_object(vm: &mut Vm, val: &Value, obj: &Rc<RefCell<PhpObject>>, st: 
         }
         match r {
             Some(Value::Array(a)) => {
-                let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let entries: Vec<(ArrayKey, Value)> = a
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 class_header(vm, &display, out);
                 out.extend_from_slice(format!("{}:{{", entries.len()).as_bytes());
                 serialize_nested(vm, &entries, st, out);
                 out.push(b'}');
             }
             _ => {
-                let msg = format!("{}::__serialize() must return an array", String::from_utf8_lossy(&display));
+                let msg = format!(
+                    "{}::__serialize() must return an array",
+                    String::from_utf8_lossy(&display)
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
             }
@@ -324,7 +377,12 @@ fn serialize_object(vm: &mut Vm, val: &Value, obj: &Rc<RefCell<PhpObject>>, st: 
         let mut entries: Vec<(ArrayKey, Value)> = Vec::new();
         for n in names {
             let name = n.to_php_string().as_bytes().to_vec();
-            let found = obj.borrow().properties.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone());
+            let found = obj
+                .borrow()
+                .properties
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone());
             match found {
                 Some(v) => {
                     let key = mangle(vm, &cl, &name);
@@ -348,12 +406,21 @@ fn serialize_object(vm: &mut Vm, val: &Value, obj: &Rc<RefCell<PhpObject>>, st: 
         .borrow()
         .properties
         .iter()
-        .filter(|(k, v)| !is_internal_property(k) && !matches!(v, Value::Undef) && k.as_slice() != b"__PHP_Incomplete_Class_Name")
+        .filter(|(k, v)| {
+            !is_internal_property(k)
+                && !matches!(v, Value::Undef)
+                && k.as_slice() != b"__PHP_Incomplete_Class_Name"
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let entries: Vec<(ArrayKey, Value)> = props
         .into_iter()
-        .map(|(k, v)| (ArrayKey::String(PhpString::from_vec(mangle(vm, &cl, &k))), v))
+        .map(|(k, v)| {
+            (
+                ArrayKey::String(PhpString::from_vec(mangle(vm, &cl, &k))),
+                v,
+            )
+        })
         .collect();
     class_header(vm, &display, out);
     out.extend_from_slice(format!("{}:{{", entries.len()).as_bytes());
@@ -382,14 +449,23 @@ pub struct UnserializeState {
 
 impl UnserializeState {
     pub fn new() -> Self {
-        UnserializeState { slots: Vec::new(), tops: Vec::new(), delayed: Vec::new() }
+        UnserializeState {
+            slots: Vec::new(),
+            tops: Vec::new(),
+            delayed: Vec::new(),
+        }
     }
 
     fn read_loc(&self, loc: &Loc) -> Option<Value> {
         match loc {
             Loc::Top(i) => self.tops.get(*i).cloned(),
             Loc::Arr(a, k) => a.borrow().get(k).cloned(),
-            Loc::Prop(o, n) => o.borrow().properties.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()),
+            Loc::Prop(o, n) => o
+                .borrow()
+                .properties
+                .iter()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone()),
         }
     }
 
@@ -490,7 +566,11 @@ impl<'a> P<'a> {
             Ok(n) => n,
             Err(_) => {
                 // Overflow: PHP's parse_iv saturates with a warning; keep it simple.
-                if s.starts_with('-') { i64::MIN } else { i64::MAX }
+                if s.starts_with('-') {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
             }
         })
     }
@@ -512,7 +592,11 @@ fn skip_value(p: &mut P) -> Option<()> {
         b'N' => p.expect(b';'),
         b'b' | b'i' | b'r' | b'R' => {
             p.expect(b':')?;
-            if c == b'i' { p.iv()?; } else { p.uiv()?; }
+            if c == b'i' {
+                p.iv()?;
+            } else {
+                p.uiv()?;
+            }
             p.expect(b';')
         }
         b'd' => {
@@ -569,12 +653,20 @@ fn skip_value(p: &mut P) -> Option<()> {
 
 fn valid_class_name(name: &[u8]) -> bool {
     !name.is_empty()
-        && name.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80)
+        && name
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'\\' || c >= 0x80)
 }
 
 /// Unserialize one value from `data[*pos..]` into `loc`. Returns false on
 /// malformed input (the session decoders then fail).
-pub fn unserialize_into(vm: &mut Vm, data: &[u8], pos: &mut usize, st: &mut UnserializeState, top: usize) -> bool {
+pub fn unserialize_into(
+    vm: &mut Vm,
+    data: &[u8],
+    pos: &mut usize,
+    st: &mut UnserializeState,
+    top: usize,
+) -> bool {
     let mut p = P { d: data, pos: *pos };
     while st.tops.len() <= top {
         st.tops.push(Value::Null);
@@ -630,7 +722,10 @@ fn unser(vm: &mut Vm, p: &mut P, st: &mut UnserializeState, loc: Loc, depth: usi
                 "-INF" => f64::NEG_INFINITY,
                 "NAN" => f64::NAN,
                 _ => {
-                    let ok = !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'));
+                    let ok = !s.is_empty()
+                        && s.bytes().all(|c| {
+                            c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-')
+                        });
                     if !ok {
                         return None;
                     }
@@ -778,15 +873,32 @@ fn unser(vm: &mut Vm, p: &mut P, st: &mut UnserializeState, loc: Loc, depth: usi
             if c == b'C' {
                 let payload = p.bytes(count)?.to_vec();
                 p.expect(b'}')?;
-                if known && vm.classes.get(&cl).map(|c| c.get_method(b"unserialize").is_some()).unwrap_or(false) {
-                    vm.call_object_method(&ov, b"unserialize", &[Value::String(PhpString::from_vec(payload))]);
+                if known
+                    && vm
+                        .classes
+                        .get(&cl)
+                        .map(|c| c.get_method(b"unserialize").is_some())
+                        .unwrap_or(false)
+                {
+                    vm.call_object_method(
+                        &ov,
+                        b"unserialize",
+                        &[Value::String(PhpString::from_vec(payload))],
+                    );
                     if vm.current_exception.is_some() {
                         return None;
                     }
                 }
                 return Some(());
             }
-            let has = |vm: &Vm, m: &[u8]| known && vm.classes.get(&cl).map(|c| c.get_method(m).is_some()).unwrap_or(false);
+            let has = |vm: &Vm, m: &[u8]| {
+                known
+                    && vm
+                        .classes
+                        .get(&cl)
+                        .map(|c| c.get_method(m).is_some())
+                        .unwrap_or(false)
+            };
             if has(vm, b"__unserialize") {
                 let tmp = Rc::new(RefCell::new(PhpArray::new()));
                 for _ in 0..count {
@@ -842,7 +954,9 @@ fn parse_key(p: &mut P) -> Option<ArrayKey> {
             let b = p.bytes(n)?.to_vec();
             p.expect(b'"')?;
             p.expect(b';')?;
-            Some(Vm::value_to_array_key(Value::String(PhpString::from_vec(b))))
+            Some(Vm::value_to_array_key(Value::String(PhpString::from_vec(
+                b,
+            ))))
         }
         _ => None,
     }
@@ -861,7 +975,10 @@ fn new_object(vm: &mut Vm, name: &[u8], cl: &[u8], known: bool) -> Rc<RefCell<Ph
     let id = vm.alloc_object_id();
     if !known {
         let mut obj = PhpObject::new(b"__PHP_Incomplete_Class".to_vec(), id);
-        obj.set_property(b"__PHP_Incomplete_Class_Name".to_vec(), Value::String(PhpString::from_vec(name.to_vec())));
+        obj.set_property(
+            b"__PHP_Incomplete_Class_Name".to_vec(),
+            Value::String(PhpString::from_vec(name.to_vec())),
+        );
         return Rc::new(RefCell::new(obj));
     }
     let canonical = match vm.classes.get(cl) {
@@ -874,7 +991,11 @@ fn new_object(vm: &mut Vm, name: &[u8], cl: &[u8], known: bool) -> Rc<RefCell<Ph
         vm.apply_class_property_defaults(&mut obj, cl);
     }
     let rc = Rc::new(RefCell::new(obj));
-    let has_destruct = vm.classes.get(cl).map(|c| c.get_method(b"__destruct").is_some()).unwrap_or(false);
+    let has_destruct = vm
+        .classes
+        .get(cl)
+        .map(|c| c.get_method(b"__destruct").is_some())
+        .unwrap_or(false);
     if has_destruct {
         vm.register_destructible(Value::Object(rc.clone()));
     }

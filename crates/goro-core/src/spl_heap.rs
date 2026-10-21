@@ -49,7 +49,9 @@ impl Vm {
                 _ => Vec::new(),
             };
             let mut pri = pri.into_iter();
-            data.into_iter().map(|d| (d, pri.next().unwrap_or(Value::Null))).collect()
+            data.into_iter()
+                .map(|d| (d, pri.next().unwrap_or(Value::Null)))
+                .collect()
         } else {
             data.into_iter().map(|d| (d, Value::Null)).collect()
         }
@@ -83,13 +85,17 @@ impl Vm {
     }
 
     fn heap_set_flag(obj: &Rc<RefCell<PhpObject>>, name: &[u8], on: bool) {
-        obj.borrow_mut().set_property(name.to_vec(), if on { Value::True } else { Value::False });
+        obj.borrow_mut()
+            .set_property(name.to_vec(), if on { Value::True } else { Value::False });
     }
 
     /// Whether the object's class overrides compare() in userland.
     fn heap_user_compare(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
-        self.classes.get(&cl).map(|c| c.get_method(b"compare").is_some()).unwrap_or(false)
+        self.classes
+            .get(&cl)
+            .map(|c| c.get_method(b"compare").is_some())
+            .unwrap_or(false)
     }
 
     /// Compare two heap elements, given as (data, priority) pairs.
@@ -104,7 +110,11 @@ impl Vm {
         if self.current_exception.is_some() {
             return 0;
         }
-        let (x, y) = if kind == HeapKind::PQueue { (&a.1, &b.1) } else { (&a.0, &b.0) };
+        let (x, y) = if kind == HeapKind::PQueue {
+            (&a.1, &b.1)
+        } else {
+            (&a.0, &b.0)
+        };
         if user_cmp {
             let this = Value::Object(obj.clone());
             let r = self.call_object_method(&this, b"compare", &[x.clone(), y.clone()]);
@@ -121,11 +131,17 @@ impl Vm {
 
     fn heap_check(&mut self, obj: &Rc<RefCell<PhpObject>>, write: bool) -> bool {
         if Self::heap_flag(obj, HEAP_CORRUPTED) {
-            self.spl_throw(b"RuntimeException", "Heap is corrupted, heap properties are no longer ensured.");
+            self.spl_throw(
+                b"RuntimeException",
+                "Heap is corrupted, heap properties are no longer ensured.",
+            );
             return false;
         }
         if write && Self::heap_flag(obj, HEAP_LOCKED) {
-            self.spl_throw(b"RuntimeException", "Heap cannot be changed when it is already being modified.");
+            self.spl_throw(
+                b"RuntimeException",
+                "Heap cannot be changed when it is already being modified.",
+            );
             return false;
         }
         true
@@ -158,7 +174,11 @@ impl Vm {
     }
 
     /// Remove the top element; returns it as (data, priority), None if empty.
-    fn heap_delete_top(&mut self, obj: &Rc<RefCell<PhpObject>>, kind: HeapKind) -> Option<(Value, Value)> {
+    fn heap_delete_top(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        kind: HeapKind,
+    ) -> Option<(Value, Value)> {
         let pq = kind == HeapKind::PQueue;
         let mut h = Self::heap_load(obj, pq);
         if h.is_empty() {
@@ -225,7 +245,10 @@ impl Vm {
         let mut out = self.spl_std_props(obj);
         let cls: &[u8] = if pq { b"SplPriorityQueue" } else { b"SplHeap" };
         let flags = if pq { Self::pq_extract_flags(obj) } else { 0 };
-        out.set(ArrayKey::String(PhpString::from_vec(mangle_private(cls, b"flags"))), Value::Long(flags));
+        out.set(
+            ArrayKey::String(PhpString::from_vec(mangle_private(cls, b"flags"))),
+            Value::Long(flags),
+        );
         let corrupted = Self::heap_flag(obj, HEAP_CORRUPTED);
         out.set(
             ArrayKey::String(PhpString::from_vec(mangle_private(cls, b"isCorrupted"))),
@@ -233,9 +256,16 @@ impl Vm {
         );
         let mut heap = PhpArray::new();
         for e in Self::heap_load(obj, pq) {
-            heap.push(if pq { Self::pq_extract_value(e, 3) } else { e.0 });
+            heap.push(if pq {
+                Self::pq_extract_value(e, 3)
+            } else {
+                e.0
+            });
         }
-        out.set(ArrayKey::String(PhpString::from_vec(mangle_private(cls, b"heap"))), val_arr(heap));
+        out.set(
+            ArrayKey::String(PhpString::from_vec(mangle_private(cls, b"heap"))),
+            val_arr(heap),
+        );
         out
     }
 
@@ -253,15 +283,27 @@ impl Vm {
         let pq = kind == HeapKind::PQueue;
         match method {
             b"count" => Some(Value::Long(Self::heap_count(obj) as i64)),
-            b"isempty" => Some(if Self::heap_count(obj) == 0 { Value::True } else { Value::False }),
+            b"isempty" => Some(if Self::heap_count(obj) == 0 {
+                Value::True
+            } else {
+                Value::False
+            }),
             b"key" => Some(Value::Long(Self::heap_count(obj) as i64 - 1)),
-            b"valid" => Some(if Self::heap_count(obj) != 0 { Value::True } else { Value::False }),
+            b"valid" => Some(if Self::heap_count(obj) != 0 {
+                Value::True
+            } else {
+                Value::False
+            }),
             b"rewind" => Some(Value::Null),
             b"recoverfromcorruption" => {
                 Self::heap_set_flag(obj, HEAP_CORRUPTED, false);
                 Some(Value::True)
             }
-            b"iscorrupted" => Some(if Self::heap_flag(obj, HEAP_CORRUPTED) { Value::True } else { Value::False }),
+            b"iscorrupted" => Some(if Self::heap_flag(obj, HEAP_CORRUPTED) {
+                Value::True
+            } else {
+                Value::False
+            }),
             b"next" => {
                 self.heap_delete_top(obj, kind);
                 Some(Value::Null)
@@ -270,7 +312,11 @@ impl Vm {
                 let h = Self::heap_load(obj, pq);
                 match h.into_iter().next() {
                     None => Some(Value::Null),
-                    Some(e) => Some(if pq { Self::pq_extract_value(e, Self::pq_extract_flags(obj)) } else { e.0 }),
+                    Some(e) => Some(if pq {
+                        Self::pq_extract_value(e, Self::pq_extract_flags(obj))
+                    } else {
+                        e.0
+                    }),
                 }
             }
             b"top" => {
@@ -280,7 +326,11 @@ impl Vm {
                 let h = Self::heap_load(obj, pq);
                 match h.into_iter().next() {
                     None => self.spl_throw(b"RuntimeException", "Can't peek at an empty heap"),
-                    Some(e) => Some(if pq { Self::pq_extract_value(e, Self::pq_extract_flags(obj)) } else { e.0 }),
+                    Some(e) => Some(if pq {
+                        Self::pq_extract_value(e, Self::pq_extract_flags(obj))
+                    } else {
+                        e.0
+                    }),
                 }
             }
             b"extract" => {
@@ -289,7 +339,11 @@ impl Vm {
                 }
                 match self.heap_delete_top(obj, kind) {
                     None => self.spl_throw(b"RuntimeException", "Can't extract from an empty heap"),
-                    Some(e) => Some(if pq { Self::pq_extract_value(e, Self::pq_extract_flags(obj)) } else { e.0 }),
+                    Some(e) => Some(if pq {
+                        Self::pq_extract_value(e, Self::pq_extract_flags(obj))
+                    } else {
+                        e.0
+                    }),
                 }
             }
             b"insert" => {
@@ -298,7 +352,11 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 let d = args.first().cloned().unwrap_or(Value::Null).deref();
-                let p = if pq { args.get(1).cloned().unwrap_or(Value::Null).deref() } else { Value::Null };
+                let p = if pq {
+                    args.get(1).cloned().unwrap_or(Value::Null).deref()
+                } else {
+                    Value::Null
+                };
                 self.heap_insert(obj, kind, (d, p));
                 Some(Value::True)
             }
@@ -316,9 +374,13 @@ impl Vm {
                 let args = args?;
                 let v = args.first().map(|v| v.to_long()).unwrap_or(0) & 3;
                 if v == 0 {
-                    return self.spl_throw(b"RuntimeException", "Must specify at least one extract flag");
+                    return self.spl_throw(
+                        b"RuntimeException",
+                        "Must specify at least one extract flag",
+                    );
                 }
-                obj.borrow_mut().set_property(b"__spl_extract_flags".to_vec(), Value::Long(v));
+                obj.borrow_mut()
+                    .set_property(b"__spl_extract_flags".to_vec(), Value::Long(v));
                 Some(Value::Long(v))
             }
             b"getextractflags" if pq => Some(Value::Long(Self::pq_extract_flags(obj))),
@@ -328,15 +390,25 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 if Self::heap_flag(obj, HEAP_LOCKED) {
-                    return self.spl_throw(b"RuntimeException", "Cannot serialize heap while it is being modified.");
+                    return self.spl_throw(
+                        b"RuntimeException",
+                        "Cannot serialize heap while it is being modified.",
+                    );
                 }
                 let mut result = PhpArray::new();
                 result.push(val_arr(self.spl_std_props(obj)));
                 let mut state = PhpArray::new();
-                state.set(skey(b"flags"), Value::Long(if pq { Self::pq_extract_flags(obj) } else { 0 }));
+                state.set(
+                    skey(b"flags"),
+                    Value::Long(if pq { Self::pq_extract_flags(obj) } else { 0 }),
+                );
                 let mut elems = PhpArray::new();
                 for e in Self::heap_load(obj, pq) {
-                    elems.push(if pq { Self::pq_extract_value(e, 3) } else { e.0 });
+                    elems.push(if pq {
+                        Self::pq_extract_value(e, 3)
+                    } else {
+                        e.0
+                    });
                 }
                 state.set(skey(b"heap_elements"), val_arr(elems));
                 result.push(val_arr(state));
@@ -347,7 +419,8 @@ impl Vm {
                 if !pq && !self.heap_check(obj, true) {
                     return Some(Value::Null);
                 }
-                let class_disp = crate::value::display_class_name(&obj.borrow().class_name).to_string();
+                let class_disp =
+                    crate::value::display_class_name(&obj.borrow().class_name).to_string();
                 let invalid = format!("Invalid serialization data for {} object", class_disp);
                 let data = match args.first().cloned().map(|v| v.deref()) {
                     Some(Value::Array(a)) => a.borrow().clone(),
@@ -374,7 +447,8 @@ impl Vm {
                     if f == 0 {
                         return self.spl_throw(b"Exception", &invalid);
                     }
-                    obj.borrow_mut().set_property(b"__spl_extract_flags".to_vec(), Value::Long(f));
+                    obj.borrow_mut()
+                        .set_property(b"__spl_extract_flags".to_vec(), Value::Long(f));
                 } else if flags != 0 {
                     return self.spl_throw(b"Exception", &invalid);
                 }
@@ -388,7 +462,10 @@ impl Vm {
                             Value::Array(p) if p.borrow().len() == 2 => p.borrow().clone(),
                             _ => return self.spl_throw(b"Exception", &invalid),
                         };
-                        match (pair.get(&skey(b"data")).cloned(), pair.get(&skey(b"priority")).cloned()) {
+                        match (
+                            pair.get(&skey(b"data")).cloned(),
+                            pair.get(&skey(b"priority")).cloned(),
+                        ) {
                             (Some(d), Some(p)) => (d, p),
                             _ => return self.spl_throw(b"Exception", &invalid),
                         }

@@ -150,7 +150,9 @@ pub fn time_compare(t1: &Time, t2: &Time) -> i32 {
 }
 
 pub fn hms_to_seconds(h: i64, m: i64, s: i64) -> i64 {
-    h.wrapping_mul(SECS_PER_HOUR).wrapping_add(m.wrapping_mul(60)).wrapping_add(s)
+    h.wrapping_mul(SECS_PER_HOUR)
+        .wrapping_add(m.wrapping_mul(60))
+        .wrapping_add(s)
 }
 
 pub fn hmsf_to_decimal_hour(hour: i64, min: i64, sec: i64, us: i64) -> f64 {

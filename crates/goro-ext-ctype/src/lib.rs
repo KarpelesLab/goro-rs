@@ -76,15 +76,27 @@ fn ctype_check<F: Fn(u8) -> bool>(
             );
             let n = *n;
             if (0..=255).contains(&n) {
-                if iswhat(n as u8) { Value::True } else { Value::False }
+                if iswhat(n as u8) {
+                    Value::True
+                } else {
+                    Value::False
+                }
             } else if (-128..0).contains(&n) {
                 let b = (n + 256) as u8;
                 if iswhat(b) { Value::True } else { Value::False }
             } else if n > 255 {
-                if allow_digits { Value::True } else { Value::False }
+                if allow_digits {
+                    Value::True
+                } else {
+                    Value::False
+                }
             } else {
                 // n < -128
-                if allow_minus { Value::True } else { Value::False }
+                if allow_minus {
+                    Value::True
+                } else {
+                    Value::False
+                }
             }
         }
         _ => {
@@ -102,19 +114,54 @@ fn ctype_check<F: Fn(u8) -> bool>(
 }
 
 fn ctype_alpha(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_alpha", |b| b.is_ascii_alphabetic(), false, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_alpha",
+        |b| b.is_ascii_alphabetic(),
+        false,
+        false,
+    ))
 }
 fn ctype_digit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_digit", |b| b.is_ascii_digit(), true, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_digit",
+        |b| b.is_ascii_digit(),
+        true,
+        false,
+    ))
 }
 fn ctype_alnum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_alnum", |b| b.is_ascii_alphanumeric(), true, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_alnum",
+        |b| b.is_ascii_alphanumeric(),
+        true,
+        false,
+    ))
 }
 fn ctype_upper(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_upper", |b| b.is_ascii_uppercase(), false, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_upper",
+        |b| b.is_ascii_uppercase(),
+        false,
+        false,
+    ))
 }
 fn ctype_lower(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_lower", |b| b.is_ascii_lowercase(), false, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_lower",
+        |b| b.is_ascii_lowercase(),
+        false,
+        false,
+    ))
 }
 fn ctype_space(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(ctype_check(
@@ -127,10 +174,24 @@ fn ctype_space(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ))
 }
 fn ctype_cntrl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_cntrl", |b| b.is_ascii_control(), false, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_cntrl",
+        |b| b.is_ascii_control(),
+        false,
+        false,
+    ))
 }
 fn ctype_graph(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_graph", |b| b.is_ascii_graphic(), true, true))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_graph",
+        |b| b.is_ascii_graphic(),
+        true,
+        true,
+    ))
 }
 fn ctype_print(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(ctype_check(
@@ -143,8 +204,22 @@ fn ctype_print(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     ))
 }
 fn ctype_punct(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_punct", |b| b.is_ascii_punctuation(), false, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_punct",
+        |b| b.is_ascii_punctuation(),
+        false,
+        false,
+    ))
 }
 fn ctype_xdigit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(ctype_check(vm, args, "ctype_xdigit", |b| b.is_ascii_hexdigit(), true, false))
+    Ok(ctype_check(
+        vm,
+        args,
+        "ctype_xdigit",
+        |b| b.is_ascii_hexdigit(),
+        true,
+        false,
+    ))
 }

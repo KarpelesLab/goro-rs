@@ -9,9 +9,14 @@ pub fn unixtime2date(ts: i64) -> (i64, i64, i64) {
     if t < 0 {
         days -= 1;
     }
-    let era = (if days >= 0 { days } else { days - DAYS_PER_ERA + 1 }) / DAYS_PER_ERA;
+    let era = (if days >= 0 {
+        days
+    } else {
+        days - DAYS_PER_ERA + 1
+    }) / DAYS_PER_ERA;
     let day_of_era = (days - era * DAYS_PER_ERA) as u64;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
     let mut y = year_of_era as i64 + era * YEARS_PER_ERA;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_portion = (5 * day_of_year + 2) / 153;
@@ -58,7 +63,12 @@ pub fn update_from_sse(tm: &mut Time) {
             unixtime2gmt(tm, v);
         }
         ZONETYPE_ID => {
-            let offset = tm.tz_info.as_ref().and_then(|t| t.get_offset_info(tm.sse)).map(|x| x.0).unwrap_or(0);
+            let offset = tm
+                .tz_info
+                .as_ref()
+                .and_then(|t| t.get_offset_info(tm.sse))
+                .map(|x| x.0)
+                .unwrap_or(0);
             let v = tm.sse + offset as i64;
             unixtime2gmt(tm, v);
         }
@@ -87,7 +97,10 @@ pub fn unixtime2local(tm: &mut Time, ts: i64) {
         }
         ZONETYPE_ID => {
             let tz = tm.tz_info.clone();
-            let gmt_offset = tz.as_ref().map(|t| t.get_time_zone_info(ts)).unwrap_or_default();
+            let gmt_offset = tz
+                .as_ref()
+                .map(|t| t.get_time_zone_info(ts))
+                .unwrap_or_default();
             unixtime2gmt(tm, ts + gmt_offset.offset as i64);
             tm.sse = ts;
             tm.dst = gmt_offset.is_dst as i32;

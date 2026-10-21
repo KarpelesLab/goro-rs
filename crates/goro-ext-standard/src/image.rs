@@ -18,12 +18,24 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"iptcparse", iptcparse_fn);
 
     let p = |n: &[u8]| n.to_vec();
-    vm.builtin_param_names.insert(p(b"getimagesize"), vec![p(b"filename"), p(b"image_info")]);
-    vm.builtin_param_names.insert(p(b"getimagesizefromstring"), vec![p(b"string"), p(b"image_info")]);
-    vm.builtin_param_names.insert(p(b"image_type_to_mime_type"), vec![p(b"image_type")]);
-    vm.builtin_param_names.insert(p(b"image_type_to_extension"), vec![p(b"image_type"), p(b"include_dot")]);
-    vm.builtin_param_names.insert(p(b"iptcembed"), vec![p(b"iptc_data"), p(b"filename"), p(b"spool")]);
-    vm.builtin_param_names.insert(p(b"iptcparse"), vec![p(b"iptc_block")]);
+    vm.builtin_param_names
+        .insert(p(b"getimagesize"), vec![p(b"filename"), p(b"image_info")]);
+    vm.builtin_param_names.insert(
+        p(b"getimagesizefromstring"),
+        vec![p(b"string"), p(b"image_info")],
+    );
+    vm.builtin_param_names
+        .insert(p(b"image_type_to_mime_type"), vec![p(b"image_type")]);
+    vm.builtin_param_names.insert(
+        p(b"image_type_to_extension"),
+        vec![p(b"image_type"), p(b"include_dot")],
+    );
+    vm.builtin_param_names.insert(
+        p(b"iptcembed"),
+        vec![p(b"iptc_data"), p(b"filename"), p(b"spool")],
+    );
+    vm.builtin_param_names
+        .insert(p(b"iptcparse"), vec![p(b"iptc_block")]);
 
     use goro_core::opcode::ParamType;
     let i = || Some(ParamType::Simple(b"int".to_vec()));
@@ -43,15 +55,38 @@ pub fn register(vm: &mut Vm) {
 fn throw(vm: &mut Vm, class: &[u8], msg: String) -> VmError {
     let exc = vm.create_exception(class, &msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
-fn arg_type_error(vm: &mut Vm, func: &str, n: usize, name: &str, expected: &str, v: &Value) -> VmError {
+fn arg_type_error(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    expected: &str,
+    v: &Value,
+) -> VmError {
     let given = Vm::value_type_name(v);
-    throw(vm, b"TypeError", format!("{}(): Argument #{} (${}) must be of type {}, {} given", func, n, name, expected, given))
+    throw(
+        vm,
+        b"TypeError",
+        format!(
+            "{}(): Argument #{} (${}) must be of type {}, {} given",
+            func, n, name, expected, given
+        ),
+    )
 }
 
-fn zpp_long(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) -> Result<i64, VmError> {
+fn zpp_long(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: Option<&Value>,
+) -> Result<i64, VmError> {
     let v = v.map(|v| v.deref()).unwrap_or(Value::Null);
     match &v {
         Value::Long(l) => Ok(*l),
@@ -68,7 +103,8 @@ fn zpp_long(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) ->
         Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
             Some((goro_core::value::NumStr::Long(l), _)) => Ok(l),
             Some((goro_core::value::NumStr::Double(d), _)) => {
-                if !d.is_finite() || d < -9.223_372_036_854_776e18 || d >= 9.223_372_036_854_776e18 {
+                if !d.is_finite() || d < -9.223_372_036_854_776e18 || d >= 9.223_372_036_854_776e18
+                {
                     Err(arg_type_error(vm, func, n, name, "int", &v))
                 } else {
                     Ok(d as i64)
@@ -80,7 +116,13 @@ fn zpp_long(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) ->
     }
 }
 
-fn zpp_bool(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) -> Result<bool, VmError> {
+fn zpp_bool(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: Option<&Value>,
+) -> Result<bool, VmError> {
     let v = v.map(|v| v.deref()).unwrap_or(Value::Null);
     match &v {
         Value::Array(_) | Value::Object(_) | Value::Resource(_) | Value::Generator(_) => {
@@ -90,7 +132,13 @@ fn zpp_bool(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) ->
     }
 }
 
-fn zpp_str(vm: &mut Vm, func: &str, n: usize, name: &str, v: Option<&Value>) -> Result<PhpString, VmError> {
+fn zpp_str(
+    vm: &mut Vm,
+    func: &str,
+    n: usize,
+    name: &str,
+    v: Option<&Value>,
+) -> Result<PhpString, VmError> {
     let v = v.map(|v| v.deref()).unwrap_or(Value::Null);
     match &v {
         Value::Array(_) | Value::Resource(_) | Value::Generator(_) => {
@@ -150,7 +198,9 @@ fn php_image_type_to_mime_type(image_type: i64) -> &'static str {
 
 fn image_type_to_mime_type_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let t = zpp_long(vm, "image_type_to_mime_type", 1, "image_type", args.first())?;
-    Ok(Value::String(PhpString::from_bytes(php_image_type_to_mime_type(t).as_bytes())))
+    Ok(Value::String(PhpString::from_bytes(
+        php_image_type_to_mime_type(t).as_bytes(),
+    )))
 }
 
 fn image_type_to_extension_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -195,7 +245,11 @@ struct ImgStream {
 
 impl ImgStream {
     fn new(data: Vec<u8>) -> Self {
-        ImgStream { data, pos: 0, eof: false }
+        ImgStream {
+            data,
+            pos: 0,
+            eof: false,
+        }
     }
 
     /// php_stream_read: returns up to `n` bytes.
@@ -305,7 +359,11 @@ fn handle_gif(s: &mut ImgStream) -> Option<GfxInfo> {
     Some(GfxInfo {
         width: dim[0] as u32 | ((dim[1] as u32) << 8),
         height: dim[2] as u32 | ((dim[3] as u32) << 8),
-        bits: if dim[4] & 0x80 != 0 { (dim[4] as u32 & 0x07) + 1 } else { 0 },
+        bits: if dim[4] & 0x80 != 0 {
+            (dim[4] as u32 & 0x07) + 1
+        } else {
+            0
+        },
         channels: 3,
     })
 }
@@ -371,7 +429,9 @@ fn swf_get_bits(buffer: &[u8], pos: u32, count: u32) -> u64 {
 fn swf_dims(buf: &[u8]) -> (u32, u32) {
     let bits = swf_get_bits(buf, 0, 5) as u32;
     let width = swf_get_bits(buf, 5 + bits, bits).wrapping_sub(swf_get_bits(buf, 5, bits)) / 20;
-    let height = swf_get_bits(buf, 5 + 3 * bits, bits).wrapping_sub(swf_get_bits(buf, 5 + 2 * bits, bits)) / 20;
+    let height =
+        swf_get_bits(buf, 5 + 3 * bits, bits).wrapping_sub(swf_get_bits(buf, 5 + 2 * bits, bits))
+            / 20;
     (width as u32, height as u32)
 }
 
@@ -423,7 +483,11 @@ fn handle_swc(s: &mut ImgStream) -> Option<GfxInfo> {
     }
     if status_ok {
         let (w, h) = swf_dims(&b);
-        Some(GfxInfo { width: w, height: h, ..Default::default() })
+        Some(GfxInfo {
+            width: w,
+            height: h,
+            ..Default::default()
+        })
     } else {
         None
     }
@@ -438,7 +502,12 @@ fn handle_swf(s: &mut ImgStream) -> Option<GfxInfo> {
         return None;
     }
     let (w, h) = swf_dims(&a);
-    Some(GfxInfo { width: w, height: h, bits: 0, channels: 0 })
+    Some(GfxInfo {
+        width: w,
+        height: h,
+        bits: 0,
+        channels: 0,
+    })
 }
 
 fn handle_png(s: &mut ImgStream) -> Option<GfxInfo> {
@@ -509,7 +578,10 @@ fn next_marker(vm: &mut Vm, func: &str, s: &mut ImgStream, ff_read: bool) -> u32
         if extraneous > 0 {
             let line = vm.current_line;
             vm.emit_warning_at(
-                &format!("{}(): Corrupt JPEG data: {} extraneous bytes before marker", func, extraneous),
+                &format!(
+                    "{}(): Corrupt JPEG data: {} extraneous bytes before marker",
+                    func, extraneous
+                ),
                 line,
             );
         }
@@ -554,22 +626,32 @@ fn read_app(s: &mut ImgStream, marker: u32, info: &mut PhpArray) -> bool {
     true
 }
 
-fn handle_jpeg(vm: &mut Vm, func: &str, s: &mut ImgStream, mut info: Option<&mut PhpArray>) -> Option<GfxInfo> {
+fn handle_jpeg(
+    vm: &mut Vm,
+    func: &str,
+    s: &mut ImgStream,
+    mut info: Option<&mut PhpArray>,
+) -> Option<GfxInfo> {
     let mut result: Option<GfxInfo> = None;
     let mut ff_read = true;
     loop {
         let marker = next_marker(vm, func, s, ff_read);
         ff_read = false;
         match marker {
-            M_SOF0 | M_SOF1 | M_SOF2 | M_SOF3 | M_SOF5 | M_SOF6 | M_SOF7 | M_SOF9 | M_SOF10 | M_SOF11
-            | M_SOF13 | M_SOF14 | M_SOF15 => {
+            M_SOF0 | M_SOF1 | M_SOF2 | M_SOF3 | M_SOF5 | M_SOF6 | M_SOF7 | M_SOF9 | M_SOF10
+            | M_SOF11 | M_SOF13 | M_SOF14 | M_SOF15 => {
                 if result.is_none() {
                     let length = read2(s);
                     let bits = s.getc() as u32;
                     let height = read2(s) as u32;
                     let width = read2(s) as u32;
                     let channels = s.getc() as u32;
-                    result = Some(GfxInfo { width, height, bits, channels });
+                    result = Some(GfxInfo {
+                        width,
+                        height,
+                        bits,
+                        channels,
+                    });
                     if info.is_none() || length < 8 {
                         return result;
                     }
@@ -604,7 +686,10 @@ fn handle_jpc(vm: &mut Vm, func: &str, s: &mut ImgStream) -> Option<GfxInfo> {
     if first_marker_id != 0x51 {
         let line = vm.current_line;
         vm.emit_warning_at(
-            &format!("{}(): JPEG2000 codestream corrupt(Expected SIZ marker not found after SOC)", func),
+            &format!(
+                "{}(): JPEG2000 codestream corrupt(Expected SIZ marker not found after SOC)",
+                func
+            ),
             line,
         );
         return None;
@@ -659,7 +744,10 @@ fn handle_jp2(vm: &mut Vm, func: &str, s: &mut ImgStream) -> Option<GfxInfo> {
     }
     if result.is_none() {
         let line = vm.current_line;
-        vm.emit_warning_at(&format!("{}(): JP2 file has no codestreams at root level", func), line);
+        vm.emit_warning_at(
+            &format!("{}(): JP2 file has no codestreams at root level", func),
+            line,
+        );
     }
     result
 }
@@ -707,11 +795,11 @@ fn handle_tiff(s: &mut ImgStream, motorola: bool) -> Option<GfxInfo> {
         let tag = ifd_get16u(&e[0..], motorola);
         let typ = ifd_get16u(&e[2..], motorola);
         let value: u64 = match typ {
-            1 | 6 => e[8] as u64,                                        // BYTE / SBYTE
-            3 => ifd_get16u(&e[8..], motorola) as u64,                   // USHORT
+            1 | 6 => e[8] as u64,                                           // BYTE / SBYTE
+            3 => ifd_get16u(&e[8..], motorola) as u64,                      // USHORT
             8 => ifd_get16u(&e[8..], motorola) as u16 as i16 as i64 as u64, // SSHORT
-            4 => ifd_get32s(&e[8..], motorola) as u32 as u64,            // ULONG
-            9 => ifd_get32s(&e[8..], motorola) as i64 as u64,            // SLONG
+            4 => ifd_get32s(&e[8..], motorola) as u32 as u64,               // ULONG
+            9 => ifd_get32s(&e[8..], motorola) as i64 as u64,               // SLONG
             _ => continue,
         };
         match tag {
@@ -721,7 +809,12 @@ fn handle_tiff(s: &mut ImgStream, motorola: bool) -> Option<GfxInfo> {
         }
     }
     if width != 0 && height != 0 {
-        return Some(GfxInfo { width: width as u32, height: height as u32, bits: 0, channels: 0 });
+        return Some(GfxInfo {
+            width: width as u32,
+            height: height as u32,
+            bits: 0,
+            channels: 0,
+        });
     }
     None
 }
@@ -858,7 +951,10 @@ fn scan_define(line: &[u8]) -> Option<(Vec<u8>, i32)> {
     let mut overflow = false;
     while p < line.len() && line[p].is_ascii_digit() {
         if !overflow {
-            match v.checked_mul(10).and_then(|x| x.checked_add((line[p] - b'0') as i64)) {
+            match v
+                .checked_mul(10)
+                .and_then(|x| x.checked_add((line[p] - b'0') as i64))
+            {
                 Some(x) => v = x,
                 None => overflow = true,
             }
@@ -904,7 +1000,11 @@ fn get_xbm(s: &mut ImgStream) -> Option<(u32, u32)> {
             }
         }
     }
-    if width != 0 && height != 0 { Some((width, height)) } else { None }
+    if width != 0 && height != 0 {
+        Some((width, height))
+    } else {
+        None
+    }
 }
 
 fn handle_ico(s: &mut ImgStream) -> Option<GfxInfo> {
@@ -953,10 +1053,18 @@ fn handle_webp(s: &mut ImgStream) -> Option<GfxInfo> {
             b(9) + ((b(10) & 0x3F) << 8) + 1,
             (b(10) >> 6) + (b(11) << 2) + ((b(12) & 0xF) << 10) + 1,
         ),
-        b'X' => (b(12) + (b(13) << 8) + (b(14) << 16) + 1, b(15) + (b(16) << 8) + (b(17) << 16) + 1),
+        b'X' => (
+            b(12) + (b(13) << 8) + (b(14) << 16) + 1,
+            b(15) + (b(16) << 8) + (b(17) << 16) + 1,
+        ),
         _ => return None,
     };
-    Some(GfxInfo { width, height, bits: 8, channels: 0 })
+    Some(GfxInfo {
+        width,
+        height,
+        bits: 8,
+        channels: 0,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,9 +1137,9 @@ struct AvifInternal {
     primary_item_id: u32,
     primary: AvifFeatures,
     data_was_skipped: bool,
-    tiles: Vec<(u32, u32)>,          // (tile_item_id, parent_item_id)
-    props: Vec<(u32, u32)>,          // (property_index, item_id)
-    dim_props: Vec<(u32, u32, u32)>, // (property_index, width, height)
+    tiles: Vec<(u32, u32)>,           // (tile_item_id, parent_item_id)
+    props: Vec<(u32, u32)>,           // (property_index, item_id)
+    dim_props: Vec<(u32, u32, u32)>,  // (property_index, width, height)
     chan_props: Vec<(u32, u32, u32)>, // (property_index, bit_depth, num_channels)
 }
 
@@ -1114,7 +1222,10 @@ fn avif_get_item_features(f: &mut AvifInternal, target: u32, tile_depth: u32) ->
 
 fn avif_get_primary_item_features(f: &mut AvifInternal) -> AvSt {
     av_check!(f.has_primary_item, AvSt::NotFound);
-    av_check!(!f.dim_props.is_empty() && !f.chan_props.is_empty(), AvSt::NotFound);
+    av_check!(
+        !f.dim_props.is_empty() && !f.chan_props.is_empty(),
+        AvSt::NotFound
+    );
     let id = f.primary_item_id;
     av_found!(avif_get_item_features(f, id, 0));
     if f.has_alpha {
@@ -1123,7 +1234,11 @@ fn avif_get_primary_item_features(f: &mut AvifInternal) -> AvSt {
     AvSt::Found
 }
 
-fn avif_parse_box(st: &mut AvifStream, num_remaining: u32, num_parsed: &mut u32) -> Result<AvifBox, AvSt> {
+fn avif_parse_box(
+    st: &mut AvifStream,
+    num_remaining: u32,
+    num_parsed: &mut u32,
+) -> Result<AvifBox, AvSt> {
     let mut header_size: u32 = 8;
     if header_size > num_remaining {
         return Err(AvSt::Invalid);
@@ -1147,7 +1262,10 @@ fn avif_parse_box(st: &mut AvifStream, num_remaining: u32, num_parsed: &mut u32)
     if size < header_size || size > num_remaining {
         return Err(AvSt::Invalid);
     }
-    let full = matches!(&typ, b"meta" | b"pitm" | b"ipma" | b"ispe" | b"pixi" | b"iref" | b"auxC");
+    let full = matches!(
+        &typ,
+        b"meta" | b"pitm" | b"ipma" | b"ispe" | b"pixi" | b"iref" | b"auxC"
+    );
     if full {
         header_size += 4;
     }
@@ -1178,10 +1296,21 @@ fn avif_parse_box(st: &mut AvifStream, num_remaining: u32, num_parsed: &mut u32)
             typ = *b"\0skp";
         }
     }
-    Ok(AvifBox { size, typ, version, flags, content_size })
+    Ok(AvifBox {
+        size,
+        typ,
+        version,
+        flags,
+        content_size,
+    })
 }
 
-fn avif_parse_ipco(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mut AvifInternal) -> AvSt {
+fn avif_parse_ipco(
+    st: &mut AvifStream,
+    mut remaining: u32,
+    np: &mut u32,
+    f: &mut AvifInternal,
+) -> AvSt {
     let mut box_index: u32 = 1;
     loop {
         let bx = av_try!(avif_parse_box(st, remaining, np));
@@ -1234,7 +1363,11 @@ fn avif_parse_ipco(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
                     av_check!(high, AvSt::Invalid);
                 }
                 if f.chan_props.len() < AVIFINFO_MAX_FEATURES && box_index <= AVIFINFO_MAX_VALUE {
-                    let bd = if high { if twelve { 12 } else { 10 } } else { 8 };
+                    let bd = if high {
+                        if twelve { 12 } else { 10 }
+                    } else {
+                        8
+                    };
                     f.chan_props.push((box_index, bd, if mono { 1 } else { 3 }));
                 } else {
                     f.data_was_skipped = true;
@@ -1269,7 +1402,12 @@ fn avif_parse_ipco(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
     AvSt::NotFound
 }
 
-fn avif_parse_iprp(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mut AvifInternal) -> AvSt {
+fn avif_parse_iprp(
+    st: &mut AvifStream,
+    mut remaining: u32,
+    np: &mut u32,
+    f: &mut AvifInternal,
+) -> AvSt {
     loop {
         let bx = av_try!(avif_parse_box(st, remaining, np));
         match &bx.typ {
@@ -1297,7 +1435,9 @@ fn avif_parse_iprp(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
                     let assoc_count = be(&d[id_num_bytes as usize..], 1);
                     let mut property: u32 = 0;
                     while property < assoc_count {
-                        if property as usize >= AVIFINFO_MAX_PROPS || f.props.len() >= AVIFINFO_MAX_PROPS {
+                        if property as usize >= AVIFINFO_MAX_PROPS
+                            || f.props.len() >= AVIFINFO_MAX_PROPS
+                        {
                             f.data_was_skipped = true;
                             break;
                         }
@@ -1333,7 +1473,12 @@ fn avif_parse_iprp(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
     AvSt::NotFound
 }
 
-fn avif_parse_iref(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mut AvifInternal) -> AvSt {
+fn avif_parse_iref(
+    st: &mut AvifStream,
+    mut remaining: u32,
+    np: &mut u32,
+    f: &mut AvifInternal,
+) -> AvSt {
     loop {
         let bx = av_try!(avif_parse_box(st, remaining, np));
         if &bx.typ == b"dimg" {
@@ -1352,7 +1497,10 @@ fn avif_parse_iref(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
                 av_check!(bx.content_size >= num_read, AvSt::Invalid);
                 let d = av_try!(st.read(nb));
                 let to_item = be(&d, nb as usize);
-                if from_item <= AVIFINFO_MAX_VALUE && to_item <= AVIFINFO_MAX_VALUE && f.tiles.len() < AVIFINFO_MAX_TILES {
+                if from_item <= AVIFINFO_MAX_VALUE
+                    && to_item <= AVIFINFO_MAX_VALUE
+                    && f.tiles.len() < AVIFINFO_MAX_TILES
+                {
                     f.tiles.push((to_item, from_item));
                 } else {
                     f.data_was_skipped = true;
@@ -1370,7 +1518,12 @@ fn avif_parse_iref(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
     AvSt::NotFound
 }
 
-fn avif_parse_meta(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mut AvifInternal) -> AvSt {
+fn avif_parse_meta(
+    st: &mut AvifStream,
+    mut remaining: u32,
+    np: &mut u32,
+    f: &mut AvifInternal,
+) -> AvSt {
     loop {
         let bx = av_try!(avif_parse_box(st, remaining, np));
         match &bx.typ {
@@ -1399,7 +1552,11 @@ fn avif_parse_meta(st: &mut AvifStream, mut remaining: u32, np: &mut u32, f: &mu
             break;
         }
     }
-    if f.data_was_skipped { AvSt::Aborted } else { AvSt::Invalid }
+    if f.data_was_skipped {
+        AvSt::Aborted
+    } else {
+        AvSt::Invalid
+    }
 }
 
 fn avif_parse_ftyp(st: &mut AvifStream) -> AvSt {
@@ -1463,7 +1620,10 @@ fn getimagetype(vm: &mut Vm, func: &str, s: &mut ImgStream, input: &[u8]) -> i64
     };
     let err_reading = |vm: &mut Vm| {
         let line = vm.current_line;
-        vm.emit_notice_at(&format!("{}(): Error reading from {}!", func, input_disp), line);
+        vm.emit_notice_at(
+            &format!("{}(): Error reading from {}!", func, input_disp),
+            line,
+        );
     };
     let mut ft = [0u8; 12];
     if s.read_into(&mut ft[..3]) != 3 {
@@ -1471,7 +1631,9 @@ fn getimagetype(vm: &mut Vm, func: &str, s: &mut ImgStream, input: &[u8]) -> i64
         return IMAGE_FILETYPE_UNKNOWN;
     }
     const PNG: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-    const JP2: [u8; 12] = [0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a];
+    const JP2: [u8; 12] = [
+        0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a,
+    ];
     if &ft[..3] == b"GIF" {
         return IMAGE_FILETYPE_GIF;
     } else if ft[..3] == [0xff, 0xd8, 0xff] {
@@ -1485,7 +1647,10 @@ fn getimagetype(vm: &mut Vm, func: &str, s: &mut ImgStream, input: &[u8]) -> i64
             return IMAGE_FILETYPE_PNG;
         }
         let line = vm.current_line;
-        vm.emit_warning_at(&format!("{}(): PNG file corrupted by ASCII conversion", func), line);
+        vm.emit_warning_at(
+            &format!("{}(): PNG file corrupted by ASCII conversion", func),
+            line,
+        );
         return IMAGE_FILETYPE_UNKNOWN;
     } else if &ft[..3] == b"FWS" {
         return IMAGE_FILETYPE_SWF;
@@ -1529,7 +1694,10 @@ fn getimagetype(vm: &mut Vm, func: &str, s: &mut ImgStream, input: &[u8]) -> i64
     if s.rewind() && is_image_avif(s) {
         return IMAGE_FILETYPE_AVIF;
     }
-    if twelve && &ft[4..8] == b"ftyp" && (&ft[8..12] == b"mif1" || &ft[8..12] == b"heic" || &ft[8..12] == b"heix") {
+    if twelve
+        && &ft[4..8] == b"ftyp"
+        && (&ft[8..12] == b"mif1" || &ft[8..12] == b"heic" || &ft[8..12] == b"heix")
+    {
         return IMAGE_FILETYPE_HEIF;
     }
     if get_wbmp(s).is_some() {
@@ -1571,7 +1739,11 @@ fn getimagesize_from_stream(
             height: h as u32,
             ..Default::default()
         }),
-        IMAGE_FILETYPE_XBM => get_xbm(s).map(|(w, h)| GfxInfo { width: w, height: h, ..Default::default() }),
+        IMAGE_FILETYPE_XBM => get_xbm(s).map(|(w, h)| GfxInfo {
+            width: w,
+            height: h,
+            ..Default::default()
+        }),
         IMAGE_FILETYPE_ICO => handle_ico(s),
         IMAGE_FILETYPE_WEBP => handle_webp(s),
         IMAGE_FILETYPE_AVIF => handle_avif(s),
@@ -1606,9 +1778,20 @@ fn getimagesize_from_stream(
     if r.channels != 0 {
         arr.set(sk(b"channels"), Value::Long(r.channels as i64));
     }
-    arr.set(sk(b"mime"), Value::String(PhpString::from_bytes(php_image_type_to_mime_type(itype).as_bytes())));
-    arr.set(sk(b"width_unit"), Value::String(PhpString::from_bytes(b"px")));
-    arr.set(sk(b"height_unit"), Value::String(PhpString::from_bytes(b"px")));
+    arr.set(
+        sk(b"mime"),
+        Value::String(PhpString::from_bytes(
+            php_image_type_to_mime_type(itype).as_bytes(),
+        )),
+    );
+    arr.set(
+        sk(b"width_unit"),
+        Value::String(PhpString::from_bytes(b"px")),
+    );
+    arr.set(
+        sk(b"height_unit"),
+        Value::String(PhpString::from_bytes(b"px")),
+    );
     Value::Array(Rc::new(RefCell::new(arr)))
 }
 
@@ -1629,7 +1812,10 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
             if !vm.check_open_basedir(func, &p) {
                 let line = vm.current_line;
                 vm.emit_warning_at(
-                    &format!("{}({}): Failed to open stream: Operation not permitted", func, path),
+                    &format!(
+                        "{}({}): Failed to open stream: Operation not permitted",
+                        func, path
+                    ),
                     line,
                 );
                 return None;
@@ -1640,7 +1826,10 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
                     if std::fs::metadata(&np).map(|m| m.is_dir()).unwrap_or(false) {
                         let line = vm.current_line;
                         vm.emit_notice_at(
-                            &format!("{}(): Read of 8192 bytes failed with errno=21 Is a directory", func),
+                            &format!(
+                                "{}(): Read of 8192 bytes failed with errno=21 Is a directory",
+                                func
+                            ),
                             line,
                         );
                         return Some(Vec::new());
@@ -1653,7 +1842,10 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
                 Err(e) => {
                     let msg = crate::misc::strip_os_error(&e.to_string());
                     let line = vm.current_line;
-                    vm.emit_warning_at(&format!("{}({}): Failed to open stream: {}", func, path, msg), line);
+                    vm.emit_warning_at(
+                        &format!("{}({}): Failed to open stream: {}", func, path, msg),
+                        line,
+                    );
                     None
                 }
             }
@@ -1680,14 +1872,21 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
 }
 
 fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result<Value, VmError> {
-    let func = if from_path { "getimagesize" } else { "getimagesizefromstring" };
+    let func = if from_path {
+        "getimagesize"
+    } else {
+        "getimagesizefromstring"
+    };
     let pname = if from_path { "filename" } else { "string" };
     let input = zpp_str(vm, func, 1, pname, args.first())?;
     if from_path && input.as_bytes().contains(&0) {
         return Err(throw(
             vm,
             b"ValueError",
-            format!("{}(): Argument #1 (${}) must not contain any null bytes", func, pname),
+            format!(
+                "{}(): Argument #1 (${}) must not contain any null bytes",
+                func, pname
+            ),
         ));
     }
     let info_ref = if args.len() >= 2 {
@@ -1858,7 +2057,11 @@ fn iptcembed_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "iptcembed(): Argument #2 ($filename) must not contain any null bytes".to_string(),
         ));
     }
-    let spool = if args.len() > 2 { zpp_long(vm, "iptcembed", 3, "spool", args.get(2))? } else { 0 };
+    let spool = if args.len() > 2 {
+        zpp_long(vm, "iptcembed", 3, "spool", args.get(2))?
+    } else {
+        0
+    };
     let path = jpeg_file.to_string_lossy().to_string();
     if !vm.check_open_basedir("iptcembed", &path) {
         return Ok(Value::False);
@@ -1955,7 +2158,9 @@ fn iptcembed_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     if use_buf {
-        Ok(Value::String(PhpString::from_vec(spoolbuf.unwrap_or_default())))
+        Ok(Value::String(PhpString::from_vec(
+            spoolbuf.unwrap_or_default(),
+        )))
     } else {
         Ok(Value::True)
     }

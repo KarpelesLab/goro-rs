@@ -102,9 +102,15 @@ impl Vm {
     fn dll_rewind_cursor(obj: &Rc<RefCell<PhpObject>>, flags: i64) -> Cursor {
         let (_, ids) = load(obj);
         if flags & IT_LIFO != 0 {
-            Cursor { cur: ids.last().copied(), pos: ids.len() as i64 - 1 }
+            Cursor {
+                cur: ids.last().copied(),
+                pos: ids.len() as i64 - 1,
+            }
         } else {
-            Cursor { cur: ids.first().copied(), pos: 0 }
+            Cursor {
+                cur: ids.first().copied(),
+                pos: 0,
+            }
         }
     }
 
@@ -169,7 +175,14 @@ impl Vm {
     }
 
     fn dll_set_obj_cursor(obj: &Rc<RefCell<PhpObject>>, c: Cursor) {
-        set_prop(obj, b"__spl_dll_cur", match c.cur { Some(n) => Value::Long(n), None => Value::Null });
+        set_prop(
+            obj,
+            b"__spl_dll_cur",
+            match c.cur {
+                Some(n) => Value::Long(n),
+                None => Value::Null,
+            },
+        );
         set_prop(obj, b"__spl_dll_tpos", Value::Long(c.pos));
     }
 
@@ -178,19 +191,35 @@ impl Vm {
         if index < 0 || index as usize >= len {
             return None;
         }
-        Some(if backward { len - 1 - index as usize } else { index as usize })
+        Some(if backward {
+            len - 1 - index as usize
+        } else {
+            index as usize
+        })
     }
 
     pub(crate) fn dll_debug_info(&mut self, obj: &Rc<RefCell<PhpObject>>) -> PhpArray {
         let mut out = self.spl_std_props(obj);
         let flags = dll_flags(self, obj);
-        out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplDoublyLinkedList", b"flags"))), Value::Long(flags));
+        out.set(
+            ArrayKey::String(PhpString::from_vec(mangle_private(
+                b"SplDoublyLinkedList",
+                b"flags",
+            ))),
+            Value::Long(flags),
+        );
         let (vals, _) = load(obj);
         let mut a = PhpArray::new();
         for v in vals {
             a.push(v);
         }
-        out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplDoublyLinkedList", b"dllist"))), val_arr(a));
+        out.set(
+            ArrayKey::String(PhpString::from_vec(mangle_private(
+                b"SplDoublyLinkedList",
+                b"dllist",
+            ))),
+            val_arr(a),
+        );
         out
     }
 
@@ -206,11 +235,25 @@ impl Vm {
 
     /// Dispatch an SplDoublyLinkedList method. `args` excludes $this; None on
     /// the no-argument path.
-    pub(crate) fn spl_dll_call(&mut self, method: &[u8], obj: &Rc<RefCell<PhpObject>>, args: Option<&[Value]>) -> Option<Value> {
+    pub(crate) fn spl_dll_call(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
-            b"push" | b"unshift" | b"enqueue" | b"setiteratormode" | b"offsetexists" | b"offsetget" | b"offsetset"
-                | b"offsetunset" | b"add" | b"unserialize" | b"__unserialize"
+            b"push"
+                | b"unshift"
+                | b"enqueue"
+                | b"setiteratormode"
+                | b"offsetexists"
+                | b"offsetget"
+                | b"offsetset"
+                | b"offsetunset"
+                | b"add"
+                | b"unserialize"
+                | b"__unserialize"
         );
         if needs_args && args.is_none() {
             return None;
@@ -241,13 +284,21 @@ impl Vm {
                         store(obj, vals, ids);
                         v
                     }
-                    None => return self.spl_throw(b"RuntimeException", "Can't pop from an empty datastructure"),
+                    None => {
+                        return self.spl_throw(
+                            b"RuntimeException",
+                            "Can't pop from an empty datastructure",
+                        );
+                    }
                 }
             }
             b"shift" | b"dequeue" => {
                 let (mut vals, mut ids) = load(obj);
                 if vals.is_empty() {
-                    return self.spl_throw(b"RuntimeException", "Can't shift from an empty datastructure");
+                    return self.spl_throw(
+                        b"RuntimeException",
+                        "Can't shift from an empty datastructure",
+                    );
                 }
                 let v = vals.remove(0);
                 ids.remove(0);
@@ -258,23 +309,39 @@ impl Vm {
                 let (vals, _) = load(obj);
                 match vals.last() {
                     Some(v) => v.clone(),
-                    None => return self.spl_throw(b"RuntimeException", "Can't peek at an empty datastructure"),
+                    None => {
+                        return self.spl_throw(
+                            b"RuntimeException",
+                            "Can't peek at an empty datastructure",
+                        );
+                    }
                 }
             }
             b"bottom" => {
                 let (vals, _) = load(obj);
                 match vals.first() {
                     Some(v) => v.clone(),
-                    None => return self.spl_throw(b"RuntimeException", "Can't peek at an empty datastructure"),
+                    None => {
+                        return self.spl_throw(
+                            b"RuntimeException",
+                            "Can't peek at an empty datastructure",
+                        );
+                    }
                 }
             }
             b"count" => Value::Long(load(obj).0.len() as i64),
             b"isempty" => {
                 // spl_dllist_object_count_elements: honours a count() override
                 let cl = obj_class_lower(obj);
-                let user_count = self.classes.get(&cl).map(|c| c.get_method(b"count").is_some()).unwrap_or(false);
+                let user_count = self
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"count").is_some())
+                    .unwrap_or(false);
                 let n = if user_count {
-                    self.call_object_method(&Value::Object(obj.clone()), b"count", &[]).map(|v| v.to_long()).unwrap_or(0)
+                    self.call_object_method(&Value::Object(obj.clone()), b"count", &[])
+                        .map(|v| v.to_long())
+                        .unwrap_or(0)
                 } else {
                     load(obj).0.len() as i64
                 };
@@ -282,7 +349,12 @@ impl Vm {
             }
             b"setiteratormode" => {
                 let v = match a.first() {
-                    Some(v) => match self.spl_arg_long("SplDoublyLinkedList::setIteratorMode", 1, "mode", v) {
+                    Some(v) => match self.spl_arg_long(
+                        "SplDoublyLinkedList::setIteratorMode",
+                        1,
+                        "mode",
+                        v,
+                    ) {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
@@ -290,7 +362,10 @@ impl Vm {
                 };
                 let flags = dll_flags(self, obj);
                 if flags & IT_FIX != 0 && (flags & IT_LIFO) != (v & IT_LIFO) {
-                    return self.spl_throw(b"RuntimeException", "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen");
+                    return self.spl_throw(
+                        b"RuntimeException",
+                        "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen",
+                    );
                 }
                 let nf = (v & IT_MASK) | (flags & IT_FIX);
                 set_prop(obj, b"__spl_iter_mode", Value::Long(nf));
@@ -303,7 +378,11 @@ impl Vm {
                     None => return Some(Value::Null),
                 };
                 let n = load(obj).0.len() as i64;
-                if i >= 0 && i < n { Value::True } else { Value::False }
+                if i >= 0 && i < n {
+                    Value::True
+                } else {
+                    Value::False
+                }
             }
             b"offsetget" => {
                 let func = "SplDoublyLinkedList::offsetGet";
@@ -360,7 +439,13 @@ impl Vm {
                         store(obj, vals, ids);
                         let c = Self::dll_obj_cursor(obj);
                         if c.cur == Some(removed_id) {
-                            Self::dll_set_obj_cursor(obj, Cursor { cur: None, pos: c.pos });
+                            Self::dll_set_obj_cursor(
+                                obj,
+                                Cursor {
+                                    cur: None,
+                                    pos: c.pos,
+                                },
+                            );
                         }
                         drop(old);
                         Value::Null
@@ -399,9 +484,15 @@ impl Vm {
             }
             b"valid" => {
                 let c = Self::dll_obj_cursor(obj);
-                if c.cur.is_some() && Self::dll_cursor_value(obj, c).is_some() { Value::True } else { Value::False }
+                if c.cur.is_some() && Self::dll_cursor_value(obj, c).is_some() {
+                    Value::True
+                } else {
+                    Value::False
+                }
             }
-            b"current" => Self::dll_cursor_value(obj, Self::dll_obj_cursor(obj)).unwrap_or(Value::Null),
+            b"current" => {
+                Self::dll_cursor_value(obj, Self::dll_obj_cursor(obj)).unwrap_or(Value::Null)
+            }
             b"key" => Value::Long(Self::dll_obj_cursor(obj).pos),
             b"next" => {
                 let c = Self::dll_obj_cursor(obj);
@@ -420,7 +511,9 @@ impl Vm {
             b"__debuginfo" => val_arr(self.dll_debug_info(obj)),
             b"serialize" => {
                 let mut out: Vec<u8> = Vec::new();
-                let f = self.spl_call_builtin(b"serialize", &[Value::Long(dll_flags(self, obj))]).unwrap_or(Value::Null);
+                let f = self
+                    .spl_call_builtin(b"serialize", &[Value::Long(dll_flags(self, obj))])
+                    .unwrap_or(Value::Null);
                 out.extend_from_slice(f.to_php_string().as_bytes());
                 // Walk the live list node by node: serializing an element may
                 // modify the list (only nodes still linked are visited).
@@ -432,22 +525,30 @@ impl Vm {
                         None => break,
                     };
                     out.push(b':');
-                    let s = self.spl_call_builtin(b"serialize", &[vals[pos].clone()]).unwrap_or(Value::Null);
+                    let s = self
+                        .spl_call_builtin(b"serialize", &[vals[pos].clone()])
+                        .unwrap_or(Value::Null);
                     out.extend_from_slice(s.to_php_string().as_bytes());
                     if self.current_exception.is_some() {
                         break;
                     }
                     let ids = load(obj).1;
-                    cur = ids.iter().position(|&x| x == id).and_then(|p| ids.get(p + 1).copied());
+                    cur = ids
+                        .iter()
+                        .position(|&x| x == id)
+                        .and_then(|p| ids.get(p + 1).copied());
                 }
                 Value::String(PhpString::from_vec(out))
             }
             b"unserialize" => {
                 let data = match a.first() {
-                    Some(v) => match self.spl_arg_string("SplDoublyLinkedList::unserialize", 1, "data", v) {
-                        Some(s) => s.as_bytes().to_vec(),
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_string("SplDoublyLinkedList::unserialize", 1, "data", v)
+                        {
+                            Some(s) => s.as_bytes().to_vec(),
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => Vec::new(),
                 };
                 if data.is_empty() {
@@ -516,7 +617,12 @@ impl Vm {
                         self.spl_load_props(obj, &m);
                         Value::Null
                     }
-                    _ => return self.spl_throw(b"UnexpectedValueException", "Incomplete or ill-typed serialization data"),
+                    _ => {
+                        return self.spl_throw(
+                            b"UnexpectedValueException",
+                            "Incomplete or ill-typed serialization data",
+                        );
+                    }
                 }
             }
             _ => return None,
@@ -539,7 +645,13 @@ impl Vm {
         {
             let mut ob = it.borrow_mut();
             ob.set_property(b"__spl_dll_target".to_vec(), Value::Object(obj.clone()));
-            ob.set_property(b"__spl_dll_cur".to_vec(), match c.cur { Some(n) => Value::Long(n), None => Value::Null });
+            ob.set_property(
+                b"__spl_dll_cur".to_vec(),
+                match c.cur {
+                    Some(n) => Value::Long(n),
+                    None => Value::Null,
+                },
+            );
             ob.set_property(b"__spl_dll_tpos".to_vec(), Value::Long(c.pos));
             ob.set_property(b"__spl_iter_mode".to_vec(), Value::Long(flags));
         }
@@ -547,7 +659,11 @@ impl Vm {
     }
 
     /// InternalIterator methods for the DLL kind.
-    pub(crate) fn dll_iterator_call(&mut self, method: &[u8], it: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    pub(crate) fn dll_iterator_call(
+        &mut self,
+        method: &[u8],
+        it: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
         let target = match prop(it, b"__spl_dll_target") {
             Value::Object(o) => o,
             _ => return None,
@@ -564,7 +680,11 @@ impl Vm {
                 Value::Null
             }
             b"valid" => {
-                if c.cur.is_some() && Self::dll_cursor_value(&target, c).is_some() { Value::True } else { Value::False }
+                if c.cur.is_some() && Self::dll_cursor_value(&target, c).is_some() {
+                    Value::True
+                } else {
+                    Value::False
+                }
             }
             b"current" => Self::dll_cursor_value(&target, c).unwrap_or(Value::Null),
             b"key" => Value::Long(c.pos),

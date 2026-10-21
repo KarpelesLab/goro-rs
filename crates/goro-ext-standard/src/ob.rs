@@ -38,14 +38,20 @@ pub fn register(vm: &mut Vm) {
 /// php_request_startup(): start the `output_handler` INI handler, or a
 /// default buffer when `output_buffering` is enabled.
 pub fn request_startup(vm: &mut Vm) {
-    let ini = |vm: &Vm, k: &[u8]| vm.constants.get(k).map(|v| v.to_php_string().to_string_lossy());
+    let ini = |vm: &Vm, k: &[u8]| {
+        vm.constants
+            .get(k)
+            .map(|v| v.to_php_string().to_string_lossy())
+    };
     let handler = ini(vm, b"output_handler").unwrap_or_default();
     if !handler.is_empty() {
         let cb = Value::String(PhpString::from_string(handler.clone()));
         let h = match ob_callable_name(vm, &cb) {
             Ok(name) => Some(Vm::ob_make_handler(name, ObKind::User(cb), 0, OBH_STDFLAGS)),
             Err(e) => {
-                vm.write_output(format!("\nWarning: (null)(): {} in Unknown on line 0\n", e).as_bytes());
+                vm.write_output(
+                    format!("\nWarning: (null)(): {} in Unknown on line 0\n", e).as_bytes(),
+                );
                 None
             }
         };
@@ -63,7 +69,12 @@ pub fn request_startup(vm: &mut Vm) {
     };
     if size > 0 {
         let chunk = if size > 1 { size as usize } else { 0 };
-        let h = Vm::ob_make_handler(b"default output handler".to_vec(), ObKind::Default, chunk, OBH_STDFLAGS);
+        let h = Vm::ob_make_handler(
+            b"default output handler".to_vec(),
+            ObKind::Default,
+            chunk,
+            OBH_STDFLAGS,
+        );
         vm.ob_handler_start(Some(h));
     }
 }
@@ -75,7 +86,11 @@ fn s(b: &[u8]) -> ArrayKey {
 /// Run `f` with `vm.ob_fname` set so output-layer diagnostics carry the
 /// right "fn(): " prefix, then surface any fatal raised inside the layer
 /// (or an exception thrown by a user handler).
-fn with_fname<F: FnOnce(&mut Vm) -> Value>(vm: &mut Vm, name: &str, f: F) -> Result<Value, VmError> {
+fn with_fname<F: FnOnce(&mut Vm) -> Value>(
+    vm: &mut Vm,
+    name: &str,
+    f: F,
+) -> Result<Value, VmError> {
     let prev = vm.ob_fname.replace(name.to_string());
     let r = f(vm);
     vm.ob_fname = prev;
@@ -83,7 +98,10 @@ fn with_fname<F: FnOnce(&mut Vm) -> Value>(vm: &mut Vm, name: &str, f: F) -> Res
         return Err(e);
     }
     if vm.current_exception.is_some() {
-        return Err(VmError { message: "exception in output handler".into(), line: vm.current_line });
+        return Err(VmError {
+            message: "exception in output handler".into(),
+            line: vm.current_line,
+        });
     }
     Ok(r)
 }
@@ -93,7 +111,9 @@ fn lower(b: &[u8]) -> Vec<u8> {
 }
 
 fn is_closure_name(b: &[u8]) -> bool {
-    b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_")
+    b.starts_with(b"__closure_")
+        || b.starts_with(b"__arrow_")
+        || b.starts_with(b"__bound_closure_")
         || b.starts_with(b"__closure_fcc_")
 }
 
@@ -102,7 +122,12 @@ fn closure_display(vm: &Vm, fname: &[u8]) -> Vec<u8> {
         if !uf.display_name.is_empty() {
             return uf.display_name.clone();
         }
-        return format!("{{closure:{}:{}}}", String::from_utf8_lossy(&uf.filename), uf.decl_line).into_bytes();
+        return format!(
+            "{{closure:{}:{}}}",
+            String::from_utf8_lossy(&uf.filename),
+            uf.decl_line
+        )
+        .into_bytes();
     }
     b"Closure::__invoke".to_vec()
 }
@@ -130,7 +155,10 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
             if vm.functions.contains_key(&l) || vm.user_functions.contains_key(&l) {
                 Ok(name.to_vec())
             } else {
-                Err(format!("function \"{}\" not found or invalid function name", String::from_utf8_lossy(name)))
+                Err(format!(
+                    "function \"{}\" not found or invalid function name",
+                    String::from_utf8_lossy(name)
+                ))
             }
         }
         Value::Array(arr) => {
@@ -171,7 +199,12 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
             if cl == b"closure" {
                 return Ok(b"Closure::__invoke".to_vec());
             }
-            if vm.classes.get(&cl).and_then(|c| c.get_method(b"__invoke")).is_some() {
+            if vm
+                .classes
+                .get(&cl)
+                .and_then(|c| c.get_method(b"__invoke"))
+                .is_some()
+            {
                 let mut n = cn;
                 n.extend_from_slice(b"::__invoke");
                 Ok(n)
@@ -183,7 +216,13 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
     }
 }
 
-fn check_method(vm: &mut Vm, cls: &[u8], meth: &[u8], has_obj: Option<()>, full: &[u8]) -> Result<Vec<u8>, String> {
+fn check_method(
+    vm: &mut Vm,
+    cls: &[u8],
+    meth: &[u8],
+    has_obj: Option<()>,
+    full: &[u8],
+) -> Result<Vec<u8>, String> {
     let mut cl = lower(cls);
     if cl.first() == Some(&b'\\') {
         cl.remove(0);
@@ -194,7 +233,12 @@ fn check_method(vm: &mut Vm, cls: &[u8], meth: &[u8], has_obj: Option<()>, full:
     let cls_disp = vm.classes.get(&cl).map(|c| c.name.clone());
     let cls_disp = match cls_disp {
         Some(n) => n,
-        None => return Err(format!("class \"{}\" not found", String::from_utf8_lossy(cls))),
+        None => {
+            return Err(format!(
+                "class \"{}\" not found",
+                String::from_utf8_lossy(cls)
+            ));
+        }
     };
     let ml = lower(meth);
     let ce = vm.classes.get(&cl).unwrap();
@@ -239,9 +283,19 @@ fn ob_start(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let chunk = chunk as usize;
     with_fname(vm, "ob_start", |vm| {
         let handler = match &cb {
-            Value::Null => Some(Vm::ob_make_handler(b"default output handler".to_vec(), ObKind::Default, chunk, flags)),
+            Value::Null => Some(Vm::ob_make_handler(
+                b"default output handler".to_vec(),
+                ObKind::Default,
+                chunk,
+                flags,
+            )),
             _ => match ob_callable_name(vm, &cb) {
-                Ok(name) => Some(Vm::ob_make_handler(name, ObKind::User(cb.clone()), chunk, flags)),
+                Ok(name) => Some(Vm::ob_make_handler(
+                    name,
+                    ObKind::User(cb.clone()),
+                    chunk,
+                    flags,
+                )),
                 Err(e) => {
                     vm.emit_warning(&format!("ob_start(): {}", e));
                     None
@@ -270,7 +324,10 @@ fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
             if vm.ob_level() > 0 {
                 let name = String::from_utf8_lossy(&vm.ob_active_name()).to_string();
                 let lvl = vm.ob_level() - 1;
-                notice(vm, &format!("ob_flush(): Failed to flush buffer of {} ({})", name, lvl));
+                notice(
+                    vm,
+                    &format!("ob_flush(): Failed to flush buffer of {} ({})", name, lvl),
+                );
             }
             return Value::False;
         }
@@ -281,14 +338,20 @@ fn ob_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn ob_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     with_fname(vm, "ob_clean", |vm| {
         if vm.ob_level() == 0 {
-            notice(vm, "ob_clean(): Failed to delete buffer. No buffer to delete");
+            notice(
+                vm,
+                "ob_clean(): Failed to delete buffer. No buffer to delete",
+            );
             return Value::False;
         }
         if !vm.ob_clean_active() {
             if vm.ob_level() > 0 {
                 let name = String::from_utf8_lossy(&vm.ob_active_name()).to_string();
                 let lvl = vm.ob_level() - 1;
-                notice(vm, &format!("ob_clean(): Failed to delete buffer of {} ({})", name, lvl));
+                notice(
+                    vm,
+                    &format!("ob_clean(): Failed to delete buffer of {} ({})", name, lvl),
+                );
             }
             return Value::False;
         }
@@ -299,20 +362,34 @@ fn ob_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn ob_end_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     with_fname(vm, "ob_end_flush", |vm| {
         if vm.ob_level() == 0 {
-            notice(vm, "ob_end_flush(): Failed to delete and flush buffer. No buffer to delete or flush");
+            notice(
+                vm,
+                "ob_end_flush(): Failed to delete and flush buffer. No buffer to delete or flush",
+            );
             return Value::False;
         }
-        if vm.ob_stack_pop(OB_POP_TRY) { Value::True } else { Value::False }
+        if vm.ob_stack_pop(OB_POP_TRY) {
+            Value::True
+        } else {
+            Value::False
+        }
     })
 }
 
 fn ob_end_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     with_fname(vm, "ob_end_clean", |vm| {
         if vm.ob_level() == 0 {
-            notice(vm, "ob_end_clean(): Failed to delete buffer. No buffer to delete");
+            notice(
+                vm,
+                "ob_end_clean(): Failed to delete buffer. No buffer to delete",
+            );
             return Value::False;
         }
-        if vm.ob_stack_pop(OB_POP_DISCARD | OB_POP_TRY) { Value::True } else { Value::False }
+        if vm.ob_stack_pop(OB_POP_DISCARD | OB_POP_TRY) {
+            Value::True
+        } else {
+            Value::False
+        }
     })
 }
 
@@ -328,14 +405,23 @@ fn ob_get_flush(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         let c = match contents(vm) {
             Some(c) => c,
             None => {
-                notice(vm, "ob_get_flush(): Failed to delete and flush buffer. No buffer to delete or flush");
+                notice(
+                    vm,
+                    "ob_get_flush(): Failed to delete and flush buffer. No buffer to delete or flush",
+                );
                 return Value::False;
             }
         };
         if !vm.ob_stack_pop(OB_POP_TRY) && vm.ob_level() > 0 {
             let name = String::from_utf8_lossy(&vm.ob_active_name()).to_string();
             let lvl = vm.ob_level() - 1;
-            notice(vm, &format!("ob_get_flush(): Failed to delete buffer of {} ({})", name, lvl));
+            notice(
+                vm,
+                &format!(
+                    "ob_get_flush(): Failed to delete buffer of {} ({})",
+                    name, lvl
+                ),
+            );
         }
         Value::String(PhpString::from_vec(c))
     })
@@ -350,7 +436,13 @@ fn ob_get_clean(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         if !vm.ob_stack_pop(OB_POP_DISCARD | OB_POP_TRY) && vm.ob_level() > 0 {
             let name = String::from_utf8_lossy(&vm.ob_active_name()).to_string();
             let lvl = vm.ob_level() - 1;
-            notice(vm, &format!("ob_get_clean(): Failed to delete buffer of {} ({})", name, lvl));
+            notice(
+                vm,
+                &format!(
+                    "ob_get_clean(): Failed to delete buffer of {} ({})",
+                    name, lvl
+                ),
+            );
         }
         Value::String(PhpString::from_vec(c))
     })

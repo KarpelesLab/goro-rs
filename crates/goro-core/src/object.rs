@@ -284,14 +284,19 @@ impl PhpObject {
                     return r.clone();
                 }
                 let cur = std::mem::replace(v, Value::Null);
-                let cur = if matches!(cur, Value::Undef) { Value::Null } else { cur };
+                let cur = if matches!(cur, Value::Undef) {
+                    Value::Null
+                } else {
+                    cur
+                };
                 let r = std::rc::Rc::new(std::cell::RefCell::new(cur));
                 *v = Value::Reference(r.clone());
                 return r;
             }
         }
         let r = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
-        self.properties.push((name.to_vec(), Value::Reference(r.clone())));
+        self.properties
+            .push((name.to_vec(), Value::Reference(r.clone())));
         r
     }
 

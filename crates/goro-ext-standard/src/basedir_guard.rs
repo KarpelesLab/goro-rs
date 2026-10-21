@@ -63,7 +63,10 @@ fn active(vm: &Vm) -> bool {
 }
 
 fn stream_fail(vm: &mut Vm, fname: &str, path: &str, what: &str) -> Result<Value, VmError> {
-    vm.emit_warning(&format!("{}({}): Failed to open {}: Operation not permitted", fname, path, what));
+    vm.emit_warning(&format!(
+        "{}({}): Failed to open {}: Operation not permitted",
+        fname, path, what
+    ));
     Ok(Value::False)
 }
 
@@ -114,7 +117,12 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
             }
         }
         Kind::TempDir => {
-            let p = arg_str(args, 0).unwrap_or_else(|| std::env::temp_dir().to_string_lossy().trim_end_matches('/').to_string());
+            let p = arg_str(args, 0).unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .to_string_lossy()
+                    .trim_end_matches('/')
+                    .to_string()
+            });
             if !vm.check_open_basedir(fname, &p) {
                 return Ok(Value::False);
             }
@@ -209,7 +217,10 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
             }
         }
         Kind::IniSet => {
-            let name = args.first().map(|v| v.to_php_string().to_string_lossy().to_string()).unwrap_or_default();
+            let name = args
+                .first()
+                .map(|v| v.to_php_string().to_string_lossy().to_string())
+                .unwrap_or_default();
             if name == "error_log" || name == "mail.log" {
                 if let Some(p) = arg_str(args, 1).filter(|p| name != "error_log" || p != "syslog") {
                     if !vm.check_open_basedir(fname, &p) {
@@ -217,11 +228,17 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
                     }
                 }
             } else if name == "open_basedir" {
-                let new_val = args.get(1).map(|v| v.to_php_string().to_string_lossy().to_string()).unwrap_or_default();
+                let new_val = args
+                    .get(1)
+                    .map(|v| v.to_php_string().to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let old = basedir::open_basedir_value(vm);
                 return match basedir::update_open_basedir(vm, &new_val) {
                     Some(v) => {
-                        vm.constants.insert(b"open_basedir".to_vec(), Value::String(PhpString::from_string(v)));
+                        vm.constants.insert(
+                            b"open_basedir".to_vec(),
+                            Value::String(PhpString::from_string(v)),
+                        );
                         Ok(Value::String(PhpString::from_string(old)))
                     }
                     None => Ok(Value::False),

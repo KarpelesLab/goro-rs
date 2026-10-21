@@ -36,26 +36,58 @@ fn arg_type(v: &Value) -> String {
 fn throw(vm: &mut Vm, class: &[u8], msg: String) -> Result<Value, VmError> {
     let exc = vm.create_exception(class, &msg, vm.current_line);
     vm.current_exception = Some(exc);
-    Err(VmError { message: msg, line: vm.current_line })
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
 }
 
 fn array_type_error(vm: &mut Vm, fname: &str, i: usize, v: &Value) -> Result<Value, VmError> {
-    let label = if i == 0 { "Argument #1 ($array)".to_string() } else { format!("Argument #{}", i + 1) };
-    throw(vm, b"TypeError", format!("{}(): {} must be of type array, {} given", fname, label, arg_type(v)))
+    let label = if i == 0 {
+        "Argument #1 ($array)".to_string()
+    } else {
+        format!("Argument #{}", i + 1)
+    };
+    throw(
+        vm,
+        b"TypeError",
+        format!(
+            "{}(): {} must be of type array, {} given",
+            fname,
+            label,
+            arg_type(v)
+        ),
+    )
 }
 
 /// Split `args` into arrays and `ncb` trailing callbacks, validating them like zpp.
-fn parse_args(vm: &mut Vm, args: &[Value], fname: &str, ncb: usize) -> Result<(Vec<Value>, Vec<Value>), VmError> {
+fn parse_args(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    ncb: usize,
+) -> Result<(Vec<Value>, Vec<Value>), VmError> {
     let min = 1 + ncb;
     if args.len() < min {
-        let msg = format!("{}() expects at least {} argument{}, {} given", fname, min, if min == 1 { "" } else { "s" }, args.len());
+        let msg = format!(
+            "{}() expects at least {} argument{}, {} given",
+            fname,
+            min,
+            if min == 1 { "" } else { "s" },
+            args.len()
+        );
         throw(vm, b"ArgumentCountError", msg)?;
     }
     let split = args.len() - ncb;
     let cbs: Vec<Value> = args[split..].iter().map(|v| v.deref()).collect();
     for (j, cb) in cbs.iter().enumerate() {
         if let Some(reason) = callable_error(vm, cb) {
-            let msg = format!("{}(): Argument #{} must be a valid callback, {}", fname, split + j + 1, reason);
+            let msg = format!(
+                "{}(): Argument #{} must be a valid callback, {}",
+                fname,
+                split + j + 1,
+                reason
+            );
             throw(vm, b"TypeError", msg)?;
         }
     }
@@ -91,11 +123,23 @@ impl<'a> Cmp<'a> {
                     Err(_) => return 0,
                 };
                 let n = r2.to_long();
-                return if n > 0 { -1 } else if n < 0 { 1 } else { 0 };
+                return if n > 0 {
+                    -1
+                } else if n < 0 {
+                    1
+                } else {
+                    0
+                };
             }
         }
         let n = r.to_long();
-        if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+        if n > 0 {
+            1
+        } else if n < 0 {
+            -1
+        } else {
+            0
+        }
     }
 }
 
@@ -107,7 +151,13 @@ fn zval_user_compare(vm: &mut Vm, cb: &Value, a: &Value, b: &Value) -> i32 {
     match call_user_func(vm, &[cb.clone(), a.clone(), b.clone()]) {
         Ok(v) => {
             let n = v.to_long();
-            if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+            if n > 0 {
+                1
+            } else if n < 0 {
+                -1
+            } else {
+                0
+            }
         }
         Err(_) => 0,
     }
@@ -117,11 +167,19 @@ fn zval_user_compare(vm: &mut Vm, cb: &Value, a: &Value, b: &Value) -> i32 {
 fn string_compare(vm: &mut Vm, a: &Value, b: &Value) -> i32 {
     let x = sort_cmp_string(vm, a);
     let y = sort_cmp_string(vm, b);
-    match x.cmp(&y) { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Greater => 1, _ => 0 }
+    match x.cmp(&y) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        _ => 0,
+    }
 }
 
 fn key_string_compare(a: &ArrayKey, b: &ArrayKey) -> i32 {
-    match key_to_bytes(a).cmp(&key_to_bytes(b)) { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Greater => 1, _ => 0 }
+    match key_to_bytes(a).cmp(&key_to_bytes(b)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        _ => 0,
+    }
 }
 
 fn unwrap_rc1(v: &Value) -> Value {
@@ -132,12 +190,21 @@ fn unwrap_rc1(v: &Value) -> Value {
 }
 
 fn arr_of(v: &Value) -> Rc<RefCell<PhpArray>> {
-    match v { Value::Array(a) => a.clone(), _ => unreachable!() }
+    match v {
+        Value::Array(a) => a.clone(),
+        _ => unreachable!(),
+    }
 }
 
 /// php_array_diff_key / php_array_intersect_key.
 /// data: 0 = none, 1 = internal (string compare), 2 = user
-fn key_based(vm: &mut Vm, args: &[Value], fname: &str, data: u8, intersect: bool) -> Result<Value, VmError> {
+fn key_based(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    data: u8,
+    intersect: bool,
+) -> Result<Value, VmError> {
     let ncb = if data == 2 { 1 } else { 0 };
     let (arrs, cbs) = parse_args(vm, args, fname, ncb)?;
     for (i, a) in arrs.iter().enumerate() {
@@ -145,7 +212,11 @@ fn key_based(vm: &mut Vm, args: &[Value], fname: &str, data: u8, intersect: bool
             return array_type_error(vm, fname, i, a);
         }
     }
-    let first: Vec<(ArrayKey, Value)> = arr_of(&arrs[0]).borrow().iter().map(|(k, v)| (k.clone(), unwrap_rc1(v))).collect();
+    let first: Vec<(ArrayKey, Value)> = arr_of(&arrs[0])
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), unwrap_rc1(v)))
+        .collect();
     let others: Vec<Rc<RefCell<PhpArray>>> = arrs[1..].iter().map(arr_of).collect();
     let mut result = PhpArray::new();
     for (k, val) in first {
@@ -161,7 +232,10 @@ fn key_based(vm: &mut Vm, args: &[Value], fname: &str, data: u8, intersect: bool
                 },
             };
             if intersect {
-                if !matched { ok = false; break; }
+                if !matched {
+                    ok = false;
+                    break;
+                }
             } else if matched {
                 ok = false;
                 break;
@@ -183,7 +257,18 @@ struct Bucket {
 }
 
 fn build_lists(arrs: &[Value]) -> Vec<Vec<Bucket>> {
-    arrs.iter().map(|a| arr_of(a).borrow().iter().map(|(k, v)| Bucket { key: k.clone(), val: v.clone() }).collect()).collect()
+    arrs.iter()
+        .map(|a| {
+            arr_of(a)
+                .borrow()
+                .iter()
+                .map(|(k, v)| Bucket {
+                    key: k.clone(),
+                    val: v.clone(),
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Comparators used by php_array_diff / php_array_intersect.
@@ -202,7 +287,9 @@ impl<'a> Funcs<'a> {
     }
     fn key(&mut self, vm: &mut Vm, a: &Bucket, b: &Bucket) -> i32 {
         match self.key_user.clone() {
-            Some(cb) => self.cmp.user(vm, &cb, key_to_value(&a.key), key_to_value(&b.key)),
+            Some(cb) => self
+                .cmp
+                .user(vm, &cb, key_to_value(&a.key), key_to_value(&b.key)),
             None => key_string_compare(&a.key, &b.key),
         }
     }
@@ -211,19 +298,41 @@ impl<'a> Funcs<'a> {
 fn sort_list(vm: &mut Vm, list: &mut [Bucket], f: &mut Funcs, by_data: bool) {
     if list.len() > 1 {
         crate::zsort::zend_sort(list, &mut |a: &Bucket, b: &Bucket| {
-            if by_data { f.data(vm, a, b) } else { f.key(vm, a, b) }
+            if by_data {
+                f.data(vm, a, b)
+            } else {
+                f.key(vm, a, b)
+            }
         });
     }
 }
 
 /// php_array_diff()
-fn sorted_diff(vm: &mut Vm, args: &[Value], fname: &str, behavior: u8, data_user: bool, key_user: bool) -> Result<Value, VmError> {
+fn sorted_diff(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    behavior: u8,
+    data_user: bool,
+    key_user: bool,
+) -> Result<Value, VmError> {
     let ncb = data_user as usize + key_user as usize;
     let (arrs, cbs) = parse_args(vm, args, fname, ncb)?;
     let mut f = Funcs {
-        data_user: if data_user { Some(cbs[0].clone()) } else { None },
-        key_user: if key_user { Some(cbs[cbs.len() - 1].clone()) } else { None },
-        cmp: Cmp { fname, warned: false },
+        data_user: if data_user {
+            Some(cbs[0].clone())
+        } else {
+            None
+        },
+        key_user: if key_user {
+            Some(cbs[cbs.len() - 1].clone())
+        } else {
+            None
+        },
+        cmp: Cmp {
+            fname,
+            warned: false,
+        },
     };
     for (i, a) in arrs.iter().enumerate() {
         if !matches!(a, Value::Array(_)) {
@@ -247,12 +356,20 @@ fn sorted_diff(vm: &mut Vm, args: &[Value], fname: &str, behavior: u8, data_user
             if behavior == NORMAL {
                 while ptrs[i] < lists[i].len() {
                     c = f.data(vm, &lists[0][ptrs[0]], &lists[i][ptrs[i]]);
-                    if c > 0 { ptrs[i] += 1; } else { break; }
+                    if c > 0 {
+                        ptrs[i] += 1;
+                    } else {
+                        break;
+                    }
                 }
             } else {
                 while ptr < lists[i].len() {
                     c = f.key(vm, &lists[0][ptrs[0]], &lists[i][ptr]);
-                    if c != 0 { ptr += 1; } else { break; }
+                    if c != 0 {
+                        ptr += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             if c == 0 {
@@ -315,13 +432,31 @@ fn sorted_diff(vm: &mut Vm, args: &[Value], fname: &str, behavior: u8, data_user
 }
 
 /// php_array_intersect()
-fn sorted_intersect(vm: &mut Vm, args: &[Value], fname: &str, behavior: u8, data_user: bool, key_user: bool) -> Result<Value, VmError> {
+fn sorted_intersect(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    behavior: u8,
+    data_user: bool,
+    key_user: bool,
+) -> Result<Value, VmError> {
     let ncb = data_user as usize + key_user as usize;
     let (arrs, cbs) = parse_args(vm, args, fname, ncb)?;
     let mut f = Funcs {
-        data_user: if data_user { Some(cbs[0].clone()) } else { None },
-        key_user: if key_user { Some(cbs[cbs.len() - 1].clone()) } else { None },
-        cmp: Cmp { fname, warned: false },
+        data_user: if data_user {
+            Some(cbs[0].clone())
+        } else {
+            None
+        },
+        key_user: if key_user {
+            Some(cbs[cbs.len() - 1].clone())
+        } else {
+            None
+        },
+        cmp: Cmp {
+            fname,
+            warned: false,
+        },
     };
     for (i, a) in arrs.iter().enumerate() {
         if !matches!(a, Value::Array(_)) {
@@ -346,14 +481,24 @@ fn sorted_intersect(vm: &mut Vm, args: &[Value], fname: &str, behavior: u8, data
             if behavior == NORMAL {
                 while ptrs[i] < lists[i].len() {
                     c = f.data(vm, &lists[0][ptrs[0]], &lists[i][ptrs[i]]);
-                    if c > 0 { ptrs[i] += 1; } else { break; }
+                    if c > 0 {
+                        ptrs[i] += 1;
+                    } else {
+                        break;
+                    }
                 }
             } else {
                 while ptrs[i] < lists[i].len() {
                     c = f.key(vm, &lists[0][ptrs[0]], &lists[i][ptrs[i]]);
-                    if c > 0 { ptrs[i] += 1; } else { break; }
+                    if c > 0 {
+                        ptrs[i] += 1;
+                    } else {
+                        break;
+                    }
                 }
-                if c == 0 && ptrs[i] < lists[i].len() && behavior == ASSOC
+                if c == 0
+                    && ptrs[i] < lists[i].len()
+                    && behavior == ASSOC
                     && f.data(vm, &lists[0][ptrs[0]], &lists[i][ptrs[i]]) != 0
                 {
                     c = 1;
@@ -434,7 +579,12 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     }
     if num == 1 {
-        let value = first.borrow().values().next().cloned().unwrap_or(Value::Null);
+        let value = first
+            .borrow()
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or(Value::Null);
         let search = sort_cmp_string(vm, &value);
         let mut found = false;
         for (i, a) in arrs.iter().enumerate().skip(1) {
@@ -454,7 +604,11 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
         }
-        return Ok(Value::Array(Rc::new(RefCell::new(if found { PhpArray::new() } else { first.borrow().clone() }))));
+        return Ok(Value::Array(Rc::new(RefCell::new(if found {
+            PhpArray::new()
+        } else {
+            first.borrow().clone()
+        }))));
     }
     check_rest(vm)?;
     let mut exclude: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -471,7 +625,11 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             exclude.insert(sort_cmp_string(vm, &v));
         }
     }
-    let entries: Vec<(ArrayKey, Value)> = first.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = first
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut result = PhpArray::new();
     for (k, v) in entries {
         let s = sort_cmp_string(vm, &v);
@@ -485,23 +643,53 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-pub fn array_diff_key(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_diff_key", 0, false) }
-pub fn array_diff_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_diff_assoc", 1, false) }
-pub fn array_udiff_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_udiff_assoc", 2, false) }
-pub fn array_intersect_key(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_intersect_key", 0, true) }
-pub fn array_intersect_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_intersect_assoc", 1, true) }
-pub fn array_uintersect_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { key_based(vm, a, "array_uintersect_assoc", 2, true) }
+pub fn array_diff_key(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_diff_key", 0, false)
+}
+pub fn array_diff_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_diff_assoc", 1, false)
+}
+pub fn array_udiff_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_udiff_assoc", 2, false)
+}
+pub fn array_intersect_key(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_intersect_key", 0, true)
+}
+pub fn array_intersect_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_intersect_assoc", 1, true)
+}
+pub fn array_uintersect_assoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    key_based(vm, a, "array_uintersect_assoc", 2, true)
+}
 
-pub fn array_diff_ukey(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_diff(vm, a, "array_diff_ukey", KEY, false, true) }
-pub fn array_diff_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_diff(vm, a, "array_diff_uassoc", ASSOC, false, true) }
-pub fn array_udiff(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_diff(vm, a, "array_udiff", NORMAL, true, false) }
-pub fn array_udiff_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_diff(vm, a, "array_udiff_uassoc", ASSOC, true, true) }
+pub fn array_diff_ukey(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_diff(vm, a, "array_diff_ukey", KEY, false, true)
+}
+pub fn array_diff_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_diff(vm, a, "array_diff_uassoc", ASSOC, false, true)
+}
+pub fn array_udiff(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_diff(vm, a, "array_udiff", NORMAL, true, false)
+}
+pub fn array_udiff_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_diff(vm, a, "array_udiff_uassoc", ASSOC, true, true)
+}
 
-pub fn array_intersect(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_intersect(vm, a, "array_intersect", NORMAL, false, false) }
-pub fn array_uintersect(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_intersect(vm, a, "array_uintersect", NORMAL, true, false) }
-pub fn array_intersect_ukey(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_intersect(vm, a, "array_intersect_ukey", KEY, false, true) }
-pub fn array_intersect_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_intersect(vm, a, "array_intersect_uassoc", ASSOC, false, true) }
-pub fn array_uintersect_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> { sorted_intersect(vm, a, "array_uintersect_uassoc", ASSOC, true, true) }
+pub fn array_intersect(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_intersect(vm, a, "array_intersect", NORMAL, false, false)
+}
+pub fn array_uintersect(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_intersect(vm, a, "array_uintersect", NORMAL, true, false)
+}
+pub fn array_intersect_ukey(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_intersect(vm, a, "array_intersect_ukey", KEY, false, true)
+}
+pub fn array_intersect_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_intersect(vm, a, "array_intersect_uassoc", ASSOC, false, true)
+}
+pub fn array_uintersect_uassoc(vm: &mut Vm, a: &[Value]) -> Result<Value, VmError> {
+    sorted_intersect(vm, a, "array_uintersect_uassoc", ASSOC, true, true)
+}
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_diff", array_diff);

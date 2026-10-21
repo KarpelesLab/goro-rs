@@ -49,8 +49,12 @@ const DT_DIR: i64 = 4;
 const DT_REG: i64 = 8;
 const DT_LNK: i64 = 10;
 
-pub const DIR_CLASSES: &[&[u8]] =
-    &[b"globiterator", b"recursivedirectoryiterator", b"filesystemiterator", b"directoryiterator"];
+pub const DIR_CLASSES: &[&[u8]] = &[
+    b"globiterator",
+    b"recursivedirectoryiterator",
+    b"filesystemiterator",
+    b"directoryiterator",
+];
 
 fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
     obj.borrow().get_property(name)
@@ -69,11 +73,7 @@ fn svec(s: Vec<u8>) -> Value {
 }
 
 fn bool_v(b: bool) -> Value {
-    if b {
-        Value::True
-    } else {
-        Value::False
-    }
+    if b { Value::True } else { Value::False }
 }
 
 fn lprop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> i64 {
@@ -225,7 +225,11 @@ impl Vm {
             let glob = matches!(prop(obj, b"__spl_dir_glob"), Value::True);
             let n = names.borrow().len() as i64;
             if cursor < n {
-                let name = names.borrow().get(&ArrayKey::Int(cursor)).map(|v| v.to_php_string().as_bytes().to_vec()).unwrap_or_default();
+                let name = names
+                    .borrow()
+                    .get(&ArrayKey::Int(cursor))
+                    .map(|v| v.to_php_string().as_bytes().to_vec())
+                    .unwrap_or_default();
                 if glob {
                     let (p, f) = glob_path_split(&name);
                     set_prop(obj, b"__spl_glob_path", svec(p));
@@ -282,7 +286,9 @@ impl Vm {
                     names.push(v.clone());
                 }
             }
-            let first = names.get(&ArrayKey::Int(0)).map(|v| v.to_php_string().as_bytes().to_vec());
+            let first = names
+                .get(&ArrayKey::Int(0))
+                .map(|v| v.to_php_string().as_bytes().to_vec());
             let (gp, _) = glob_path_split(first.as_deref().unwrap_or(pattern));
             set_prop(obj, b"__spl_glob_path", svec(gp));
             set_prop(obj, b"__spl_dir_names", val_arr(names));
@@ -292,7 +298,8 @@ impl Vm {
             let p = String::from_utf8_lossy(path).to_string();
             match std::fs::read_dir(&p) {
                 Ok(rd) => {
-                    let mut ents: Vec<(Vec<u8>, i64)> = vec![(b".".to_vec(), DT_DIR), (b"..".to_vec(), DT_DIR)];
+                    let mut ents: Vec<(Vec<u8>, i64)> =
+                        vec![(b".".to_vec(), DT_DIR), (b"..".to_vec(), DT_DIR)];
                     for e in rd.flatten() {
                         let t = match e.file_type() {
                             Ok(ft) if ft.is_symlink() => DT_LNK,
@@ -315,7 +322,9 @@ impl Vm {
                     opened = true;
                 }
                 Err(e) => {
-                    let msg = if std::path::Path::new(&p).exists() && !std::path::Path::new(&p).is_dir() {
+                    let msg = if std::path::Path::new(&p).exists()
+                        && !std::path::Path::new(&p).is_dir()
+                    {
                         "Not a directory".to_string()
                     } else {
                         strerror(&e)
@@ -326,7 +335,11 @@ impl Vm {
         }
         set_prop(obj, b"__spl_dir_open", bool_v(opened));
         set_prop(obj, b"__spl_dir_cursor", Value::Long(0));
-        let stored = if path.len() > 1 && path[path.len() - 1] == b'/' { &path[..path.len() - 1] } else { path };
+        let stored = if path.len() > 1 && path[path.len() - 1] == b'/' {
+            &path[..path.len() - 1]
+        } else {
+            path
+        };
         set_prop(obj, b"__spl_path", svec(stored.to_vec()));
         set_prop(obj, b"__spl_dir_index", Value::Long(0));
         if !opened {
@@ -344,10 +357,17 @@ impl Vm {
     }
 
     /// spl_filesystem_object_construct()
-    fn fs_dir_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, base: &[u8], args: &[Value]) -> bool {
+    fn fs_dir_construct(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        base: &[u8],
+        args: &[Value],
+    ) -> bool {
         let (func, ctor_flags): (&str, i64) = match base {
             b"globiterator" => ("GlobIterator::__construct", DIT_CTOR_FLAGS | DIT_CTOR_GLOB),
-            b"recursivedirectoryiterator" => ("RecursiveDirectoryIterator::__construct", DIT_CTOR_FLAGS),
+            b"recursivedirectoryiterator" => {
+                ("RecursiveDirectoryIterator::__construct", DIT_CTOR_FLAGS)
+            }
             b"filesystemiterator" => ("FilesystemIterator::__construct", DIT_CTOR_FLAGS | SKIPDOTS),
             _ => ("DirectoryIterator::__construct", 0),
         };
@@ -367,7 +387,10 @@ impl Vm {
             None => return false,
         };
         if path.contains(&0) {
-            let msg = format!("{}(): Argument #1 ($directory) must not contain any null bytes", func);
+            let msg = format!(
+                "{}(): Argument #1 ($directory) must not contain any null bytes",
+                func
+            );
             self.spl_throw(b"ValueError", &msg);
             return false;
         }
@@ -399,7 +422,13 @@ impl Vm {
     }
 
     /// Validate a class-name argument (zpp "C"/"C!").
-    fn fs_class_arg(&mut self, func: &str, v: &Value, base: Option<&[u8]>, nullable: bool) -> Result<Option<Vec<u8>>, ()> {
+    fn fs_class_arg(
+        &mut self,
+        func: &str,
+        v: &Value,
+        base: Option<&[u8]>,
+        nullable: bool,
+    ) -> Result<Option<Vec<u8>>, ()> {
         let v = v.deref();
         if nullable && matches!(v, Value::Null) {
             return Ok(None);
@@ -469,11 +498,15 @@ impl Vm {
     }
 
     fn fs_info_class(obj: &Rc<RefCell<PhpObject>>) -> Vec<u8> {
-        sprop(obj, b"__spl_info_class").filter(|s| !s.is_empty()).unwrap_or_else(|| b"SplFileInfo".to_vec())
+        sprop(obj, b"__spl_info_class")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| b"SplFileInfo".to_vec())
     }
 
     fn fs_file_class(obj: &Rc<RefCell<PhpObject>>) -> Vec<u8> {
-        sprop(obj, b"__spl_file_class").filter(|s| !s.is_empty()).unwrap_or_else(|| b"SplFileObject".to_vec())
+        sprop(obj, b"__spl_file_class")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| b"SplFileObject".to_vec())
     }
 
     /// Whether `class_lower`'s constructor is not the built-in one of `base`.
@@ -486,7 +519,11 @@ impl Vm {
         let new_obj = self.spl_instantiate(class);
         let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
         if self.fs_user_ctor(&cl) {
-            self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", &[svec(file_path.to_vec())]);
+            self.call_object_method(
+                &Value::Object(new_obj.clone()),
+                b"__construct",
+                &[svec(file_path.to_vec())],
+            );
         } else {
             Self::sfi_set_filename(&new_obj, file_path);
         }
@@ -494,7 +531,11 @@ impl Vm {
     }
 
     /// spl_filesystem_object_create_type(SPL_FS_INFO)
-    fn fs_create_info_from(&mut self, source: &Rc<RefCell<PhpObject>>, class: Option<Vec<u8>>) -> Value {
+    fn fs_create_info_from(
+        &mut self,
+        source: &Rc<RefCell<PhpObject>>,
+        class: Option<Vec<u8>>,
+    ) -> Value {
         if Self::fs_is_dir(source) && Self::fs_entry(source).is_empty() {
             self.spl_throw(b"RuntimeException", "Could not open file");
             return Value::Null;
@@ -507,7 +548,11 @@ impl Vm {
         };
         let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
         if self.fs_user_ctor(&cl) {
-            self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", &[svec(fname)]);
+            self.call_object_method(
+                &Value::Object(new_obj.clone()),
+                b"__construct",
+                &[svec(fname)],
+            );
         } else {
             set_prop(&new_obj, b"__spl_file_path", svec(fname));
             match Self::fs_get_path(source) {
@@ -540,7 +585,11 @@ impl Vm {
         };
         let cl: Vec<u8> = class.iter().map(|b| b.to_ascii_lowercase()).collect();
         if self.fs_user_ctor(&cl) {
-            self.call_object_method(&Value::Object(new_obj.clone()), b"__construct", &[svec(fname), mode]);
+            self.call_object_method(
+                &Value::Object(new_obj.clone()),
+                b"__construct",
+                &[svec(fname), mode],
+            );
         } else {
             let mut cargs = vec![svec(fname), mode];
             cargs.extend_from_slice(a.get(1..).unwrap_or(&[]));
@@ -589,12 +638,18 @@ impl Vm {
                     b"isreadable" => b"is_readable",
                     _ => b"is_executable",
                 };
-                return self.spl_call_builtin(f, &[svec(fname.to_vec())]).unwrap_or(Value::False);
+                return self
+                    .spl_call_builtin(f, &[svec(fname.to_vec())])
+                    .unwrap_or(Value::False);
             }
             _ => {}
         }
         let p = String::from_utf8_lossy(fname).to_string();
-        let md = if link_op { std::fs::symlink_metadata(&p) } else { std::fs::metadata(&p) };
+        let md = if link_op {
+            std::fs::symlink_metadata(&p)
+        } else {
+            std::fs::metadata(&p)
+        };
         let m = match md {
             Ok(m) => m,
             Err(_) => {
@@ -674,7 +729,10 @@ impl Vm {
         };
         out.set(key(b"SplFileInfo", b"pathName"), svec(path_name));
         if let Some(f) = file_name {
-            out.set(key(b"SplFileInfo", b"fileName"), svec(Self::fs_short_name(obj, &f)));
+            out.set(
+                key(b"SplFileInfo", b"fileName"),
+                svec(Self::fs_short_name(obj, &f)),
+            );
         }
         let cl = obj_class_lower(obj);
         if Self::fs_is_dir(obj) {
@@ -685,7 +743,10 @@ impl Vm {
             };
             out.set(key(b"DirectoryIterator", b"glob"), glob);
             let sub = sprop(obj, b"__spl_sub_path").unwrap_or_default();
-            out.set(key(b"RecursiveDirectoryIterator", b"subPathName"), svec(sub));
+            out.set(
+                key(b"RecursiveDirectoryIterator", b"subPathName"),
+                svec(sub),
+            );
         } else if self.spl_find_base(&cl, &[b"splfileobject"]).is_some()
             && !matches!(prop(obj, b"__spl_stream"), Value::Null | Value::Undef)
         {
@@ -708,14 +769,22 @@ impl Vm {
     /// spl_filesystem_object_get_method_check() for SplFileObject and
     /// GlobIterator: methods cannot be looked up on an object whose
     /// constructor never ran.
-    pub(crate) fn spl_fs_method_check_fails(&self, obj: &Rc<RefCell<PhpObject>>, class_lower: &[u8]) -> bool {
+    pub(crate) fn spl_fs_method_check_fails(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+    ) -> bool {
         {
             let ob = obj.borrow();
-            if ob.has_property(b"__spl_stream") || ob.has_property(b"__spl_dir_open") || ob.has_property(b"__spl_orig_path") {
+            if ob.has_property(b"__spl_stream")
+                || ob.has_property(b"__spl_dir_open")
+                || ob.has_property(b"__spl_orig_path")
+            {
                 return false;
             }
         }
-        self.spl_find_base(class_lower, &[b"splfileobject", b"globiterator"]).is_some()
+        self.spl_find_base(class_lower, &[b"splfileobject", b"globiterator"])
+            .is_some()
     }
 
     /// CHECK_DIRECTORY_ITERATOR_IS_INITIALIZED
@@ -763,7 +832,10 @@ impl Vm {
             && !Self::fs_dir_open(obj)
             && sprop(obj, b"__spl_orig_path").is_none()
         {
-            return self.spl_throw(b"Error", "The parent constructor was not called: the object is in an invalid state");
+            return self.spl_throw(
+                b"Error",
+                "The parent constructor was not called: the object is in an invalid state",
+            );
         }
         let r = match (class, method) {
             // ---------------- SplFileInfo ----------------
@@ -784,10 +856,12 @@ impl Vm {
             },
             (b"splfileinfo", b"getbasename") => {
                 let suffix = match a.first() {
-                    Some(v) => match self.spl_arg_string("SplFileInfo::getBasename", 1, "suffix", v) {
-                        Some(s) => s.as_bytes().to_vec(),
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_string("SplFileInfo::getBasename", 1, "suffix", v) {
+                            Some(s) => s.as_bytes().to_vec(),
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => Vec::new(),
                 };
                 match sprop(obj, b"__spl_file_path") {
@@ -805,9 +879,21 @@ impl Vm {
             (b"splfileinfo", m)
                 if matches!(
                     m,
-                    b"getperms" | b"getinode" | b"getsize" | b"getowner" | b"getgroup" | b"getatime"
-                        | b"getmtime" | b"getctime" | b"gettype" | b"iswritable" | b"isreadable"
-                        | b"isexecutable" | b"isfile" | b"isdir" | b"islink"
+                    b"getperms"
+                        | b"getinode"
+                        | b"getsize"
+                        | b"getowner"
+                        | b"getgroup"
+                        | b"getatime"
+                        | b"getmtime"
+                        | b"getctime"
+                        | b"gettype"
+                        | b"iswritable"
+                        | b"isreadable"
+                        | b"isexecutable"
+                        | b"isfile"
+                        | b"isdir"
+                        | b"islink"
                 ) =>
             {
                 let f = self.fs_get_file_name(obj)?;
@@ -828,7 +914,9 @@ impl Vm {
                 let full = if p.starts_with('/') {
                     std::path::PathBuf::from(&p)
                 } else {
-                    std::env::current_dir().map(|c| c.join(&p)).unwrap_or_else(|_| std::path::PathBuf::from(&p))
+                    std::env::current_dir()
+                        .map(|c| c.join(&p))
+                        .unwrap_or_else(|_| std::path::PathBuf::from(&p))
                 };
                 match std::fs::read_link(&full) {
                     Ok(t) => svec(t.to_string_lossy().as_bytes().to_vec()),
@@ -840,14 +928,22 @@ impl Vm {
                 }
             }
             (b"splfileinfo", b"getrealpath") => {
-                if Self::fs_is_dir(obj) && sprop(obj, b"__spl_file_path").is_none() && !Self::fs_entry(obj).is_empty() {
+                if Self::fs_is_dir(obj)
+                    && sprop(obj, b"__spl_file_path").is_none()
+                    && !Self::fs_entry(obj).is_empty()
+                {
                     self.fs_get_file_name(obj)?;
                 }
-                let filename = sprop(obj, b"__spl_orig_path").or_else(|| sprop(obj, b"__spl_file_path"));
+                let filename =
+                    sprop(obj, b"__spl_orig_path").or_else(|| sprop(obj, b"__spl_file_path"));
                 match filename {
                     Some(f) => {
                         let p = String::from_utf8_lossy(&f).to_string();
-                        let r = if p.is_empty() { std::env::current_dir() } else { std::fs::canonicalize(&p) };
+                        let r = if p.is_empty() {
+                            std::env::current_dir()
+                        } else {
+                            std::fs::canonicalize(&p)
+                        };
                         match r {
                             Ok(rp) => svec(rp.to_string_lossy().as_bytes().to_vec()),
                             Err(_) => Value::False,
@@ -858,11 +954,22 @@ impl Vm {
             }
             (b"splfileinfo", b"openfile") => self.fs_open_file(obj, a),
             (b"splfileinfo", b"setfileclass") | (b"splfileinfo", b"setinfoclass") => {
-                let (func, base, pname, default): (&str, &[u8], &[u8], &[u8]) = if method == b"setfileclass" {
-                    ("SplFileInfo::setFileClass", b"splfileobject", b"__spl_file_class", b"SplFileObject")
-                } else {
-                    ("SplFileInfo::setInfoClass", b"splfileinfo", b"__spl_info_class", b"SplFileInfo")
-                };
+                let (func, base, pname, default): (&str, &[u8], &[u8], &[u8]) =
+                    if method == b"setfileclass" {
+                        (
+                            "SplFileInfo::setFileClass",
+                            b"splfileobject",
+                            b"__spl_file_class",
+                            b"SplFileObject",
+                        )
+                    } else {
+                        (
+                            "SplFileInfo::setInfoClass",
+                            b"splfileinfo",
+                            b"__spl_info_class",
+                            b"SplFileInfo",
+                        )
+                    };
                 let c = match a.first() {
                     Some(v) => match self.fs_class_arg(func, v, Some(base), false) {
                         Ok(c) => c.unwrap_or_else(|| default.to_vec()),
@@ -877,10 +984,12 @@ impl Vm {
                 let ic = Self::fs_info_class(obj);
                 let icl: Vec<u8> = ic.iter().map(|b| b.to_ascii_lowercase()).collect();
                 let c = match a.first() {
-                    Some(v) => match self.fs_class_arg("SplFileInfo::getFileInfo", v, Some(&icl), true) {
-                        Ok(c) => c,
-                        Err(()) => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.fs_class_arg("SplFileInfo::getFileInfo", v, Some(&icl), true) {
+                            Ok(c) => c,
+                            Err(()) => return Some(Value::Null),
+                        }
+                    }
                     None => None,
                 };
                 self.fs_create_info_from(obj, c)
@@ -897,7 +1006,9 @@ impl Vm {
                     None => Self::fs_info_class(obj),
                     Some(c) => {
                         let ccl: Vec<u8> = c.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if ccl != b"splfileinfo" && self.spl_find_base(&ccl, &[b"splfileinfo"]).is_none() {
+                        if ccl != b"splfileinfo"
+                            && self.spl_find_base(&ccl, &[b"splfileinfo"]).is_none()
+                        {
                             let msg = format!(
                                 "SplFileInfo::getPathInfo(): Argument #1 ($class) must be a class name derived from SplFileInfo or null, {} given",
                                 String::from_utf8_lossy(&c)
@@ -921,7 +1032,10 @@ impl Vm {
             }
             (b"splfileinfo", b"__debuginfo") => val_arr(self.fs_debug_info(obj)),
             (b"splfileinfo", b"_bad_state_ex") => {
-                return self.spl_throw(b"Error", "The parent constructor was not called: the object is in an invalid state");
+                return self.spl_throw(
+                    b"Error",
+                    "The parent constructor was not called: the object is in an invalid state",
+                );
             }
             // ---------------- DirectoryIterator ----------------
             (b"directoryiterator", m) => {
@@ -939,7 +1053,12 @@ impl Vm {
                     }
                     b"getbasename" => {
                         let suffix = match a.first() {
-                            Some(v) => match self.spl_arg_string("DirectoryIterator::getBasename", 1, "suffix", v) {
+                            Some(v) => match self.spl_arg_string(
+                                "DirectoryIterator::getBasename",
+                                1,
+                                "suffix",
+                                v,
+                            ) {
                                 Some(s) => s.as_bytes().to_vec(),
                                 None => return Some(Value::Null),
                             },
@@ -959,13 +1078,22 @@ impl Vm {
                     b"current" => Value::Object(obj.clone()),
                     b"next" => {
                         let skip = Self::fs_flags(obj) & SKIPDOTS != 0;
-                        set_prop(obj, b"__spl_dir_index", Value::Long(lprop(obj, b"__spl_dir_index") + 1));
+                        set_prop(
+                            obj,
+                            b"__spl_dir_index",
+                            Value::Long(lprop(obj, b"__spl_dir_index") + 1),
+                        );
                         Self::fs_dir_read_skip(obj, skip);
                         set_prop(obj, b"__spl_file_path", Value::Null);
                         Value::Null
                     }
                     b"seek" => {
-                        let pos = match self.spl_arg_long("DirectoryIterator::seek", 1, "offset", &a[0]) {
+                        let pos = match self.spl_arg_long(
+                            "DirectoryIterator::seek",
+                            1,
+                            "offset",
+                            &a[0],
+                        ) {
                             Some(n) => n,
                             None => return Some(Value::Null),
                         };
@@ -978,7 +1106,9 @@ impl Vm {
                         }
                         let mut guard = 0u64;
                         while lprop(obj, b"__spl_dir_index") < pos {
-                            let valid = self.call_object_method(&ov, b"valid", &[]).unwrap_or(Value::False);
+                            let valid = self
+                                .call_object_method(&ov, b"valid", &[])
+                                .unwrap_or(Value::False);
                             if self.current_exception.is_some() {
                                 return Some(Value::Null);
                             }
@@ -1078,7 +1208,9 @@ impl Vm {
                 if self.spl_has_user_ctor(&cl) {
                     self.call_object_method(&cv, b"__construct", &cargs);
                 } else {
-                    let base = self.spl_find_base(&cl, DIR_CLASSES).unwrap_or(b"recursivedirectoryiterator");
+                    let base = self
+                        .spl_find_base(&cl, DIR_CLASSES)
+                        .unwrap_or(b"recursivedirectoryiterator");
                     self.spl_push_ctor_frame(&child, &cargs);
                     self.fs_dir_construct(&child, base, &cargs);
                     self.call_stack.pop();
@@ -1105,7 +1237,9 @@ impl Vm {
                 }
                 cv
             }
-            (b"recursivedirectoryiterator", b"getsubpath") => svec(sprop(obj, b"__spl_sub_path").unwrap_or_default()),
+            (b"recursivedirectoryiterator", b"getsubpath") => {
+                svec(sprop(obj, b"__spl_sub_path").unwrap_or_default())
+            }
             (b"recursivedirectoryiterator", b"getsubpathname") => {
                 let entry = Self::fs_entry(obj);
                 match sprop(obj, b"__spl_sub_path") {
@@ -1144,7 +1278,9 @@ pub fn spl_dir_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Resu
         _ => return Ok(()),
     };
     let cl = obj_class_lower(&obj);
-    let base = vm.spl_find_base(&cl, DIR_CLASSES).unwrap_or(b"directoryiterator");
+    let base = vm
+        .spl_find_base(&cl, DIR_CLASSES)
+        .unwrap_or(b"directoryiterator");
     vm.spl_push_ctor_frame(&obj, &args[1..]);
     let ok = vm.fs_dir_construct(&obj, base, &args[1..]);
     vm.call_stack.pop();
@@ -1152,7 +1288,11 @@ pub fn spl_dir_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Resu
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)

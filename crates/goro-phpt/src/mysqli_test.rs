@@ -81,13 +81,17 @@ fn find_mysqld() -> Option<PathBuf> {
 /// Find a free TCP port by binding a socket and asking the OS.
 fn find_free_port() -> Option<u16> {
     use std::net::TcpListener;
-    TcpListener::bind("127.0.0.1:0").ok().and_then(|l| l.local_addr().ok()).map(|a| a.port())
+    TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
 }
 
 /// Attempt to start the embedded server. Returns None on any failure.
 pub fn try_start() -> Option<EmbeddedMysql> {
     let bin = find_mysqld()?;
-    let is_mariadb = bin.file_name()
+    let is_mariadb = bin
+        .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.contains("mariadb"))
         .unwrap_or(false);
@@ -206,8 +210,17 @@ pub fn try_start() -> Option<EmbeddedMysql> {
         if let Ok(mut f) = std::fs::File::open(&errlog) {
             let mut buf = String::new();
             let _ = f.read_to_string(&mut buf);
-            eprintln!("[goro-phpt] embedded mysqld failed to start; tail of err.log:\n{}",
-                buf.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+            eprintln!(
+                "[goro-phpt] embedded mysqld failed to start; tail of err.log:\n{}",
+                buf.lines()
+                    .rev()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
         }
         let _ = std::fs::remove_dir_all(&tmpdir);
         return None;

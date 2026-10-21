@@ -36,7 +36,10 @@ fn sanitize_header_value(v: &[u8]) -> Vec<u8> {
         }
         if out[i] < 0x20 || out[i] == 0x7f {
             // SKIP_LONG_HEADER_SEP: CRLF followed by space/tab is kept
-            if out[i] == b'\r' && out.get(i + 1) == Some(&b'\n') && matches!(out.get(i + 2), Some(b' ') | Some(b'\t')) {
+            if out[i] == b'\r'
+                && out.get(i + 1) == Some(&b'\n')
+                && matches!(out.get(i + 2), Some(b' ') | Some(b'\t'))
+            {
                 i += 3;
                 while i < out.len() && matches!(out[i], b' ' | b'\t') {
                     i += 1;
@@ -57,7 +60,10 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = format!("mail() expects at least 3 arguments, {} given", args.len());
         let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
     }
     let to = path_arg(vm, f, args, 0, "to")?;
     let subject = path_arg(vm, f, args, 1, "subject")?;
@@ -68,7 +74,13 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(_) => {
             let h = str_arg(vm, f, args, 3, "additional_headers")?;
             if h.contains(&0) {
-                return Err(arg_value_error(vm, f, 4, "additional_headers", "must not contain any null bytes"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    4,
+                    "additional_headers",
+                    "must not contain any null bytes",
+                ));
             }
             let mut end = h.len();
             while end > 0 && matches!(h[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0) {
@@ -93,7 +105,15 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         (None, None) => None,
     };
     let hdr = headers.filter(|h| !h.is_empty());
-    let ok = php_mail(vm, f, &to_r, &subject_r, &message, hdr.as_deref(), extra_cmd.as_deref());
+    let ok = php_mail(
+        vm,
+        f,
+        &to_r,
+        &subject_r,
+        &message,
+        hdr.as_deref(),
+        extra_cmd.as_deref(),
+    );
     if vm.current_exception.is_some() {
         return Ok(Value::Null);
     }
@@ -101,7 +121,9 @@ fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn ini_bytes(vm: &Vm, key: &str) -> Option<Vec<u8>> {
-    vm.constants.get(key.as_bytes()).map(|v| v.to_php_string().as_bytes().to_vec())
+    vm.constants
+        .get(key.as_bytes())
+        .map(|v| v.to_php_string().as_bytes().to_vec())
 }
 
 fn ini_bool(vm: &Vm, key: &str) -> bool {
@@ -206,7 +228,9 @@ fn parse_mail_headers(s: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
                     _ => {}
                 }
                 if fallthrough && crlf_state == -1 {
-                    fld_val = token.filter(|_| token_pos > 0).map(|t| s[t..(t + token_pos).min(s.len())].to_vec());
+                    fld_val = token
+                        .filter(|_| token_pos > 0)
+                        .map(|t| s[t..(t + token_pos).min(s.len())].to_vec());
                     if let (Some(n), Some(v)) = (fld_name.take(), fld_val.take()) {
                         update(&mut out, n, v);
                     }
@@ -230,7 +254,9 @@ fn parse_mail_headers(s: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         state = 3;
     }
     if state == 3 {
-        let v = token.filter(|_| token_pos > 0).map(|t| s[t..(t + token_pos).min(s.len())].to_vec());
+        let v = token
+            .filter(|_| token_pos > 0)
+            .map(|t| s[t..(t + token_pos).min(s.len())].to_vec());
         if let (Some(n), Some(v)) = (fld_name.take(), v) {
             update(&mut out, n, v);
         }
@@ -255,27 +281,59 @@ fn check_field_value(vm: &mut Vm, key: &[u8], val: &[u8]) -> Result<(), VmError>
                 }
                 return Err(value_error(
                     vm,
-                    format!("Header \"{}\" contains CRLF characters that are used as a line separator and are not allowed in the header", k),
+                    format!(
+                        "Header \"{}\" contains CRLF characters that are used as a line separator and are not allowed in the header",
+                        k
+                    ),
                 ));
             }
-            return Err(value_error(vm, format!("Header \"{}\" contains CR character that is not allowed in the header", k)));
+            return Err(value_error(
+                vm,
+                format!(
+                    "Header \"{}\" contains CR character that is not allowed in the header",
+                    k
+                ),
+            ));
         }
         if c == b'\n' {
-            return Err(value_error(vm, format!("Header \"{}\" contains LF character that is not allowed in the header", k)));
+            return Err(value_error(
+                vm,
+                format!(
+                    "Header \"{}\" contains LF character that is not allowed in the header",
+                    k
+                ),
+            ));
         }
         if c == 0 {
-            return Err(value_error(vm, format!("Header \"{}\" contains NULL character that is not allowed in the header", k)));
+            return Err(value_error(
+                vm,
+                format!(
+                    "Header \"{}\" contains NULL character that is not allowed in the header",
+                    k
+                ),
+            ));
         }
         i += 1;
     }
     Ok(())
 }
 
-fn build_header_elem(vm: &mut Vm, out: &mut Vec<u8>, key: &[u8], val: &Value) -> Result<(), VmError> {
+fn build_header_elem(
+    vm: &mut Vm,
+    out: &mut Vec<u8>,
+    key: &[u8],
+    val: &Value,
+) -> Result<(), VmError> {
     match val.deref() {
         Value::String(s) => {
             if !check_field_name(key) {
-                return Err(value_error(vm, format!("Header name \"{}\" contains invalid characters", String::from_utf8_lossy(key))));
+                return Err(value_error(
+                    vm,
+                    format!(
+                        "Header name \"{}\" contains invalid characters",
+                        String::from_utf8_lossy(key)
+                    ),
+                ));
             }
             check_field_value(vm, key, s.as_bytes())?;
             out.extend_from_slice(key);
@@ -285,19 +343,31 @@ fn build_header_elem(vm: &mut Vm, out: &mut Vec<u8>, key: &[u8], val: &Value) ->
             Ok(())
         }
         Value::Array(a) => {
-            let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let entries: Vec<(ArrayKey, Value)> = a
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (k, v) in entries {
                 if let ArrayKey::String(ks) = &k {
                     return Err(type_error(
                         vm,
-                        format!("Header \"{}\" must only contain numeric keys, \"{}\" found", String::from_utf8_lossy(key), ks.to_string_lossy()),
+                        format!(
+                            "Header \"{}\" must only contain numeric keys, \"{}\" found",
+                            String::from_utf8_lossy(key),
+                            ks.to_string_lossy()
+                        ),
                     ));
                 }
                 let v = v.deref();
                 if !matches!(v, Value::String(_)) {
                     return Err(type_error(
                         vm,
-                        format!("Header \"{}\" must only contain values of type string, {} found", String::from_utf8_lossy(key), type_name(&v)),
+                        format!(
+                            "Header \"{}\" must only contain values of type string, {} found",
+                            String::from_utf8_lossy(key),
+                            type_name(&v)
+                        ),
                     ));
                 }
                 build_header_elem(vm, out, key, &v)?;
@@ -306,7 +376,11 @@ fn build_header_elem(vm: &mut Vm, out: &mut Vec<u8>, key: &[u8], val: &Value) ->
         }
         other => Err(type_error(
             vm,
-            format!("Header \"{}\" must be of type array|string, {} given", String::from_utf8_lossy(key), type_name(&other)),
+            format!(
+                "Header \"{}\" must be of type array|string, {} given",
+                String::from_utf8_lossy(key),
+                type_name(&other)
+            ),
         )),
     }
 }
@@ -317,25 +391,56 @@ fn build_headers(vm: &mut Vm, headers: &Value) -> Result<Vec<u8>, VmError> {
         Value::Array(a) => a.clone(),
         _ => return Ok(Vec::new()),
     };
-    let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut out = Vec::new();
     for (k, v) in entries {
         let key = match k {
-            ArrayKey::Int(n) => return Err(type_error(vm, format!("Header name cannot be numeric, {} given", n))),
+            ArrayKey::Int(n) => {
+                return Err(type_error(
+                    vm,
+                    format!("Header name cannot be numeric, {} given", n),
+                ));
+            }
             ArrayKey::String(s) => s.as_bytes().to_vec(),
         };
         let lower = key.to_ascii_lowercase();
-        let single_only = ["orig-date", "from", "sender", "reply-to", "cc", "bcc", "message-id", "references", "in-reply-to"];
+        let single_only = [
+            "orig-date",
+            "from",
+            "sender",
+            "reply-to",
+            "cc",
+            "bcc",
+            "message-id",
+            "references",
+            "in-reply-to",
+        ];
         if lower == b"to" {
-            return Err(value_error(vm, "The additional headers cannot contain the \"To\" header".to_string()));
+            return Err(value_error(
+                vm,
+                "The additional headers cannot contain the \"To\" header".to_string(),
+            ));
         }
         if lower == b"subject" {
-            return Err(value_error(vm, "The additional headers cannot contain the \"Subject\" header".to_string()));
+            return Err(value_error(
+                vm,
+                "The additional headers cannot contain the \"Subject\" header".to_string(),
+            ));
         }
         let v = v.deref();
-        if let Some(t) = single_only.iter().find(|t| t.as_bytes() == lower.as_slice()) {
+        if let Some(t) = single_only
+            .iter()
+            .find(|t| t.as_bytes() == lower.as_slice())
+        {
             if matches!(v, Value::Array(_)) {
-                return Err(type_error(vm, format!("Header \"{}\" must be of type string, array given", t)));
+                return Err(type_error(
+                    vm,
+                    format!("Header \"{}\" must be of type string, array given", t),
+                ));
             }
         }
         build_header_elem(vm, &mut out, &key, &v)?;
@@ -358,7 +463,11 @@ fn detect_multiple_crlf(hdr: &[u8]) -> bool {
     let mut i = 0;
     while i < hdr.len() && hdr[i] != 0 {
         if hdr[i] == b'\r' {
-            if at(i + 1) == 0 || at(i + 1) == b'\r' || (at(i + 1) == b'\n' && (at(i + 2) == 0 || at(i + 2) == b'\n' || at(i + 2) == b'\r')) {
+            if at(i + 1) == 0
+                || at(i + 1) == b'\r'
+                || (at(i + 1) == b'\n'
+                    && (at(i + 2) == 0 || at(i + 2) == b'\n' || at(i + 2) == b'\r'))
+            {
                 return true;
             }
             i += 2;
@@ -392,7 +501,8 @@ fn escape_shell_cmd(s: &[u8]) -> Vec<u8> {
                 out.push(b'\\');
                 out.push(c);
             }
-            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b',' | 0x0A | 0xFF => {
+            b'#' | b'&' | b';' | b'`' | b'|' | b'*' | b'?' | b'~' | b'<' | b'>' | b'^' | b'('
+            | b')' | b'[' | b']' | b'{' | b'}' | b'$' | b'\\' | b',' | 0x0A | 0xFF => {
                 out.push(b'\\');
                 out.push(c);
             }
@@ -404,7 +514,15 @@ fn escape_shell_cmd(s: &[u8]) -> Vec<u8> {
 }
 
 /// C: `php_mail`
-pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u8], headers: Option<&[u8]>, extra_cmd: Option<&[u8]>) -> bool {
+pub fn php_mail(
+    vm: &mut Vm,
+    func: &str,
+    to: &[u8],
+    subject: &[u8],
+    message: &[u8],
+    headers: Option<&[u8]>,
+    extra_cmd: Option<&[u8]>,
+) -> bool {
     let sendmail_path = match ini_bytes(vm, "sendmail_path") {
         Some(p) if !p.is_empty() => p,
         _ => b"/usr/sbin/sendmail -t -i".to_vec(),
@@ -423,11 +541,13 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
     if let Some(log) = ini_bytes(vm, "mail.log").filter(|v| !v.is_empty()) {
         let mut line = format!(
             "mail() on [{}:{}]: To: {} -- Headers: {} -- Subject: {}",
-            vm.current_file, vm.current_line,
+            vm.current_file,
+            vm.current_line,
             String::from_utf8_lossy(to),
             String::from_utf8_lossy(headers.unwrap_or(b"")),
             String::from_utf8_lossy(subject)
-        ).into_bytes();
+        )
+        .into_bytes();
         if headers.is_some() {
             for c in line.iter_mut() {
                 if *c == b'\r' || *c == b'\n' {
@@ -436,7 +556,10 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
             }
         }
         if log != b"syslog" {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             let days = now.div_euclid(86400);
             let secs = now.rem_euclid(86400);
             // civil_from_days
@@ -449,12 +572,27 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
             let d = doy - (153 * mp + 2) / 5 + 1;
             let m = if mp < 10 { mp + 3 } else { mp - 9 };
             let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            let mut entry = format!("[{:02}-{}-{:04} {:02}:{:02}:{:02} UTC] ", d, months[(m - 1) as usize], y, secs / 3600, (secs / 60) % 60, secs % 60).into_bytes();
+            let months = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let mut entry = format!(
+                "[{:02}-{}-{:04} {:02}:{:02}:{:02} UTC] ",
+                d,
+                months[(m - 1) as usize],
+                y,
+                secs / 3600,
+                (secs / 60) % 60,
+                secs % 60
+            )
+            .into_bytes();
             entry.extend_from_slice(&line);
             entry.push(b'\n');
             let path = String::from_utf8_lossy(&log).to_string();
-            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut fh) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = fh.write_all(&entry);
             }
         }
@@ -462,7 +600,10 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
     let mut hdr: Option<Vec<u8>> = headers.map(|h| h.to_vec());
     if ini_bool(vm, "mail.add_x_header") {
         let file = vm.current_file.clone();
-        let base = std::path::Path::new(&file).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        let base = std::path::Path::new(&file)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
         let uid = unsafe { libc_getuid() };
         let mut x = format!("X-PHP-Originating-Script: {}:{}", uid, base).into_bytes();
         if let Some(h) = &hdr {
@@ -475,7 +616,10 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
     }
     if let Some(h) = &hdr {
         if detect_multiple_crlf(h) {
-            vm.emit_warning(&format!("{}(): Multiple or malformed newlines found in additional_header", func));
+            vm.emit_warning(&format!(
+                "{}(): Multiple or malformed newlines found in additional_header",
+                func
+            ));
             return false;
         }
     }
@@ -512,7 +656,11 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
     }
     data.extend_from_slice(line_sep);
     let cmd_s = String::from_utf8_lossy(&cmd).to_string();
-    let child = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd_s).stdin(std::process::Stdio::piped()).spawn();
+    let child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&cmd_s)
+        .stdin(std::process::Stdio::piped())
+        .spawn();
     match child {
         Ok(mut c) => {
             if let Some(mut stdin) = c.stdin.take() {
@@ -522,14 +670,30 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
                 Ok(st) => {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(sig) = st.signal() {
-                        let name = match sig { 1 => "Hangup", 2 => "Interrupt", 3 => "Quit", 6 => "Aborted", 9 => "Killed", 13 => "Broken pipe", 14 => "Alarm clock", 15 => "Terminated", _ => "Unknown signal" };
-                        vm.emit_warning(&format!("{}(): Sendmail killed by signal {} ({})", func, sig, name));
+                        let name = match sig {
+                            1 => "Hangup",
+                            2 => "Interrupt",
+                            3 => "Quit",
+                            6 => "Aborted",
+                            9 => "Killed",
+                            13 => "Broken pipe",
+                            14 => "Alarm clock",
+                            15 => "Terminated",
+                            _ => "Unknown signal",
+                        };
+                        vm.emit_warning(&format!(
+                            "{}(): Sendmail killed by signal {} ({})",
+                            func, sig, name
+                        ));
                         return false;
                     }
                     let ret = st.code().unwrap_or(-1);
                     // EX_OK (0) and EX_TEMPFAIL (75) count as success
                     if ret != 0 && ret != 75 {
-                        vm.emit_warning(&format!("{}(): Sendmail exited with non-zero exit code {}", func, ret));
+                        vm.emit_warning(&format!(
+                            "{}(): Sendmail exited with non-zero exit code {}",
+                            func, ret
+                        ));
                         false
                     } else {
                         true
@@ -539,7 +703,11 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
             }
         }
         Err(_) => {
-            vm.emit_warning(&format!("{}(): Could not execute mail delivery program '{}'", func, String::from_utf8_lossy(&sendmail_path)));
+            vm.emit_warning(&format!(
+                "{}(): Could not execute mail delivery program '{}'",
+                func,
+                String::from_utf8_lossy(&sendmail_path)
+            ));
             false
         }
     }
@@ -550,10 +718,22 @@ unsafe extern "C" {
     fn libc_getuid() -> u32;
 }
 
-fn path_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<Vec<u8>, VmError> {
+fn path_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<Vec<u8>, VmError> {
     let s = str_arg(vm, func, args, idx, pname)?;
     if s.contains(&0) {
-        return Err(arg_value_error(vm, func, idx + 1, pname, "must not contain any null bytes"));
+        return Err(arg_value_error(
+            vm,
+            func,
+            idx + 1,
+            pname,
+            "must not contain any null bytes",
+        ));
     }
     Ok(s)
 }
@@ -562,9 +742,12 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_send_mail";
     state::sync(vm);
     let lang = state::no2language(state::with(|s| s.language));
-    let mut tran_cs: &'static Encoding = mbfl::no2encoding(lang.mail_charset).unwrap_or(&mbfl::basic::ENC_UTF8);
-    let head_enc: &'static Encoding = mbfl::no2encoding(lang.mail_header_encoding).unwrap_or(&mbfl::basic::ENC_8BIT);
-    let mut body_enc: &'static Encoding = mbfl::no2encoding(lang.mail_body_encoding).unwrap_or(&mbfl::basic::ENC_8BIT);
+    let mut tran_cs: &'static Encoding =
+        mbfl::no2encoding(lang.mail_charset).unwrap_or(&mbfl::basic::ENC_UTF8);
+    let head_enc: &'static Encoding =
+        mbfl::no2encoding(lang.mail_header_encoding).unwrap_or(&mbfl::basic::ENC_8BIT);
+    let mut body_enc: &'static Encoding =
+        mbfl::no2encoding(lang.mail_body_encoding).unwrap_or(&mbfl::basic::ENC_8BIT);
 
     let to = path_arg(vm, f, args, 0, "to")?;
     let subject = path_arg(vm, f, args, 1, "subject")?;
@@ -578,7 +761,13 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(_) => {
             let h = str_arg(vm, f, args, 3, "additional_headers")?;
             if h.contains(&0) {
-                return Err(arg_value_error(vm, f, 4, "additional_headers", "must not contain any null bytes"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    4,
+                    "additional_headers",
+                    "must not contain any null bytes",
+                ));
             }
             // php_trim(..., 2): right trim of default whitespace
             let mut end = h.len();
@@ -591,14 +780,23 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let extra_cmd = match str_or_null_arg(vm, f, args, 4, "additional_params")? {
         Some(e) => {
             if e.contains(&0) {
-                return Err(arg_value_error(vm, f, 5, "additional_params", "must not contain any null bytes"));
+                return Err(arg_value_error(
+                    vm,
+                    f,
+                    5,
+                    "additional_params",
+                    "must not contain any null bytes",
+                ));
             }
             Some(e)
         }
         None => None,
     };
 
-    let ht = str_headers.as_deref().map(parse_mail_headers).unwrap_or_default();
+    let ht = str_headers
+        .as_deref()
+        .map(parse_mail_headers)
+        .unwrap_or_default();
     let find = |name: &[u8]| ht.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
     let mut suppress_content_type = false;
     let mut suppress_cte = false;
@@ -610,7 +808,9 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             if p < ct.len() {
                 let rest = &ct[p..];
-                let mut parts = rest.split(|&c| c == b'=' || c == b' ').filter(|x| !x.is_empty());
+                let mut parts = rest
+                    .split(|&c| c == b'=' || c == b' ')
+                    .filter(|x| !x.is_empty());
                 if let Some(param) = parts.next() {
                     if param.eq_ignore_ascii_case(b"charset") {
                         // charset = strtok(NULL, "= \"")
@@ -620,7 +820,11 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             .find(|x| !x.is_empty())
                             .map(|x| x.to_vec())
                             .unwrap_or_default();
-                        let enc = if cs.is_empty() { Some(tran_cs) } else { mbfl::name2encoding(&cs) };
+                        let enc = if cs.is_empty() {
+                            Some(tran_cs)
+                        } else {
+                            mbfl::name2encoding(&cs)
+                        };
                         tran_cs = match enc {
                             Some(e) => e,
                             None => {
@@ -640,7 +844,9 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cte) = find(b"content-transfer-encoding") {
         let e = mbfl::name2encoding(&cte);
         match e.map(|e| e.no) {
-            Some(EncNo::Base64) | Some(EncNo::SevenBit) | Some(EncNo::EightBit) => body_enc = e.unwrap(),
+            Some(EncNo::Base64) | Some(EncNo::SevenBit) | Some(EncNo::EightBit) => {
+                body_enc = e.unwrap()
+            }
             _ => {
                 vm.emit_warning(&format!(
                     "mb_send_mail(): Unsupported transfer encoding \"{}\" - will be regarded as 8bit",
@@ -664,7 +870,10 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut i = 0;
     while i < to_r.len() {
         if to_r[i] < 0x20 || to_r[i] == 0x7F {
-            if to_r[i] == b'\r' && to_r.get(i + 1) == Some(&b'\n') && matches!(to_r.get(i + 2), Some(b' ') | Some(b'\t')) {
+            if to_r[i] == b'\r'
+                && to_r.get(i + 1) == Some(&b'\n')
+                && matches!(to_r.get(i + 2), Some(b' ') | Some(b'\t'))
+            {
                 i += 2;
                 while matches!(to_r.get(i + 1), Some(b' ') | Some(b'\t')) {
                     i += 1;
@@ -683,10 +892,21 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if enc.no == EncNo::Pass {
         enc = guess_encoding(&[&subject], &detect.0, detect.1, false).unwrap_or(enc);
     }
-    let line_sep: &[u8] = if ini_bool(vm, "mail.mixed_lf_and_crlf") { b"\n" } else { b"\r\n" };
+    let line_sep: &[u8] = if ini_bool(vm, "mail.mixed_lf_and_crlf") {
+        b"\n"
+    } else {
+        b"\r\n"
+    };
     let indent = ("Subject: [PHP-jp nnnnnnnn]".len() + line_sep.len()) as i64;
     let subject_enc = if tran_cs.from_wchar.is_some() && tran_cs.mime_name.is_some() {
-        mime_header_encode(&subject, enc, tran_cs, head_enc.no == EncNo::Base64, line_sep, indent)
+        mime_header_encode(
+            &subject,
+            enc,
+            tran_cs,
+            head_enc.no == EncNo::Base64,
+            line_sep,
+            indent,
+        )
     } else {
         subject.clone()
     };
@@ -696,8 +916,20 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if msg_enc.no == EncNo::Pass {
         msg_enc = guess_encoding(&[&message], &detect.0, detect.1, false).unwrap_or(msg_enc);
     }
-    let (tmp, _) = mbfl::fast_convert(&message, msg_enc, tran_cs, b'?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR);
-    let (conv, _) = mbfl::fast_convert(&tmp, &mbfl::basic::ENC_8BIT, body_enc, b'?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR);
+    let (tmp, _) = mbfl::fast_convert(
+        &message,
+        msg_enc,
+        tran_cs,
+        b'?' as u32,
+        mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR,
+    );
+    let (conv, _) = mbfl::fast_convert(
+        &tmp,
+        &mbfl::basic::ENC_8BIT,
+        body_enc,
+        b'?' as u32,
+        mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR,
+    );
 
     // other headers
     let mut s: Vec<u8> = Vec::new();
@@ -738,7 +970,11 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             s.extend_from_slice(line_sep);
         }
         s.extend_from_slice(b"Content-Transfer-Encoding: ");
-        s.extend_from_slice(mbfl::preferred_mime_name(body_enc).unwrap_or("7bit").as_bytes());
+        s.extend_from_slice(
+            mbfl::preferred_mime_name(body_enc)
+                .unwrap_or("7bit")
+                .as_bytes(),
+        );
     }
 
     let force = ini_bytes(vm, "mail.force_extra_parameters").filter(|v| !v.is_empty());
@@ -747,5 +983,13 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         (None, Some(e)) => Some(escape_shell_cmd(&e)),
         _ => None,
     };
-    Ok(vbool(php_mail(vm, f, &to_r, &subject_enc, &conv, Some(&s), extra.as_deref())))
+    Ok(vbool(php_mail(
+        vm,
+        f,
+        &to_r,
+        &subject_enc,
+        &conv,
+        Some(&s),
+        extra.as_deref(),
+    )))
 }

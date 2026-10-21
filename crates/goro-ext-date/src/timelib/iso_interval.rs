@@ -1,7 +1,7 @@
 //! Port of timelib parse_iso_intervals.re (timelib_strtointerval)
 
-use super::parse_date::{get_nr, Ptr};
-use super::regex::{parse_definitions, parse_expr, Scanner as ReScanner};
+use super::parse_date::{Ptr, get_nr};
+use super::regex::{Scanner as ReScanner, parse_definitions, parse_expr};
 use super::*;
 use std::cell::RefCell;
 
@@ -25,7 +25,15 @@ combinedrep = "P" year4 "-" monthlzz "-" daylzz "T" hour24lz ':' minutelz ':' se
 recurrences = "R" number;
 "#;
 
-const RULES: &[&str] = &["recurrences", "datetimebasic| datetimeextended", "period", "combinedrep", "[ .,\\t/]", "\"\\000\"|\"\\n\"", "any"];
+const RULES: &[&str] = &[
+    "recurrences",
+    "datetimebasic| datetimeextended",
+    "period",
+    "combinedrep",
+    "[ .,\\t/]",
+    "\"\\000\"|\"\\n\"",
+    "any",
+];
 
 thread_local! {
     static SCANNER: RefCell<Option<ReScanner>> = const { RefCell::new(None) };
@@ -90,7 +98,13 @@ fn is_c_space(c: u8) -> bool {
 
 pub fn strtointerval(input: &[u8]) -> IsoInterval {
     let mut errors = ErrorContainer::default();
-    let mut res = IsoInterval { begin: None, end: None, period: None, recurrences: None, errors: ErrorContainer::default() };
+    let mut res = IsoInterval {
+        begin: None,
+        end: None,
+        period: None,
+        recurrences: None,
+        errors: ErrorContainer::default(),
+    };
     let len = input.len();
     let mut s0 = 0usize;
     let mut e: isize = len as isize - 1;
@@ -103,7 +117,12 @@ pub fn strtointerval(input: &[u8]) -> IsoInterval {
         }
     }
     let push_err = |errors: &mut ErrorContainer, pos: usize, ch: u8, msg: &str| {
-        errors.error_messages.push(ErrorMessage { error_code: 0, position: pos as i32, character: ch, message: msg.to_string() });
+        errors.error_messages.push(ErrorMessage {
+            error_code: 0,
+            position: pos as i32,
+            character: ch,
+            message: msg.to_string(),
+        });
     };
     if e - (s0 as isize) < 0 {
         push_err(&mut errors, 0, 0, "Empty string");
@@ -117,14 +136,24 @@ pub fn strtointerval(input: &[u8]) -> IsoInterval {
 
     let mut begin = new_time();
     let mut end = new_time();
-    let mut period = RelTime { days: UNSET, ..Default::default() };
+    let mut period = RelTime {
+        days: UNSET,
+        ..Default::default()
+    };
     let mut recurrences: i64 = 1;
-    let (mut have_period, mut have_recurrences, mut have_date, mut have_begin_date, mut have_end_date) = (false, false, false, false, false);
+    let (
+        mut have_period,
+        mut have_recurrences,
+        mut have_date,
+        mut have_begin_date,
+        mut have_end_date,
+    ) = (false, false, false, false, false);
 
     let mut cur = 0usize;
     while cur <= input_len {
         let tok = cur;
-        let (rule, endp) = with_scanner(|sc| sc.longest_match(&buf, cur)).unwrap_or((RULES.len() - 1, cur + 1));
+        let (rule, endp) =
+            with_scanner(|sc| sc.longest_match(&buf, cur)).unwrap_or((RULES.len() - 1, cur + 1));
         cur = endp;
         let token: Vec<u8> = buf[tok..cur].to_vec();
         let z = token.iter().position(|&c| c == 0).unwrap_or(token.len());

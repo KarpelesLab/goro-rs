@@ -112,9 +112,7 @@ pub fn populate_from_url_with_source_flags(
     let source_has_userinfo = source
         .and_then(|s| s.find("://").map(|i| &s[i + 3..]))
         .map(|rest| {
-            let end = rest
-                .find(['/', '?', '#'])
-                .unwrap_or(rest.len());
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
             &rest[..end]
         })
         .is_some_and(|auth| auth.contains('@'));
@@ -223,9 +221,7 @@ fn rfc3986_brackets_valid(uri: &str) -> bool {
         return !(rest.contains('[') || rest.contains(']'));
     }
     // Find end of authority (first '/', '?', '#').
-    let auth_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let post_auth = &rest[auth_end..];
     // Authority: userinfo@host[:port]. userinfo cannot contain '[' or ']'.
@@ -349,7 +345,12 @@ fn extract_explicit_port(src: &str) -> Option<u16> {
 /// relative references (empty string, path-only, etc.). WhatWG URL is stricter
 /// and rejects these. It also controls port preservation: RFC 3986 keeps an
 /// explicit port even when it matches the scheme default; WhatWG strips it.
-pub fn parse_into(obj: &mut PhpObject, uri: &str, base: Option<&str>, allow_relative: bool) -> bool {
+pub fn parse_into(
+    obj: &mut PhpObject,
+    uri: &str,
+    base: Option<&str>,
+    allow_relative: bool,
+) -> bool {
     // RFC 3986 is strictly ASCII: reject any URI containing non-ASCII or
     // whitespace/control characters up front. (WhatWg is more permissive.)
     if allow_relative {
@@ -432,7 +433,16 @@ pub fn parse_into(obj: &mut PhpObject, uri: &str, base: Option<&str>, allow_rela
 #[allow(clippy::type_complexity)]
 fn try_parse_generic_authority_uri(
     uri: &str,
-) -> Option<(String, Option<String>, Option<String>, String, Option<u16>, String, Option<String>, Option<String>)> {
+) -> Option<(
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<u16>,
+    String,
+    Option<String>,
+    Option<String>,
+)> {
     let sep = uri.find("://")?;
     let scheme = &uri[..sep];
     if scheme.is_empty() {
@@ -448,16 +458,17 @@ fn try_parse_generic_authority_uri(
         return None;
     }
     let rest = &uri[sep + 3..];
-    let auth_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];
     let (user, pass, host_port) = if let Some(at) = authority.rfind('@') {
         let userinfo = &authority[..at];
         let hp = &authority[at + 1..];
         let (u, p) = match userinfo.find(':') {
-            Some(c) => (userinfo[..c].to_string(), Some(userinfo[c + 1..].to_string())),
+            Some(c) => (
+                userinfo[..c].to_string(),
+                Some(userinfo[c + 1..].to_string()),
+            ),
             None => (userinfo.to_string(), None),
         };
         (Some(u), p, hp)
@@ -484,8 +495,10 @@ fn try_parse_generic_authority_uri(
         };
         // Reject brackets/reserved chars in bare host (not IP-literal).
         for b in h_str.bytes() {
-            if matches!(b, b'[' | b']' | b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}')
-            {
+            if matches!(
+                b,
+                b'[' | b']' | b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+            ) {
                 return None;
             }
         }
@@ -496,7 +509,10 @@ fn try_parse_generic_authority_uri(
         _ => None,
     };
     let (before_frag, fragment) = match path_and_rest.find('#') {
-        Some(i) => (&path_and_rest[..i], Some(path_and_rest[i + 1..].to_string())),
+        Some(i) => (
+            &path_and_rest[..i],
+            Some(path_and_rest[i + 1..].to_string()),
+        ),
         None => (path_and_rest, None),
     };
     let (path, query) = match before_frag.find('?') {
@@ -518,7 +534,16 @@ fn try_parse_generic_authority_uri(
 #[allow(clippy::type_complexity)]
 fn populate_generic_authority(
     obj: &mut PhpObject,
-    parsed: &(String, Option<String>, Option<String>, String, Option<u16>, String, Option<String>, Option<String>),
+    parsed: &(
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<u16>,
+        String,
+        Option<String>,
+        Option<String>,
+    ),
     original: &str,
 ) {
     let (scheme, user, pass, host, port, path, query, fragment) = parsed;
@@ -594,7 +619,10 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
         if scheme.is_empty() {
             return "MissingSchemeNonRelativeUrl";
         }
-        let first_ok = scheme.bytes().next().is_some_and(|b| b.is_ascii_alphabetic());
+        let first_ok = scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic());
         let rest_ok = scheme
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
@@ -619,7 +647,10 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
     // Special schemes (http, https, ftp, ws, wss, file) require a host.
     // For these, "scheme:" or "scheme:...without //" is HostMissing.
     if let Some(colon) = uri.find(':') {
-        let scheme_lower: Vec<u8> = uri[..colon].bytes().map(|b| b.to_ascii_lowercase()).collect();
+        let scheme_lower: Vec<u8> = uri[..colon]
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         let is_special = matches!(
             scheme_lower.as_slice(),
             b"http" | b"https" | b"ftp" | b"ws" | b"wss" | b"file"
@@ -633,9 +664,7 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
     }
     if let Some(sep) = uri.find("://") {
         let rest = &uri[sep + 3..];
-        let end = rest
-            .find(['/', '?', '#'])
-            .unwrap_or(rest.len());
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = &rest[..end];
         let (has_userinfo, host_port) = match authority.rfind('@') {
             Some(i) => (true, &authority[i + 1..]),
@@ -678,12 +707,16 @@ pub fn whatwg_error_code(uri: &str) -> &'static str {
         // Host contains invalid character (e.g. brackets without IPv6, spaces).
         // For special schemes, PHP reports DomainInvalidCodePoint.
         for ch in host.bytes() {
-            if !ch.is_ascii_alphanumeric() && !matches!(ch, b'-' | b'.' | b'_' | b'~' | b'[' | b']' | b':' | b'%') {
+            if !ch.is_ascii_alphanumeric()
+                && !matches!(ch, b'-' | b'.' | b'_' | b'~' | b'[' | b']' | b':' | b'%')
+            {
                 return "DomainInvalidCodePoint";
             }
         }
         // Specifically: brackets that aren't a wrapping IP-literal → invalid.
-        if (host.contains('[') || host.contains(']')) && !(host.starts_with('[') && host.ends_with(']')) {
+        if (host.contains('[') || host.contains(']'))
+            && !(host.starts_with('[') && host.ends_with(']'))
+        {
             return "DomainInvalidCodePoint";
         }
     } else if !uri.contains(':') {
@@ -709,8 +742,13 @@ fn looks_like_relative_reference(uri: &str) -> bool {
     if let Some(colon_pos) = uri.find(':') {
         let scheme_candidate = &uri[..colon_pos];
         if !scheme_candidate.is_empty()
-            && scheme_candidate.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
-            && scheme_candidate.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+            && scheme_candidate
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+            && scheme_candidate
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
         {
             return false;
         }
@@ -771,7 +809,14 @@ fn try_parse_scheme_uri(uri: &str) -> Option<(String, String, Option<String>, Op
 #[allow(clippy::type_complexity)]
 fn try_parse_empty_authority_uri(
     uri: &str,
-) -> Option<(String, Option<String>, Option<String>, String, Option<String>, Option<String>)> {
+) -> Option<(
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+)> {
     let sep = uri.find("://")?;
     let scheme = &uri[..sep];
     if scheme.is_empty() {
@@ -793,9 +838,7 @@ fn try_parse_empty_authority_uri(
         }
     }
     // Locate end of authority (first '/', '?', '#', or end).
-    let auth_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];
     // Optional userinfo@
@@ -803,7 +846,10 @@ fn try_parse_empty_authority_uri(
         let userinfo = &authority[..at];
         let hp = &authority[at + 1..];
         let (u, p) = match userinfo.find(':') {
-            Some(c) => (userinfo[..c].to_string(), Some(userinfo[c + 1..].to_string())),
+            Some(c) => (
+                userinfo[..c].to_string(),
+                Some(userinfo[c + 1..].to_string()),
+            ),
             None => (userinfo.to_string(), None),
         };
         (Some(u), p, hp)
@@ -816,19 +862,36 @@ fn try_parse_empty_authority_uri(
         return None;
     }
     let (before_frag, fragment) = match path_and_rest.find('#') {
-        Some(i) => (&path_and_rest[..i], Some(path_and_rest[i + 1..].to_string())),
+        Some(i) => (
+            &path_and_rest[..i],
+            Some(path_and_rest[i + 1..].to_string()),
+        ),
         None => (path_and_rest, None),
     };
     let (path, query) = match before_frag.find('?') {
         Some(i) => (&before_frag[..i], Some(before_frag[i + 1..].to_string())),
         None => (before_frag, None),
     };
-    Some((scheme.to_string(), user, pass, path.to_string(), query, fragment))
+    Some((
+        scheme.to_string(),
+        user,
+        pass,
+        path.to_string(),
+        query,
+        fragment,
+    ))
 }
 
 fn populate_empty_authority(
     obj: &mut PhpObject,
-    parsed: &(String, Option<String>, Option<String>, String, Option<String>, Option<String>),
+    parsed: &(
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    ),
     original: &str,
 ) {
     let (scheme, user, pass, path, query, fragment) = parsed;
@@ -836,10 +899,7 @@ fn populate_empty_authority(
         b"__uri_scheme".to_vec(),
         Value::String(PhpString::from_string(scheme.clone())),
     );
-    obj.set_property(
-        b"__uri_host".to_vec(),
-        Value::String(PhpString::empty()),
-    );
+    obj.set_property(b"__uri_host".to_vec(), Value::String(PhpString::empty()));
     obj.set_property(b"__uri_port".to_vec(), Value::Null);
     obj.set_property(
         b"__uri_user".to_vec(),
@@ -921,9 +981,7 @@ fn populate_scheme_uri(
 fn populate_network_path(obj: &mut PhpObject, uri: &str) {
     // Strip the leading "//"
     let rest = &uri[2..];
-    let auth_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let path_and_rest = &rest[auth_end..];
     // Parse userinfo@ if present
@@ -931,7 +989,10 @@ fn populate_network_path(obj: &mut PhpObject, uri: &str) {
         let userinfo = &authority[..at];
         let hp = &authority[at + 1..];
         let (u, p) = match userinfo.find(':') {
-            Some(c) => (userinfo[..c].to_string(), Some(userinfo[c + 1..].to_string())),
+            Some(c) => (
+                userinfo[..c].to_string(),
+                Some(userinfo[c + 1..].to_string()),
+            ),
             None => (userinfo.to_string(), None),
         };
         (Some(u), p, hp)
@@ -950,12 +1011,18 @@ fn populate_network_path(obj: &mut PhpObject, uri: &str) {
         }
     } else {
         match host_port.rfind(':') {
-            Some(i) => (host_port[..i].to_string(), host_port[i + 1..].parse::<u16>().ok()),
+            Some(i) => (
+                host_port[..i].to_string(),
+                host_port[i + 1..].parse::<u16>().ok(),
+            ),
             None => (host_port.to_string(), None),
         }
     };
     let (before_frag, fragment) = match path_and_rest.find('#') {
-        Some(i) => (&path_and_rest[..i], Some(path_and_rest[i + 1..].to_string())),
+        Some(i) => (
+            &path_and_rest[..i],
+            Some(path_and_rest[i + 1..].to_string()),
+        ),
         None => (path_and_rest, None),
     };
     let (path, query) = match before_frag.find('?') {
@@ -1113,12 +1180,12 @@ pub fn uri_dispatch_noarg(
         b"tonormalizedstring" | b"tonormalizedasciistring" => {
             Some(component_to_value(&ob, b"__uri_serialized"))
         }
-        b"equals" => None, // takes args
+        b"equals" => None,  // takes args
         b"resolve" => None, // takes args
         b"withscheme" | b"withhost" | b"withport" | b"withpath" | b"withquery"
         | b"withfragment" | b"withuserinfo" | b"withusername" | b"withpassword" => None,
-        b"getrawuserinfo" | b"getrawhost" | b"getrawpath" | b"getrawquery"
-        | b"getrawfragment" | b"getrawusername" | b"getrawpassword" => {
+        b"getrawuserinfo" | b"getrawhost" | b"getrawpath" | b"getrawquery" | b"getrawfragment"
+        | b"getrawusername" | b"getrawpassword" => {
             // MVP: return same as non-raw getters
             let prop_name: &[u8] = match method {
                 b"getrawuserinfo" | b"getrawusername" => b"__uri_user",
@@ -1240,7 +1307,10 @@ pub fn uri_dispatch_with_args(
             let arg = args.get(1).cloned().unwrap_or(Value::Null);
             let rel = arg.to_php_string().to_string_lossy();
             let ob = obj.borrow();
-            let base_str = ob.get_property(b"__uri_serialized").to_php_string().to_string_lossy();
+            let base_str = ob
+                .get_property(b"__uri_serialized")
+                .to_php_string()
+                .to_string_lossy();
             drop(ob);
             let parsed = match Url::parse(&base_str) {
                 Ok(base) => base.join(&rel).ok(),
@@ -1275,7 +1345,10 @@ pub fn uri_dispatch_with_args(
                 _ => Some(arg.to_php_string().to_string_lossy()),
             };
             let ob = obj.borrow();
-            let current = ob.get_property(b"__uri_serialized").to_php_string().to_string_lossy();
+            let current = ob
+                .get_property(b"__uri_serialized")
+                .to_php_string()
+                .to_string_lossy();
             drop(ob);
             let new_serialized = with_component(&current, component, value_str.as_deref())?;
             let parsed = Url::parse(&new_serialized).ok()?;
@@ -1386,8 +1459,8 @@ fn percent_decode_unreserved(input: &[u8]) -> Vec<u8> {
             let h2 = input[i + 2];
             if let (Some(d1), Some(d2)) = (hex_digit(h1), hex_digit(h2)) {
                 let byte = (d1 << 4) | d2;
-                let is_unreserved = byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'-' | b'.' | b'_' | b'~');
+                let is_unreserved =
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
                 if is_unreserved {
                     out.push(byte);
                 } else {

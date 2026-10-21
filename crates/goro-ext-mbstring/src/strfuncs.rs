@@ -8,7 +8,9 @@ use goro_core::array::PhpArray;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
-use crate::mbfl::{self, EncNo, Encoding, MBFL_BAD_INPUT, MBFL_ENCTYPE_SBCS, MBFL_ENCTYPE_WCS2, MBFL_ENCTYPE_WCS4};
+use crate::mbfl::{
+    self, EncNo, Encoding, MBFL_BAD_INPUT, MBFL_ENCTYPE_SBCS, MBFL_ENCTYPE_WCS2, MBFL_ENCTYPE_WCS4,
+};
 use crate::mbstring::*;
 use crate::state;
 use crate::unicode::CaseMode;
@@ -104,7 +106,9 @@ pub fn memnstr(hay: &[u8], from: usize, needle: &[u8], end: usize) -> Option<usi
     if needle.len() == 1 {
         return h.iter().position(|&c| c == needle[0]).map(|p| p + from);
     }
-    h.windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    h.windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
 }
 
 /// zend_memnrstr: last occurrence of needle in hay[from..end]
@@ -117,13 +121,24 @@ pub fn memnrstr(hay: &[u8], from: usize, needle: &[u8], end: usize) -> Option<us
         return None;
     }
     let h = &hay[from..end];
-    h.windows(needle.len()).rposition(|w| w == needle).map(|p| p + from)
+    h.windows(needle.len())
+        .rposition(|w| w == needle)
+        .map(|p| p + from)
 }
 
 /// C: `mb_find_strpos`
-pub fn find_strpos(haystack: &[u8], needle: &[u8], enc: &Encoding, offset: i64, reverse: bool) -> usize {
+pub fn find_strpos(
+    haystack: &[u8],
+    needle: &[u8],
+    enc: &Encoding,
+    offset: i64,
+    reverse: bool,
+) -> usize {
     let (h, n): (std::borrow::Cow<[u8]>, std::borrow::Cow<[u8]>) = if !is_utf8_family(enc.no) {
-        (to_utf8_badmarker(haystack, enc).into(), to_utf8_badmarker(needle, enc).into())
+        (
+            to_utf8_badmarker(haystack, enc).into(),
+            to_utf8_badmarker(needle, enc).into(),
+        )
     } else {
         (haystack.into(), needle.into())
     };
@@ -156,26 +171,66 @@ fn handle_strpos_error(vm: &mut Vm, func: &str, error: usize) -> Result<(), VmEr
             vm.emit_warning(&format!("{}(): Conversion error", func));
             Ok(())
         }
-        MBFL_ERROR_OFFSET => Err(arg_value_error(vm, func, 3, "offset", "must be contained in argument #1 ($haystack)")),
+        MBFL_ERROR_OFFSET => Err(arg_value_error(
+            vm,
+            func,
+            3,
+            "offset",
+            "must be contained in argument #1 ($haystack)",
+        )),
         _ => Err(value_error(vm, "mb_strpos(): Unknown error".to_string())),
     }
 }
 
 /// C: `php_mb_stripos`
-pub fn stripos(reverse: bool, haystack: &[u8], needle: &[u8], offset: i64, enc: &Encoding) -> usize {
+pub fn stripos(
+    reverse: bool,
+    haystack: &[u8],
+    needle: &[u8],
+    offset: i64,
+    enc: &Encoding,
+) -> usize {
     use crate::unicode::convert_case;
     let u8e = &mbfl::basic::ENC_UTF8;
-    let h = convert_case(CaseMode::FoldSimple, haystack, enc, u8e, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8, 0);
-    let n = convert_case(CaseMode::FoldSimple, needle, enc, u8e, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8, 0);
+    let h = convert_case(
+        CaseMode::FoldSimple,
+        haystack,
+        enc,
+        u8e,
+        mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8,
+        0,
+    );
+    let n = convert_case(
+        CaseMode::FoldSimple,
+        needle,
+        enc,
+        u8e,
+        mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8,
+        0,
+    );
     find_strpos(&h, &n, u8e, offset, reverse)
 }
 
-fn strpos_common(vm: &mut Vm, args: &[Value], func: &str, ci: bool, reverse: bool) -> Result<Value, VmError> {
+fn strpos_common(
+    vm: &mut Vm,
+    args: &[Value],
+    func: &str,
+    ci: bool,
+    reverse: bool,
+) -> Result<Value, VmError> {
     let h = str_arg(vm, func, args, 0, "haystack")?;
     let n = str_arg(vm, func, args, 1, "needle")?;
-    let offset = if present(args, 2) { long_arg(vm, func, args, 2, "offset")? } else { 0 };
+    let offset = if present(args, 2) {
+        long_arg(vm, func, args, 2, "offset")?
+    } else {
+        0
+    };
     let enc = encoding_arg(vm, func, args, 3, "encoding")?;
-    let r = if ci { stripos(reverse, &h, &n, offset, enc) } else { find_strpos(&h, &n, enc, offset, reverse) };
+    let r = if ci {
+        stripos(reverse, &h, &n, offset, enc)
+    } else {
+        find_strpos(&h, &n, enc, offset, reverse)
+    };
     if !mbfl_is_error(r) {
         Ok(Value::Long(r as i64))
     } else {
@@ -205,7 +260,11 @@ pub fn get_substr_slow(input: &[u8], from: usize, len: usize, enc: &Encoding) ->
     if from >= w.len() || len == 0 {
         return Vec::new();
     }
-    let end = if len >= w.len() - from { w.len() } else { from + len };
+    let end = if len >= w.len() - from {
+        w.len()
+    } else {
+        from + len
+    };
     from_wchars(enc, &w[from..end])
 }
 
@@ -229,12 +288,22 @@ pub fn get_substr(input: &[u8], from: usize, len: usize, enc: &Encoding) -> Vec<
     get_substr_slow(input, from, len, enc)
 }
 
-fn strstr_variants(vm: &mut Vm, args: &[Value], func: &str, reverse: bool, ci: bool) -> Result<Value, VmError> {
+fn strstr_variants(
+    vm: &mut Vm,
+    args: &[Value],
+    func: &str,
+    reverse: bool,
+    ci: bool,
+) -> Result<Value, VmError> {
     let h = str_arg(vm, func, args, 0, "haystack")?;
     let n = str_arg(vm, func, args, 1, "needle")?;
     let part = bool_arg(args, 2);
     let enc = encoding_arg(vm, func, args, 3, "encoding")?;
-    let r = if ci { stripos(reverse, &h, &n, 0, enc) } else { find_strpos(&h, &n, enc, 0, reverse) };
+    let r = if ci {
+        stripos(reverse, &h, &n, 0, enc)
+    } else {
+        find_strpos(&h, &n, enc, 0, reverse)
+    };
     if mbfl_is_error(r) {
         return Ok(Value::False);
     }
@@ -267,8 +336,16 @@ fn mb_substr_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let enc = encoding_arg(vm, f, args, 2, "encoding")?;
     let (hu, nu) = if is_utf8_family(enc.no) {
-        let hu = if std::str::from_utf8(&h).is_ok() { h.clone() } else { to_utf8_badmarker(&h, enc) };
-        let nu = if std::str::from_utf8(&n).is_ok() { n.clone() } else { to_utf8_badmarker(&n, enc) };
+        let hu = if std::str::from_utf8(&h).is_ok() {
+            h.clone()
+        } else {
+            to_utf8_badmarker(&h, enc)
+        };
+        let nu = if std::str::from_utf8(&n).is_ok() {
+            n.clone()
+        } else {
+            to_utf8_badmarker(&n, enc)
+        };
         (hu, nu)
     } else {
         let hu = to_utf8_badmarker(&h, enc);
@@ -295,10 +372,22 @@ fn mb_substr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let from = long_arg(vm, f, args, 1, "start")?;
     let len = long_or_null_arg(vm, f, args, 2, "length")?;
     if from == i64::MIN {
-        return Err(arg_value_error(vm, f, 2, "start", &format!("must be between {} and {}", i64::MIN + 1, i64::MAX)));
+        return Err(arg_value_error(
+            vm,
+            f,
+            2,
+            "start",
+            &format!("must be between {} and {}", i64::MIN + 1, i64::MAX),
+        ));
     }
     if len == Some(i64::MIN) {
-        return Err(arg_value_error(vm, f, 3, "length", &format!("must be between {} and {}", i64::MIN + 1, i64::MAX)));
+        return Err(arg_value_error(
+            vm,
+            f,
+            3,
+            "length",
+            &format!("must be between {} and {}", i64::MIN + 1, i64::MAX),
+        ));
     }
     let enc = encoding_arg(vm, f, args, 3, "encoding")?;
     let mut mblen = 0usize;
@@ -351,12 +440,23 @@ fn strcut_generic(s: &[u8], from: usize, len: usize, enc: &Encoding) -> Vec<u8> 
     // A trailing error marker is only emitted by the old filters once the
     // next byte arrives (or at the final flush, where it is dropped)
     let lcp = |w: &[u32]| -> usize {
-        let w = if w.last() == Some(&MBFL_BAD_INPUT) { &w[..w.len() - 1] } else { w };
-        w.iter().zip(full.iter()).take_while(|(a, b)| a == b).count()
+        let w = if w.last() == Some(&MBFL_BAD_INPUT) {
+            &w[..w.len() - 1]
+        } else {
+            w
+        };
+        w.iter()
+            .zip(full.iter())
+            .take_while(|(a, b)| a == b)
+            .count()
     };
     let start = lcp(&decode_prefix(from));
     let encode = |w: &[u32], end: bool| -> Vec<u8> {
-        let mut buf = mbfl::ConvBuf::new(w.len() * 2, b'?' as u32, mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR);
+        let mut buf = mbfl::ConvBuf::new(
+            w.len() * 2,
+            b'?' as u32,
+            mbfl::MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR,
+        );
         from_wchar(w, &mut buf, end);
         if end && w.is_empty() {
             return Vec::new();
@@ -372,7 +472,11 @@ fn strcut_generic(s: &[u8], from: usize, len: usize, enc: &Encoding) -> Vec<u8> 
         if encode(&full[start..done], false).len() > len {
             break;
         }
-        let flushed: Vec<u32> = if pref.len() > start { pref[start..].to_vec() } else { Vec::new() };
+        let flushed: Vec<u32> = if pref.len() > start {
+            pref[start..].to_vec()
+        } else {
+            Vec::new()
+        };
         if encode(&flushed, true).len() > len {
             break;
         }
@@ -409,7 +513,8 @@ fn mb_strcut(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cut) = enc.cut {
         return Ok(pstring(cut(&s, from, len)));
     }
-    let char_len = (enc.flag & (MBFL_ENCTYPE_SBCS | MBFL_ENCTYPE_WCS2 | MBFL_ENCTYPE_WCS4)) as usize;
+    let char_len =
+        (enc.flag & (MBFL_ENCTYPE_SBCS | MBFL_ENCTYPE_WCS2 | MBFL_ENCTYPE_WCS4)) as usize;
     if char_len != 0 {
         let from = from & !(char_len - 1);
         let len = len.min(s.len() - from);
@@ -526,7 +631,11 @@ fn mb_strimwidth(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = str_arg(vm, f, args, 0, "string")?;
     let mut from = long_arg(vm, f, args, 1, "start")?;
     let mut width = long_arg(vm, f, args, 2, "width")?;
-    let marker = if present(args, 3) { str_arg(vm, f, args, 3, "trim_marker")? } else { Vec::new() };
+    let marker = if present(args, 3) {
+        str_arg(vm, f, args, 3, "trim_marker")?
+    } else {
+        Vec::new()
+    };
     let enc = encoding_arg(vm, f, args, 4, "encoding")?;
     if from != 0 {
         let str_len = get_strlen(&s, enc) as i64;
@@ -538,7 +647,9 @@ fn mb_strimwidth(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     if width < 0 {
-        vm.emit_deprecated("mb_strimwidth(): passing a negative integer to argument #3 ($width) is deprecated");
+        vm.emit_deprecated(
+            "mb_strimwidth(): passing a negative integer to argument #3 ($width) is deprecated",
+        );
         width += get_strwidth(&s, enc) as i64;
         if from > 0 {
             let trimmed = get_substr(&s, 0, from as usize, enc);
@@ -548,7 +659,13 @@ fn mb_strimwidth(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Err(arg_value_error(vm, f, 3, "width", "is out of range"));
         }
     }
-    Ok(pstring(trim_string(&s, &marker, enc, from as usize, width as usize)))
+    Ok(pstring(trim_string(
+        &s,
+        &marker,
+        enc,
+        from as usize,
+        width as usize,
+    )))
 }
 
 /* ===== Case conversion ===== */
@@ -564,7 +681,13 @@ fn mb_convert_case(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mode = long_arg(vm, f, args, 1, "mode")?;
     let enc = encoding_arg(vm, f, args, 2, "encoding")?;
     let Some(mode) = CaseMode::from_long(mode) else {
-        return Err(arg_value_error(vm, f, 2, "mode", "must be one of the MB_CASE_* constants"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            2,
+            "mode",
+            "must be one of the MB_CASE_* constants",
+        ));
     };
     Ok(pstring(convert_case_cur(mode, &s, enc)))
 }
@@ -606,7 +729,12 @@ fn mb_lcfirst(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 const MB_LTRIM: u8 = 1;
 const MB_RTRIM: u8 = 2;
 
-fn trim_each_wchar(s: &[u8], is_trim: &dyn Fn(u32) -> bool, mut mode: u8, enc: &Encoding) -> Vec<u8> {
+fn trim_each_wchar(
+    s: &[u8],
+    is_trim: &dyn Fn(u32) -> bool,
+    mut mode: u8,
+    enc: &Encoding,
+) -> Vec<u8> {
     let w = to_wchars(enc, s);
     let total = w.len();
     let mut left = 0;
@@ -641,14 +769,16 @@ fn do_trim(vm: &mut Vm, args: &[Value], func: &str, mode: u8) -> Result<Value, V
             if what.is_empty() {
                 s.clone()
             } else {
-                let set: std::collections::HashSet<u32> = to_wchars(enc, &what).into_iter().collect();
+                let set: std::collections::HashSet<u32> =
+                    to_wchars(enc, &what).into_iter().collect();
                 trim_each_wchar(&s, &|c| set.contains(&c), mode, enc)
             }
         }
         None => {
             const DEFAULT: [u32; 27] = [
-                0x20, 0x0C, 0x0A, 0x0D, 0x09, 0x0B, 0x00, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007,
-                0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0x85, 0x180E,
+                0x20, 0x0C, 0x0A, 0x0D, 0x09, 0x0B, 0x00, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002,
+                0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029,
+                0x202F, 0x205F, 0x3000, 0x85, 0x180E,
             ];
             trim_each_wchar(&s, &|c| DEFAULT.contains(&c), mode, enc)
         }
@@ -671,9 +801,19 @@ fn mb_rtrim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn mb_str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_str_split";
     let s = str_arg(vm, f, args, 0, "string")?;
-    let split_len = if present(args, 1) { long_arg(vm, f, args, 1, "length")? } else { 1 };
+    let split_len = if present(args, 1) {
+        long_arg(vm, f, args, 1, "length")?
+    } else {
+        1
+    };
     if split_len <= 0 {
-        return Err(arg_value_error(vm, f, 2, "length", "must be greater than 0"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            2,
+            "length",
+            "must be greater than 0",
+        ));
     } else if split_len > (u32::MAX / 4) as i64 {
         return Err(arg_value_error(vm, f, 2, "length", "is too large"));
     }
@@ -683,7 +823,8 @@ fn mb_str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(new_array(arr));
     }
     let split_len = split_len as usize;
-    let char_len = (enc.flag & (MBFL_ENCTYPE_SBCS | MBFL_ENCTYPE_WCS2 | MBFL_ENCTYPE_WCS4)) as usize;
+    let char_len =
+        (enc.flag & (MBFL_ENCTYPE_SBCS | MBFL_ENCTYPE_WCS2 | MBFL_ENCTYPE_WCS4)) as usize;
     if char_len != 0 {
         let chunk_len = char_len * split_len;
         for c in s.chunks(chunk_len) {
@@ -746,7 +887,10 @@ fn mb_ord(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let enc = encoding_arg(vm, f, args, 1, "encoding")?;
     if is_unsupported_for_ord(enc.no) {
-        return Err(value_error(vm, format!("mb_ord() does not support the \"{}\" encoding", enc.name)));
+        return Err(value_error(
+            vm,
+            format!("mb_ord() does not support the \"{}\" encoding", enc.name),
+        ));
     }
     // Decoding a bounded prefix is enough to get the first character
     let prefix = &s[..s.len().min(16)];
@@ -763,7 +907,10 @@ fn mb_chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let cp = long_arg(vm, f, args, 0, "codepoint")?;
     let enc = encoding_arg(vm, f, args, 1, "encoding")?;
     if is_unsupported_for_ord(enc.no) {
-        return Err(value_error(vm, format!("mb_chr() does not support the \"{}\" encoding", enc.name)));
+        return Err(value_error(
+            vm,
+            format!("mb_chr() does not support the \"{}\" encoding", enc.name),
+        ));
     }
     if !(0..=0x10ffff).contains(&cp) {
         return Ok(Value::False);
@@ -791,8 +938,16 @@ fn mb_str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_str_pad";
     let input = str_arg(vm, f, args, 0, "string")?;
     let pad_to_length = long_arg(vm, f, args, 1, "length")?;
-    let pad = if present(args, 2) { str_arg(vm, f, args, 2, "pad_string")? } else { b" ".to_vec() };
-    let pad_type = if present(args, 3) { long_arg(vm, f, args, 3, "pad_type")? } else { 1 };
+    let pad = if present(args, 2) {
+        str_arg(vm, f, args, 2, "pad_string")?
+    } else {
+        b" ".to_vec()
+    };
+    let pad_type = if present(args, 3) {
+        long_arg(vm, f, args, 3, "pad_type")?
+    } else {
+        1
+    };
     let enc = encoding_arg(vm, f, args, 4, "encoding")?;
     let input_length = get_strlen(&input, enc);
     if pad_to_length < 0 || (pad_to_length as usize) <= input_length {
@@ -802,7 +957,13 @@ fn mb_str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(arg_value_error(vm, f, 3, "pad_string", "must not be empty"));
     }
     if !(0..=2).contains(&pad_type) {
-        return Err(arg_value_error(vm, f, 4, "pad_type", "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH"));
+        return Err(arg_value_error(
+            vm,
+            f,
+            4,
+            "pad_type",
+            "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH",
+        ));
     }
     let pad_length = get_strlen(&pad, enc);
     if pad_length == 0 {

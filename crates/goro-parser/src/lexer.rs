@@ -174,7 +174,11 @@ impl<'a> Lexer<'a> {
                     // A doc comment is /** ... */ where the character after the
                     // second `*` is whitespace (space, tab, CR, LF) or `/`
                     // (empty doc comment /**/). PHP rejects /*** ... */ etc.
-                    let is_doc = self.peek() == Some(b'*') && matches!(self.peek_at(1), Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/'));
+                    let is_doc = self.peek() == Some(b'*')
+                        && matches!(
+                            self.peek_at(1),
+                            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/')
+                        );
                     loop {
                         match self.advance() {
                             Some(b'*') if self.peek() == Some(b'/') => {
@@ -358,12 +362,16 @@ impl<'a> Lexer<'a> {
                     // "Invalid numeric literal"; overflow yields a float.
                     let after_zero = self.peek_at(1);
                     let starts_digits = after_zero.is_some_and(|c| c.is_ascii_digit())
-                        || (after_zero == Some(b'_') && self.peek_at(2).is_some_and(|c| c.is_ascii_digit()));
+                        || (after_zero == Some(b'_')
+                            && self.peek_at(2).is_some_and(|c| c.is_ascii_digit()));
                     if starts_digits {
                         let oct_start = self.pos;
                         self.advance(); // skip leading 0
                         while let Some(ch) = self.peek() {
-                            if ch.is_ascii_digit() || (ch == b'_' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())) {
+                            if ch.is_ascii_digit()
+                                || (ch == b'_'
+                                    && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()))
+                            {
                                 self.advance();
                             } else {
                                 break;
@@ -373,8 +381,11 @@ impl<'a> Lexer<'a> {
                             Some(b'e') | Some(b'E') => true,
                             Some(b'.') => {
                                 let next = self.peek_at(1);
-                                !(next.is_some_and(|c| (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) && c != b'e' && c != b'E')
-                                    || next == Some(b'.'))
+                                !(next.is_some_and(|c| {
+                                    (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
+                                        && c != b'e'
+                                        && c != b'E'
+                                }) || next == Some(b'.'))
                             }
                             _ => false,
                         };
@@ -385,13 +396,19 @@ impl<'a> Lexer<'a> {
                                 .filter(|b| *b != b'_')
                                 .collect();
                             if digits.iter().any(|d| *d == b'8' || *d == b'9') {
-                                crate::push_lexer_error("Invalid numeric literal".to_string(), self.line);
+                                crate::push_lexer_error(
+                                    "Invalid numeric literal".to_string(),
+                                    self.line,
+                                );
                                 return TokenKind::LongNumber(0);
                             }
                             let mut v: i64 = 0;
                             let mut overflow = false;
                             for d in &digits {
-                                match v.checked_mul(8).and_then(|x| x.checked_add((*d - b'0') as i64)) {
+                                match v
+                                    .checked_mul(8)
+                                    .and_then(|x| x.checked_add((*d - b'0') as i64))
+                                {
                                     Some(n) => v = n,
                                     None => {
                                         overflow = true;
@@ -429,7 +446,9 @@ impl<'a> Lexer<'a> {
             let next = self.peek_at(1);
             // Allow "12." (dot followed by non-digit) and "12.5" (dot followed by digit)
             // But NOT "12.method" (dot followed by letter/underscore - that's a method call on int)
-            let is_method_call = next.is_some_and(|c| (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) && c != b'e' && c != b'E');
+            let is_method_call = next.is_some_and(|c| {
+                (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) && c != b'e' && c != b'E'
+            });
             // Also not ".." (range operator)
             let is_double_dot = next == Some(b'.');
             if !is_method_call && !is_double_dot {
@@ -584,7 +603,10 @@ impl<'a> Lexer<'a> {
                             let v = u32::from_str_radix(&s, 8).unwrap_or(0);
                             if v > 0xFF {
                                 crate::push_lexer_warning(
-                                    format!("Octal escape sequence overflow \\{} is greater than \\377", s),
+                                    format!(
+                                        "Octal escape sequence overflow \\{} is greater than \\377",
+                                        s
+                                    ),
                                     self.line,
                                 );
                             }
@@ -664,10 +686,9 @@ impl<'a> Lexer<'a> {
                             }
                             _ => {
                                 // Bare identifier as key
-                                if self
-                                    .peek()
-                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
-                                {
+                                if self.peek().is_some_and(|c| {
+                                    c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+                                }) {
                                     let key = self.scan_identifier();
                                     self.pending.push(Token::new(
                                         TokenKind::Identifier(key),
@@ -686,11 +707,10 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(b'$')
-                    if self
-                        .peek_at(1)
-                        .is_some_and(|c| c == b'{') && self
-                        .peek_at(2)
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
+                    if self.peek_at(1).is_some_and(|c| c == b'{')
+                        && self
+                            .peek_at(2)
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax, equivalent to {$variable})
                     crate::push_lexer_deprecated(
@@ -715,11 +735,10 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(b'{')
-                    if self
-                        .peek_at(1)
-                        .is_some_and(|c| c == b'$') && self
-                        .peek_at(2)
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
+                    if self.peek_at(1).is_some_and(|c| c == b'$')
+                        && self
+                            .peek_at(2)
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) =>
                 {
                     // {$variable} interpolation - same as $variable but with curly braces
                     self.pending.push(Token::new(
@@ -743,7 +762,10 @@ impl<'a> Lexer<'a> {
                                 TokenKind::Arrow,
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
-                            if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) {
+                            if self
+                                .peek()
+                                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
+                            {
                                 let prop_name = self.scan_identifier();
                                 self.pending.push(Token::new(
                                     TokenKind::Identifier(prop_name),
@@ -802,7 +824,10 @@ impl<'a> Lexer<'a> {
                                         self.advance();
                                         let mut s = Vec::new();
                                         while let Some(c) = self.peek() {
-                                            if c == b'\'' { self.advance(); break; }
+                                            if c == b'\'' {
+                                                self.advance();
+                                                break;
+                                            }
                                             if c == b'\\' {
                                                 self.advance();
                                                 if let Some(esc) = self.peek() {
@@ -810,7 +835,10 @@ impl<'a> Lexer<'a> {
                                                     match esc {
                                                         b'\\' => s.push(b'\\'),
                                                         b'\'' => s.push(b'\''),
-                                                        c => { s.push(b'\\'); s.push(c); }
+                                                        c => {
+                                                            s.push(b'\\');
+                                                            s.push(c);
+                                                        }
                                                     }
                                                 }
                                             } else {
@@ -857,20 +885,30 @@ impl<'a> Lexer<'a> {
                                         Span::new(self.pos as u32, self.pos as u32, self.line),
                                     ));
                                 }
-                                Some(b'-') if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
+                                Some(b'-')
+                                    if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) =>
+                                {
                                     self.advance(); // consume -
                                     let num_kind = self.scan_number();
                                     match num_kind {
                                         TokenKind::LongNumber(n) => {
                                             self.pending.push(Token::new(
                                                 TokenKind::LongNumber(-n),
-                                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                                                Span::new(
+                                                    self.pos as u32,
+                                                    self.pos as u32,
+                                                    self.line,
+                                                ),
                                             ));
                                         }
                                         _ => {
                                             self.pending.push(Token::new(
                                                 num_kind,
-                                                Span::new(self.pos as u32, self.pos as u32, self.line),
+                                                Span::new(
+                                                    self.pos as u32,
+                                                    self.pos as u32,
+                                                    self.line,
+                                                ),
                                             ));
                                         }
                                     }
@@ -902,7 +940,10 @@ impl<'a> Lexer<'a> {
                                                     b't' => key.push(b'\t'),
                                                     b'\\' => key.push(b'\\'),
                                                     c if c == quote => key.push(quote),
-                                                    c => { key.push(b'\\'); key.push(c); }
+                                                    c => {
+                                                        key.push(b'\\');
+                                                        key.push(c);
+                                                    }
                                                 }
                                             }
                                         } else {
@@ -916,7 +957,9 @@ impl<'a> Lexer<'a> {
                                     ));
                                 }
                                 _ => {
-                                    if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) {
+                                    if self.peek().is_some_and(|c| {
+                                        c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+                                    }) {
                                         let key = self.scan_identifier();
                                         self.pending.push(Token::new(
                                             TokenKind::Identifier(key),
@@ -1194,7 +1237,8 @@ impl<'a> Lexer<'a> {
                 let is_ident = |b: &[u8]| {
                     !b.is_empty()
                         && (b[0].is_ascii_alphabetic() || b[0] == b'_' || b[0] >= 0x80)
-                        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 0x80)
+                        && b.iter()
+                            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 0x80)
                 };
                 // Note `${name}` is a constant lookup in PHP, not `$name`.
                 let simple = expr_bytes.first() == Some(&b'$') && is_ident(&expr_bytes[1..]);
@@ -1267,18 +1311,27 @@ impl<'a> Lexer<'a> {
                     if self.source[self.pos] == b'"' {
                         self.advance();
                         let tok = self.scan_double_quoted_string();
-                        return Token::new(tok, Span::new(self.pos as u32, self.pos as u32, start_line));
+                        return Token::new(
+                            tok,
+                            Span::new(self.pos as u32, self.pos as u32, start_line),
+                        );
                     } else if self.source[self.pos] == b'\'' {
                         self.advance();
                         let s = self.scan_single_quoted_string();
-                        return Token::new(TokenKind::ConstantString(s), Span::new(self.pos as u32, self.pos as u32, start_line));
+                        return Token::new(
+                            TokenKind::ConstantString(s),
+                            Span::new(self.pos as u32, self.pos as u32, start_line),
+                        );
                     } else if self.remaining().starts_with(b"<<<") {
                         // b<<< heredoc/nowdoc - skip the <<< and parse as heredoc
                         self.advance(); // <
                         self.advance(); // <
                         self.advance(); // <
                         let tok = self.scan_heredoc_start();
-                        return Token::new(tok, Span::new(start as u32, self.pos as u32, start_line));
+                        return Token::new(
+                            tok,
+                            Span::new(start as u32, self.pos as u32, start_line),
+                        );
                     }
                 }
 
@@ -1635,7 +1688,10 @@ impl<'a> Lexer<'a> {
                 // Unknown character - skip it and produce an identifier
                 if ch < 0x20 || ch == 0x7F {
                     // T_BAD_CHARACTER
-                    crate::push_lexer_error(format!("syntax error, unexpected character 0x{:02X}", ch), self.line);
+                    crate::push_lexer_error(
+                        format!("syntax error, unexpected character 0x{:02X}", ch),
+                        self.line,
+                    );
                 }
                 self.advance();
                 TokenKind::Identifier(vec![ch])
@@ -1696,7 +1752,8 @@ impl<'a> Lexer<'a> {
                 let after_label = self.pos + label.len();
                 let next_ch = self.source.get(after_label).copied();
                 // The closing label may be followed by anything but a label character.
-                if !matches!(next_ch, Some(c) if c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
+                if !matches!(next_ch, Some(c) if c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80)
+                {
                     self.pos = after_label;
                     closing_indent = indent;
                     found_closing = true;
@@ -1740,10 +1797,17 @@ impl<'a> Lexer<'a> {
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
-                crate::push_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), closing_line);
+                crate::push_lexer_error(
+                    "Invalid indentation - tabs and spaces cannot be mixed".into(),
+                    closing_line,
+                );
             }
             let mut stripped = Vec::new();
-            let lines: Vec<&[u8]> = if content.is_empty() { Vec::new() } else { content.split(|&b| b == b'\n').collect() };
+            let lines: Vec<&[u8]> = if content.is_empty() {
+                Vec::new()
+            } else {
+                content.split(|&b| b == b'\n').collect()
+            };
             let first_line = closing_line.saturating_sub(lines.len() as u32);
             for (i, line) in lines.iter().enumerate() {
                 let body = line.strip_suffix(b"\r").unwrap_or(line);
@@ -1752,13 +1816,19 @@ impl<'a> Lexer<'a> {
                     let c = body[skip];
                     if c != b' ' && c != b'\t' {
                         crate::push_lexer_error(
-                            format!("Invalid body indentation level (expecting an indentation level of at least {})", indent_len),
+                            format!(
+                                "Invalid body indentation level (expecting an indentation level of at least {})",
+                                indent_len
+                            ),
                             first_line + i as u32,
                         );
                         break;
                     }
                     if (c == b' ') != using_spaces {
-                        crate::push_lexer_error("Invalid indentation - tabs and spaces cannot be mixed".into(), first_line + i as u32);
+                        crate::push_lexer_error(
+                            "Invalid indentation - tabs and spaces cannot be mixed".into(),
+                            first_line + i as u32,
+                        );
                         break;
                     }
                     skip += 1;
@@ -1888,7 +1958,10 @@ impl<'a> Lexer<'a> {
                             let v = u32::from_str_radix(&s, 8).unwrap_or(0);
                             if v > 0xFF {
                                 crate::push_lexer_warning(
-                                    format!("Octal escape sequence overflow \\{} is greater than \\377", s),
+                                    format!(
+                                        "Octal escape sequence overflow \\{} is greater than \\377",
+                                        s
+                                    ),
                                     self.line,
                                 );
                             }
@@ -1902,7 +1975,9 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'$' if i + 1 < len
-                    && (content[i + 1].is_ascii_alphabetic() || content[i + 1] == b'_' || content[i + 1] >= 0x80) =>
+                    && (content[i + 1].is_ascii_alphabetic()
+                        || content[i + 1] == b'_'
+                        || content[i + 1] >= 0x80) =>
                 {
                     // Variable interpolation
                     self.pending.push(Token::new(
@@ -1934,7 +2009,11 @@ impl<'a> Lexer<'a> {
                             TokenKind::Arrow,
                             Span::new(self.pos as u32, self.pos as u32, self.line),
                         ));
-                        if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_' || content[i] >= 0x80) {
+                        if i < len
+                            && (content[i].is_ascii_alphabetic()
+                                || content[i] == b'_'
+                                || content[i] >= 0x80)
+                        {
                             let prop_start = i;
                             while i < len
                                 && (content[i].is_ascii_alphanumeric()
@@ -2018,7 +2097,9 @@ impl<'a> Lexer<'a> {
                 }
                 b'$' if i + 2 < len
                     && content[i + 1] == b'{'
-                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_' || content[i + 2] >= 0x80) =>
+                    && (content[i + 2].is_ascii_alphabetic()
+                        || content[i + 2] == b'_'
+                        || content[i + 2] >= 0x80) =>
                 {
                     // ${variable} interpolation (deprecated syntax)
                     crate::push_lexer_deprecated(
@@ -2052,7 +2133,9 @@ impl<'a> Lexer<'a> {
                 }
                 b'{' if i + 2 < len
                     && content[i + 1] == b'$'
-                    && (content[i + 2].is_ascii_alphabetic() || content[i + 2] == b'_' || content[i + 2] >= 0x80) =>
+                    && (content[i + 2].is_ascii_alphabetic()
+                        || content[i + 2] == b'_'
+                        || content[i + 2] >= 0x80) =>
                 {
                     // {$variable} interpolation
                     self.pending.push(Token::new(
@@ -2084,7 +2167,11 @@ impl<'a> Lexer<'a> {
                                 TokenKind::Arrow,
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
-                            if i < len && (content[i].is_ascii_alphabetic() || content[i] == b'_' || content[i] >= 0x80) {
+                            if i < len
+                                && (content[i].is_ascii_alphabetic()
+                                    || content[i] == b'_'
+                                    || content[i] >= 0x80)
+                            {
                                 let prop_start = i;
                                 while i < len
                                     && (content[i].is_ascii_alphanumeric()
@@ -2112,8 +2199,10 @@ impl<'a> Lexer<'a> {
                                         while i < len && content[i].is_ascii_digit() {
                                             i += 1;
                                         }
-                                        let s: String =
-                                            content[num_start..i].iter().map(|&b| b as char).collect();
+                                        let s: String = content[num_start..i]
+                                            .iter()
+                                            .map(|&b| b as char)
+                                            .collect();
                                         let n = s.parse::<i64>().unwrap_or(0);
                                         self.pending.push(Token::new(
                                             TokenKind::LongNumber(n),
@@ -2126,8 +2215,10 @@ impl<'a> Lexer<'a> {
                                         while i < len && content[i].is_ascii_digit() {
                                             i += 1;
                                         }
-                                        let s: String =
-                                            content[num_start..i].iter().map(|&b| b as char).collect();
+                                        let s: String = content[num_start..i]
+                                            .iter()
+                                            .map(|&b| b as char)
+                                            .collect();
                                         let n = -(s.parse::<i64>().unwrap_or(0));
                                         self.pending.push(Token::new(
                                             TokenKind::LongNumber(n),
@@ -2163,7 +2254,10 @@ impl<'a> Lexer<'a> {
                                                     b't' => key.push(b'\t'),
                                                     b'\\' => key.push(b'\\'),
                                                     c if c == quote => key.push(quote),
-                                                    c => { key.push(b'\\'); key.push(c); }
+                                                    c => {
+                                                        key.push(b'\\');
+                                                        key.push(c);
+                                                    }
                                                 }
                                                 i += 1;
                                             } else {
@@ -2260,7 +2354,10 @@ fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
     let cp = match u64::from_str_radix(hex, 16) {
         Ok(v) if v <= 0x10FFFF => v as u32,
         _ => {
-            crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence: Codepoint too large".to_string(), line);
+            crate::push_lexer_error(
+                "Invalid UTF-8 codepoint escape sequence: Codepoint too large".to_string(),
+                line,
+            );
             return;
         }
     };

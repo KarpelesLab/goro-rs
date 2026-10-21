@@ -54,7 +54,6 @@ impl XmlParser {
             skip_white: false,
         }
     }
-
 }
 
 /// Apply XML_OPTION_SKIP_TAGSTART: drop N leading bytes from tag name.
@@ -112,36 +111,36 @@ enum XmlEvent {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ParseState {
     Text,
-    TagOpen,        // just saw '<'
-    TagName,        // reading tag name
-    EndTagName,     // reading </tagname
-    AttrSpace,      // whitespace between attrs
-    AttrName,       // reading attribute name
-    AttrEq,         // expecting '='
-    AttrValueStart, // expecting opening quote
+    TagOpen,         // just saw '<'
+    TagName,         // reading tag name
+    EndTagName,      // reading </tagname
+    AttrSpace,       // whitespace between attrs
+    AttrName,        // reading attribute name
+    AttrEq,          // expecting '='
+    AttrValueStart,  // expecting opening quote
     AttrValueQuoted, // reading "value"
-    SelfClose,      // saw '/' in a tag, expect '>'
-    Comment1,       // saw <!-
-    Comment,        // inside <!-- ... -->
-    CommentDash1,   // saw - inside comment
-    CommentDash2,   // saw -- inside comment
-    Cdata1,         // saw <![
-    Cdata2,         // saw <![C
-    Cdata3,         // saw <![CD
-    Cdata4,         // saw <![CDA
-    Cdata5,         // saw <![CDAT
-    Cdata6,         // saw <![CDATA
-    CdataContent,   // inside <![CDATA[ ... ]]>
-    CdataClose1,    // saw ]
-    CdataClose2,    // saw ]]
+    SelfClose,       // saw '/' in a tag, expect '>'
+    Comment1,        // saw <!-
+    Comment,         // inside <!-- ... -->
+    CommentDash1,    // saw - inside comment
+    CommentDash2,    // saw -- inside comment
+    Cdata1,          // saw <![
+    Cdata2,          // saw <![C
+    Cdata3,          // saw <![CD
+    Cdata4,          // saw <![CDA
+    Cdata5,          // saw <![CDAT
+    Cdata6,          // saw <![CDATA
+    CdataContent,    // inside <![CDATA[ ... ]]>
+    CdataClose1,     // saw ]
+    CdataClose2,     // saw ]]
     #[allow(dead_code)]
-    Pi,             // inside <?...?>
-    PiTarget,       // reading PI target name
-    PiData,         // reading PI data
-    PiClose,        // saw ? in PI
-    Doctype,        // inside <!DOCTYPE ...>
-    BangTag,        // saw <! (deciding comment/cdata/doctype)
-    XmlDecl,        // inside <?xml ... ?> declaration
+    Pi, // inside <?...?>
+    PiTarget,        // reading PI target name
+    PiData,          // reading PI data
+    PiClose,         // saw ? in PI
+    Doctype,         // inside <!DOCTYPE ...>
+    BangTag,         // saw <! (deciding comment/cdata/doctype)
+    XmlDecl,         // inside <?xml ... ?> declaration
 }
 
 fn decode_entity(entity: &str) -> Option<String> {
@@ -258,9 +257,7 @@ fn parse_xml(
                 if c == '<' {
                     if !text_buf.is_empty() {
                         let resolved = resolve_entities(&text_buf);
-                        events.push(XmlEvent::CharacterData {
-                            data: resolved,
-                        });
+                        events.push(XmlEvent::CharacterData { data: resolved });
                         text_buf.clear();
                     }
                     state = ParseState::TagOpen;
@@ -570,9 +567,7 @@ fn parse_xml(
                         name: processed.clone(),
                         attributes: attrs.clone(),
                     });
-                    events.push(XmlEvent::EndElement {
-                        name: processed,
-                    });
+                    events.push(XmlEvent::EndElement { name: processed });
                     attrs.clear();
                     tag_name.clear();
                     state = ParseState::Text;
@@ -589,9 +584,7 @@ fn parse_xml(
                             return Err((XML_ERROR_TAG_MISMATCH, line, col, byte_index + i));
                         }
                     }
-                    events.push(XmlEvent::EndElement {
-                        name: processed,
-                    });
+                    events.push(XmlEvent::EndElement { name: processed });
                     tag_name.clear();
                     state = ParseState::Text;
                 } else if c.is_ascii_whitespace() {
@@ -623,11 +616,7 @@ fn parse_xml(
 // ── Callback dispatch ───────────────────────────────────────────────────────
 
 /// Call a PHP callback (function name string, array callback, or callable Value).
-fn call_callback(
-    vm: &mut Vm,
-    callback: &Value,
-    args: Vec<Value>,
-) -> Result<Value, VmError> {
+fn call_callback(vm: &mut Vm, callback: &Value, args: Vec<Value>) -> Result<Value, VmError> {
     match callback {
         Value::String(s) => {
             let func_name = s.as_bytes();
@@ -646,8 +635,11 @@ fn call_callback(
             drop(arr_borrow);
             if vals.len() >= 2 {
                 let method_name = vals[1].to_php_string();
-                let method_lower: Vec<u8> =
-                    method_name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                let method_lower: Vec<u8> = method_name
+                    .as_bytes()
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if let Value::Object(obj) = &vals[0] {
                     let class_lower: Vec<u8> = {
                         let obj_borrow = obj.borrow();
@@ -692,7 +684,12 @@ fn call_callback(
         }
         Value::Object(obj) => {
             // Closure or invokable object: look for __invoke method
-            let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let class_lower: Vec<u8> = obj
+                .borrow()
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
             if class_lower == b"closure" {
                 if let Some(result) = vm.call_object_method(callback, b"__invoke", &args) {
                     return Ok(result);
@@ -725,21 +722,18 @@ fn dispatch_callback(
     mut extra_args: Vec<Value>,
 ) -> Result<(), VmError> {
     // If the callback is a string and the parser has an object set, use method dispatch
-    let first_arg = parser_object
-        .clone()
-        .unwrap_or(Value::Long(parser_id));
+    let first_arg = parser_object.clone().unwrap_or(Value::Long(parser_id));
 
-    let effective_callback = if let (Value::String(method_name), Some(obj)) =
-        (callback, parser_object)
-    {
-        // Build [object, method_name] array callback
-        let mut arr = PhpArray::new();
-        arr.push(obj.clone());
-        arr.push(Value::String(method_name.clone()));
-        Value::Array(Rc::new(RefCell::new(arr)))
-    } else {
-        callback.clone()
-    };
+    let effective_callback =
+        if let (Value::String(method_name), Some(obj)) = (callback, parser_object) {
+            // Build [object, method_name] array callback
+            let mut arr = PhpArray::new();
+            arr.push(obj.clone());
+            arr.push(Value::String(method_name.clone()));
+            Value::Array(Rc::new(RefCell::new(arr)))
+        } else {
+            callback.clone()
+        };
 
     let mut args = vec![first_arg];
     args.append(&mut extra_args);
@@ -757,7 +751,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"xml_parse", xml_parse);
     vm.register_function(b"xml_parser_free", xml_parser_free);
     vm.register_function(b"xml_set_element_handler", xml_set_element_handler);
-    vm.register_function(b"xml_set_character_data_handler", xml_set_character_data_handler);
+    vm.register_function(
+        b"xml_set_character_data_handler",
+        xml_set_character_data_handler,
+    );
     vm.register_function(b"xml_set_default_handler", xml_set_default_handler);
     vm.register_function(
         b"xml_set_processing_instruction_handler",
@@ -769,13 +766,22 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"xml_get_error_code", xml_get_error_code);
     vm.register_function(b"xml_error_string", xml_error_string);
     vm.register_function(b"xml_get_current_line_number", xml_get_current_line_number);
-    vm.register_function(b"xml_get_current_column_number", xml_get_current_column_number);
+    vm.register_function(
+        b"xml_get_current_column_number",
+        xml_get_current_column_number,
+    );
     vm.register_function(b"xml_get_current_byte_index", xml_get_current_byte_index);
     vm.register_function(b"xml_parse_into_struct", xml_parse_into_struct);
     vm.register_function(b"xml_set_external_entity_ref_handler", xml_set_stub_handler);
     vm.register_function(b"xml_set_notation_decl_handler", xml_set_stub_handler);
-    vm.register_function(b"xml_set_unparsed_entity_decl_handler", xml_set_stub_handler);
-    vm.register_function(b"xml_set_start_namespace_decl_handler", xml_set_stub_handler);
+    vm.register_function(
+        b"xml_set_unparsed_entity_decl_handler",
+        xml_set_stub_handler,
+    );
+    vm.register_function(
+        b"xml_set_start_namespace_decl_handler",
+        xml_set_stub_handler,
+    );
     vm.register_function(b"xml_set_end_namespace_decl_handler", xml_set_stub_handler);
     vm.register_function(b"simplexml_load_string", simplexml_load_string);
     vm.register_function(b"simplexml_load_file", simplexml_load_file);
@@ -799,10 +805,8 @@ pub fn register(vm: &mut Vm) {
         .insert(b"XML_ERROR_TAG_MISMATCH".to_vec(), Value::Long(7));
     vm.constants
         .insert(b"XML_ERROR_DUPLICATE_ATTRIBUTE".to_vec(), Value::Long(8));
-    vm.constants.insert(
-        b"XML_ERROR_JUNK_AFTER_DOC_ELEMENT".to_vec(),
-        Value::Long(9),
-    );
+    vm.constants
+        .insert(b"XML_ERROR_JUNK_AFTER_DOC_ELEMENT".to_vec(), Value::Long(9));
     vm.constants
         .insert(b"XML_ERROR_PARAM_ENTITY_REF".to_vec(), Value::Long(10));
     vm.constants
@@ -849,34 +853,66 @@ pub fn register(vm: &mut Vm) {
     );
 
     // LIBXML constants
-    vm.constants.insert(b"LIBXML_VERSION".to_vec(), Value::Long(20913));
-    vm.constants.insert(b"LIBXML_DOTTED_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"2.9.13")));
-    vm.constants.insert(b"LIBXML_LOADED_VERSION".to_vec(), Value::String(PhpString::from_bytes(b"20913")));
-    vm.constants.insert(b"LIBXML_NOENT".to_vec(), Value::Long(2));
-    vm.constants.insert(b"LIBXML_DTDLOAD".to_vec(), Value::Long(4));
-    vm.constants.insert(b"LIBXML_DTDATTR".to_vec(), Value::Long(8));
-    vm.constants.insert(b"LIBXML_DTDVALID".to_vec(), Value::Long(16));
-    vm.constants.insert(b"LIBXML_NOERROR".to_vec(), Value::Long(32));
-    vm.constants.insert(b"LIBXML_NOWARNING".to_vec(), Value::Long(64));
-    vm.constants.insert(b"LIBXML_NOBLANKS".to_vec(), Value::Long(256));
-    vm.constants.insert(b"LIBXML_XINCLUDE".to_vec(), Value::Long(1024));
-    vm.constants.insert(b"LIBXML_NSCLEAN".to_vec(), Value::Long(8192));
-    vm.constants.insert(b"LIBXML_NOCDATA".to_vec(), Value::Long(16384));
-    vm.constants.insert(b"LIBXML_NONET".to_vec(), Value::Long(2048));
-    vm.constants.insert(b"LIBXML_PEDANTIC".to_vec(), Value::Long(128));
-    vm.constants.insert(b"LIBXML_COMPACT".to_vec(), Value::Long(65536));
-    vm.constants.insert(b"LIBXML_NOXMLDECL".to_vec(), Value::Long(2));
-    vm.constants.insert(b"LIBXML_PARSEHUGE".to_vec(), Value::Long(524288));
-    vm.constants.insert(b"LIBXML_BIGLINES".to_vec(), Value::Long(4194304));
-    vm.constants.insert(b"LIBXML_NOEMPTYTAG".to_vec(), Value::Long(4));
-    vm.constants.insert(b"LIBXML_SCHEMA_CREATE".to_vec(), Value::Long(1));
-    vm.constants.insert(b"LIBXML_HTML_NOIMPLIED".to_vec(), Value::Long(8192));
-    vm.constants.insert(b"LIBXML_HTML_NODEFDTD".to_vec(), Value::Long(4));
-    vm.constants.insert(b"LIBXML_ERR_NONE".to_vec(), Value::Long(0));
-    vm.constants.insert(b"LIBXML_ERR_WARNING".to_vec(), Value::Long(1));
-    vm.constants.insert(b"LIBXML_ERR_ERROR".to_vec(), Value::Long(2));
-    vm.constants.insert(b"LIBXML_ERR_FATAL".to_vec(), Value::Long(3));
-    vm.constants.insert(b"LIBXML_RECOVER".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"LIBXML_VERSION".to_vec(), Value::Long(20913));
+    vm.constants.insert(
+        b"LIBXML_DOTTED_VERSION".to_vec(),
+        Value::String(PhpString::from_bytes(b"2.9.13")),
+    );
+    vm.constants.insert(
+        b"LIBXML_LOADED_VERSION".to_vec(),
+        Value::String(PhpString::from_bytes(b"20913")),
+    );
+    vm.constants
+        .insert(b"LIBXML_NOENT".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"LIBXML_DTDLOAD".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"LIBXML_DTDATTR".to_vec(), Value::Long(8));
+    vm.constants
+        .insert(b"LIBXML_DTDVALID".to_vec(), Value::Long(16));
+    vm.constants
+        .insert(b"LIBXML_NOERROR".to_vec(), Value::Long(32));
+    vm.constants
+        .insert(b"LIBXML_NOWARNING".to_vec(), Value::Long(64));
+    vm.constants
+        .insert(b"LIBXML_NOBLANKS".to_vec(), Value::Long(256));
+    vm.constants
+        .insert(b"LIBXML_XINCLUDE".to_vec(), Value::Long(1024));
+    vm.constants
+        .insert(b"LIBXML_NSCLEAN".to_vec(), Value::Long(8192));
+    vm.constants
+        .insert(b"LIBXML_NOCDATA".to_vec(), Value::Long(16384));
+    vm.constants
+        .insert(b"LIBXML_NONET".to_vec(), Value::Long(2048));
+    vm.constants
+        .insert(b"LIBXML_PEDANTIC".to_vec(), Value::Long(128));
+    vm.constants
+        .insert(b"LIBXML_COMPACT".to_vec(), Value::Long(65536));
+    vm.constants
+        .insert(b"LIBXML_NOXMLDECL".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"LIBXML_PARSEHUGE".to_vec(), Value::Long(524288));
+    vm.constants
+        .insert(b"LIBXML_BIGLINES".to_vec(), Value::Long(4194304));
+    vm.constants
+        .insert(b"LIBXML_NOEMPTYTAG".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"LIBXML_SCHEMA_CREATE".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"LIBXML_HTML_NOIMPLIED".to_vec(), Value::Long(8192));
+    vm.constants
+        .insert(b"LIBXML_HTML_NODEFDTD".to_vec(), Value::Long(4));
+    vm.constants
+        .insert(b"LIBXML_ERR_NONE".to_vec(), Value::Long(0));
+    vm.constants
+        .insert(b"LIBXML_ERR_WARNING".to_vec(), Value::Long(1));
+    vm.constants
+        .insert(b"LIBXML_ERR_ERROR".to_vec(), Value::Long(2));
+    vm.constants
+        .insert(b"LIBXML_ERR_FATAL".to_vec(), Value::Long(3));
+    vm.constants
+        .insert(b"LIBXML_RECOVER".to_vec(), Value::Long(1));
 
     // libxml functions
     vm.register_function(b"libxml_use_internal_errors", libxml_use_internal_errors_fn);
@@ -884,8 +920,14 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"libxml_clear_errors", libxml_clear_errors_fn);
     vm.register_function(b"libxml_get_last_error", libxml_get_last_error_fn);
     vm.register_function(b"libxml_set_streams_context", libxml_set_streams_context_fn);
-    vm.register_function(b"libxml_disable_entity_loader", libxml_disable_entity_loader_fn);
-    vm.register_function(b"libxml_set_external_entity_loader", libxml_set_external_entity_loader_fn);
+    vm.register_function(
+        b"libxml_disable_entity_loader",
+        libxml_disable_entity_loader_fn,
+    );
+    vm.register_function(
+        b"libxml_set_external_entity_loader",
+        libxml_set_external_entity_loader_fn,
+    );
     vm.register_extension(b"libxml");
 
     // Register XMLParser as a final, opaque, non-serializable class.
@@ -972,25 +1014,26 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_string_lossy();
 
     // Extract parser state for parsing
-    let (start_byte, start_line, start_col, separator, case_folding, skip_tagstart) = XML_PARSERS.with(|p| {
-        let parsers = p.borrow();
-        if let Some(parser) = parsers.get(&parser_id) {
-            Ok((
-                parser.current_byte_index,
-                parser.current_line,
-                parser.current_column,
-                parser.separator.clone(),
-                parser.case_folding,
-                parser.skip_tagstart,
-            ))
-        } else {
-            Err(VmError {
-                message: "xml_parse(): supplied argument is not a valid XML Parser resource"
-                    .to_string(),
-                line: 0,
-            })
-        }
-    })?;
+    let (start_byte, start_line, start_col, separator, case_folding, skip_tagstart) =
+        XML_PARSERS.with(|p| {
+            let parsers = p.borrow();
+            if let Some(parser) = parsers.get(&parser_id) {
+                Ok((
+                    parser.current_byte_index,
+                    parser.current_line,
+                    parser.current_column,
+                    parser.separator.clone(),
+                    parser.case_folding,
+                    parser.skip_tagstart,
+                ))
+            } else {
+                Err(VmError {
+                    message: "xml_parse(): supplied argument is not a valid XML Parser resource"
+                        .to_string(),
+                    line: 0,
+                })
+            }
+        })?;
 
     let sep_ref = separator.as_deref();
     let parse_result = parse_xml(&data, start_byte, start_line, start_col, sep_ref);
@@ -1205,7 +1248,9 @@ fn xml_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn xml_parser_free(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    _vm.emit_deprecated("Function xml_parser_free() is deprecated since 8.5, as it has no effect since PHP 8.0");
+    _vm.emit_deprecated(
+        "Function xml_parser_free() is deprecated since 8.5, as it has no effect since PHP 8.0",
+    );
     let parser_id = extract_xml_id(args.first().unwrap_or(&Value::Null)).unwrap_or(0);
     let removed = XML_PARSERS.with(|p| p.borrow_mut().remove(&parser_id).is_some());
     Ok(if removed { Value::True } else { Value::False })
@@ -1225,10 +1270,15 @@ fn require_xmlparser(vm: &mut Vm, fn_name: &str, val: &Value) -> Result<i64, VmE
                 Ok(n)
             } else {
                 let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {class_name} given");
+                let msg = format!(
+                    "{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {class_name} given"
+                );
                 let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
                 vm.current_exception = Some(exc);
-                Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+                Err(VmError {
+                    message: format!("Uncaught TypeError: {msg}"),
+                    line: vm.current_line,
+                })
             }
         }
         other => {
@@ -1242,10 +1292,15 @@ fn require_xmlparser(vm: &mut Vm, fn_name: &str, val: &Value) -> Result<i64, VmE
                 Value::Resource(_) => "resource",
                 _ => "unknown",
             };
-            let msg = format!("{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {type_name} given");
+            let msg = format!(
+                "{fn_name}(): Argument #1 ($parser) must be of type XMLParser, {type_name} given"
+            );
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+            Err(VmError {
+                message: format!("Uncaught TypeError: {msg}"),
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -1257,10 +1312,14 @@ fn require_callable_handler(vm: &mut Vm, fn_name: &str, handler: &Value) -> Resu
         Value::String(_) | Value::Array(_) | Value::Object(_) => Ok(()),
         Value::Reference(r) => require_callable_handler(vm, fn_name, &r.borrow()),
         _ => {
-            let msg = format!("{fn_name}(): Argument #2 ($handler) must be of type callable|string|null");
+            let msg =
+                format!("{fn_name}(): Argument #2 ($handler) must be of type callable|string|null");
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            Err(VmError { message: format!("Uncaught TypeError: {msg}"), line: vm.current_line })
+            Err(VmError {
+                message: format!("Uncaught TypeError: {msg}"),
+                line: vm.current_line,
+            })
         }
     }
 }
@@ -1278,8 +1337,8 @@ fn warn_non_callable_string(vm: &mut Vm, fn_name: &str, handler: &Value) {
             return;
         }
         let s_lower: Vec<u8> = s_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let is_callable = vm.user_functions.contains_key(&s_lower)
-            || vm.functions.contains_key(&s_lower);
+        let is_callable =
+            vm.user_functions.contains_key(&s_lower) || vm.functions.contains_key(&s_lower);
         if !is_callable {
             vm.emit_deprecated_at(
                 &format!("{fn_name}(): Passing non-callable strings is deprecated since 8.4"),
@@ -1290,7 +1349,11 @@ fn warn_non_callable_string(vm: &mut Vm, fn_name: &str, handler: &Value) {
 }
 
 fn xml_set_element_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = require_xmlparser(vm, "xml_set_element_handler", args.first().unwrap_or(&Value::Null))?;
+    let parser_id = require_xmlparser(
+        vm,
+        "xml_set_element_handler",
+        args.first().unwrap_or(&Value::Null),
+    )?;
     let start = args.get(1).cloned().unwrap_or(Value::Null);
     let end = args.get(2).cloned().unwrap_or(Value::Null);
     require_callable_handler(vm, "xml_set_element_handler", &start)?;
@@ -1322,7 +1385,11 @@ fn xml_set_element_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 
 fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = require_xmlparser(vm, "xml_set_character_data_handler", args.first().unwrap_or(&Value::Null))?;
+    let parser_id = require_xmlparser(
+        vm,
+        "xml_set_character_data_handler",
+        args.first().unwrap_or(&Value::Null),
+    )?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
     require_callable_handler(vm, "xml_set_character_data_handler", &handler)?;
 
@@ -1331,12 +1398,12 @@ fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     XML_PARSERS.with(|p| {
         let mut parsers = p.borrow_mut();
         if let Some(parser) = parsers.get_mut(&parser_id) {
-            parser.char_data_handler = if handler.is_truthy() || matches!(&handler, Value::String(_))
-            {
-                Some(to_callback_value(&handler))
-            } else {
-                None
-            };
+            parser.char_data_handler =
+                if handler.is_truthy() || matches!(&handler, Value::String(_)) {
+                    Some(to_callback_value(&handler))
+                } else {
+                    None
+                };
         }
     });
 
@@ -1344,7 +1411,11 @@ fn xml_set_character_data_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, 
 }
 
 fn xml_set_default_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let parser_id = require_xmlparser(vm, "xml_set_default_handler", args.first().unwrap_or(&Value::Null))?;
+    let parser_id = require_xmlparser(
+        vm,
+        "xml_set_default_handler",
+        args.first().unwrap_or(&Value::Null),
+    )?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
     require_callable_handler(vm, "xml_set_default_handler", &handler)?;
 
@@ -1365,11 +1436,12 @@ fn xml_set_default_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     Ok(Value::True)
 }
 
-fn xml_set_processing_instruction_handler(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, VmError> {
-    let parser_id = require_xmlparser(vm, "xml_set_processing_instruction_handler", args.first().unwrap_or(&Value::Null))?;
+fn xml_set_processing_instruction_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let parser_id = require_xmlparser(
+        vm,
+        "xml_set_processing_instruction_handler",
+        args.first().unwrap_or(&Value::Null),
+    )?;
     let handler = args.get(1).cloned().unwrap_or(Value::Null);
     require_callable_handler(vm, "xml_set_processing_instruction_handler", &handler)?;
 
@@ -1443,9 +1515,7 @@ fn xml_parser_get_option(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         let parsers = p.borrow();
         if let Some(parser) = parsers.get(&parser_id) {
             match option {
-                XML_OPTION_CASE_FOLDING => {
-                    Ok(Value::Long(if parser.case_folding { 1 } else { 0 }))
-                }
+                XML_OPTION_CASE_FOLDING => Ok(Value::Long(if parser.case_folding { 1 } else { 0 })),
                 XML_OPTION_TARGET_ENCODING => Ok(Value::String(PhpString::from_string(
                     parser.target_encoding.clone(),
                 ))),
@@ -1568,10 +1638,16 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     let (separator, case_folding, skip_tagstart) = XML_PARSERS.with(|p| {
         let parsers = p.borrow();
         if let Some(parser) = parsers.get(&parser_id) {
-            Ok((parser.separator.clone(), parser.case_folding, parser.skip_tagstart))
+            Ok((
+                parser.separator.clone(),
+                parser.case_folding,
+                parser.skip_tagstart,
+            ))
         } else {
             Err(VmError {
-                message: "xml_parse_into_struct(): supplied argument is not a valid XML Parser resource".to_string(),
+                message:
+                    "xml_parse_into_struct(): supplied argument is not a valid XML Parser resource"
+                        .to_string(),
                 line: 0,
             })
         }
@@ -1639,10 +1715,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                         } else {
                             let mut idx_entry = PhpArray::new();
                             idx_entry.push(Value::Long(value_idx));
-                            index_arr.set(
-                                tag_key,
-                                Value::Array(Rc::new(RefCell::new(idx_entry))),
-                            );
+                            index_arr.set(tag_key, Value::Array(Rc::new(RefCell::new(idx_entry))));
                         }
                         value_idx += 1;
                     }
@@ -1674,8 +1747,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                                 }
                                 drop(prev);
                                 if merged {
-                                    if let Some(Value::Array(prev_arr)) =
-                                        values_arr.get(&prev_key)
+                                    if let Some(Value::Array(prev_arr)) = values_arr.get(&prev_key)
                                     {
                                         prev_arr.borrow_mut().set(
                                             ArrayKey::String(PhpString::from_bytes(b"type")),
@@ -1702,8 +1774,7 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             );
                             values_arr.push(Value::Array(Rc::new(RefCell::new(entry))));
 
-                            let tag_key =
-                                ArrayKey::String(PhpString::from_string(folded));
+                            let tag_key = ArrayKey::String(PhpString::from_string(folded));
                             if let Some(existing) = index_arr.get(&tag_key) {
                                 if let Value::Array(arr) = existing {
                                     arr.borrow_mut().push(Value::Long(value_idx));
@@ -1711,10 +1782,8 @@ fn xml_parse_into_struct(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             } else {
                                 let mut idx_entry = PhpArray::new();
                                 idx_entry.push(Value::Long(value_idx));
-                                index_arr.set(
-                                    tag_key,
-                                    Value::Array(Rc::new(RefCell::new(idx_entry))),
-                                );
+                                index_arr
+                                    .set(tag_key, Value::Array(Rc::new(RefCell::new(idx_entry))));
                             }
                             value_idx += 1;
                         }
@@ -1823,8 +1892,7 @@ fn build_simplexml_subtree(
                 let child_name = name.clone();
                 let child_attrs = attrs.clone();
                 *pos += 1;
-                let child_obj =
-                    build_simplexml_subtree(vm, events, pos, &child_name, &child_attrs);
+                let child_obj = build_simplexml_subtree(vm, events, pos, &child_name, &child_attrs);
 
                 if !child_order.contains(&child_name) {
                     child_order.push(child_name.clone());
@@ -1848,7 +1916,10 @@ fn build_simplexml_subtree(
     let mut obj = PhpObject::new(b"SimpleXMLElement".to_vec(), obj_id);
 
     // Store the tag name as an internal property (for getName())
-    obj.set_property(b"__sxml_name".to_vec(), Value::String(PhpString::from_string(tag_name.to_string())));
+    obj.set_property(
+        b"__sxml_name".to_vec(),
+        Value::String(PhpString::from_string(tag_name.to_string())),
+    );
 
     // Set attributes
     if !tag_attrs.is_empty() {
@@ -1869,7 +1940,10 @@ fn build_simplexml_subtree(
     // For non-leaf nodes this is the text directly inside (mixed content).
     // PHP SimpleXML does not create text nodes for whitespace-only content.
     if !text_content.is_empty() && text_content.chars().any(|c| !c.is_whitespace()) {
-        obj.set_property(b"0".to_vec(), Value::String(PhpString::from_string(text_content)));
+        obj.set_property(
+            b"0".to_vec(),
+            Value::String(PhpString::from_string(text_content)),
+        );
     }
     if !children.is_empty() {
         for key in &child_order {
@@ -1881,7 +1955,10 @@ fn build_simplexml_subtree(
                 for v in vals {
                     arr.push(v.clone());
                 }
-                obj.set_property(key.as_bytes().to_vec(), Value::Array(Rc::new(RefCell::new(arr))));
+                obj.set_property(
+                    key.as_bytes().to_vec(),
+                    Value::Array(Rc::new(RefCell::new(arr))),
+                );
             }
         }
     }
@@ -1936,7 +2013,8 @@ fn simplexml_load_string(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
             let root = build_simplexml_subtree(vm, &events, &mut pos, &root_name, &root_attrs);
             // Mark the root for XML declaration emission in asXML/saveXML
             if let Value::Object(ref obj) = root {
-                obj.borrow_mut().set_property(b"__sxml_is_root".to_vec(), Value::True);
+                obj.borrow_mut()
+                    .set_property(b"__sxml_is_root".to_vec(), Value::True);
             }
             Ok(root)
         }

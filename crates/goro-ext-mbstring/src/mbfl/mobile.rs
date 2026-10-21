@@ -44,7 +44,9 @@ pub fn mbfilter_sjis_emoji_kddi2unicode(s: i32, snd: &mut i32) -> i32 {
             return keypad('#' as i32, snd);
         } else {
             *snd = 0;
-            return convert_emoji_cp(mb_tbl_code2uni_kddi1[(s - mb_tbl_code2uni_kddi1_min) as usize] as i32);
+            return convert_emoji_cp(
+                mb_tbl_code2uni_kddi1[(s - mb_tbl_code2uni_kddi1_min) as usize] as i32,
+            );
         }
     } else if s >= mb_tbl_code2uni_kddi2_min && s <= mb_tbl_code2uni_kddi2_max {
         if s == 0x2750 {
@@ -57,7 +59,9 @@ pub fn mbfilter_sjis_emoji_kddi2unicode(s: i32, snd: &mut i32) -> i32 {
             return keypad('0' as i32, snd);
         } else {
             *snd = 0;
-            return convert_emoji_cp(mb_tbl_code2uni_kddi2[(s - mb_tbl_code2uni_kddi2_min) as usize] as i32);
+            return convert_emoji_cp(
+                mb_tbl_code2uni_kddi2[(s - mb_tbl_code2uni_kddi2_min) as usize] as i32,
+            );
         }
     }
     0
@@ -65,8 +69,13 @@ pub fn mbfilter_sjis_emoji_kddi2unicode(s: i32, snd: &mut i32) -> i32 {
 
 pub fn mbfilter_sjis_emoji_docomo2unicode(s: i32, snd: &mut i32) -> i32 {
     if s >= mb_tbl_code2uni_docomo1_min && s <= mb_tbl_code2uni_docomo1_max {
-        let v = convert_emoji_cp(mb_tbl_code2uni_docomo1[(s - mb_tbl_code2uni_docomo1_min) as usize] as i32);
-        if (s >= docomo_keypad(1) && s <= docomo_keypad(9)) || s == docomo_keypad(0) || s == DOCOMO_KEYPAD_HASH {
+        let v = convert_emoji_cp(
+            mb_tbl_code2uni_docomo1[(s - mb_tbl_code2uni_docomo1_min) as usize] as i32,
+        );
+        if (s >= docomo_keypad(1) && s <= docomo_keypad(9))
+            || s == docomo_keypad(0)
+            || s == DOCOMO_KEYPAD_HASH
+        {
             return keypad(v, snd);
         } else {
             *snd = 0;
@@ -79,20 +88,29 @@ pub fn mbfilter_sjis_emoji_docomo2unicode(s: i32, snd: &mut i32) -> i32 {
 pub fn mbfilter_sjis_emoji_sb2unicode(s: i32, snd: &mut i32) -> i32 {
     if s >= mb_tbl_code2uni_sb1_min && s <= mb_tbl_code2uni_sb1_max {
         if s == 0x2817 || (0x2823..=0x282C).contains(&s) {
-            return keypad(mb_tbl_code2uni_sb1[(s - mb_tbl_code2uni_sb1_min) as usize] as i32, snd);
+            return keypad(
+                mb_tbl_code2uni_sb1[(s - mb_tbl_code2uni_sb1_min) as usize] as i32,
+                snd,
+            );
         } else {
             *snd = 0;
-            return convert_emoji_cp(mb_tbl_code2uni_sb1[(s - mb_tbl_code2uni_sb1_min) as usize] as i32);
+            return convert_emoji_cp(
+                mb_tbl_code2uni_sb1[(s - mb_tbl_code2uni_sb1_min) as usize] as i32,
+            );
         }
     } else if s >= mb_tbl_code2uni_sb2_min && s <= mb_tbl_code2uni_sb2_max {
         *snd = 0;
-        return convert_emoji_cp(mb_tbl_code2uni_sb2[(s - mb_tbl_code2uni_sb2_min) as usize] as i32);
+        return convert_emoji_cp(
+            mb_tbl_code2uni_sb2[(s - mb_tbl_code2uni_sb2_min) as usize] as i32,
+        );
     } else if s >= mb_tbl_code2uni_sb3_min && s <= mb_tbl_code2uni_sb3_max {
         if (0x2B02..=0x2B0B).contains(&s) {
             return flag(&nflags_sb[(s - 0x2B02) as usize], snd);
         } else {
             *snd = 0;
-            return convert_emoji_cp(mb_tbl_code2uni_sb3[(s - mb_tbl_code2uni_sb3_min) as usize] as i32);
+            return convert_emoji_cp(
+                mb_tbl_code2uni_sb3[(s - mb_tbl_code2uni_sb3_min) as usize] as i32,
+            );
         }
     }
     0
@@ -129,25 +147,79 @@ pub fn emoji_lookup(
 
 pub fn docomo_tables() -> [(i32, i32, &'static [u16], &'static [u16], i32); 3] {
     [
-        (mb_tbl_uni_docomo2code2_min, mb_tbl_uni_docomo2code2_max, &mb_tbl_uni_docomo2code2_key, &mb_tbl_uni_docomo2code2_value, mb_tbl_uni_docomo2code2_len),
-        (mb_tbl_uni_docomo2code3_min, mb_tbl_uni_docomo2code3_max, &mb_tbl_uni_docomo2code3_key, &mb_tbl_uni_docomo2code3_value, mb_tbl_uni_docomo2code3_len),
-        (mb_tbl_uni_docomo2code5_min, mb_tbl_uni_docomo2code5_max, &mb_tbl_uni_docomo2code5_key, &mb_tbl_uni_docomo2code5_val, mb_tbl_uni_docomo2code5_len),
+        (
+            mb_tbl_uni_docomo2code2_min,
+            mb_tbl_uni_docomo2code2_max,
+            &mb_tbl_uni_docomo2code2_key,
+            &mb_tbl_uni_docomo2code2_value,
+            mb_tbl_uni_docomo2code2_len,
+        ),
+        (
+            mb_tbl_uni_docomo2code3_min,
+            mb_tbl_uni_docomo2code3_max,
+            &mb_tbl_uni_docomo2code3_key,
+            &mb_tbl_uni_docomo2code3_value,
+            mb_tbl_uni_docomo2code3_len,
+        ),
+        (
+            mb_tbl_uni_docomo2code5_min,
+            mb_tbl_uni_docomo2code5_max,
+            &mb_tbl_uni_docomo2code5_key,
+            &mb_tbl_uni_docomo2code5_val,
+            mb_tbl_uni_docomo2code5_len,
+        ),
     ]
 }
 
 pub fn kddi_tables() -> [(i32, i32, &'static [u16], &'static [u16], i32); 3] {
     [
-        (mb_tbl_uni_kddi2code2_min, mb_tbl_uni_kddi2code2_max, &mb_tbl_uni_kddi2code2_key, &mb_tbl_uni_kddi2code2_value, mb_tbl_uni_kddi2code2_len),
-        (mb_tbl_uni_kddi2code3_min, mb_tbl_uni_kddi2code3_max, &mb_tbl_uni_kddi2code3_key, &mb_tbl_uni_kddi2code3_value, mb_tbl_uni_kddi2code3_len),
-        (mb_tbl_uni_kddi2code5_min, mb_tbl_uni_kddi2code5_max, &mb_tbl_uni_kddi2code5_key, &mb_tbl_uni_kddi2code5_val, mb_tbl_uni_kddi2code5_len),
+        (
+            mb_tbl_uni_kddi2code2_min,
+            mb_tbl_uni_kddi2code2_max,
+            &mb_tbl_uni_kddi2code2_key,
+            &mb_tbl_uni_kddi2code2_value,
+            mb_tbl_uni_kddi2code2_len,
+        ),
+        (
+            mb_tbl_uni_kddi2code3_min,
+            mb_tbl_uni_kddi2code3_max,
+            &mb_tbl_uni_kddi2code3_key,
+            &mb_tbl_uni_kddi2code3_value,
+            mb_tbl_uni_kddi2code3_len,
+        ),
+        (
+            mb_tbl_uni_kddi2code5_min,
+            mb_tbl_uni_kddi2code5_max,
+            &mb_tbl_uni_kddi2code5_key,
+            &mb_tbl_uni_kddi2code5_val,
+            mb_tbl_uni_kddi2code5_len,
+        ),
     ]
 }
 
 pub fn sb_tables() -> [(i32, i32, &'static [u16], &'static [u16], i32); 3] {
     [
-        (mb_tbl_uni_sb2code2_min, mb_tbl_uni_sb2code2_max, &mb_tbl_uni_sb2code2_key, &mb_tbl_uni_sb2code2_value, mb_tbl_uni_sb2code2_len),
-        (mb_tbl_uni_sb2code3_min, mb_tbl_uni_sb2code3_max, &mb_tbl_uni_sb2code3_key, &mb_tbl_uni_sb2code3_value, mb_tbl_uni_sb2code3_len),
-        (mb_tbl_uni_sb2code5_min, mb_tbl_uni_sb2code5_max, &mb_tbl_uni_sb2code5_key, &mb_tbl_uni_sb2code5_val, mb_tbl_uni_sb2code5_len),
+        (
+            mb_tbl_uni_sb2code2_min,
+            mb_tbl_uni_sb2code2_max,
+            &mb_tbl_uni_sb2code2_key,
+            &mb_tbl_uni_sb2code2_value,
+            mb_tbl_uni_sb2code2_len,
+        ),
+        (
+            mb_tbl_uni_sb2code3_min,
+            mb_tbl_uni_sb2code3_max,
+            &mb_tbl_uni_sb2code3_key,
+            &mb_tbl_uni_sb2code3_value,
+            mb_tbl_uni_sb2code3_len,
+        ),
+        (
+            mb_tbl_uni_sb2code5_min,
+            mb_tbl_uni_sb2code5_max,
+            &mb_tbl_uni_sb2code5_key,
+            &mb_tbl_uni_sb2code5_val,
+            mb_tbl_uni_sb2code5_len,
+        ),
     ]
 }
 
@@ -257,7 +329,8 @@ fn mb_iso2022jp_kddi_to_wchar(input: &[u8], out: &mut Vec<u32>, state: &mut u32)
                 }
                 if w == 0 {
                     if s >= cp932ext1_ucs_table_min as u32 && s < cp932ext1_ucs_table_max as u32 {
-                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize] as u32;
+                        w = cp932ext1_ucs_table[(s - cp932ext1_ucs_table_min as u32) as usize]
+                            as u32;
                     } else if s < jisx0208_ucs_table_size as u32 {
                         w = jisx0208_ucs_table[s as usize] as u32;
                     }

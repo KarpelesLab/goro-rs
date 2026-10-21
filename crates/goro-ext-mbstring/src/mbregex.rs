@@ -11,7 +11,7 @@ use goro_core::vm::{Vm, VmError};
 
 use crate::mbfl::{self, Encoding};
 use crate::mbstring::check_encoding;
-use crate::onig::{self, Limits, RegEnc, Region, Regex, Syntax};
+use crate::onig::{self, Limits, RegEnc, Regex, Region, Syntax};
 use crate::state;
 use crate::zpp::*;
 
@@ -36,15 +36,34 @@ pub fn register(vm: &mut Vm) {
 
 /// (names, onig encoding) as in php_mbregex.c's enc_name_map
 static ENC_NAME_MAP: &[(&[&str], RegEnc)] = &[
-    (&["EUC-JP", "EUCJP", "X-EUC-JP", "UJIS", "EUCJP", "EUCJP-WIN"], RegEnc::EucJp),
+    (
+        &["EUC-JP", "EUCJP", "X-EUC-JP", "UJIS", "EUCJP", "EUCJP-WIN"],
+        RegEnc::EucJp,
+    ),
     (&["UTF-8", "UTF8"], RegEnc::Utf8),
     (&["UTF-16", "UTF-16BE"], RegEnc::Utf16Be),
     (&["UTF-16LE"], RegEnc::Utf16Le),
     (&["UCS-4", "UTF-32", "UTF-32BE"], RegEnc::Utf32Be),
     (&["UCS-4LE", "UTF-32LE"], RegEnc::Utf32Le),
-    (&["SJIS", "CP932", "MS932", "SHIFT_JIS", "SJIS-WIN", "WINDOWS-31J"], RegEnc::Sjis),
-    (&["BIG5", "BIG-5", "BIGFIVE", "CN-BIG5", "BIG-FIVE"], RegEnc::Big5),
-    (&["EUC-CN", "EUCCN", "EUC_CN", "GB-2312", "GB2312"], RegEnc::EucCn),
+    (
+        &[
+            "SJIS",
+            "CP932",
+            "MS932",
+            "SHIFT_JIS",
+            "SJIS-WIN",
+            "WINDOWS-31J",
+        ],
+        RegEnc::Sjis,
+    ),
+    (
+        &["BIG5", "BIG-5", "BIGFIVE", "CN-BIG5", "BIG-FIVE"],
+        RegEnc::Big5,
+    ),
+    (
+        &["EUC-CN", "EUCCN", "EUC_CN", "GB-2312", "GB2312"],
+        RegEnc::EucCn,
+    ),
     (&["EUC-TW", "EUCTW", "EUC_TW"], RegEnc::EucTw),
     (&["EUC-KR", "EUCKR", "EUC_KR"], RegEnc::EucKr),
     (&["KOI8", "KOI-8"], RegEnc::Koi8),
@@ -72,7 +91,11 @@ fn name2mbctype(name: &[u8]) -> Option<usize> {
     if name.is_empty() {
         return None;
     }
-    ENC_NAME_MAP.iter().position(|(names, _)| names.iter().any(|n| n.as_bytes().eq_ignore_ascii_case(name)))
+    ENC_NAME_MAP.iter().position(|(names, _)| {
+        names
+            .iter()
+            .any(|n| n.as_bytes().eq_ignore_ascii_case(name))
+    })
 }
 
 struct MbRex {
@@ -132,7 +155,13 @@ fn mbctype_name(i: usize) -> &'static str {
 }
 
 fn regex_encoding() -> (RegEnc, usize, Option<&'static Encoding>) {
-    with(|m| (ENC_NAME_MAP[m.current_mbctype].1, m.current_mbctype, m.current_mbfl))
+    with(|m| {
+        (
+            ENC_NAME_MAP[m.current_mbctype].1,
+            m.current_mbctype,
+            m.current_mbfl,
+        )
+    })
 }
 
 fn limits(vm: &Vm) -> Limits {
@@ -146,8 +175,16 @@ fn limits(vm: &Vm) -> Limits {
     let stack = get(b"mbstring.regex_stack_limit", 100000);
     let retry = get(b"mbstring.regex_retry_limit", 1000000);
     Limits {
-        stack_limit: if stack > 0 && stack < u32::MAX as i64 { stack as usize } else { 0 },
-        retry_limit: if retry > 0 && retry < u32::MAX as i64 { retry as usize } else { 0 },
+        stack_limit: if stack > 0 && stack < u32::MAX as i64 {
+            stack as usize
+        } else {
+            0
+        },
+        retry_limit: if retry > 0 && retry < u32::MAX as i64 {
+            retry as usize
+        } else {
+            0
+        },
     }
 }
 
@@ -160,10 +197,20 @@ fn check_mbctype_encoding(s: &[u8]) -> bool {
 }
 
 /// C: `php_mbregex_compile_pattern`
-fn compile_pattern(vm: &mut Vm, func: &str, pattern: &[u8], options: u32, syntax: Syntax) -> Option<Rc<Regex>> {
+fn compile_pattern(
+    vm: &mut Vm,
+    func: &str,
+    pattern: &[u8],
+    options: u32,
+    syntax: Syntax,
+) -> Option<Rc<Regex>> {
     let (enc, idx, _) = regex_encoding();
     if !check_mbctype_encoding(pattern) {
-        vm.emit_warning(&format!("{}(): Pattern is not valid under {} encoding", func, mbctype_name(idx)));
+        vm.emit_warning(&format!(
+            "{}(): Pattern is not valid under {} encoding",
+            func,
+            mbctype_name(idx)
+        ));
         return None;
     }
     let cached = with(|m| m.cache.get(pattern).cloned());
@@ -177,12 +224,17 @@ fn compile_pattern(vm: &mut Vm, func: &str, pattern: &[u8], options: u32, syntax
             let re = Rc::new(re);
             with(|m| {
                 if let Some((old, ..)) = &cached {
-                    if m.search_re.as_ref().map(|s| Rc::ptr_eq(s, old)).unwrap_or(false) {
+                    if m.search_re
+                        .as_ref()
+                        .map(|s| Rc::ptr_eq(s, old))
+                        .unwrap_or(false)
+                    {
                         // see bug #72399
                         m.search_re = None;
                     }
                 }
-                m.cache.insert(pattern.to_vec(), (re.clone(), options, syntax, idx));
+                m.cache
+                    .insert(pattern.to_vec(), (re.clone(), options, syntax, idx));
             });
             Some(re)
         }
@@ -214,7 +266,12 @@ fn init_options(vm: &mut Vm, opts: &[u8]) -> Result<(u32, Syntax), VmError> {
             b'z' => syntax = Syntax::Perl,
             b'b' => syntax = Syntax::PosixBasic,
             b'd' => syntax = Syntax::PosixExtended,
-            _ => return Err(value_error(vm, format!("Option \"{}\" is not supported", c as char))),
+            _ => {
+                return Err(value_error(
+                    vm,
+                    format!("Option \"{}\" is not supported", c as char),
+                ));
+            }
         }
     }
     Ok((o, syntax))
@@ -228,7 +285,9 @@ fn option_string(o: u32, syntax: Syntax) -> String {
     if o & onig::OPT_EXTEND != 0 {
         s.push('x');
     }
-    if o & (onig::OPT_MULTILINE | onig::OPT_SINGLELINE) == (onig::OPT_MULTILINE | onig::OPT_SINGLELINE) {
+    if o & (onig::OPT_MULTILINE | onig::OPT_SINGLELINE)
+        == (onig::OPT_MULTILINE | onig::OPT_SINGLELINE)
+    {
         s.push('p');
     } else {
         if o & onig::OPT_MULTILINE != 0 {
@@ -267,7 +326,10 @@ fn add_named_groups(arr: &mut PhpArray, re: &Regex, s: &[u8], region: &Region) {
         let name = &re.names[idx].0;
         let gn = re.name_to_backref_number(name, Some(region)).unwrap_or(0);
         let key = ArrayKey::String(PhpString::from_vec(name.clone()));
-        match (region.beg.get(gn).copied().flatten(), region.end.get(gn).copied().flatten()) {
+        match (
+            region.beg.get(gn).copied().flatten(),
+            region.end.get(gn).copied().flatten(),
+        ) {
             (Some(b), Some(e)) if b < e && e <= s.len() => arr.set(key, pstr(&s[b..e])),
             _ => arr.set(key, Value::False),
         }
@@ -288,7 +350,10 @@ fn mb_regex_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "mb_regex_encoding",
                 1,
                 "encoding",
-                &format!("must be a valid encoding, \"{}\" given", String::from_utf8_lossy(&n)),
+                &format!(
+                    "must be a valid encoding, \"{}\" given",
+                    String::from_utf8_lossy(&n)
+                ),
             )),
             Some(i) => {
                 with(|m| {
@@ -337,7 +402,9 @@ fn ereg_exec(vm: &mut Vm, args: &[Value], icase: bool) -> Result<Value, VmError>
         let mut arr = PhpArray::new();
         for i in 0..region.beg.len() {
             match (region.beg[i], region.end[i]) {
-                (Some(b), Some(e)) if b < e && e <= string.len() => arr.set(ArrayKey::Int(i as i64), pstr(&string[b..e])),
+                (Some(b), Some(e)) if b < e && e <= string.len() => {
+                    arr.set(ArrayKey::Int(i as i64), pstr(&string[b..e]))
+                }
                 _ => arr.set(ArrayKey::Int(i as i64), Value::False),
             }
         }
@@ -377,7 +444,14 @@ fn mbchar_bytes(s: &[u8], p: usize, enc: Option<&Encoding>) -> usize {
 }
 
 /// C: `mb_regex_substitute`
-fn substitute(out: &mut Vec<u8>, subject: &[u8], replace: &[u8], re: &Regex, regs: &Region, enc: Option<&Encoding>) {
+fn substitute(
+    out: &mut Vec<u8>,
+    subject: &[u8],
+    replace: &[u8],
+    re: &Regex,
+    regs: &Region,
+    enc: Option<&Encoding>,
+) {
     let eos = replace.len();
     let mut p = 0usize;
     let num_regs = regs.beg.len();
@@ -455,10 +529,16 @@ fn substitute(out: &mut Vec<u8>, subject: &[u8], replace: &[u8], re: &Regex, reg
                         out.extend_from_slice(&replace[sp..p]);
                         continue;
                     } else {
-                        no = std::str::from_utf8(&replace[name..name_end]).ok().and_then(|t| t.parse::<i64>().ok()).unwrap_or(-1);
+                        no = std::str::from_utf8(&replace[name..name_end])
+                            .ok()
+                            .and_then(|t| t.parse::<i64>().ok())
+                            .unwrap_or(-1);
                     }
                 } else {
-                    no = re.name_to_backref_number(&replace[name..name_end], Some(regs)).map(|n| n as i64).unwrap_or(-1);
+                    no = re
+                        .name_to_backref_number(&replace[name..name_end], Some(regs))
+                        .map(|n| n as i64)
+                        .unwrap_or(-1);
                 }
             }
             _ => {
@@ -479,7 +559,12 @@ fn substitute(out: &mut Vec<u8>, subject: &[u8], replace: &[u8], re: &Regex, reg
     }
 }
 
-fn replace_exec(vm: &mut Vm, args: &[Value], base_options: u32, callable: bool) -> Result<Value, VmError> {
+fn replace_exec(
+    vm: &mut Vm,
+    args: &[Value],
+    base_options: u32,
+    callable: bool,
+) -> Result<Value, VmError> {
     let f = if callable {
         "mb_ereg_replace_callback"
     } else if base_options & onig::OPT_IGNORECASE != 0 {
@@ -507,7 +592,10 @@ fn replace_exec(vm: &mut Vm, args: &[Value], base_options: u32, callable: bool) 
             let (o2, s) = init_options(vm, &o)?;
             (base_options | o2, s)
         }
-        None => (base_options | with(|m| m.default_options), with(|m| m.default_syntax)),
+        None => (
+            base_options | with(|m| m.default_options),
+            with(|m| m.default_syntax),
+        ),
     };
     let re = match compile_pattern(vm, f, &pattern, options, syntax) {
         Some(r) => r,
@@ -521,7 +609,11 @@ fn replace_exec(vm: &mut Vm, args: &[Value], base_options: u32, callable: bool) 
         let res = re.search_prepared(&subj, pos, &lim);
         let regs = match res {
             Err(e) => {
-                vm.emit_warning(&format!("{}(): mbregex search failure in php_mbereg_replace_exec(): {}", f, e.message()));
+                vm.emit_warning(&format!(
+                    "{}(): mbregex search failure in php_mbereg_replace_exec(): {}",
+                    f,
+                    e.message()
+                ));
                 return Ok(Value::False);
             }
             Ok(None) => {
@@ -552,7 +644,10 @@ fn replace_exec(vm: &mut Vm, args: &[Value], base_options: u32, callable: bool) 
             }
             let r = vm.call_callback(&callback, &[new_array(subpats)])?;
             if vm.current_exception.is_some() {
-                return Err(VmError { message: "exception in callback".into(), line: vm.current_line });
+                return Err(VmError {
+                    message: "exception in callback".into(),
+                    line: vm.current_line,
+                });
             }
             let s = vm.value_to_string(&r);
             out.extend_from_slice(s.as_bytes());
@@ -588,7 +683,11 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     state::sync(vm);
     let pattern = str_arg(vm, f, args, 0, "pattern")?;
     let string = str_arg(vm, f, args, 1, "string")?;
-    let mut count: u64 = if present(args, 2) { long_arg(vm, f, args, 2, "limit")? as u64 } else { u64::MAX };
+    let mut count: u64 = if present(args, 2) {
+        long_arg(vm, f, args, 2, "limit")? as u64
+    } else {
+        u64::MAX
+    };
     count = count.saturating_sub(1);
     if !check_mbctype_encoding(&string) {
         return Ok(Value::False);
@@ -630,7 +729,10 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     if let Some(e) = failed {
-        vm.emit_warning(&format!("mb_split(): mbregex search failure in mbsplit(): {}", e));
+        vm.emit_warning(&format!(
+            "mb_split(): mbregex search failure in mbsplit(): {}",
+            e
+        ));
         return Ok(Value::False);
     }
     if string.len() > chunk_pos {
@@ -701,7 +803,11 @@ fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> 
             Ok(Value::False)
         }
         Err(e) => {
-            vm.emit_warning(&format!("{}(): mbregex search failure in mbregex_search(): {}", f, e.message()));
+            vm.emit_warning(&format!(
+                "{}(): mbregex search failure in mbregex_search(): {}",
+                f,
+                e.message()
+            ));
             Ok(Value::False)
         }
         Ok(Some(regs)) => {
@@ -731,7 +837,9 @@ fn regs_array(re: &Regex, s: &[u8], regs: &Region) -> Value {
     let mut arr = PhpArray::new();
     for i in 0..regs.beg.len() {
         match (regs.beg[i], regs.end[i]) {
-            (Some(b), Some(e)) if b <= e && e <= s.len() => arr.set(ArrayKey::Int(i as i64), pstr(&s[b..e])),
+            (Some(b), Some(e)) if b <= e && e <= s.len() => {
+                arr.set(ArrayKey::Int(i as i64), pstr(&s[b..e]))
+            }
             _ => arr.set(ArrayKey::Int(i as i64), Value::False),
         }
     }
@@ -783,7 +891,13 @@ fn mb_ereg_search_init(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn mb_ereg_search_getregs(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let (re, s, regs) = with(|m| (m.search_re.clone(), m.search_str.clone(), m.search_regs.clone()));
+    let (re, s, regs) = with(|m| {
+        (
+            m.search_re.clone(),
+            m.search_str.clone(),
+            m.search_regs.clone(),
+        )
+    });
     match (re, s, regs) {
         (Some(re), Some(s), Some(regs)) => Ok(regs_array(&re, &s, &regs)),
         _ => Ok(Value::False),
@@ -815,7 +929,7 @@ fn mb_regex_set_options(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (o, syn) = match s {
         Some(s) => {
             let (o, syn) = init_options(vm, &s)?;
-            
+
             with(|m| {
                 let prev = (m.default_options, m.default_syntax);
                 m.default_options = o;

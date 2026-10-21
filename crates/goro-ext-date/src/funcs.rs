@@ -3,9 +3,11 @@
 
 use crate::format::*;
 use crate::state::*;
-use crate::timelib::parse_date::{abbr_search, fill_holes, parse_from_format, strtotime, timezone_id_from_abbr, TIMEZONEMAP};
+use crate::timelib::parse_date::{
+    TIMEZONEMAP, abbr_search, fill_holes, parse_from_format, strtotime, timezone_id_from_abbr,
+};
 use crate::timelib::tm2unixtime::update_ts;
-use crate::timelib::tz::{parse_tzfile, timezone_id_is_valid, TZDB_INDEX, TZDB_VERSION};
+use crate::timelib::tz::{TZDB_INDEX, TZDB_VERSION, parse_tzfile, timezone_id_is_valid};
 use crate::timelib::unixtime2tm::{unixtime2date, unixtime2gmt, unixtime2local};
 use crate::timelib::*;
 use crate::zpp::*;
@@ -33,7 +35,9 @@ pub fn update_errors_warnings(err: Option<&ErrorContainer>) {
 }
 
 pub fn now_with_fraction() -> (i64, i64) {
-    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     (d.as_secs() as i64, d.subsec_micros() as i64)
 }
 
@@ -64,7 +68,11 @@ pub fn get_timezone_info(vm: &mut Vm) -> Option<Rc<TzInfo>> {
     match parse_tzfile(&name) {
         Some(t) => Some(t),
         None => {
-            throw(vm, b"DateError", "Timezone database is corrupt. Please file a bug report as this should never happen");
+            throw(
+                vm,
+                b"DateError",
+                "Timezone database is corrupt. Please file a bug report as this should never happen",
+            );
             None
         }
     }
@@ -255,7 +263,10 @@ pub fn checkdate_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 }
 
 fn php_strftime(vm: &mut Vm, args: &[Value], fname: &str, gmt: bool) -> R<Value> {
-    vm.emit_deprecated(&format!("Function {}() is deprecated since 8.1, use IntlDateFormatter::format() instead", fname));
+    vm.emit_deprecated(&format!(
+        "Function {}() is deprecated since 8.1, use IntlDateFormatter::format() instead",
+        fname
+    ));
     check_count(vm, fname, args, 1, 2)?;
     let format = str_arg(vm, fname, args, 0, "format", false)?.unwrap_or_default();
     let ts = long_arg(vm, fname, args, 1, "timestamp", true)?.unwrap_or_else(php_time);
@@ -361,8 +372,16 @@ pub fn getdate_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     arr_set(&mut a, "mon", Value::Long(t.m));
     arr_set(&mut a, "year", Value::Long(t.y));
     arr_set(&mut a, "yday", Value::Long(dow::day_of_year(t.y, t.m, t.d)));
-    arr_set(&mut a, "weekday", s(full_day_name(t.y, t.m, t.d).as_bytes()));
-    arr_set(&mut a, "month", s(MON_FULL[(t.m - 1).clamp(0, 11) as usize].as_bytes()));
+    arr_set(
+        &mut a,
+        "weekday",
+        s(full_day_name(t.y, t.m, t.d).as_bytes()),
+    );
+    arr_set(
+        &mut a,
+        "month",
+        s(MON_FULL[(t.m - 1).clamp(0, 11) as usize].as_bytes()),
+    );
     a.set(goro_core::array::ArrayKey::Int(0), Value::Long(ts));
     Ok(arr_val(a))
 }
@@ -390,7 +409,11 @@ pub fn gettimeofday_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let mut a = new_arr();
     arr_set(&mut a, "sec", Value::Long(sec));
     arr_set(&mut a, "usec", Value::Long(usec));
-    arr_set(&mut a, "minuteswest", Value::Long(-(off.offset as i64) / 60));
+    arr_set(
+        &mut a,
+        "minuteswest",
+        Value::Long(-(off.offset as i64) / 60),
+    );
     arr_set(&mut a, "dsttime", Value::Long(off.is_dst as i64));
     Ok(arr_val(a))
 }
@@ -400,13 +423,19 @@ pub fn errors_to_array(a: &mut goro_core::array::PhpArray, e: &ErrorContainer) {
     arr_set(a, "warning_count", Value::Long(e.warning_count() as i64));
     let mut w = new_arr();
     for m in &e.warning_messages {
-        w.set(goro_core::array::ArrayKey::Int(m.position as i64), ss(m.message.clone()));
+        w.set(
+            goro_core::array::ArrayKey::Int(m.position as i64),
+            ss(m.message.clone()),
+        );
     }
     arr_set(a, "warnings", arr_val(w));
     arr_set(a, "error_count", Value::Long(e.error_count() as i64));
     let mut er = new_arr();
     for m in &e.error_messages {
-        er.set(goro_core::array::ArrayKey::Int(m.position as i64), ss(m.message.clone()));
+        er.set(
+            goro_core::array::ArrayKey::Int(m.position as i64),
+            ss(m.message.clone()),
+        );
     }
     arr_set(a, "errors", arr_val(er));
 }
@@ -448,13 +477,29 @@ fn return_parsed_time(t: &Time, err: &ErrorContainer) -> Value {
         arr_set(&mut a, "fraction", Value::Double(t.us as f64 / 1000000.0));
     }
     errors_to_array(&mut a, err);
-    arr_set(&mut a, "is_localtime", if t.is_localtime != 0 { Value::True } else { Value::False });
+    arr_set(
+        &mut a,
+        "is_localtime",
+        if t.is_localtime != 0 {
+            Value::True
+        } else {
+            Value::False
+        },
+    );
     if t.is_localtime != 0 {
         el(&mut a, "zone_type", t.zone_type as i64);
         match t.zone_type {
             ZONETYPE_OFFSET => {
                 el(&mut a, "zone", t.z);
-                arr_set(&mut a, "is_dst", if t.dst != 0 { Value::True } else { Value::False });
+                arr_set(
+                    &mut a,
+                    "is_dst",
+                    if t.dst != 0 {
+                        Value::True
+                    } else {
+                        Value::False
+                    },
+                );
             }
             ZONETYPE_ID => {
                 if let Some(ab) = &t.tz_abbr {
@@ -466,7 +511,15 @@ fn return_parsed_time(t: &Time, err: &ErrorContainer) -> Value {
             }
             ZONETYPE_ABBR => {
                 el(&mut a, "zone", t.z);
-                arr_set(&mut a, "is_dst", if t.dst != 0 { Value::True } else { Value::False });
+                arr_set(
+                    &mut a,
+                    "is_dst",
+                    if t.dst != 0 {
+                        Value::True
+                    } else {
+                        Value::False
+                    },
+                );
                 arr_set(&mut a, "tz_abbr", ss(t.tz_abbr.clone().unwrap_or_default()));
             }
             _ => {}
@@ -490,7 +543,11 @@ fn return_parsed_time(t: &Time, err: &ErrorContainer) -> Value {
         if r.first_last_day_of != 0 {
             arr_set(
                 &mut e,
-                if r.first_last_day_of == SPECIAL_FIRST_DAY_OF_MONTH { "first_day_of_month" } else { "last_day_of_month" },
+                if r.first_last_day_of == SPECIAL_FIRST_DAY_OF_MONTH {
+                    "first_day_of_month"
+                } else {
+                    "last_day_of_month"
+                },
                 Value::True,
             );
         }
@@ -508,7 +565,8 @@ pub fn date_parse_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 pub fn date_parse_from_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     check_count(vm, "date_parse_from_format", args, 2, 2)?;
-    let format = str_arg(vm, "date_parse_from_format", args, 0, "format", false)?.unwrap_or_default();
+    let format =
+        str_arg(vm, "date_parse_from_format", args, 0, "format", false)?.unwrap_or_default();
     let date = path_arg(vm, "date_parse_from_format", args, 1, "datetime")?.unwrap_or_default();
     let (t, err) = parse_from_format(&format, &date);
     Ok(return_parsed_time(&t, &err))
@@ -516,10 +574,24 @@ pub fn date_parse_from_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
 
 pub fn date_default_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     check_count(vm, "date_default_timezone_set", args, 1, 1)?;
-    let zone = str_arg(vm, "date_default_timezone_set", args, 0, "timezoneId", false)?.unwrap_or_default();
+    let zone = str_arg(
+        vm,
+        "date_default_timezone_set",
+        args,
+        0,
+        "timezoneId",
+        false,
+    )?
+    .unwrap_or_default();
     let zs = String::from_utf8_lossy(&zone).into_owned();
     if zone.contains(&0) || !timezone_id_is_valid(&zs) {
-        vm.emit_notice_at(&format!("date_default_timezone_set(): Timezone ID '{}' is invalid", zs), vm.current_line);
+        vm.emit_notice_at(
+            &format!(
+                "date_default_timezone_set(): Timezone ID '{}' is invalid",
+                zs
+            ),
+            vm.current_line,
+        );
         return Ok(Value::False);
     }
     vm.constants.insert(b"__default_timezone".to_vec(), ss(zs));
@@ -535,9 +607,20 @@ pub fn validate_date_timezone(vm: &mut Vm, value: &[u8], startup: bool) -> bool 
     if startup {
         vm.write_output(format!("\nWarning: PHP Startup: Invalid date.timezone value '{}', using 'UTC' instead in Unknown on line 0\n", s).as_bytes());
     } else {
-        let current = vm.constants.get(b"date.timezone".as_ref()).map(|v| v.to_php_string().to_string_lossy()).unwrap_or_default();
-        let using = if current.is_empty() { "UTC".to_string() } else { current };
-        vm.emit_warning(&format!("ini_set(): Invalid date.timezone value '{}', using '{}' instead", s, using));
+        let current = vm
+            .constants
+            .get(b"date.timezone".as_ref())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default();
+        let using = if current.is_empty() {
+            "UTC".to_string()
+        } else {
+            current
+        };
+        vm.emit_warning(&format!(
+            "ini_set(): Invalid date.timezone value '{}', using '{}' instead",
+            s, using
+        ));
     }
     false
 }
@@ -546,7 +629,10 @@ pub fn date_default_timezone_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     check_count(vm, "date_default_timezone_get", args, 0, 0)?;
     match get_timezone_info(vm) {
         Some(t) => Ok(ss(t.name.clone())),
-        None => Err(VmError { message: "tz".into(), line: vm.current_line }),
+        None => Err(VmError {
+            message: "tz".into(),
+            line: vm.current_line,
+        }),
     }
 }
 
@@ -576,7 +662,9 @@ fn check_id_allowed(id: &str, what: i64) -> bool {
         (0x0200, "Pacific/"),
         (0x0400, "UTC"),
     ];
-    groups.iter().any(|(bit, pfx)| what & bit != 0 && id.len() >= pfx.len() && id[..pfx.len()].eq_ignore_ascii_case(pfx))
+    groups.iter().any(|(bit, pfx)| {
+        what & bit != 0 && id.len() >= pfx.len() && id[..pfx.len()].eq_ignore_ascii_case(pfx)
+    })
 }
 
 static TZDB_RAW: &[u8] = include_bytes!("data/tzdb.bin");
@@ -589,7 +677,10 @@ pub fn identifiers_list(vm: &mut Vm, fname: &str, args: &[Value]) -> R<Value> {
         return Err(throw(
             vm,
             b"ValueError",
-            &format!("{}(): Argument #2 ($countryCode) must be a two-letter ISO 3166-1 compatible country code when argument #1 ($timezoneGroup) is DateTimeZone::PER_COUNTRY", fname),
+            &format!(
+                "{}(): Argument #2 ($countryCode) must be a two-letter ISO 3166-1 compatible country code when argument #1 ($timezoneGroup) is DateTimeZone::PER_COUNTRY",
+                fname
+            ),
         ));
     }
     let mut a = new_arr();
@@ -620,15 +711,24 @@ pub fn abbreviations_list(vm: &mut Vm, fname: &str, args: &[Value]) -> R<Value> 
     check_count(vm, fname, args, 0, 0)?;
     let mut out = new_arr();
     let mut order: Vec<String> = Vec::new();
-    let mut groups: std::collections::HashMap<String, goro_core::array::PhpArray> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, goro_core::array::PhpArray> =
+        std::collections::HashMap::new();
     for (name, dst, off, tzid) in TIMEZONEMAP {
         let mut el = new_arr();
-        arr_set(&mut el, "dst", if *dst != 0 { Value::True } else { Value::False });
+        arr_set(
+            &mut el,
+            "dst",
+            if *dst != 0 { Value::True } else { Value::False },
+        );
         arr_set(&mut el, "offset", Value::Long(*off as i64));
-        arr_set(&mut el, "timezone_id", match tzid {
-            Some(t) => s(t.as_bytes()),
-            None => Value::Null,
-        });
+        arr_set(
+            &mut el,
+            "timezone_id",
+            match tzid {
+                Some(t) => s(t.as_bytes()),
+                None => Value::Null,
+            },
+        );
         let key = name.to_string();
         if !groups.contains_key(&key) {
             order.push(key.clone());
@@ -655,12 +755,17 @@ fn ini_float(vm: &Vm, name: &[u8], default: f64) -> f64 {
 }
 
 fn sunrise_sunset(vm: &mut Vm, args: &[Value], fname: &str, calc_sunset: bool) -> R<Value> {
-    vm.emit_deprecated(&format!("Function {}() is deprecated since 8.1, use date_sun_info() instead", fname));
+    vm.emit_deprecated(&format!(
+        "Function {}() is deprecated since 8.1, use date_sun_info() instead",
+        fname
+    ));
     check_count(vm, fname, args, 1, 6)?;
     let time = long_arg(vm, fname, args, 0, "timestamp", false)?.unwrap_or(0);
     let retformat = long_arg(vm, fname, args, 1, "returnFormat", false)?.unwrap_or(1);
-    let latitude = double_arg(vm, fname, args, 2, "latitude", true)?.unwrap_or_else(|| ini_float(vm, b"date.default_latitude", 31.7667));
-    let longitude = double_arg(vm, fname, args, 3, "longitude", true)?.unwrap_or_else(|| ini_float(vm, b"date.default_longitude", 35.2333));
+    let latitude = double_arg(vm, fname, args, 2, "latitude", true)?
+        .unwrap_or_else(|| ini_float(vm, b"date.default_latitude", 31.7667));
+    let longitude = double_arg(vm, fname, args, 3, "longitude", true)?
+        .unwrap_or_else(|| ini_float(vm, b"date.default_longitude", 35.2333));
     let zenith = match double_arg(vm, fname, args, 4, "zenith", true)? {
         Some(z) => z,
         None => {
@@ -676,7 +781,10 @@ fn sunrise_sunset(vm: &mut Vm, args: &[Value], fname: &str, calc_sunset: bool) -
         return Err(throw(
             vm,
             b"ValueError",
-            &format!("{}(): Argument #2 ($returnFormat) must be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE", fname),
+            &format!(
+                "{}(): Argument #2 ($returnFormat) must be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE",
+                fname
+            ),
         ));
     }
     let altitude = 90.0 - zenith;
@@ -697,7 +805,11 @@ fn sunrise_sunset(vm: &mut Vm, args: &[Value], fname: &str, calc_sunset: bool) -
         return Ok(Value::False);
     }
     if retformat == 0 {
-        return Ok(Value::Long(if calc_sunset { rs.ts_set } else { rs.ts_rise }));
+        return Ok(Value::Long(if calc_sunset {
+            rs.ts_set
+        } else {
+            rs.ts_rise
+        }));
     }
     let mut n = (if calc_sunset { rs.h_set } else { rs.h_rise }) + gmt_offset;
     if !(0.0..=24.0).contains(&n) {
@@ -707,7 +819,11 @@ fn sunrise_sunset(vm: &mut Vm, args: &[Value], fname: &str, calc_sunset: bool) -
         return Ok(Value::False);
     }
     if retformat == 1 {
-        Ok(ss(format!("{:02}:{:02}", n as i32, (60.0 * (n - (n as i32) as f64)) as i32)))
+        Ok(ss(format!(
+            "{:02}:{:02}",
+            n as i32,
+            (60.0 * (n - (n as i32) as f64)) as i32
+        )))
     } else {
         Ok(Value::Double(n))
     }
@@ -727,10 +843,18 @@ pub fn date_sun_info_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let latitude = double_arg(vm, "date_sun_info", args, 1, "latitude", false)?.unwrap_or(0.0);
     let longitude = double_arg(vm, "date_sun_info", args, 2, "longitude", false)?.unwrap_or(0.0);
     if !latitude.is_finite() {
-        return Err(throw(vm, b"ValueError", "date_sun_info(): Argument #2 ($latitude) must be finite"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "date_sun_info(): Argument #2 ($latitude) must be finite",
+        ));
     }
     if !longitude.is_finite() {
-        return Err(throw(vm, b"ValueError", "date_sun_info(): Argument #3 ($longitude) must be finite"));
+        return Err(throw(
+            vm,
+            b"ValueError",
+            "date_sun_info(): Argument #3 ($longitude) must be finite",
+        ));
     }
     let tzi = get_timezone_info(vm);
     let mut t = Time::new();
@@ -741,8 +865,18 @@ pub fn date_sun_info_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let pairs: [(f64, bool, &str, &str); 4] = [
         (-35.0 / 60.0, true, "sunrise", "sunset"),
         (-6.0, false, "civil_twilight_begin", "civil_twilight_end"),
-        (-12.0, false, "nautical_twilight_begin", "nautical_twilight_end"),
-        (-18.0, false, "astronomical_twilight_begin", "astronomical_twilight_end"),
+        (
+            -12.0,
+            false,
+            "nautical_twilight_begin",
+            "nautical_twilight_end",
+        ),
+        (
+            -18.0,
+            false,
+            "astronomical_twilight_begin",
+            "astronomical_twilight_end",
+        ),
     ];
     for (idx, (alt, upper, k1, k2)) in pairs.iter().enumerate() {
         let rs = astro::rise_set_altitude(&mut t, longitude, latitude, *alt, *upper);

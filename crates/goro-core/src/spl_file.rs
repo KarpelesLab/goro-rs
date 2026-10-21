@@ -105,7 +105,11 @@ impl Vm {
 
     pub(crate) fn sfi_set_filename(obj: &Rc<RefCell<PhpObject>>, path: &[u8]) {
         let (f, p) = split_file_name(path);
-        set_prop(obj, b"__spl_file_path", Value::String(PhpString::from_vec(f)));
+        set_prop(
+            obj,
+            b"__spl_file_path",
+            Value::String(PhpString::from_vec(f)),
+        );
         set_prop(obj, b"__spl_path", Value::String(PhpString::from_vec(p)));
     }
 
@@ -158,11 +162,15 @@ impl Vm {
     }
 
     fn sfo_file_name_str(obj: &Rc<RefCell<PhpObject>>) -> String {
-        prop(obj, b"__spl_file_path").to_php_string().to_string_lossy()
+        prop(obj, b"__spl_file_path")
+            .to_php_string()
+            .to_string_lossy()
     }
 
     fn sfo_eof(&mut self, stream: &Value) -> bool {
-        self.spl_call_builtin(b"feof", std::slice::from_ref(stream)).map(|v| v.is_truthy()).unwrap_or(true)
+        self.spl_call_builtin(b"feof", std::slice::from_ref(stream))
+            .map(|v| v.is_truthy())
+            .unwrap_or(true)
     }
 
     fn sfo_cannot_read(&mut self, obj: &Rc<RefCell<PhpObject>>) {
@@ -170,7 +178,13 @@ impl Vm {
         self.spl_throw(b"RuntimeException", &msg);
     }
 
-    fn sfo_read_ex(&mut self, obj: &Rc<RefCell<PhpObject>>, silent: bool, line_add: i64, csv: bool) -> bool {
+    fn sfo_read_ex(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        silent: bool,
+        line_add: i64,
+        csv: bool,
+    ) -> bool {
         Self::sfo_free_line(obj);
         let stream = match Self::sfo_stream(obj) {
             Some(s) => s,
@@ -204,7 +218,11 @@ impl Vm {
             }
             _ => Vec::new(),
         };
-        set_prop(obj, b"__spl_cur_line", Value::String(PhpString::from_vec(line)));
+        set_prop(
+            obj,
+            b"__spl_cur_line",
+            Value::String(PhpString::from_vec(line)),
+        );
         Self::sfo_add_line_num(obj, line_add);
         true
     }
@@ -237,7 +255,9 @@ impl Vm {
         let stream = Self::sfo_stream(obj)?;
         let mut start;
         loop {
-            start = self.spl_call_builtin(b"ftell", std::slice::from_ref(&stream)).unwrap_or(Value::False);
+            start = self
+                .spl_call_builtin(b"ftell", std::slice::from_ref(&stream))
+                .unwrap_or(Value::False);
             if !self.sfo_read(obj, silent, true) {
                 return None;
             }
@@ -252,7 +272,8 @@ impl Vm {
         if let Value::Long(pos) = start {
             if !line.as_bytes().is_empty() {
                 self.spl_call_builtin(b"fseek", &[stream.clone(), Value::Long(pos)]);
-                let r = self.spl_call_builtin(b"fgetcsv", &[stream.clone(), Value::Null, delim, encl, esc]);
+                let r = self
+                    .spl_call_builtin(b"fgetcsv", &[stream.clone(), Value::Null, delim, encl, esc]);
                 if let Some(Value::Array(a)) = r {
                     values = Some(Value::Array(a));
                 }
@@ -269,7 +290,10 @@ impl Vm {
 
     fn sfo_user_get_current_line(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
-        self.classes.get(&cl).map(|c| c.get_method(b"getcurrentline").is_some()).unwrap_or(false)
+        self.classes
+            .get(&cl)
+            .map(|c| c.get_method(b"getcurrentline").is_some())
+            .unwrap_or(false)
     }
 
     fn sfo_read_line_ex(&mut self, obj: &Rc<RefCell<PhpObject>>, silent: bool) -> bool {
@@ -337,7 +361,10 @@ impl Vm {
                 return;
             }
         };
-        let ok = self.spl_call_builtin(b"rewind", &[stream]).map(|v| v.is_truthy()).unwrap_or(false);
+        let ok = self
+            .spl_call_builtin(b"rewind", &[stream])
+            .map(|v| v.is_truthy())
+            .unwrap_or(false);
         if !ok {
             let msg = format!("Cannot rewind file {}", Self::sfo_file_name_str(obj));
             self.spl_throw(b"RuntimeException", &msg);
@@ -359,7 +386,13 @@ impl Vm {
     }
 
     /// Validate a single-character csv argument. Err(()) => exception set.
-    fn sfo_csv_arg(&mut self, func: &str, v: Option<&Value>, argn: usize, name: &str) -> Result<Option<Value>, ()> {
+    fn sfo_csv_arg(
+        &mut self,
+        func: &str,
+        v: Option<&Value>,
+        argn: usize,
+        name: &str,
+    ) -> Result<Option<Value>, ()> {
         match v.map(|v| v.deref()) {
             None | Some(Value::Undef) => Ok(None),
             Some(v) => {
@@ -368,7 +401,10 @@ impl Vm {
                     None => return Err(()),
                 };
                 if s.len() != 1 {
-                    let msg = format!("{}(): Argument #{} (${}) must be a single character", func, argn, name);
+                    let msg = format!(
+                        "{}(): Argument #{} (${}) must be a single character",
+                        func, argn, name
+                    );
                     self.spl_throw(b"ValueError", &msg);
                     return Err(());
                 }
@@ -378,7 +414,13 @@ impl Vm {
     }
 
     /// Escape argument for fgetcsv/fputcsv (spl_csv_enclosure_param_handling).
-    fn sfo_escape_arg(&mut self, obj: &Rc<RefCell<PhpObject>>, func: &str, v: Option<&Value>, argn: usize) -> Result<Value, ()> {
+    fn sfo_escape_arg(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        func: &str,
+        v: Option<&Value>,
+        argn: usize,
+    ) -> Result<Value, ()> {
         match v.map(|v| v.deref()) {
             None | Some(Value::Undef) => {
                 if !matches!(prop(obj, b"__spl_escape_set"), Value::True) {
@@ -399,7 +441,10 @@ impl Vm {
                     None => return Err(()),
                 };
                 if s.len() > 1 {
-                    let msg = format!("{}(): Argument #{} ($escape) must be empty or a single character", func, argn);
+                    let msg = format!(
+                        "{}(): Argument #{} ($escape) must be empty or a single character",
+                        func, argn
+                    );
                     self.spl_throw(b"ValueError", &msg);
                     return Err(());
                 }
@@ -409,10 +454,18 @@ impl Vm {
     }
 
     /// Coerce an argument to string (non-strict mode). None => TypeError set.
-    pub(crate) fn spl_arg_string(&mut self, func: &str, argn: usize, name: &str, v: &Value) -> Option<PhpString> {
+    pub(crate) fn spl_arg_string(
+        &mut self,
+        func: &str,
+        argn: usize,
+        name: &str,
+        v: &Value,
+    ) -> Option<PhpString> {
         match v.deref() {
             Value::String(s) => Some(s),
-            Value::Long(_) | Value::Double(_) | Value::True | Value::False => Some(v.to_php_string()),
+            Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                Some(v.to_php_string())
+            }
             Value::Null | Value::Undef => {
                 let msg = format!(
                     "{}(): Passing null to parameter #{} (${}) of type string is deprecated",
@@ -423,7 +476,11 @@ impl Vm {
             }
             Value::Object(o) => {
                 let cl = obj_class_lower(&o);
-                let has_ts = self.classes.get(&cl).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false)
+                let has_ts = self
+                    .classes
+                    .get(&cl)
+                    .map(|c| c.get_method(b"__tostring").is_some())
+                    .unwrap_or(false)
                     || self.spl_has_builtin_tostring(&cl);
                 if has_ts {
                     let line = self.current_line;
@@ -436,7 +493,10 @@ impl Vm {
                 }
                 let msg = format!(
                     "{}(): Argument #{} (${}) must be of type string, {} given",
-                    func, argn, name, Self::value_type_name(v)
+                    func,
+                    argn,
+                    name,
+                    Self::value_type_name(v)
                 );
                 self.spl_throw(b"TypeError", &msg);
                 None
@@ -444,7 +504,10 @@ impl Vm {
             other => {
                 let msg = format!(
                     "{}(): Argument #{} (${}) must be of type string, {} given",
-                    func, argn, name, Self::value_type_name(&other)
+                    func,
+                    argn,
+                    name,
+                    Self::value_type_name(&other)
                 );
                 self.spl_throw(b"TypeError", &msg);
                 None
@@ -454,7 +517,13 @@ impl Vm {
 
     /// Coerce an argument to int (non-strict mode). None => TypeError set.
     #[allow(clippy::if_same_then_else)] // branches mirror php-src
-    pub(crate) fn spl_arg_long(&mut self, func: &str, argn: usize, name: &str, v: &Value) -> Option<i64> {
+    pub(crate) fn spl_arg_long(
+        &mut self,
+        func: &str,
+        argn: usize,
+        name: &str,
+        v: &Value,
+    ) -> Option<i64> {
         match v.deref() {
             Value::Long(n) => Some(n),
             Value::True => Some(1),
@@ -463,11 +532,17 @@ impl Vm {
                 if d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18 {
                     Some(d as i64)
                 } else if d.is_finite() && d.abs() < 9.2e18 {
-                    let msg = format!("Implicit conversion from float {} to int loses precision", Value::Double(d).to_php_string().to_string_lossy());
+                    let msg = format!(
+                        "Implicit conversion from float {} to int loses precision",
+                        Value::Double(d).to_php_string().to_string_lossy()
+                    );
                     self.emit_deprecated(&msg);
                     Some(d as i64)
                 } else {
-                    let msg = format!("{}(): Argument #{} (${}) must be of type int, float given", func, argn, name);
+                    let msg = format!(
+                        "{}(): Argument #{} (${}) must be of type int, float given",
+                        func, argn, name
+                    );
                     self.spl_throw(b"TypeError", &msg);
                     None
                 }
@@ -486,9 +561,16 @@ impl Vm {
                 if let Ok(n) = tt.trim_end().parse::<i64>() {
                     Some(n)
                 } else if let Ok(d) = tt.trim_end().parse::<f64>() {
-                    if d.fract() == 0.0 { Some(d as i64) } else { Some(d as i64) }
+                    if d.fract() == 0.0 {
+                        Some(d as i64)
+                    } else {
+                        Some(d as i64)
+                    }
                 } else {
-                    let msg = format!("{}(): Argument #{} (${}) must be of type int, string given", func, argn, name);
+                    let msg = format!(
+                        "{}(): Argument #{} (${}) must be of type int, string given",
+                        func, argn, name
+                    );
                     self.spl_throw(b"TypeError", &msg);
                     None
                 }
@@ -496,7 +578,10 @@ impl Vm {
             other => {
                 let msg = format!(
                     "{}(): Argument #{} (${}) must be of type int, {} given",
-                    func, argn, name, Self::value_type_name(&other)
+                    func,
+                    argn,
+                    name,
+                    Self::value_type_name(&other)
                 );
                 self.spl_throw(b"TypeError", &msg);
                 None
@@ -528,14 +613,21 @@ impl Vm {
     ) -> bool {
         let fname_str = String::from_utf8_lossy(file_name).to_string();
         if !fname_str.contains("://") && std::path::Path::new(&fname_str).is_dir() {
-            self.spl_throw(b"LogicException", "Cannot use SplFileObject with directories");
+            self.spl_throw(
+                b"LogicException",
+                "Cannot use SplFileObject with directories",
+            );
             return false;
         }
         let prev = self.warning_capture.replace(Vec::new());
         let mut fargs = vec![
             Value::String(PhpString::from_vec(file_name.to_vec())),
             Value::String(PhpString::from_vec(mode.to_vec())),
-            if use_include_path { Value::True } else { Value::False },
+            if use_include_path {
+                Value::True
+            } else {
+                Value::False
+            },
         ];
         if !matches!(context, Value::Null | Value::Undef) {
             fargs.push(context);
@@ -549,7 +641,11 @@ impl Vm {
                     if let Some(w) = captured.first() {
                         // "fopen(x): msg" -> "SplFileObject::__construct(x): msg"
                         let msg = match w.find('(') {
-                            Some(i) if w[..i].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                            Some(i)
+                                if w[..i]
+                                    .chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+                            {
                                 format!("{}{}", ctor, &w[i..])
                             }
                             _ => format!("{}(): {}", ctor, w),
@@ -572,8 +668,14 @@ impl Vm {
         };
         let mut ob = obj.borrow_mut();
         ob.set_property(b"__spl_stream".to_vec(), res);
-        ob.set_property(b"__spl_file_path".to_vec(), Value::String(PhpString::from_vec(fname)));
-        ob.set_property(b"__spl_open_mode".to_vec(), Value::String(PhpString::from_vec(mode.to_vec())));
+        ob.set_property(
+            b"__spl_file_path".to_vec(),
+            Value::String(PhpString::from_vec(fname)),
+        );
+        ob.set_property(
+            b"__spl_open_mode".to_vec(),
+            Value::String(PhpString::from_vec(mode.to_vec())),
+        );
         ob.set_property(b"__spl_csv_delimiter".to_vec(), sv(b","));
         ob.set_property(b"__spl_csv_enclosure".to_vec(), sv(b"\""));
         ob.set_property(b"__spl_csv_escape".to_vec(), sv(b"\\"));
@@ -590,13 +692,22 @@ impl Vm {
 
     /// SplFileObject::__construct / SplTempFileObject::__construct.
     /// `args` excludes $this.
-    pub fn spl_file_object_construct(&mut self, obj: &Rc<RefCell<PhpObject>>, args: &[Value]) -> bool {
+    pub fn spl_file_object_construct(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        args: &[Value],
+    ) -> bool {
         let cl = obj_class_lower(obj);
-        let is_temp = self.spl_find_base(&cl, &[b"spltempfileobject", b"splfileobject"]) == Some(b"spltempfileobject");
+        let is_temp = self.spl_find_base(&cl, &[b"spltempfileobject", b"splfileobject"])
+            == Some(b"spltempfileobject");
         if is_temp {
             let func = "SplTempFileObject::__construct";
             if args.len() > 1 {
-                let msg = format!("{}() expects at most 1 argument, {} given", func, args.len());
+                let msg = format!(
+                    "{}() expects at most 1 argument, {} given",
+                    func,
+                    args.len()
+                );
                 self.spl_throw(b"ArgumentCountError", &msg);
                 return false;
             }
@@ -629,7 +740,11 @@ impl Vm {
             return false;
         }
         if args.len() > 4 {
-            let msg = format!("{}() expects at most 4 arguments, {} given", func, args.len());
+            let msg = format!(
+                "{}() expects at most 4 arguments, {} given",
+                func,
+                args.len()
+            );
             self.spl_throw(b"ArgumentCountError", &msg);
             return false;
         }
@@ -638,7 +753,10 @@ impl Vm {
             None => return false,
         };
         if file_name.contains(&0) {
-            let msg = format!("{}(): Argument #1 ($filename) must not contain any null bytes", func);
+            let msg = format!(
+                "{}(): Argument #1 ($filename) must not contain any null bytes",
+                func
+            );
             self.spl_throw(b"ValueError", &msg);
             return false;
         }
@@ -668,7 +786,10 @@ impl Vm {
             return false;
         }
         // path: directory part of the opened path
-        let orig = prop(obj, b"__spl_file_path").to_php_string().as_bytes().to_vec();
+        let orig = prop(obj, b"__spl_file_path")
+            .to_php_string()
+            .as_bytes()
+            .to_vec();
         let mut path_len = orig.len();
         if path_len > 1 && orig[path_len - 1] == b'/' {
             path_len -= 1;
@@ -677,7 +798,11 @@ impl Vm {
             path_len -= 1;
         }
         path_len = path_len.saturating_sub(1);
-        set_prop(obj, b"__spl_path", Value::String(PhpString::from_vec(orig[..path_len].to_vec())));
+        set_prop(
+            obj,
+            b"__spl_path",
+            Value::String(PhpString::from_vec(orig[..path_len].to_vec())),
+        );
         true
     }
 
@@ -691,8 +816,18 @@ impl Vm {
     ) -> Option<Value> {
         let needs_args = matches!(
             method,
-            b"setflags" | b"setmaxlinelen" | b"fgetcsv" | b"fputcsv" | b"setcsvcontrol" | b"flock"
-                | b"fseek" | b"fscanf" | b"fwrite" | b"fread" | b"ftruncate" | b"seek"
+            b"setflags"
+                | b"setmaxlinelen"
+                | b"fgetcsv"
+                | b"fputcsv"
+                | b"setcsvcontrol"
+                | b"flock"
+                | b"fseek"
+                | b"fscanf"
+                | b"fwrite"
+                | b"fread"
+                | b"ftruncate"
+                | b"seek"
         );
         if needs_args && args.is_none() {
             return None;
@@ -713,19 +848,38 @@ impl Vm {
             }
             b"eof" => {
                 let s = stream_or_throw!();
-                Some(if self.sfo_eof(&s) { Value::True } else { Value::False })
+                Some(if self.sfo_eof(&s) {
+                    Value::True
+                } else {
+                    Value::False
+                })
             }
             b"valid" => {
                 if Self::sfo_flags(obj) & READ_AHEAD != 0 {
-                    return Some(if Self::sfo_has_line(obj) || Self::sfo_has_zval(obj) { Value::True } else { Value::False });
+                    return Some(if Self::sfo_has_line(obj) || Self::sfo_has_zval(obj) {
+                        Value::True
+                    } else {
+                        Value::False
+                    });
                 }
                 match Self::sfo_stream(obj) {
                     None => Some(Value::False),
-                    Some(s) => Some(if self.sfo_eof(&s) { Value::False } else { Value::True }),
+                    Some(s) => Some(if self.sfo_eof(&s) {
+                        Value::False
+                    } else {
+                        Value::True
+                    }),
                 }
             }
             b"fgets" | b"getcurrentline" => {
-                if !self.sfo_expects_none(if method == b"fgets" { "SplFileObject::fgets" } else { "SplFileObject::getCurrentLine" }, args) {
+                if !self.sfo_expects_none(
+                    if method == b"fgets" {
+                        "SplFileObject::fgets"
+                    } else {
+                        "SplFileObject::getCurrentLine"
+                    },
+                    args,
+                ) {
                     return Some(Value::Null);
                 }
                 let _ = stream_or_throw!();
@@ -766,7 +920,10 @@ impl Vm {
                         None => return Some(Value::Null),
                     },
                     None => {
-                        return self.spl_throw(b"ArgumentCountError", "SplFileObject::setFlags() expects exactly 1 argument, 0 given");
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::setFlags() expects exactly 1 argument, 0 given",
+                        );
                     }
                 };
                 set_prop(obj, b"__spl_flags", Value::Long(f));
@@ -775,12 +932,17 @@ impl Vm {
             b"getflags" => Some(Value::Long(Self::sfo_flags(obj) & 0xF)),
             b"setmaxlinelen" => {
                 let n = match a.first() {
-                    Some(v) => match self.spl_arg_long("SplFileObject::setMaxLineLen", 1, "maxLength", v) {
-                        Some(n) => n,
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_long("SplFileObject::setMaxLineLen", 1, "maxLength", v) {
+                            Some(n) => n,
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => {
-                        return self.spl_throw(b"ArgumentCountError", "SplFileObject::setMaxLineLen() expects exactly 1 argument, 0 given");
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::setMaxLineLen() expects exactly 1 argument, 0 given",
+                        );
                     }
                 };
                 if n < 0 {
@@ -821,11 +983,18 @@ impl Vm {
                 let fields = match a.first().map(|v| v.deref()) {
                     Some(v @ Value::Array(_)) => v,
                     Some(other) => {
-                        let msg = format!("{}(): Argument #1 ($fields) must be of type array, {} given", func, Self::value_type_name(&other));
+                        let msg = format!(
+                            "{}(): Argument #1 ($fields) must be of type array, {} given",
+                            func,
+                            Self::value_type_name(&other)
+                        );
                         return self.spl_throw(b"TypeError", &msg);
                     }
                     None => {
-                        return self.spl_throw(b"ArgumentCountError", "SplFileObject::fputcsv() expects at least 1 argument, 0 given");
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::fputcsv() expects at least 1 argument, 0 given",
+                        );
                     }
                 };
                 let (cd, ce, _) = self.sfo_csv_controls(obj);
@@ -846,7 +1015,10 @@ impl Vm {
                 if let Some(eol) = a.get(4) {
                     fargs.push(eol.clone());
                 }
-                Some(self.spl_call_builtin(b"fputcsv", &fargs).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"fputcsv", &fargs)
+                        .unwrap_or(Value::False),
+                )
             }
             b"setcsvcontrol" => {
                 let func = "SplFileObject::setCsvControl";
@@ -860,7 +1032,10 @@ impl Vm {
                 };
                 let x = match a.get(2).map(|v| v.deref()) {
                     None | Some(Value::Undef) => {
-                        let msg = format!("{}(): the $escape parameter must be provided as its default value will change", func);
+                        let msg = format!(
+                            "{}(): the $escape parameter must be provided as its default value will change",
+                            func
+                        );
                         self.emit_deprecated(&msg);
                         if self.current_exception.is_some() {
                             return Some(Value::Null);
@@ -896,15 +1071,24 @@ impl Vm {
                 let s = stream_or_throw!();
                 let mut fargs = vec![s];
                 fargs.extend_from_slice(a);
-                Some(self.spl_call_builtin(b"flock", &fargs).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"flock", &fargs)
+                        .unwrap_or(Value::False),
+                )
             }
             b"fflush" => {
                 let s = stream_or_throw!();
-                Some(self.spl_call_builtin(b"fflush", &[s]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"fflush", &[s])
+                        .unwrap_or(Value::False),
+                )
             }
             b"ftell" => {
                 let s = stream_or_throw!();
-                Some(self.spl_call_builtin(b"ftell", &[s]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"ftell", &[s])
+                        .unwrap_or(Value::False),
+                )
             }
             b"fseek" => {
                 let func = "SplFileObject::fseek";
@@ -913,7 +1097,12 @@ impl Vm {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::fseek() expects at least 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::fseek() expects at least 1 argument, 0 given",
+                        );
+                    }
                 };
                 let whence = match a.get(1) {
                     Some(v) => match self.spl_arg_long(func, 2, "whence", v) {
@@ -924,7 +1113,10 @@ impl Vm {
                 };
                 let s = stream_or_throw!();
                 Self::sfo_free_line(obj);
-                Some(self.spl_call_builtin(b"fseek", &[s, Value::Long(pos), Value::Long(whence)]).unwrap_or(Value::Long(-1)))
+                Some(
+                    self.spl_call_builtin(b"fseek", &[s, Value::Long(pos), Value::Long(whence)])
+                        .unwrap_or(Value::Long(-1)),
+                )
             }
             b"fgetc" => {
                 let s = stream_or_throw!();
@@ -941,12 +1133,20 @@ impl Vm {
             }
             b"fpassthru" => {
                 let s = stream_or_throw!();
-                Some(self.spl_call_builtin(b"fpassthru", &[s]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"fpassthru", &[s])
+                        .unwrap_or(Value::False),
+                )
             }
             b"fscanf" => {
                 let format = match a.first() {
                     Some(v) => v.clone(),
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::fscanf() expects at least 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::fscanf() expects at least 1 argument, 0 given",
+                        );
+                    }
                 };
                 let _ = stream_or_throw!();
                 if !self.sfo_read(obj, false, false) {
@@ -954,7 +1154,10 @@ impl Vm {
                 }
                 let mut sargs = vec![prop(obj, b"__spl_cur_line"), format];
                 sargs.extend_from_slice(&a[1..]);
-                Some(self.spl_call_builtin(b"sscanf", &sargs).unwrap_or(Value::Null))
+                Some(
+                    self.spl_call_builtin(b"sscanf", &sargs)
+                        .unwrap_or(Value::Null),
+                )
             }
             b"fwrite" => {
                 let func = "SplFileObject::fwrite";
@@ -963,7 +1166,12 @@ impl Vm {
                         Some(s) => s,
                         None => return Some(Value::Null),
                     },
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::fwrite() expects at least 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::fwrite() expects at least 1 argument, 0 given",
+                        );
+                    }
                 };
                 let len = match a.get(1).map(|v| v.deref()) {
                     None | Some(Value::Null) | Some(Value::Undef) => None,
@@ -984,7 +1192,13 @@ impl Vm {
                 if bytes.is_empty() {
                     return Some(Value::Long(0));
                 }
-                Some(self.spl_call_builtin(b"fwrite", &[s, Value::String(PhpString::from_vec(bytes))]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(
+                        b"fwrite",
+                        &[s, Value::String(PhpString::from_vec(bytes))],
+                    )
+                    .unwrap_or(Value::False),
+                )
             }
             b"fread" => {
                 let func = "SplFileObject::fread";
@@ -993,17 +1207,31 @@ impl Vm {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::fread() expects exactly 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::fread() expects exactly 1 argument, 0 given",
+                        );
+                    }
                 };
                 let s = stream_or_throw!();
                 if n <= 0 {
-                    return self.spl_throw(b"ValueError", "SplFileObject::fread(): Argument #1 ($length) must be greater than 0");
+                    return self.spl_throw(
+                        b"ValueError",
+                        "SplFileObject::fread(): Argument #1 ($length) must be greater than 0",
+                    );
                 }
-                Some(self.spl_call_builtin(b"fread", &[s, Value::Long(n)]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"fread", &[s, Value::Long(n)])
+                        .unwrap_or(Value::False),
+                )
             }
             b"fstat" => {
                 let s = stream_or_throw!();
-                Some(self.spl_call_builtin(b"fstat", &[s]).unwrap_or(Value::False))
+                Some(
+                    self.spl_call_builtin(b"fstat", &[s])
+                        .unwrap_or(Value::False),
+                )
             }
             b"ftruncate" => {
                 let n = match a.first() {
@@ -1011,7 +1239,12 @@ impl Vm {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::ftruncate() expects exactly 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::ftruncate() expects exactly 1 argument, 0 given",
+                        );
+                    }
                 };
                 let s = stream_or_throw!();
                 if n < 0 {
@@ -1019,7 +1252,8 @@ impl Vm {
                 }
                 let prev = self.warning_capture.replace(Vec::new());
                 let r = self.spl_call_builtin(b"ftruncate", &[s, Value::Long(n)]);
-                let captured = std::mem::replace(&mut self.warning_capture, prev).unwrap_or_default();
+                let captured =
+                    std::mem::replace(&mut self.warning_capture, prev).unwrap_or_default();
                 if !captured.is_empty() && !matches!(r, Some(Value::True)) {
                     let msg = format!("Can't truncate file {}", Self::sfo_file_name_str(obj));
                     return self.spl_throw(b"LogicException", &msg);
@@ -1032,7 +1266,12 @@ impl Vm {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
-                    None => return self.spl_throw(b"ArgumentCountError", "SplFileObject::seek() expects exactly 1 argument, 0 given"),
+                    None => {
+                        return self.spl_throw(
+                            b"ArgumentCountError",
+                            "SplFileObject::seek() expects exactly 1 argument, 0 given",
+                        );
+                    }
                 };
                 let _ = stream_or_throw!();
                 if n < 0 {
@@ -1070,7 +1309,11 @@ impl Vm {
 
 /// Native constructor handler for SplFileObject / SplTempFileObject
 /// (registered in object_construct_handlers).
-pub fn spl_file_object_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
+pub fn spl_file_object_construct_native(
+    vm: &mut Vm,
+    args: &[Value],
+    _line: u32,
+) -> Result<(), String> {
     let obj = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return Ok(()),
@@ -1082,7 +1325,11 @@ pub fn spl_file_object_construct_native(vm: &mut Vm, args: &[Value], _line: u32)
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)
@@ -1090,7 +1337,11 @@ pub fn spl_file_object_construct_native(vm: &mut Vm, args: &[Value], _line: u32)
 }
 
 /// Native constructor handler for SplFileInfo.
-pub fn spl_file_info_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
+pub fn spl_file_info_construct_native(
+    vm: &mut Vm,
+    args: &[Value],
+    _line: u32,
+) -> Result<(), String> {
     let obj = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return Ok(()),
@@ -1102,16 +1353,29 @@ pub fn spl_file_info_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -
     r
 }
 
-fn spl_file_info_construct_inner(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, args: &[Value], func: &str) -> Result<(), String> {
+fn spl_file_info_construct_inner(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    args: &[Value],
+    func: &str,
+) -> Result<(), String> {
     let fail = |vm: &mut Vm| -> Result<(), String> {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)
     };
     if args.len() != 2 {
-        let msg = format!("{}() expects exactly 1 argument, {} given", func, args.len() - 1);
+        let msg = format!(
+            "{}() expects exactly 1 argument, {} given",
+            func,
+            args.len() - 1
+        );
         vm.spl_throw(b"ArgumentCountError", &msg);
         return fail(vm);
     }
@@ -1120,7 +1384,10 @@ fn spl_file_info_construct_inner(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, args
         None => return fail(vm),
     };
     if name.as_bytes().contains(&0) {
-        let msg = format!("{}(): Argument #1 ($filename) must not contain any null bytes", func);
+        let msg = format!(
+            "{}(): Argument #1 ($filename) must not contain any null bytes",
+            func
+        );
         vm.spl_throw(b"ValueError", &msg);
         return fail(vm);
     }

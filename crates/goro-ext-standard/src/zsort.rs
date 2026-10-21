@@ -34,7 +34,14 @@ fn sort3<T, F: FnMut(&T, &T) -> i32>(v: &mut [T], a: usize, b: usize, c: usize, 
     }
 }
 
-fn sort4<T, F: FnMut(&T, &T) -> i32>(v: &mut [T], a: usize, b: usize, c: usize, d: usize, cmp: &mut F) {
+fn sort4<T, F: FnMut(&T, &T) -> i32>(
+    v: &mut [T],
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    cmp: &mut F,
+) {
     sort3(v, a, b, c, cmp);
     if cmp(&v[c], &v[d]) > 0 {
         v.swap(c, d);
@@ -47,7 +54,15 @@ fn sort4<T, F: FnMut(&T, &T) -> i32>(v: &mut [T], a: usize, b: usize, c: usize, 
     }
 }
 
-fn sort5<T, F: FnMut(&T, &T) -> i32>(v: &mut [T], a: usize, b: usize, c: usize, d: usize, e: usize, cmp: &mut F) {
+fn sort5<T, F: FnMut(&T, &T) -> i32>(
+    v: &mut [T],
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    e: usize,
+    cmp: &mut F,
+) {
     sort4(v, a, b, c, d, cmp);
     if cmp(&v[d], &v[e]) > 0 {
         v.swap(d, e);
@@ -142,7 +157,15 @@ pub fn zend_sort<T, F: FnMut(&T, &T) -> i32>(v: &mut [T], cmp: &mut F) {
         let pivot0 = start + offset;
         if (nmemb >> 10) != 0 {
             let delta = offset >> 1;
-            sort5(v, start, start + delta, pivot0, pivot0 + delta, end - 1, cmp);
+            sort5(
+                v,
+                start,
+                start + delta,
+                pivot0,
+                pivot0 + delta,
+                end - 1,
+                cmp,
+            );
         } else {
             sort3(v, start, pivot0, end - 1, cmp);
         }
@@ -257,7 +280,13 @@ fn compare_left(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> i32 {
 /// strnatcmp_ex()
 pub fn strnatcmp_ex(a: &[u8], b: &[u8], fold_case: bool) -> i32 {
     if a.is_empty() || b.is_empty() {
-        return if a.len() == b.len() { 0 } else if a.len() > b.len() { 1 } else { -1 };
+        return if a.len() == b.len() {
+            0
+        } else if a.len() > b.len() {
+            1
+        } else {
+            -1
+        };
     }
     let at = |i: usize| -> u8 { if i < a.len() { a[i] } else { 0 } };
     let bt = |i: usize| -> u8 { if i < b.len() { b[i] } else { 0 } };

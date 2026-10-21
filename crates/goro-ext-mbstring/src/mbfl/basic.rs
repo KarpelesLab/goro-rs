@@ -62,7 +62,11 @@ pub static ENC_8BIT: Encoding = Encoding {
 /* 7bit */
 
 fn mb_7bit_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
-    out.extend(input.iter().map(|&c| if c < 0x80 { c as u32 } else { MBFL_BAD_INPUT }));
+    out.extend(
+        input
+            .iter()
+            .map(|&c| if c < 0x80 { c as u32 } else { MBFL_BAD_INPUT }),
+    );
 }
 
 fn mb_wchar_to_7bit(input: &[u32], buf: &mut ConvBuf, _end: bool) {
@@ -125,11 +129,19 @@ pub fn mb_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                     out.push(MBFL_BAD_INPUT);
                     p -= 1;
                 } else {
-                    out.push((((c & 0xF) as u32) << 12) | (((c2 & 0x3F) as u32) << 6) | (c3 & 0x3F) as u32);
+                    out.push(
+                        (((c & 0xF) as u32) << 12)
+                            | (((c2 & 0x3F) as u32) << 6)
+                            | (c3 & 0x3F) as u32,
+                    );
                 }
             } else {
                 out.push(MBFL_BAD_INPUT);
-                if p < e && (c != 0xE0 || input[p] >= 0xA0) && (c != 0xED || input[p] < 0xA0) && (input[p] & 0xC0) == 0x80 {
+                if p < e
+                    && (c != 0xE0 || input[p] >= 0xA0)
+                    && (c != 0xED || input[p] < 0xA0)
+                    && (input[p] & 0xC0) == 0x80
+                {
                     p += 1;
                     if p < e && (input[p] & 0xC0) == 0x80 {
                         p += 1;
@@ -153,14 +165,20 @@ pub fn mb_utf8_to_wchar(input: &[u8], out: &mut Vec<u32>, _state: &mut u32) {
                     p -= 1;
                 } else {
                     out.push(
-                        (((c & 0x7) as u32) << 18) | (((c2 & 0x3F) as u32) << 12) | (((c3 & 0x3F) as u32) << 6) | (c4 & 0x3F) as u32,
+                        (((c & 0x7) as u32) << 18)
+                            | (((c2 & 0x3F) as u32) << 12)
+                            | (((c3 & 0x3F) as u32) << 6)
+                            | (c4 & 0x3F) as u32,
                     );
                 }
             } else {
                 out.push(MBFL_BAD_INPUT);
                 if p < e {
                     let c2 = input[p];
-                    if (c == 0xF0 && c2 >= 0x90) || (c == 0xF4 && c2 < 0x90) || (c >= 0xF1 && c <= 0xF3) {
+                    if (c == 0xF0 && c2 >= 0x90)
+                        || (c == 0xF4 && c2 < 0x90)
+                        || (c >= 0xF1 && c <= 0xF3)
+                    {
                         while p < e && (input[p] & 0xC0) == 0x80 {
                             p += 1;
                         }

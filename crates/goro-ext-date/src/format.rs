@@ -3,9 +3,32 @@
 use crate::timelib::dow::*;
 use crate::timelib::*;
 
-pub const MON_FULL: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-pub const MON_SHORT: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-pub const DAY_FULL: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+pub const MON_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+pub const MON_SHORT: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+pub const DAY_FULL: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
 pub const DAY_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 fn english_suffix(n: i64) -> &'static str {
@@ -22,12 +45,20 @@ fn english_suffix(n: i64) -> &'static str {
 
 pub fn full_day_name(y: i64, m: i64, d: i64) -> &'static str {
     let dow = day_of_week(y, m, d);
-    if dow < 0 { "Unknown" } else { DAY_FULL[dow as usize] }
+    if dow < 0 {
+        "Unknown"
+    } else {
+        DAY_FULL[dow as usize]
+    }
 }
 
 pub fn short_day_name(y: i64, m: i64, d: i64) -> &'static str {
     let dow = day_of_week(y, m, d);
-    if dow < 0 { "Unknown" } else { DAY_SHORT[dow as usize] }
+    if dow < 0 {
+        "Unknown"
+    } else {
+        DAY_SHORT[dow as usize]
+    }
 }
 
 fn mon_idx(m: i64) -> usize {
@@ -50,7 +81,12 @@ pub fn local_offset(t: &Time) -> TimeOffset {
                 offset: off,
                 leap_secs: 0,
                 is_dst: 0,
-                abbr: format!("GMT{}{:02}{:02}", if off < 0 { '-' } else { '+' }, (off / 3600).abs(), ((off % 3600) / 60).abs()),
+                abbr: format!(
+                    "GMT{}{:02}{:02}",
+                    if off < 0 { '-' } else { '+' },
+                    (off / 3600).abs(),
+                    ((off % 3600) / 60).abs()
+                ),
                 transition_time: 0,
             }
         }
@@ -68,7 +104,11 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
     if format.is_empty() {
         return out;
     }
-    let offset = if localtime { local_offset(t) } else { TimeOffset::default() };
+    let offset = if localtime {
+        local_offset(t)
+    } else {
+        TimeOffset::default()
+    };
     let mut iso: Option<(i64, i64)> = None;
     let mut i = 0;
     while i < format.len() {
@@ -98,9 +138,27 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
             b't' => format!("{}", days_in_month(t.y, t.m) as i32),
             b'L' => format!("{}", is_leap(t.y as i32 as i64) as i32),
             b'y' => format!("{:02}", (t.y % 100) as i32),
-            b'Y' => format!("{}{:04}", if t.y < 0 { "-" } else { "" }, t.y.unsigned_abs()),
-            b'x' => format!("{}{:04}", if t.y < 0 { "-" } else if t.y >= 10000 { "+" } else { "" }, t.y.unsigned_abs()),
-            b'X' => format!("{}{:04}", if t.y < 0 { "-" } else { "+" }, t.y.unsigned_abs()),
+            b'Y' => format!(
+                "{}{:04}",
+                if t.y < 0 { "-" } else { "" },
+                t.y.unsigned_abs()
+            ),
+            b'x' => format!(
+                "{}{:04}",
+                if t.y < 0 {
+                    "-"
+                } else if t.y >= 10000 {
+                    "+"
+                } else {
+                    ""
+                },
+                t.y.unsigned_abs()
+            ),
+            b'X' => format!(
+                "{}{:04}",
+                if t.y < 0 { "-" } else { "+" },
+                t.y.unsigned_abs()
+            ),
             b'a' => (if t.h >= 12 { "pm" } else { "am" }).to_string(),
             b'A' => (if t.h >= 12 { "PM" } else { "AM" }).to_string(),
             b'B' => {
@@ -122,7 +180,12 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
             b'v' => format!("{:03}", (t.us / 1000) as i32),
             b'I' => format!("{}", if localtime { offset.is_dst } else { 0 }),
             b'p' | b'P' | b'O' => {
-                if c == b'p' && (!localtime || offset.abbr == "UTC" || offset.abbr == "Z" || offset.abbr == "GMT+0000") {
+                if c == b'p'
+                    && (!localtime
+                        || offset.abbr == "UTC"
+                        || offset.abbr == "Z"
+                        || offset.abbr == "GMT+0000")
+                {
                     "Z".to_string()
                 } else {
                     if c != b'O' {
@@ -131,10 +194,18 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
                     let o = offset.offset;
                     format!(
                         "{}{:02}{}{:02}",
-                        if localtime { if o < 0 { '-' } else { '+' } } else { '+' },
+                        if localtime {
+                            if o < 0 { '-' } else { '+' }
+                        } else {
+                            '+'
+                        },
                         if localtime { (o / 3600).abs() } else { 0 },
                         if rfc_colon { ":" } else { "" },
-                        if localtime { ((o % 3600) / 60).abs() } else { 0 }
+                        if localtime {
+                            ((o % 3600) / 60).abs()
+                        } else {
+                            0
+                        }
                     )
                 }
             }
@@ -150,15 +221,30 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
                     "UTC".to_string()
                 } else {
                     match t.zone_type {
-                        ZONETYPE_ID => t.tz_info.as_ref().map(|z| z.name.clone()).unwrap_or_default(),
+                        ZONETYPE_ID => t
+                            .tz_info
+                            .as_ref()
+                            .map(|z| z.name.clone())
+                            .unwrap_or_default(),
                         ZONETYPE_ABBR => offset.abbr.clone(),
                         ZONETYPE_OFFSET => {
                             let o = offset.offset;
                             let seconds = o % 60;
                             if seconds == 0 {
-                                format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, (o / 3600).abs(), ((o % 3600) / 60).abs())
+                                format!(
+                                    "{}{:02}:{:02}",
+                                    if o < 0 { '-' } else { '+' },
+                                    (o / 3600).abs(),
+                                    ((o % 3600) / 60).abs()
+                                )
                             } else {
-                                format!("{}{:02}:{:02}:{:02}", if o < 0 { '-' } else { '+' }, (o / 3600).abs(), ((o % 3600) / 60).abs(), seconds.abs())
+                                format!(
+                                    "{}{:02}:{:02}:{:02}",
+                                    if o < 0 { '-' } else { '+' },
+                                    (o / 3600).abs(),
+                                    ((o % 3600) / 60).abs(),
+                                    seconds.abs()
+                                )
                             }
                         }
                         _ => String::new(),
@@ -176,9 +262,17 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
                     t.h as i32,
                     t.i as i32,
                     t.s as i32,
-                    if localtime { if o < 0 { '-' } else { '+' } } else { '+' },
+                    if localtime {
+                        if o < 0 { '-' } else { '+' }
+                    } else {
+                        '+'
+                    },
                     if localtime { (o / 3600).abs() } else { 0 },
-                    if localtime { ((o % 3600) / 60).abs() } else { 0 }
+                    if localtime {
+                        ((o % 3600) / 60).abs()
+                    } else {
+                        0
+                    }
                 )
             }
             b'r' => {
@@ -192,9 +286,17 @@ pub fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
                     t.h as i32,
                     t.i as i32,
                     t.s as i32,
-                    if localtime { if o < 0 { '-' } else { '+' } } else { '+' },
+                    if localtime {
+                        if o < 0 { '-' } else { '+' }
+                    } else {
+                        '+'
+                    },
                     if localtime { (o / 3600).abs() } else { 0 },
-                    if localtime { ((o % 3600) / 60).abs() } else { 0 }
+                    if localtime {
+                        ((o % 3600) / 60).abs()
+                    } else {
+                        0
+                    }
                 )
             }
             b'U' => format!("{}", t.sse),
@@ -371,9 +473,19 @@ pub fn strftime(format: &[u8], tm: &Tm) -> Vec<u8> {
             ),
             b'C' => num((tm.year + 1900).div_euclid(100), 2, b'0'),
             b'd' => num(tm.mday, 2, b'0'),
-            b'D' => format!("{:02}/{:02}/{:02}", tm.mon + 1, tm.mday, (tm.year + 1900).rem_euclid(100)),
+            b'D' => format!(
+                "{:02}/{:02}/{:02}",
+                tm.mon + 1,
+                tm.mday,
+                (tm.year + 1900).rem_euclid(100)
+            ),
             b'e' => num(tm.mday, 2, b'_'),
-            b'F' => format!("{}-{:02}-{:02}", num(tm.year + 1900, 1, b'0'), tm.mon + 1, tm.mday),
+            b'F' => format!(
+                "{}-{:02}-{:02}",
+                num(tm.year + 1900, 1, b'0'),
+                tm.mon + 1,
+                tm.mday
+            ),
             b'g' => num(iso_week_based(tm).0.rem_euclid(100), 2, b'0'),
             b'G' => num(iso_week_based(tm).0, 1, b'0'),
             b'H' => num(tm.hour, 2, b'0'),
@@ -386,7 +498,13 @@ pub fn strftime(format: &[u8], tm: &Tm) -> Vec<u8> {
             b'n' => "\n".to_string(),
             b'p' => (if tm.hour >= 12 { "PM" } else { "AM" }).to_string(),
             b'P' => (if tm.hour >= 12 { "pm" } else { "am" }).to_string(),
-            b'r' => format!("{:02}:{:02}:{:02} {}", h12, tm.min, tm.sec, if tm.hour >= 12 { "PM" } else { "AM" }),
+            b'r' => format!(
+                "{:02}:{:02}:{:02} {}",
+                h12,
+                tm.min,
+                tm.sec,
+                if tm.hour >= 12 { "PM" } else { "AM" }
+            ),
             b'R' => format!("{:02}:{:02}", tm.hour, tm.min),
             b's' => format!("{}", tm.ts),
             b'S' => num(tm.sec, 2, b'0'),
@@ -397,13 +515,23 @@ pub fn strftime(format: &[u8], tm: &Tm) -> Vec<u8> {
             b'V' => num(iso_week_based(tm).1, 2, b'0'),
             b'w' => format!("{}", tm.wday),
             b'W' => num((tm.yday - (tm.wday - 1 + 7) % 7 + 7) / 7, 2, b'0'),
-            b'x' => format!("{:02}/{:02}/{:02}", tm.mon + 1, tm.mday, (tm.year + 1900).rem_euclid(100)),
+            b'x' => format!(
+                "{:02}/{:02}/{:02}",
+                tm.mon + 1,
+                tm.mday,
+                (tm.year + 1900).rem_euclid(100)
+            ),
             b'y' => num((tm.year + 1900).rem_euclid(100), 2, b'0'),
             b'Y' => num(tm.year + 1900, 1, b'0'),
             b'z' => {
                 let o = tm.gmtoff;
                 let a = o.abs();
-                format!("{}{:02}{:02}", if o < 0 { '-' } else { '+' }, a / 3600, (a % 3600) / 60)
+                format!(
+                    "{}{:02}{:02}",
+                    if o < 0 { '-' } else { '+' },
+                    a / 3600,
+                    (a % 3600) / 60
+                )
             }
             b'Z' => tm.zone.clone(),
             b'%' => "%".to_string(),

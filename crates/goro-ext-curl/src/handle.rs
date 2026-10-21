@@ -133,7 +133,9 @@ pub struct HandleStore {
 
 impl Default for HandleStore {
     fn default() -> Self {
-        Self { handles: RefCell::new(HashMap::new()) }
+        Self {
+            handles: RefCell::new(HashMap::new()),
+        }
     }
 }
 

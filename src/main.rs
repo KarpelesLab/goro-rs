@@ -105,7 +105,7 @@ fn main() {
                 let directive = &args[i + 1];
                 if let Some(eq) = directive.find('=') {
                     let key = directive[..eq].trim().to_string();
-                    let val = directive[eq+1..].trim().to_string();
+                    let val = directive[eq + 1..].trim().to_string();
                     ini_overrides.push((key, val));
                 } else {
                     ini_overrides.push((directive.trim().to_string(), "1".to_string()));
@@ -114,7 +114,10 @@ fn main() {
                 continue;
             }
             // Switches with no argument; ignore.
-            "-n" | "-C" | "-q" | "-z" => { i += 1; continue; }
+            "-n" | "-C" | "-q" | "-z" => {
+                i += 1;
+                continue;
+            }
             "--" => break,
             _ => {
                 if a.starts_with('-') && a.len() > 1 {
@@ -188,9 +191,16 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
             // errors and PHP prints them to stdout as well, but with a
             // different leading word.
             let is_fatal = is_fatal_parse_error(&e.message);
-            let kind = if is_fatal { "Fatal error" } else { "Parse error" };
+            let kind = if is_fatal {
+                "Fatal error"
+            } else {
+                "Parse error"
+            };
             let line = e.span.line;
-            let out = format!("\n{}: {} in {} on line {}\n", kind, e.message, filename, line);
+            let out = format!(
+                "\n{}: {} in {} on line {}\n",
+                kind, e.message, filename, line
+            );
             use std::io::Write as _;
             let stdout = std::io::stdout();
             let mut h = stdout.lock();
@@ -218,16 +228,20 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
             let mut handle = stdout.lock();
             for (msg, line) in &lexer_deprecations {
                 let _ = handle.write_all(
-                    format!("\nDeprecated: {} in {} on line {}\n", msg, filename, line).as_bytes()
+                    format!("\nDeprecated: {} in {} on line {}\n", msg, filename, line).as_bytes(),
                 );
             }
             for (kind, msg, line) in goro_core::compiler::take_pending_compile_warnings() {
                 let _ = handle.write_all(
-                    format!("\n{}: {} in {} on line {}\n", kind, msg, filename, line).as_bytes()
+                    format!("\n{}: {} in {} on line {}\n", kind, msg, filename, line).as_bytes(),
                 );
             }
             let _ = handle.write_all(
-                format!("\nFatal error: {} in {} on line {}\n", e.message, filename, e.line).as_bytes()
+                format!(
+                    "\nFatal error: {} in {} on line {}\n",
+                    e.message, filename, e.line
+                )
+                .as_bytes(),
             );
             let _ = handle.flush();
             process::exit(255);
@@ -276,7 +290,12 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
             None => vec![b"Standard input code".to_vec()],
         };
         info.env = std::env::vars_os()
-            .map(|(k, v)| (k.to_string_lossy().as_bytes().to_vec(), v.to_string_lossy().as_bytes().to_vec()))
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().as_bytes().to_vec(),
+                    v.to_string_lossy().as_bytes().to_vec(),
+                )
+            })
             .collect();
         let ini = |_k: &str| -> Option<String> { None };
         goro_ext_standard::request::startup(&mut vm, &info, &ini);
@@ -379,7 +398,7 @@ fn is_fatal_parse_error(err_msg: &str) -> bool {
 }
 
 fn apply_ini_overrides(overrides: &[(String, String)]) -> i64 {
-    use goro_core::value::{set_php_precision, set_php_serialize_precision, set_memory_limit};
+    use goro_core::value::{set_memory_limit, set_php_precision, set_php_serialize_precision};
     // Default PHP error_reporting (E_ALL); overridden by -d error_reporting=...
     let mut error_reporting: i64 = 32767;
     for (key, val) in overrides {
@@ -399,9 +418,9 @@ fn apply_ini_overrides(overrides: &[(String, String)]) -> i64 {
                 let s = val.trim();
                 let (num_part, mul): (&str, i64) = if let Some(last) = s.chars().last() {
                     match last {
-                        'k' | 'K' => (&s[..s.len()-1], 1024),
-                        'm' | 'M' => (&s[..s.len()-1], 1024 * 1024),
-                        'g' | 'G' => (&s[..s.len()-1], 1024 * 1024 * 1024),
+                        'k' | 'K' => (&s[..s.len() - 1], 1024),
+                        'm' | 'M' => (&s[..s.len() - 1], 1024 * 1024),
+                        'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
                         _ => (s, 1),
                     }
                 } else {
@@ -482,9 +501,8 @@ fn run_builtin_server(args: &[String]) -> ! {
             process::exit(1);
         }
     };
-    let doc_root = doc_root.unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let doc_root =
+        doc_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let opts = cli_server::CliServerOptions {
         addr,
         doc_root,

@@ -37,10 +37,21 @@ fn dec_month(y: &mut i64, m: &mut i64) {
 
 fn dim(leap: bool, month: i64) -> i64 {
     let idx = month.clamp(0, 12) as usize;
-    if leap { DAYS_IN_MONTH_LEAP[idx] } else { DAYS_IN_MONTH[idx] }
+    if leap {
+        DAYS_IN_MONTH_LEAP[idx]
+    } else {
+        DAYS_IN_MONTH[idx]
+    }
 }
 
-fn do_range_limit_days_relative(base_y: &mut i64, base_m: &mut i64, _y: &mut i64, m: &mut i64, d: &mut i64, invert: i32) {
+fn do_range_limit_days_relative(
+    base_y: &mut i64,
+    base_m: &mut i64,
+    _y: &mut i64,
+    m: &mut i64,
+    d: &mut i64,
+    invert: i32,
+) {
     do_range_limit(1, 13, 12, base_m, base_y);
     let mut year = *base_y;
     let mut month = *base_m;
@@ -71,7 +82,7 @@ fn do_range_limit_days(y: &mut i64, m: &mut i64, d: &mut i64) -> bool {
     let leapyear = is_leap(*y);
     while *d <= 0 && *m > 0 {
         let mut previous_month = *m - 1;
-        
+
         let previous_year = if previous_month < 1 {
             previous_month += 12;
             *y - 1
@@ -105,7 +116,9 @@ fn do_adjust_for_weekday(time: &mut Time) {
         return;
     }
     let mut difference = time.relative.weekday as i64 - current_dow;
-    if (time.relative.d < 0 && difference < 0) || (time.relative.d >= 0 && difference <= -(time.relative.weekday_behavior as i64)) {
+    if (time.relative.d < 0 && difference < 0)
+        || (time.relative.d >= 0 && difference <= -(time.relative.weekday_behavior as i64))
+    {
         difference += 7;
     }
     if time.relative.weekday >= 0 {
@@ -286,29 +299,41 @@ fn do_adjust_timezone(tz: &mut Time, tzi: Option<&Rc<TzInfo>>) {
             tz.sse = tz.sse.wrapping_add(-tz.z - tz.dst as i64 * SECS_PER_HOUR);
         }
         _ => {
-            let tzi: Option<Rc<TzInfo>> = if tz.zone_type == ZONETYPE_ID { tz.tz_info.clone() } else { tzi.cloned() };
+            let tzi: Option<Rc<TzInfo>> = if tz.zone_type == ZONETYPE_ID {
+                tz.tz_info.clone()
+            } else {
+                tzi.cloned()
+            };
             let tzi = match tzi {
                 Some(t) => t,
                 None => return,
             };
-            let (current_offset, current_transition_time, current_is_dst) = tzi.get_offset_info(tz.sse).unwrap_or((0, 0, 0));
-            let (after_offset, after_transition_time, _) =
-                tzi.get_offset_info(tz.sse - current_offset as i64).unwrap_or((0, 0, 0));
+            let (current_offset, current_transition_time, current_is_dst) =
+                tzi.get_offset_info(tz.sse).unwrap_or((0, 0, 0));
+            let (after_offset, after_transition_time, _) = tzi
+                .get_offset_info(tz.sse - current_offset as i64)
+                .unwrap_or((0, 0, 0));
             let _ = current_transition_time;
             let mut actual_offset = after_offset;
             let mut actual_transition_time = after_transition_time;
             if current_offset == after_offset && tz.have_zone != 0 {
                 if current_offset >= 0 && tz.dst != 0 && current_is_dst == 0 {
-                    let (earlier_offset, earlier_transition_time, _) =
-                        tzi.get_offset_info(tz.sse - current_offset as i64 - 7200).unwrap_or((0, 0, 0));
-                    if earlier_offset != after_offset && tz.sse - (earlier_offset as i64) < after_transition_time {
+                    let (earlier_offset, earlier_transition_time, _) = tzi
+                        .get_offset_info(tz.sse - current_offset as i64 - 7200)
+                        .unwrap_or((0, 0, 0));
+                    if earlier_offset != after_offset
+                        && tz.sse - (earlier_offset as i64) < after_transition_time
+                    {
                         actual_offset = earlier_offset;
                         actual_transition_time = earlier_transition_time;
                     }
                 } else if current_offset <= 0 && current_is_dst != 0 && tz.dst == 0 {
-                    let (later_offset, later_transition_time, _) =
-                        tzi.get_offset_info(tz.sse - current_offset as i64 + 7200).unwrap_or((0, 0, 0));
-                    if later_offset != after_offset && tz.sse - (later_offset as i64) >= later_transition_time {
+                    let (later_offset, later_transition_time, _) = tzi
+                        .get_offset_info(tz.sse - current_offset as i64 + 7200)
+                        .unwrap_or((0, 0, 0));
+                    if later_offset != after_offset
+                        && tz.sse - (later_offset as i64) >= later_transition_time
+                    {
                         actual_offset = later_offset;
                         actual_transition_time = later_transition_time;
                     }
@@ -316,7 +341,8 @@ fn do_adjust_timezone(tz: &mut Time, tzi: Option<&Rc<TzInfo>>) {
             }
             tz.is_localtime = 1;
             let in_transition = actual_transition_time != i64::MIN
-                && (tz.sse - actual_offset as i64) >= (actual_transition_time + (current_offset as i64 - actual_offset as i64))
+                && (tz.sse - actual_offset as i64)
+                    >= (actual_transition_time + (current_offset as i64 - actual_offset as i64))
                 && (tz.sse - actual_offset as i64) < actual_transition_time;
             let adjustment = if current_offset != actual_offset && !in_transition {
                 -(actual_offset as i64)
@@ -337,8 +363,11 @@ pub fn epoch_days_from_time(time: &Time) -> i64 {
     let era = (if y >= 0 { y } else { y - 399 }) / YEARS_PER_ERA;
     let year_of_era = y - era * YEARS_PER_ERA;
     let day_of_year = (153 * (time.m + if time.m > 2 { -3 } else { 9 }) + 2) / 5 + time.d - 1;
-    let day_of_era = year_of_era * DAYS_PER_YEAR + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era.wrapping_mul(DAYS_PER_ERA).wrapping_add(day_of_era).wrapping_sub(HINNANT_EPOCH_SHIFT)
+    let day_of_era =
+        year_of_era * DAYS_PER_YEAR + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era.wrapping_mul(DAYS_PER_ERA)
+        .wrapping_add(day_of_era)
+        .wrapping_sub(HINNANT_EPOCH_SHIFT)
 }
 
 /// timelib_update_ts

@@ -193,7 +193,10 @@ fn zend_strip(src: &[u8], skip_shebang: bool) -> Vec<u8> {
 fn value_error(vm: &mut Vm, msg: String) -> VmError {
     let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 /// php_strip_url_passwd()
@@ -295,13 +298,27 @@ fn open_for_scanning(vm: &mut Vm, fname: &str, path: &str) -> Option<Vec<u8>> {
 }
 
 /// Minimal zpp check: arrays are never accepted for string/bool params.
-fn check_args(vm: &mut Vm, args: &[Value], fname: &str, names: &[(&str, &str)]) -> Result<(), VmError> {
+fn check_args(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    names: &[(&str, &str)],
+) -> Result<(), VmError> {
     for (i, (name, ty)) in names.iter().enumerate() {
         if let Some(Value::Array(_)) = args.get(i).map(|v| v.deref()) {
-            let msg = format!("{}(): Argument #{} (${}) must be of type {}, array given", fname, i + 1, name, ty);
+            let msg = format!(
+                "{}(): Argument #{} (${}) must be of type {}, array given",
+                fname,
+                i + 1,
+                name,
+                ty
+            );
             let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
             vm.current_exception = Some(exc);
-            return Err(VmError { message: msg, line: vm.current_line });
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
         }
     }
     Ok(())
@@ -322,7 +339,12 @@ fn finish(vm: &mut Vm, out: Vec<u8>, ret: bool) -> Result<Value, VmError> {
 
 /// PHP_FUNCTION(highlight_string)
 fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    check_args(vm, args, "highlight_string", &[("string", "string"), ("return", "bool")])?;
+    check_args(
+        vm,
+        args,
+        "highlight_string",
+        &[("string", "string"), ("return", "bool")],
+    )?;
     let code = args.first().unwrap_or(&Value::Null).to_php_string();
     let ret = arg_bool(args, 1);
     let ini = get_highlight_struct(vm);
@@ -332,12 +354,20 @@ fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// PHP_FUNCTION(highlight_file) (also show_source)
 fn highlight_file_impl(vm: &mut Vm, args: &[Value], fname: &str) -> Result<Value, VmError> {
-    check_args(vm, args, fname, &[("filename", "string"), ("return", "bool")])?;
+    check_args(
+        vm,
+        args,
+        fname,
+        &[("filename", "string"), ("return", "bool")],
+    )?;
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if path.as_bytes().contains(&0) {
         return Err(value_error(
             vm,
-            format!("{}(): Argument #1 ($filename) must not contain any null bytes", fname),
+            format!(
+                "{}(): Argument #1 ($filename) must not contain any null bytes",
+                fname
+            ),
         ));
     }
     let ret = arg_bool(args, 1);
@@ -380,7 +410,8 @@ fn php_strip_whitespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
     if path.as_bytes().contains(&0) {
         return Err(value_error(
             vm,
-            "php_strip_whitespace(): Argument #1 ($filename) must not contain any null bytes".to_string(),
+            "php_strip_whitespace(): Argument #1 ($filename) must not contain any null bytes"
+                .to_string(),
         ));
     }
     let path = path.to_string_lossy().to_string();
@@ -415,7 +446,10 @@ pub fn tokenize_raw(src: &[u8]) -> goro_core::array::PhpArray {
     while let Some(t) = sc.next_token() {
         add(&mut result, t.id, &src[t.start..t.end], t.line);
         if need_tokens != -1 {
-            if !matches!(t.id, ps::T_WHITESPACE | ps::T_OPEN_TAG | ps::T_COMMENT | ps::T_DOC_COMMENT) {
+            if !matches!(
+                t.id,
+                ps::T_WHITESPACE | ps::T_OPEN_TAG | ps::T_COMMENT | ps::T_DOC_COMMENT
+            ) {
                 need_tokens -= 1;
                 if need_tokens == 0 {
                     if t.end < src.len() {

@@ -90,7 +90,10 @@ fn same_key(a: &Value, b: &Value) -> bool {
 impl Vm {
     fn sos_user_get_hash(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
-        self.classes.get(&cl).map(|c| c.get_method(b"gethash").is_some()).unwrap_or(false)
+        self.classes
+            .get(&cl)
+            .map(|c| c.get_method(b"gethash").is_some())
+            .unwrap_or(false)
     }
 
     /// spl_object_storage_get_hash(): None with an exception on failure.
@@ -102,7 +105,11 @@ impl Vm {
         if !self.sos_user_get_hash(storage) {
             return Some(Value::Long(oid));
         }
-        let r = self.call_object_method(&Value::Object(storage.clone()), b"getHash", std::slice::from_ref(o));
+        let r = self.call_object_method(
+            &Value::Object(storage.clone()),
+            b"getHash",
+            std::slice::from_ref(o),
+        );
         if self.current_exception.is_some() {
             return None;
         }
@@ -160,7 +167,11 @@ impl Vm {
         false
     }
 
-    fn sos_find(&mut self, storage: &Rc<RefCell<PhpObject>>, o: &Value) -> Result<Option<usize>, ()> {
+    fn sos_find(
+        &mut self,
+        storage: &Rc<RefCell<PhpObject>>,
+        o: &Value,
+    ) -> Result<Option<usize>, ()> {
         let key = match self.sos_key(storage, o) {
             Some(k) => k,
             None => return Err(()),
@@ -178,7 +189,11 @@ impl Vm {
         match v.map(|v| v.deref()) {
             Some(o @ Value::Object(_)) => Some(o),
             Some(other) => {
-                let msg = format!("{}(): Argument #1 ($object) must be of type object, {} given", func, Self::value_type_name(&other));
+                let msg = format!(
+                    "{}(): Argument #1 ($object) must be of type object, {} given",
+                    func,
+                    Self::value_type_name(&other)
+                );
                 self.spl_throw(b"TypeError", &msg);
                 None
             }
@@ -192,10 +207,21 @@ impl Vm {
 
     fn sos_storage_arg(&mut self, func: &str, v: Option<&Value>) -> Option<Rc<RefCell<PhpObject>>> {
         match v.map(|v| v.deref()) {
-            Some(Value::Object(o)) if self.spl_find_base(&obj_class_lower(&o), &[b"splobjectstorage"]).is_some() => Some(o),
+            Some(Value::Object(o))
+                if self
+                    .spl_find_base(&obj_class_lower(&o), &[b"splobjectstorage"])
+                    .is_some() =>
+            {
+                Some(o)
+            }
             other => {
-                let t = other.map(|v| Self::value_type_name(&v)).unwrap_or_else(|| "null".to_string());
-                let msg = format!("{}(): Argument #1 ($storage) must be of type SplObjectStorage, {} given", func, t);
+                let t = other
+                    .map(|v| Self::value_type_name(&v))
+                    .unwrap_or_else(|| "null".to_string());
+                let msg = format!(
+                    "{}(): Argument #1 ($storage) must be of type SplObjectStorage, {} given",
+                    func, t
+                );
                 self.spl_throw(b"TypeError", &msg);
                 None
             }
@@ -212,17 +238,40 @@ impl Vm {
             entry.set(skey(b"inf"), inf);
             st.push(val_arr(entry));
         }
-        out.set(ArrayKey::String(PhpString::from_vec(mangle_private(b"SplObjectStorage", b"storage"))), val_arr(st));
+        out.set(
+            ArrayKey::String(PhpString::from_vec(mangle_private(
+                b"SplObjectStorage",
+                b"storage",
+            ))),
+            val_arr(st),
+        );
         out
     }
 
     /// SplObjectStorage methods (`args` excludes $this; None on the no-arg path).
-    pub(crate) fn spl_storage_call(&mut self, method: &[u8], obj: &Rc<RefCell<PhpObject>>, args: Option<&[Value]>) -> Option<Value> {
+    pub(crate) fn spl_storage_call(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
-            b"attach" | b"detach" | b"contains" | b"addall" | b"removeall" | b"removeallexcept" | b"setinfo"
-                | b"seek" | b"unserialize" | b"offsetexists" | b"offsetget" | b"offsetset" | b"offsetunset"
-                | b"gethash" | b"__unserialize"
+            b"attach"
+                | b"detach"
+                | b"contains"
+                | b"addall"
+                | b"removeall"
+                | b"removeallexcept"
+                | b"setinfo"
+                | b"seek"
+                | b"unserialize"
+                | b"offsetexists"
+                | b"offsetget"
+                | b"offsetset"
+                | b"offsetunset"
+                | b"gethash"
+                | b"__unserialize"
         );
         if needs_args && args.is_none() {
             return None;
@@ -230,21 +279,33 @@ impl Vm {
         let a = args.unwrap_or(&[]);
         let r = match method {
             b"attach" | b"offsetset" => {
-                let func = if method == b"attach" { "SplObjectStorage::attach" } else { "SplObjectStorage::offsetSet" };
+                let func = if method == b"attach" {
+                    "SplObjectStorage::attach"
+                } else {
+                    "SplObjectStorage::offsetSet"
+                };
                 let o = self.sos_obj_arg(func, a.first())?;
                 let inf = a.get(1).cloned().unwrap_or(Value::Null).deref();
                 self.sos_attach(obj, &o, inf);
                 Value::Null
             }
             b"detach" | b"offsetunset" => {
-                let func = if method == b"detach" { "SplObjectStorage::detach" } else { "SplObjectStorage::offsetUnset" };
+                let func = if method == b"detach" {
+                    "SplObjectStorage::detach"
+                } else {
+                    "SplObjectStorage::offsetUnset"
+                };
                 let o = self.sos_obj_arg(func, a.first())?;
                 self.sos_detach(obj, &o);
                 Self::sos_reset(obj);
                 Value::Null
             }
             b"contains" | b"offsetexists" => {
-                let func = if method == b"contains" { "SplObjectStorage::contains" } else { "SplObjectStorage::offsetExists" };
+                let func = if method == b"contains" {
+                    "SplObjectStorage::contains"
+                } else {
+                    "SplObjectStorage::offsetExists"
+                };
                 let o = self.sos_obj_arg(func, a.first())?;
                 match self.sos_find(obj, &o) {
                     Ok(f) => bv(f.is_some()),
@@ -255,7 +316,9 @@ impl Vm {
                 let o = self.sos_obj_arg("SplObjectStorage::offsetGet", a.first())?;
                 match self.sos_find(obj, &o) {
                     Ok(Some(i)) => load(obj).infs[i].clone(),
-                    Ok(None) => return self.spl_throw(b"UnexpectedValueException", "Object not found"),
+                    Ok(None) => {
+                        return self.spl_throw(b"UnexpectedValueException", "Object not found");
+                    }
                     Err(()) => Value::Null,
                 }
             }
@@ -318,13 +381,22 @@ impl Vm {
                 let e = load(obj);
                 match e.objs.get(pos.max(0) as usize).filter(|_| pos >= 0) {
                     Some(o) => o.clone(),
-                    None => return self.spl_throw(b"RuntimeException", "Called current() on invalid iterator"),
+                    None => {
+                        return self.spl_throw(
+                            b"RuntimeException",
+                            "Called current() on invalid iterator",
+                        );
+                    }
                 }
             }
             b"getinfo" => {
                 let pos = lprop(obj, b"__spl_pos");
                 let e = load(obj);
-                if pos >= 0 { e.infs.get(pos as usize).cloned().unwrap_or(Value::Null) } else { Value::Null }
+                if pos >= 0 {
+                    e.infs.get(pos as usize).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                }
             }
             b"setinfo" => {
                 let pos = lprop(obj, b"__spl_pos");
@@ -380,8 +452,15 @@ impl Vm {
                 let st = data.get(&ArrayKey::Int(0)).cloned();
                 let members = data.get(&ArrayKey::Int(1)).cloned();
                 let (st, members) = match (st, members) {
-                    (Some(Value::Array(s)), Some(Value::Array(m))) => (s.borrow().clone(), m.borrow().clone()),
-                    _ => return self.spl_throw(b"UnexpectedValueException", "Incomplete or ill-typed serialization data"),
+                    (Some(Value::Array(s)), Some(Value::Array(m))) => {
+                        (s.borrow().clone(), m.borrow().clone())
+                    }
+                    _ => {
+                        return self.spl_throw(
+                            b"UnexpectedValueException",
+                            "Incomplete or ill-typed serialization data",
+                        );
+                    }
                 };
                 if st.len() % 2 != 0 {
                     return self.spl_throw(b"UnexpectedValueException", "Odd number of elements");
@@ -404,25 +483,33 @@ impl Vm {
                 let mut out: Vec<u8> = b"x:".to_vec();
                 out.extend_from_slice(format!("i:{};", e.objs.len()).as_bytes());
                 for (o, inf) in e.objs.into_iter().zip(e.infs) {
-                    let so = self.spl_call_builtin(b"serialize", &[o]).unwrap_or(Value::Null);
+                    let so = self
+                        .spl_call_builtin(b"serialize", &[o])
+                        .unwrap_or(Value::Null);
                     out.extend_from_slice(so.to_php_string().as_bytes());
                     out.push(b',');
-                    let si = self.spl_call_builtin(b"serialize", &[inf]).unwrap_or(Value::Null);
+                    let si = self
+                        .spl_call_builtin(b"serialize", &[inf])
+                        .unwrap_or(Value::Null);
                     out.extend_from_slice(si.to_php_string().as_bytes());
                     out.push(b';');
                 }
                 out.extend_from_slice(b"m:");
                 let props = val_arr(self.spl_std_props(obj));
-                let sp = self.spl_call_builtin(b"serialize", &[props]).unwrap_or(Value::Null);
+                let sp = self
+                    .spl_call_builtin(b"serialize", &[props])
+                    .unwrap_or(Value::Null);
                 out.extend_from_slice(sp.to_php_string().as_bytes());
                 Value::String(PhpString::from_vec(out))
             }
             b"unserialize" => {
                 let data = match a.first() {
-                    Some(v) => match self.spl_arg_string("SplObjectStorage::unserialize", 1, "data", v) {
-                        Some(s) => s.as_bytes().to_vec(),
-                        None => return Some(Value::Null),
-                    },
+                    Some(v) => {
+                        match self.spl_arg_string("SplObjectStorage::unserialize", 1, "data", v) {
+                            Some(s) => s.as_bytes().to_vec(),
+                            None => return Some(Value::Null),
+                        }
+                    }
                     None => Vec::new(),
                 };
                 if data.is_empty() {
@@ -495,11 +582,23 @@ impl Vm {
     }
 
     /// MultipleIterator methods.
-    pub(crate) fn spl_multiple_call(&mut self, method: &[u8], obj: &Rc<RefCell<PhpObject>>, args: Option<&[Value]>) -> Option<Value> {
+    pub(crate) fn spl_multiple_call(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
-            b"setflags" | b"attachiterator" | b"detachiterator" | b"containsiterator" | b"__unserialize"
-                | b"offsetset" | b"offsetget" | b"offsetexists" | b"offsetunset"
+            b"setflags"
+                | b"attachiterator"
+                | b"detachiterator"
+                | b"containsiterator"
+                | b"__unserialize"
+                | b"offsetset"
+                | b"offsetget"
+                | b"offsetexists"
+                | b"offsetunset"
         );
         if needs_args && args.is_none() {
             return None;
@@ -512,7 +611,10 @@ impl Vm {
         // Dimension handlers MultipleIterator shares with SplObjectStorage
         // (spl_multiple_iterator_write_dimension & co.); it has no
         // ArrayAccess methods of its own.
-        if matches!(method, b"offsetset" | b"offsetget" | b"offsetexists" | b"offsetunset") {
+        if matches!(
+            method,
+            b"offsetset" | b"offsetget" | b"offsetexists" | b"offsetunset"
+        ) {
             let key = a.first().cloned().unwrap_or(Value::Null).deref();
             let ko = match &key {
                 Value::Object(_) => key.clone(),
@@ -520,7 +622,10 @@ impl Vm {
                     if method == b"offsetexists" {
                         return Some(Value::False);
                     }
-                    return self.spl_throw(b"Error", "Cannot use object of type MultipleIterator as array");
+                    return self.spl_throw(
+                        b"Error",
+                        "Cannot use object of type MultipleIterator as array",
+                    );
                 }
             };
             let r = match method {
@@ -528,12 +633,16 @@ impl Vm {
                     let is_iter = match &ko {
                         Value::Object(o) => {
                             let cl = obj_class_lower(o);
-                            self.class_implements_interface(&cl, b"iterator") || crate::vm::is_builtin_subclass(&cl, b"iterator")
+                            self.class_implements_interface(&cl, b"iterator")
+                                || crate::vm::is_builtin_subclass(&cl, b"iterator")
                         }
                         _ => false,
                     };
                     if !is_iter {
-                        return self.spl_throw(b"TypeError", "Can only attach objects that implement the Iterator interface");
+                        return self.spl_throw(
+                            b"TypeError",
+                            "Can only attach objects that implement the Iterator interface",
+                        );
                     }
                     let inf = a.get(1).cloned().unwrap_or(Value::Null).deref();
                     self.sos_attach(obj, &ko, inf);
@@ -550,7 +659,9 @@ impl Vm {
                 },
                 _ => match self.sos_find(obj, &ko) {
                     Ok(Some(i)) => load(obj).infs[i].clone(),
-                    Ok(None) => return self.spl_throw(b"UnexpectedValueException", "Object not found"),
+                    Ok(None) => {
+                        return self.spl_throw(b"UnexpectedValueException", "Object not found");
+                    }
                     Err(()) => Value::Null,
                 },
             };
@@ -560,7 +671,8 @@ impl Vm {
             b"getflags" => Value::Long(flags),
             b"setflags" => {
                 let f = match a.first() {
-                    Some(v) => match self.spl_arg_long("MultipleIterator::setFlags", 1, "flags", v) {
+                    Some(v) => match self.spl_arg_long("MultipleIterator::setFlags", 1, "flags", v)
+                    {
                         Some(n) => n,
                         None => return Some(Value::Null),
                     },
@@ -574,7 +686,8 @@ impl Vm {
                 let is_iter = match &it {
                     Value::Object(o) => {
                         let cl = obj_class_lower(o);
-                        self.class_implements_interface(&cl, b"iterator") || crate::vm::is_builtin_subclass(&cl, b"iterator")
+                        self.class_implements_interface(&cl, b"iterator")
+                            || crate::vm::is_builtin_subclass(&cl, b"iterator")
                     }
                     _ => false,
                 };
@@ -599,7 +712,8 @@ impl Vm {
                 if !matches!(info, Value::Null) {
                     let e = load(obj);
                     if e.infs.iter().any(|x| x.identical(&info)) {
-                        return self.spl_throw(b"InvalidArgumentException", "Key duplication error");
+                        return self
+                            .spl_throw(b"InvalidArgumentException", "Key duplication error");
                     }
                 }
                 self.sos_attach(obj, &it, info);
@@ -640,7 +754,10 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    let v = matches!(self.call_object_method(&it, b"valid", &[]), Some(Value::True));
+                    let v = matches!(
+                        self.call_object_method(&it, b"valid", &[]),
+                        Some(Value::True)
+                    );
                     if v != expect {
                         return Some(bv(!expect));
                     }
@@ -650,7 +767,10 @@ impl Vm {
             b"current" | b"key" => {
                 let e = load(obj);
                 if e.objs.is_empty() {
-                    let msg = format!("Called {}() on an invalid iterator", String::from_utf8_lossy(method));
+                    let msg = format!(
+                        "Called {}() on an invalid iterator",
+                        String::from_utf8_lossy(method)
+                    );
                     return self.spl_throw(b"RuntimeException", &msg);
                 }
                 let mut out = PhpArray::new();
@@ -658,19 +778,28 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    let valid = matches!(self.call_object_method(&it, b"valid", &[]), Some(Value::True));
+                    let valid = matches!(
+                        self.call_object_method(&it, b"valid", &[]),
+                        Some(Value::True)
+                    );
                     let v = if valid {
                         match self.call_object_method(&it, method, &[]) {
                             Some(v) => v,
                             None => {
                                 if self.current_exception.is_none() {
-                                    self.spl_throw(b"RuntimeException", "Failed to call sub iterator method");
+                                    self.spl_throw(
+                                        b"RuntimeException",
+                                        "Failed to call sub iterator method",
+                                    );
                                 }
                                 return Some(Value::Null);
                             }
                         }
                     } else if flags & MIT_NEED_ALL != 0 {
-                        let msg = format!("Called {}() with non valid sub iterator", String::from_utf8_lossy(method));
+                        let msg = format!(
+                            "Called {}() with non valid sub iterator",
+                            String::from_utf8_lossy(method)
+                        );
                         return self.spl_throw(b"RuntimeException", &msg);
                     } else {
                         Value::Null
@@ -678,8 +807,15 @@ impl Vm {
                     if flags & MIT_KEYS_ASSOC != 0 {
                         match inf {
                             Value::Long(n) => out.set(ArrayKey::Int(n), v),
-                            Value::String(s) => out.set(Self::value_to_array_key(Value::String(s)), v),
-                            _ => return self.spl_throw(b"InvalidArgumentException", "Sub-Iterator is associated with NULL"),
+                            Value::String(s) => {
+                                out.set(Self::value_to_array_key(Value::String(s)), v)
+                            }
+                            _ => {
+                                return self.spl_throw(
+                                    b"InvalidArgumentException",
+                                    "Sub-Iterator is associated with NULL",
+                                );
+                            }
                         }
                     } else {
                         out.push(v);
@@ -708,7 +844,11 @@ impl Vm {
 }
 
 /// Native constructor handler for MultipleIterator.
-pub fn spl_multiple_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
+pub fn spl_multiple_construct_native(
+    vm: &mut Vm,
+    args: &[Value],
+    _line: u32,
+) -> Result<(), String> {
     let obj = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return Ok(()),
@@ -717,7 +857,11 @@ pub fn spl_multiple_construct_native(vm: &mut Vm, args: &[Value], _line: u32) ->
         Ok(())
     } else {
         let msg = match &vm.current_exception {
-            Some(Value::Object(e)) => e.borrow().get_property(b"message").to_php_string().to_string_lossy(),
+            Some(Value::Object(e)) => e
+                .borrow()
+                .get_property(b"message")
+                .to_php_string()
+                .to_string_lossy(),
             _ => String::new(),
         };
         Err(msg)

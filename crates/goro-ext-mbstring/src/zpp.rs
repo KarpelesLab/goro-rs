@@ -8,7 +8,10 @@ use goro_core::vm::{Vm, VmError};
 pub fn throw(vm: &mut Vm, class: &[u8], msg: String) -> VmError {
     let exc = vm.create_exception(class, &msg, vm.current_line);
     vm.current_exception = Some(exc);
-    VmError { message: msg, line: vm.current_line }
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 pub fn value_error(vm: &mut Vm, msg: String) -> VmError {
@@ -21,7 +24,10 @@ pub fn type_error(vm: &mut Vm, msg: String) -> VmError {
 
 /// `zend_argument_value_error(arg_num, ...)`
 pub fn arg_value_error(vm: &mut Vm, func: &str, arg_num: usize, pname: &str, msg: &str) -> VmError {
-    value_error(vm, format!("{}(): Argument #{} (${}) {}", func, arg_num, pname, msg))
+    value_error(
+        vm,
+        format!("{}(): Argument #{} (${}) {}", func, arg_num, pname, msg),
+    )
 }
 
 pub fn type_name(v: &Value) -> String {
@@ -34,24 +40,51 @@ fn is_strict(_vm: &Vm) -> bool {
 
 /// Z_PARAM_STR: returns the bytes of argument `idx` (0-based), converting
 /// scalars to strings; arrays and non-stringable objects raise a TypeError.
-pub fn str_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<Vec<u8>, VmError> {
+pub fn str_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<Vec<u8>, VmError> {
     let v = args.get(idx).map(|v| v.deref()).unwrap_or(Value::Null);
     to_str(vm, func, &v, idx, pname, "string")
 }
 
-fn to_str(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &str) -> Result<Vec<u8>, VmError> {
+fn to_str(
+    vm: &mut Vm,
+    func: &str,
+    v: &Value,
+    idx: usize,
+    pname: &str,
+    tname: &str,
+) -> Result<Vec<u8>, VmError> {
     let _ = is_strict(vm);
     match v {
         Value::String(s) => Ok(s.as_bytes().to_vec()),
         Value::Array(_) => Err(type_error(
             vm,
-            format!("{}(): Argument #{} (${}) must be of type {}, array given", func, idx + 1, pname, tname),
+            format!(
+                "{}(): Argument #{} (${}) must be of type {}, array given",
+                func,
+                idx + 1,
+                pname,
+                tname
+            ),
         )),
         Value::Object(_) => {
             let has_tostring = {
                 if let Value::Object(o) = v {
-                    let cls: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    vm.classes.get(&cls).map(|c| c.methods.contains_key(&b"__tostring".to_vec())).unwrap_or(false)
+                    let cls: Vec<u8> = o
+                        .borrow()
+                        .class_name
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    vm.classes
+                        .get(&cls)
+                        .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
+                        .unwrap_or(false)
                 } else {
                     false
                 }
@@ -61,7 +94,14 @@ fn to_str(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &s
             } else {
                 Err(type_error(
                     vm,
-                    format!("{}(): Argument #{} (${}) must be of type {}, {} given", func, idx + 1, pname, tname, type_name(v)),
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type {}, {} given",
+                        func,
+                        idx + 1,
+                        pname,
+                        tname,
+                        type_name(v)
+                    ),
                 ))
             }
         }
@@ -70,7 +110,13 @@ fn to_str(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &s
 }
 
 /// Z_PARAM_STR_OR_NULL (missing or null => None)
-pub fn str_or_null_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<Option<Vec<u8>>, VmError> {
+pub fn str_or_null_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<Option<Vec<u8>>, VmError> {
     match args.get(idx).map(|v| v.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => Ok(None),
         Some(v) => to_str(vm, func, &v, idx, pname, "?string").map(Some),
@@ -78,23 +124,50 @@ pub fn str_or_null_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pnam
 }
 
 /// Z_PARAM_LONG
-pub fn long_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<i64, VmError> {
+pub fn long_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<i64, VmError> {
     let v = args.get(idx).map(|v| v.deref()).unwrap_or(Value::Null);
     to_long(vm, func, &v, idx, pname, "int")
 }
 
-fn to_long(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &str) -> Result<i64, VmError> {
+fn to_long(
+    vm: &mut Vm,
+    func: &str,
+    v: &Value,
+    idx: usize,
+    pname: &str,
+    tname: &str,
+) -> Result<i64, VmError> {
     match v {
         Value::Long(n) => Ok(*n),
         Value::Double(f) => {
-            if !f.is_finite() || f.fract() != 0.0 || *f >= 9.223_372_036_854_776e18 || *f < -9.223_372_036_854_776e18 {
-                if f.is_finite() && f.fract() != 0.0 && *f < 9.223_372_036_854_776e18 && *f >= -9.223_372_036_854_776e18 {
+            if !f.is_finite()
+                || f.fract() != 0.0
+                || *f >= 9.223_372_036_854_776e18
+                || *f < -9.223_372_036_854_776e18
+            {
+                if f.is_finite()
+                    && f.fract() != 0.0
+                    && *f < 9.223_372_036_854_776e18
+                    && *f >= -9.223_372_036_854_776e18
+                {
                     // Fractional part: deprecated implicit conversion (handled by VM) — truncate
                     return Ok(*f as i64);
                 }
                 return Err(type_error(
                     vm,
-                    format!("{}(): Argument #{} (${}) must be of type {}, float given", func, idx + 1, pname, tname),
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type {}, float given",
+                        func,
+                        idx + 1,
+                        pname,
+                        tname
+                    ),
                 ));
             }
             Ok(*f as i64)
@@ -106,30 +179,57 @@ fn to_long(vm: &mut Vm, func: &str, v: &Value, idx: usize, pname: &str, tname: &
             match parse_numeric_str(b) {
                 Some(Num::Int(n)) => Ok(n),
                 Some(Num::Float(f)) => {
-                    if f.is_finite() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&f) {
+                    if f.is_finite()
+                        && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&f)
+                    {
                         Ok(f as i64)
                     } else {
                         Err(type_error(
                             vm,
-                            format!("{}(): Argument #{} (${}) must be of type {}, string given", func, idx + 1, pname, tname),
+                            format!(
+                                "{}(): Argument #{} (${}) must be of type {}, string given",
+                                func,
+                                idx + 1,
+                                pname,
+                                tname
+                            ),
                         ))
                     }
                 }
                 None => Err(type_error(
                     vm,
-                    format!("{}(): Argument #{} (${}) must be of type {}, string given", func, idx + 1, pname, tname),
+                    format!(
+                        "{}(): Argument #{} (${}) must be of type {}, string given",
+                        func,
+                        idx + 1,
+                        pname,
+                        tname
+                    ),
                 )),
             }
         }
         other => Err(type_error(
             vm,
-            format!("{}(): Argument #{} (${}) must be of type {}, {} given", func, idx + 1, pname, tname, type_name(other)),
+            format!(
+                "{}(): Argument #{} (${}) must be of type {}, {} given",
+                func,
+                idx + 1,
+                pname,
+                tname,
+                type_name(other)
+            ),
         )),
     }
 }
 
 /// Z_PARAM_LONG_OR_NULL
-pub fn long_or_null_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pname: &str) -> Result<Option<i64>, VmError> {
+pub fn long_or_null_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    idx: usize,
+    pname: &str,
+) -> Result<Option<i64>, VmError> {
     match args.get(idx).map(|v| v.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => Ok(None),
         Some(v) => to_long(vm, func, &v, idx, pname, "?int").map(Some),
@@ -138,7 +238,9 @@ pub fn long_or_null_arg(vm: &mut Vm, func: &str, args: &[Value], idx: usize, pna
 
 /// Z_PARAM_BOOL
 pub fn bool_arg(args: &[Value], idx: usize) -> bool {
-    args.get(idx).map(|v| v.deref().is_truthy()).unwrap_or(false)
+    args.get(idx)
+        .map(|v| v.deref().is_truthy())
+        .unwrap_or(false)
 }
 
 enum Num {
@@ -212,5 +314,8 @@ pub fn vbool(b: bool) -> Value {
 
 /// Was an optional argument passed? (skipped named arguments arrive as null)
 pub fn present(args: &[Value], idx: usize) -> bool {
-    !matches!(args.get(idx).map(|v| v.deref()), None | Some(Value::Null) | Some(Value::Undef))
+    !matches!(
+        args.get(idx).map(|v| v.deref()),
+        None | Some(Value::Null) | Some(Value::Undef)
+    )
 }
