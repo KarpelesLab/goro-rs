@@ -433,10 +433,10 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
                 }
-                _ => {
+                cur => {
                     let mut obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
-                    if !matches!(current, Value::Null | Value::Undef) {
-                        obj.set_property(b"scalar".to_vec(), current);
+                    if !matches!(cur, Value::Null | Value::Undef) {
+                        obj.set_property(b"scalar".to_vec(), cur);
                     }
                     Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
                 }
