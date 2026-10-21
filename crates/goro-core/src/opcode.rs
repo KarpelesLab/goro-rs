@@ -339,6 +339,10 @@ pub enum OpCode {
     /// Jump to op1 (JmpTarget) if the pending call's next positional
     /// parameter is by-reference (runtime FUNC_ARG dispatch).
     JmpIfArgByRef,
+    /// Fetch an array element for a nested write (`$a[k][...] = v`):
+    /// op1 = container (CV or tmp array), op2 = key (Unused = append),
+    /// result = tmp holding the (vivified, separated) element array.
+    ArrayGetW,
 }
 
 /// A compiled function / script

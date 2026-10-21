@@ -6310,6 +6310,23 @@ impl Compiler {
             });
             return Ok(OperandType::Tmp(tmp));
         }
+        if let ExprKind::ArrayAccess { array: inner, index } = &array.kind {
+            // Nested dimension write: fetch the intermediate element for writing.
+            let container = self.compile_dim_write_base(inner)?;
+            let key = match index {
+                Some(idx) => self.compile_expr(idx)?,
+                None => OperandType::Unused,
+            };
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayGetW,
+                op1: container,
+                op2: key,
+                result: OperandType::Tmp(tmp),
+                line: array.span.line,
+            });
+            return Ok(OperandType::Tmp(tmp));
+        }
         self.compile_expr(array)
     }
 

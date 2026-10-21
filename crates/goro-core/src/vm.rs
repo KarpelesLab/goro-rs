@@ -28956,6 +28956,106 @@ impl Vm {
                     }
                 }
 
+                OpCode::ArrayGetW => {
+                    // Resolve the container array, vivifying a null/undef CV.
+                    let container: Option<Rc<RefCell<PhpArray>>> = match &op.op1 {
+                        OperandType::Cv(ci) => {
+                            let i = *ci as usize;
+                            let cur = cvs.get(i).map(|v| v.deref()).unwrap_or(Value::Undef);
+                            match cur {
+                                Value::Array(rc) => Some(rc),
+                                Value::Null | Value::Undef => {
+                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
+                                    match cvs.get_mut(i) {
+                                        Some(Value::Reference(r)) => { *r.borrow_mut() = Value::Array(rc.clone()); }
+                                        Some(slot) => { *slot = Value::Array(rc.clone()); }
+                                        None => {}
+                                    }
+                                    Some(rc)
+                                }
+                                _ => None,
+                            }
+                        }
+                        other => match self.read_operand(other, &cvs, &tmps, &op_array.literals).deref() {
+                            Value::Array(rc) => Some(rc),
+                            _ => None,
+                        },
+                    };
+                    let result = if let Some(arr) = container {
+                        if matches!(op.op2, OperandType::Unused) {
+                            let rc = Rc::new(RefCell::new(PhpArray::new()));
+                            arr.borrow_mut().push(Value::Array(rc.clone()));
+                            Value::Array(rc)
+                        } else {
+                            let key_val = self.read_operand_warn(&op.op2, &cvs, &tmps, &op_array.literals, op_array, op.line);
+                            let key = self.value_to_array_key_checked(&key_val, op.line);
+                            let existing = arr.borrow().get(&key).cloned();
+                            match existing {
+                                None | Some(Value::Null) | Some(Value::Undef) => {
+                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
+                                    arr.borrow_mut().set(key, Value::Array(rc.clone()));
+                                    Value::Array(rc)
+                                }
+                                Some(Value::Reference(r)) => {
+                                    let inner = r.borrow().clone();
+                                    match inner {
+                                        Value::Null | Value::Undef => {
+                                            let rc = Rc::new(RefCell::new(PhpArray::new()));
+                                            *r.borrow_mut() = Value::Array(rc.clone());
+                                            Value::Array(rc)
+                                        }
+                                        Value::Array(rc) => {
+                                            if Rc::strong_count(&rc) > 2 {
+                                                let sep = Rc::new(RefCell::new(rc.borrow().clone()));
+                                                *r.borrow_mut() = Value::Array(sep.clone());
+                                                Value::Array(sep)
+                                            } else {
+                                                Value::Array(rc)
+                                            }
+                                        }
+                                        other => other,
+                                    }
+                                }
+                                Some(Value::Array(rc)) => {
+                                    // Copy-on-write: separate an element array shared elsewhere.
+                                    if Rc::strong_count(&rc) > 2 {
+                                        let sep = Rc::new(RefCell::new(rc.borrow().clone()));
+                                        arr.borrow_mut().set(key, Value::Array(sep.clone()));
+                                        Value::Array(sep)
+                                    } else {
+                                        Value::Array(rc)
+                                    }
+                                }
+                                Some(Value::False) => {
+                                    self.emit_deprecated_at("Automatic conversion of false to array is deprecated", op.line);
+                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
+                                    arr.borrow_mut().set(key, Value::Array(rc.clone()));
+                                    Value::Array(rc)
+                                }
+                                Some(other) => other,
+                            }
+                        }
+                    } else {
+                        // Non-array container (string, object, scalar): fall back to a read.
+                        let c = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        if matches!(op.op2, OperandType::Unused) {
+                            Value::Null
+                        } else {
+                            let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                            match c.deref() {
+                                Value::Object(_) => self.call_object_method(&c.deref(), b"offsetGet", &[key_val]).unwrap_or(Value::Null),
+                                _ => Value::Null,
+                            }
+                        }
+                    };
+                    if let OperandType::Tmp(t) = op.result {
+                        if let Some(slot) = tmps.get_mut(t as usize) {
+                            *slot = Value::Undef;
+                        }
+                    }
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
                 OpCode::JmpIfArgByRef => {
                     let by_ref = self.pending_calls.last().and_then(|call| {
                         let idx = call.args.len();
