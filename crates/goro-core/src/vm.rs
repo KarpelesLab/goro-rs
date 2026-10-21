@@ -33139,6 +33139,26 @@ impl Vm {
                                         prop = arr;
                                     }
                                 } else if matches!(prop, Value::Null | Value::Undef) && (exists || !has_get) {
+                                    if !exists && self.classes.contains_key(&class_lower)
+                                        && class_lower != b"stdclass"
+                                        && !is_builtin_subclass(&class_lower, b"stdclass")
+                                    {
+                                        let mut allows = false;
+                                        let mut cur = Some(class_lower.clone());
+                                        while let Some(c) = cur {
+                                            match self.classes.get(&c) {
+                                                Some(ce) => {
+                                                    if ce.allow_dynamic_properties { allows = true; break; }
+                                                    cur = ce.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
+                                                }
+                                                None => break,
+                                            }
+                                        }
+                                        if !allows {
+                                            let class_display = crate::value::display_class_name(&class_name_orig);
+                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_string_lossy()));
+                                        }
+                                    }
                                     let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
                                     obj.borrow_mut().set_property(storage_key.clone(), arr.clone());
                                     prop = arr;
