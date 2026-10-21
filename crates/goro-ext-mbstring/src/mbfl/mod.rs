@@ -14,6 +14,15 @@ pub mod tables;
 pub mod common;
 pub mod basic;
 pub mod singlebyte;
+pub mod iso2022;
+pub mod unicode;
+pub mod utf7;
+pub mod transfer;
+pub mod chinese;
+pub mod mobile;
+pub mod sjis;
+pub mod eucjp;
+pub mod utf8_mobile;
 
 /// Codepoint used to mark an invalid byte sequence in decoded text.
 pub const MBFL_BAD_INPUT: u32 = 0xFFFF_FFFF;
@@ -378,6 +387,15 @@ fn all_family_encodings() -> Vec<&'static Encoding> {
     let mut v: Vec<&'static Encoding> = Vec::new();
     v.extend_from_slice(basic::ENCODINGS);
     v.extend_from_slice(singlebyte::ENCODINGS);
+    v.extend_from_slice(iso2022::ENCODINGS);
+    v.extend_from_slice(unicode::ENCODINGS);
+    v.extend_from_slice(utf7::ENCODINGS);
+    v.extend_from_slice(transfer::ENCODINGS);
+    v.extend_from_slice(chinese::ENCODINGS);
+    v.extend_from_slice(mobile::ENCODINGS);
+    v.extend_from_slice(sjis::ENCODINGS);
+    v.extend_from_slice(eucjp::ENCODINGS);
+    v.extend_from_slice(utf8_mobile::ENCODINGS);
     v
 }
 
@@ -445,8 +463,18 @@ pub fn preferred_mime_name(enc: &Encoding) -> Option<&'static str> {
 
 /// C: `mb_fast_convert`. Returns the converted bytes and the error count.
 pub fn fast_convert(input: &[u8], from: &Encoding, to: &Encoding, repl_char: u32, error_mode: u8) -> (Vec<u8>, usize) {
-    let mut buf = ConvBuf::new(input.len(), repl_char, error_mode);
-    let mut state = 0u32;
+    // Transfer encodings operate on raw bytes (C: mb_fast_convert)
+    let (from, to): (&Encoding, &Encoding) = if matches!(to.no, EncNo::Base64 | EncNo::Qprint) {
+        (&basic::ENC_8BIT, to)
+    } else if matches!(from.no, EncNo::Base64 | EncNo::Qprint | EncNo::Uuencode) {
+        (from, &basic::ENC_8BIT)
+    } else {
+        (from, to)
+    };
+    if input.is_empty() {
+        // C never calls the encoder when there is no input
+        return (Vec::new(), 0);
+    }
     let to_wchar = match from.to_wchar {
         Some(f) => f,
         None => return (input.to_vec(), 0),
@@ -455,12 +483,8 @@ pub fn fast_convert(input: &[u8], from: &Encoding, to: &Encoding, repl_char: u32
         Some(f) => f,
         None => return (input.to_vec(), 0),
     };
-    // Process in chunks, like PHP does, to bound memory use; decoders keep
-    // their state in `state` so the result is the same as one big call,
-    // except that a multi-byte character split across a chunk boundary
-    // would be broken. To avoid that, chunk only for large inputs at
-    // boundaries the decoder never splits: we don't know those generically,
-    // so decode in one go.
+    let mut buf = ConvBuf::new(input.len(), repl_char, error_mode);
+    let mut state = 0u32;
     let mut wchars: Vec<u32> = Vec::with_capacity(input.len());
     to_wchar(input, &mut wchars, &mut state);
     from_wchar(&wchars, &mut buf, true);
