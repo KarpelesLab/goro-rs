@@ -1,6 +1,7 @@
 pub mod mbfl;
 pub mod arginfo;
 pub mod entities;
+pub mod gpc;
 pub mod mbstring;
 pub mod mime;
 pub mod misc;

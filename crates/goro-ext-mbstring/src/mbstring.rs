@@ -35,9 +35,18 @@ pub fn register(vm: &mut Vm) {
     crate::mime::register(vm);
     crate::entities::register(vm);
     crate::misc::register(vm);
+    crate::gpc::register(vm);
 }
 
 /* ===== Helpers ===== */
+
+/// Truncate at the first NUL byte (C string semantics)
+pub fn cstr(b: &[u8]) -> &[u8] {
+    match b.iter().position(|&c| c == 0) {
+        Some(p) => &b[..p],
+        None => b,
+    }
+}
 
 pub fn is_utf8_family(no: EncNo) -> bool {
     matches!(no, EncNo::Utf8 | EncNo::Utf8Docomo | EncNo::Utf8KddiA | EncNo::Utf8KddiB | EncNo::Utf8Sb)
@@ -71,6 +80,7 @@ fn emit_transfer_deprecation(vm: &mut Vm, func: &str, enc: &Encoding) {
 /// C: `php_mb_get_encoding`. `name` None => current internal encoding.
 pub fn get_encoding(vm: &mut Vm, func: &str, name: Option<&[u8]>, arg_num: usize, pname: &str) -> Result<&'static Encoding, VmError> {
     state::sync(vm);
+    let name = name.map(cstr);
     match name {
         None => Ok(state::current_internal_encoding()),
         Some(n) => {
@@ -134,11 +144,13 @@ pub fn parse_encoding_array(vm: &mut Vm, func: &str, arr: &Rc<RefCell<PhpArray>>
             let v = v.deref();
             match &v {
                 Value::Array(_) => {
-                    return Err(type_error(vm, "Array to string conversion".to_string()));
+                    vm.emit_warning("Array to string conversion");
+                    b"Array".to_vec()
                 }
                 _ => vm.value_to_string(&v).as_bytes().to_vec(),
             }
         };
+        let s = cstr(&s).to_vec();
         if s.eq_ignore_ascii_case(b"auto") {
             if !included_auto {
                 included_auto = true;

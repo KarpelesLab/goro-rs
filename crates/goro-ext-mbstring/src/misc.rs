@@ -100,66 +100,129 @@ fn mb_convert_kana(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /* ===== mb_convert_variables ===== */
 
-fn collect_strings(v: &Value, out: &mut Vec<Vec<u8>>, depth: usize) -> bool {
-    if depth > 128 {
+fn collect_strings(v: &Value, out: &mut Vec<Vec<u8>>, path: &mut Vec<usize>) -> bool {
+    if path.len() > 256 {
         return true;
     }
-    match v.deref() {
-        Value::String(s) => out.push(s.as_bytes().to_vec()),
+    match v {
+        Value::Reference(r) => {
+            let p = Rc::as_ptr(r) as *const () as usize;
+            if path.contains(&p) {
+                return true;
+            }
+            path.push(p);
+            let inner = r.borrow().clone();
+            let res = collect_strings(&inner, out, path);
+            path.pop();
+            res
+        }
+        Value::String(s) => {
+            out.push(s.as_bytes().to_vec());
+            false
+        }
         Value::Array(a) => {
+            let p = Rc::as_ptr(a) as *const () as usize;
+            if path.contains(&p) {
+                return true;
+            }
+            path.push(p);
             let vals: Vec<Value> = a.borrow().values().cloned().collect();
             for e in vals {
-                if collect_strings(&e, out, depth + 1) {
+                if collect_strings(&e, out, path) {
+                    path.pop();
                     return true;
                 }
             }
+            path.pop();
+            false
         }
         Value::Object(o) => {
+            let p = Rc::as_ptr(o) as *const () as usize;
+            if path.contains(&p) {
+                return true;
+            }
+            path.push(p);
             let vals: Vec<Value> = o.borrow().properties.iter().map(|(_, v)| v.clone()).collect();
             for e in vals {
-                if collect_strings(&e, out, depth + 1) {
+                if collect_strings(&e, out, path) {
+                    path.pop();
                     return true;
                 }
             }
+            path.pop();
+            false
         }
-        _ => {}
+        _ => false,
     }
-    false
 }
 
-/// Returns the converted value, or None on recursion
-fn convert_value(v: &Value, from: &Encoding, to: &Encoding, depth: usize) -> Option<Value> {
-    if depth > 128 {
+/// Converts strings in place (through references). Returns false on recursion.
+fn convert_value(v: &Value, from: &Encoding, to: &Encoding, path: &mut Vec<usize>) -> Option<Value> {
+    if path.len() > 256 {
         return None;
     }
     match v {
         Value::Reference(r) => {
+            let p = Rc::as_ptr(r) as *const () as usize;
+            if path.contains(&p) {
+                return None;
+            }
+            path.push(p);
             let inner = r.borrow().clone();
-            let nv = convert_value(&inner, from, to, depth)?;
+            let nv = convert_value(&inner, from, to, path);
+            path.pop();
+            let nv = nv?;
             *r.borrow_mut() = nv;
             Some(Value::Reference(r.clone()))
         }
         Value::String(s) => Some(pstring(convert_ex(s.as_bytes(), to, from))),
         Value::Array(a) => {
+            let p = Rc::as_ptr(a) as *const () as usize;
+            if path.contains(&p) {
+                return None;
+            }
+            path.push(p);
             let entries: Vec<(ArrayKey, Value)> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             let mut na = PhpArray::new();
             for (k, e) in entries {
-                let ne = convert_value(&e, from, to, depth + 1)?;
-                na.set(k, ne);
+                match convert_value(&e, from, to, path) {
+                    Some(ne) => na.set(k, ne),
+                    None => {
+                        path.pop();
+                        return None;
+                    }
+                }
             }
+            path.pop();
             Some(Value::Array(Rc::new(RefCell::new(na))))
         }
         Value::Object(o) => {
+            let p = Rc::as_ptr(o) as *const () as usize;
+            if path.contains(&p) {
+                return None;
+            }
+            path.push(p);
             let n = o.borrow().properties.len();
             for i in 0..n {
                 let cur = o.borrow().properties.get(i).map(|(_, v)| v.clone());
                 if let Some(cur) = cur {
-                    let nv = convert_value(&cur, from, to, depth + 1)?;
-                    if let Some(slot) = o.borrow_mut().properties.get_mut(i) {
-                        slot.1 = nv;
+                    if matches!(cur, Value::Undef) {
+                        continue;
+                    }
+                    match convert_value(&cur, from, to, path) {
+                        Some(nv) => {
+                            if let Some(slot) = o.borrow_mut().properties.get_mut(i) {
+                                slot.1 = nv;
+                            }
+                        }
+                        None => {
+                            path.pop();
+                            return None;
+                        }
                     }
                 }
             }
+            path.pop();
             Some(v.clone())
         }
         other => Some(other.clone()),
@@ -192,7 +255,7 @@ fn mb_convert_variables(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         let mut strings: Vec<Vec<u8>> = Vec::new();
         for v in vars {
-            if collect_strings(v, &mut strings, 0) {
+            if collect_strings(v, &mut strings, &mut Vec::new()) {
                 vm.emit_warning("mb_convert_variables(): Cannot handle recursive references");
                 return Ok(Value::False);
             }
@@ -210,14 +273,14 @@ fn mb_convert_variables(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     for v in vars {
         if let Value::Reference(r) = v {
             let inner = r.borrow().clone();
-            match convert_value(&inner, from, to, 0) {
+            match convert_value(&inner, from, to, &mut vec![Rc::as_ptr(r) as *const () as usize]) {
                 Some(nv) => *r.borrow_mut() = nv,
                 None => {
                     vm.emit_warning("mb_convert_variables(): Cannot handle recursive references");
                     return Ok(Value::False);
                 }
             }
-        } else if convert_value(v, from, to, 0).is_none() {
+        } else if convert_value(v, from, to, &mut Vec::new()).is_none() {
             vm.emit_warning("mb_convert_variables(): Cannot handle recursive references");
             return Ok(Value::False);
         }
