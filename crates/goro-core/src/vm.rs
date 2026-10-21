@@ -23944,7 +23944,31 @@ impl Vm {
                                         Err(_) => Value::False,
                                     }
                                 }
-                                Err(_) => Value::False,
+                                Err(e) => {
+                                    // A syntax error in the included file throws ParseError;
+                                    // uncaught, it is reported as "Parse error" (E_PARSE).
+                                    let msg = if e.message.contains("unexpected") || e.message.contains("syntax error") || e.message.starts_with("Invalid ") {
+                                        e.message.clone()
+                                    } else {
+                                        "syntax error".to_string()
+                                    };
+                                    self.current_file = old_file.clone();
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                        let exc = self.create_exception(b"ParseError", &msg, e.span.line);
+                                        if let Value::Object(ref obj) = exc {
+                                            let mut ob = obj.borrow_mut();
+                                            ob.set_property(b"file".to_vec(), Value::String(PhpString::from_string(abs_path.clone())));
+                                            ob.set_property(b"line".to_vec(), Value::Long(e.span.line as i64));
+                                        }
+                                        self.current_exception = Some(exc);
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    self.display_error("Parse error", &msg, &abs_path, e.span.line);
+                                    self.fatal_emitted = true;
+                                    return Err(VmError { message: msg, line: e.span.line });
+                                }
                             }
                         }
                         Err(_) => {
