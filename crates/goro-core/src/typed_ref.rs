@@ -494,6 +494,64 @@ impl Vm {
             self.param_type_name(&b.ty)
         )
     }
+
+    /// zend_std_read_property after __get() for an unset typed property:
+    /// the result must satisfy (and is coerced to) the property's type, using
+    /// the strictness of __get()'s file. A by-reference result is coerced in
+    /// place.
+    pub(crate) fn magic_get_typed_check(
+        &self,
+        class_lower: &[u8],
+        prop: &[u8],
+        result: &mut Value,
+        strict: bool,
+    ) -> Result<(), String> {
+        let Some((_, declaring, _, Some(ty), _)) = self.find_property_def(class_lower, prop) else {
+            return Ok(());
+        };
+        let verdict = match &*result {
+            Value::Reference(r) if !sources(r).is_empty() => {
+                // A typed reference must already be exactly assignable.
+                let inner = r.borrow().clone();
+                match self.typed_ref_check_one(&ty, &inner, strict) {
+                    Ok(None) => Ok(None),
+                    _ => Err(()),
+                }
+            }
+            v => self.typed_ref_check_one(&ty, &v.deref(), strict),
+        };
+        match verdict {
+            Ok(None) => Ok(()),
+            Ok(Some(c)) => {
+                match result {
+                    Value::Reference(r) => *r.borrow_mut() = c,
+                    v => *v = c,
+                }
+                Ok(())
+            }
+            Err(()) => {
+                let v = result.deref();
+                let tn = match &v {
+                    Value::True | Value::False => "bool".to_string(),
+                    other => Self::value_type_name(other),
+                };
+                let decl_lower = declaring.to_ascii_lowercase();
+                let class = self
+                    .classes
+                    .get(&decl_lower)
+                    .map(|c| crate::value::display_class_name(&c.name))
+                    .unwrap_or_else(|| crate::value::display_class_name(&declaring));
+                Err(format!(
+                    "Value of type {} returned from {}::__get() must be compatible with unset property {}::${} of type {}",
+                    tn,
+                    class,
+                    class,
+                    String::from_utf8_lossy(prop),
+                    self.param_type_name(&ty)
+                ))
+            }
+        }
+    }
 }
 
 /// Static-property sources and the generic check / post-op entry points used

@@ -36473,6 +36473,7 @@ impl Vm {
                         }
                     }
                     let mut ref_error: Option<String> = None;
+                    let mut magic_type_error: Option<String> = None;
                     let result = if let Value::Object(obj) = &obj_val {
                         let class_name_orig = obj.borrow().class_name.clone();
                         let class_lower: Vec<u8> = class_name_orig
@@ -36582,6 +36583,22 @@ impl Vm {
                                 .unwrap_or(Value::Null);
                             self.magic_prop_guards.remove(&guard_key);
                             self.keep_ref_depth = None;
+                            let mut v = v;
+                            if inaccessible.is_none() && self.current_exception.is_none() {
+                                let get_strict = self
+                                    .classes
+                                    .get(&class_lower)
+                                    .and_then(|c| c.get_method(b"__get"))
+                                    .is_some_and(|m| m.op_array.strict_types);
+                                if let Err(msg) = self.magic_get_typed_check(
+                                    &class_lower,
+                                    prop_name.as_bytes(),
+                                    &mut v,
+                                    get_strict,
+                                ) {
+                                    magic_type_error = Some(msg);
+                                }
+                            }
                             if !matches!(v, Value::Object(_) | Value::Reference(_)) {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
@@ -36655,6 +36672,19 @@ impl Vm {
                         }
                         return Err(VmError {
                             message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
+                    if let Some(msg) = magic_type_error {
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught TypeError: {}", msg),
                             line: op.line,
                         });
                     }
@@ -44427,6 +44457,30 @@ impl Vm {
                                             };
                                             return Err(VmError {
                                                 message: exc_msg,
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    let mut result = result;
+                                    if !hidden_private_prop {
+                                        if let Err(msg) = self.magic_get_typed_check(
+                                            &class_lower,
+                                            prop_name.as_bytes(),
+                                            &mut result,
+                                            method.strict_types,
+                                        ) {
+                                            let exc =
+                                                self.create_exception(b"TypeError", &msg, op.line);
+                                            self.current_exception = Some(exc);
+                                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                                exception_handlers.pop()
+                                            {
+                                                pending_calls_catch_depth = Some(saved_pc);
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError {
+                                                message: format!("Uncaught TypeError: {}", msg),
                                                 line: op.line,
                                             });
                                         }
