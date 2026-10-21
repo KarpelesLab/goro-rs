@@ -4406,6 +4406,12 @@ impl Vm {
         self.run_pending_destructors();
     }
 
+    /// Track an object created by an extension so that its __destruct runs
+    /// once the last reference is dropped (or at shutdown).
+    pub fn track_destructible(&mut self, obj: Value) {
+        self.destructible_objects.push(obj);
+    }
+
     /// gc_collect_cycles(): run the cycle collector (see gc.rs).
     pub fn gc_collect_cycles(&mut self) -> i64 {
         crate::gc::collect_cycles(self, None)

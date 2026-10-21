@@ -611,10 +611,37 @@ fn create_object(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>) -> Resu
         Some(id) => Value::Resource(id),
         None => Value::Null,
     };
-    // add_property_resource()/add_property_null(): honours typed properties.
-    let prop_type = vm.classes.get(&cl).and_then(|c| {
-        c.properties.iter().find(|p| p.name == b"context" && !p.is_static).and_then(|p| p.property_type.clone())
-    });
+    // add_property_resource()/add_property_null() go through the regular
+    // property write: visibility, readonly and property types apply.
+    let pdef = vm.classes.get(&cl).and_then(|c| c.properties.iter().find(|p| p.name == b"context" && !p.is_static).cloned());
+    if let Some(pd) = &pdef {
+        let scope: Option<Vec<u8>> = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let decl = pd.declaring_class.to_ascii_lowercase();
+        let decl_name = vm.classes.get(&decl).map(|c| c.name.clone()).unwrap_or_else(|| canonical.clone());
+        let decl_disp = goro_core::value::display_class_name(&decl_name).to_string();
+        let accessible = match pd.visibility {
+            Visibility::Public => true,
+            Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
+            Visibility::Protected => match &scope {
+                Some(sc) => *sc == decl || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc),
+                None => false,
+            },
+        };
+        if !accessible {
+            let vis = if matches!(pd.visibility, Visibility::Private) { "private" } else { "protected" };
+            let msg = format!("Cannot access {} property {}::$context", vis, decl_disp);
+            return Err(throw(vm, b"Error", &msg));
+        }
+        if pd.is_readonly && scope.as_deref() != Some(decl.as_slice()) {
+            let from = match &scope {
+                Some(sc) => format!("scope {}", vm.classes.get(sc).map(|c| goro_core::value::display_class_name(&c.name).to_string()).unwrap_or_default()),
+                None => "global scope".to_string(),
+            };
+            let msg = format!("Cannot initialize readonly property {}::$context from {}", decl_disp, from);
+            return Err(throw(vm, b"Error", &msg));
+        }
+    }
+    let prop_type = pdef.and_then(|p| p.property_type);
     if let Some(pt) = prop_type {
         if !vm.value_matches_type(&ctx_val, &pt) {
             let msg = format!(
@@ -636,6 +663,9 @@ fn create_object(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>) -> Resu
         if vm.current_exception.is_some() {
             return Err(exc_err(vm));
         }
+    }
+    if vm.classes.get(&cl).map(|c| c.get_method(b"__destruct").is_some()).unwrap_or(false) {
+        vm.track_destructible(val.clone());
     }
     Ok(Some(val))
 }
@@ -1582,11 +1612,15 @@ fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
             }
         });
     }
-    let mut b = us.borrow_mut();
-    b.closed = true;
-    b.in_free = false;
-    b.readbuf.clear();
-    b.readpos = 0;
+    {
+        let mut b = us.borrow_mut();
+        b.closed = true;
+        b.in_free = false;
+        b.readbuf.clear();
+        b.readpos = 0;
+        b.obj = Value::Null;
+    }
+    vm.run_pending_destructors_pub();
     res
 }
 
@@ -1829,7 +1863,10 @@ fn wrapper_url_stat(vm: &mut Vm, uw: &UserWrapperRef, url: &[u8], flags: i64) ->
         None => return Ok(None),
     };
     let cname = lossy(&class_name_of(&obj));
-    match call_method(vm, &obj, b"url_stat", vec![s(url), Value::Long(flags)])? {
+    let r = call_method(vm, &obj, b"url_stat", vec![s(url), Value::Long(flags)]);
+    drop(obj);
+    vm.run_pending_destructors_pub();
+    match r? {
         CallRes::NotImpl => {
             warn(vm, &format!("{}::url_stat is not implemented!", cname));
             Ok(None)
@@ -1856,8 +1893,10 @@ fn wrapper_bool_op(vm: &mut Vm, uw: &UserWrapperRef, context: Option<i64>, metho
         None => return Ok(false),
     };
     let cname = lossy(&class_name_of(&obj));
-    let r = call_method(vm, &obj, method.as_bytes(), args)?;
+    let r = call_method(vm, &obj, method.as_bytes(), args);
     drop(obj);
+    vm.run_pending_destructors_pub();
+    let r = r?;
     match r {
         CallRes::NotImpl => {
             warn(vm, &format!("{}::{} is not implemented!", cname, method));
