@@ -2374,18 +2374,9 @@ pub fn reflection_class_docall(
                 // Inherited private (instance) props are NOT visible via
                 // getProperty without an explicit qualifier; static private
                 // props remain accessible.
-                let prop_info = rcls(vm, &lookup_lower)
-                    .and_then(|c| c.properties.iter().find(|p| {
-                        if p.name != prop_name.as_bytes() { return false; }
-                        if qualified_class_lower.is_none()
-                            && p.visibility == Visibility::Private
-                            && p.declaring_class != lookup_lower
-                            && !p.is_static
-                        {
-                            return false;
-                        }
-                        true
-                    }))
+                // Zend: a private property is only found on its declaring class.
+                let prop_info = rprop(vm, &lookup_lower, prop_name.as_bytes())
+                    .filter(|p| p.visibility != Visibility::Private || p.declaring_class.eq_ignore_ascii_case(&lookup_lower))
                     .map(|p| p.declaring_class.clone());
                 // For ReflectionObject, check the actual object for dynamic
                 // properties. Inherited private props leave entries on the
@@ -7524,6 +7515,10 @@ fn find_static_property_owner(vm: &Vm, class_lower: &[u8], prop_name: &[u8]) -> 
         if visited.contains(&c) { break; }
         visited.push(c.clone());
         if let Some(ce) = rcls(vm, c.as_slice()) {
+            // The nearest class declaring it owns the static slot.
+            if ce.properties.iter().any(|p| p.is_static && p.name == prop_name && p.declaring_class.eq_ignore_ascii_case(&c)) {
+                return Some(c.clone());
+            }
             if ce.properties.iter().any(|p| p.is_static && p.name == prop_name) {
                 owner = Some(c.clone());
             }
